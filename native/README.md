@@ -1,6 +1,7 @@
-# RazorForge Native Runtime
+# Ingrid C Sources
 
-This directory contains the native C runtime and vendored libraries used by RazorForge and, later, Suflae.
+This directory contains Ingrid's C APIs (most of them thin layers over the operating system) and the libraries
+they build against.
 
 It is not just a math library folder. It is the runtime substrate for:
 
@@ -78,7 +79,7 @@ native/
 
 ## Runtime Layers
 
-The native runtime is moving toward four layers.
+Ingrid is moving toward four layers.
 
 ### 1. Core Runtime
 
@@ -191,7 +192,7 @@ Important split from the stdlib roadmap:
 - `Result[T]` and `Lookup[T]` are ephemeral control-flow carriers
 - `Task[T]` is a runtime handle, not user-owned inline state
 
-That means the native runtime must prioritize:
+That means Ingrid must prioritize:
 
 - task state and completion handling
 - waiting, timeout, and scheduler hooks
@@ -237,7 +238,7 @@ The stdlib already establishes these wrapper families:
 - `Viewed[T]`, `Hijacked[T]`, `Inspected[T]`, `Seized[T]`: temporary access wrappers
 - `Snatched[T]`: raw unmanaged pointer escape hatch
 
-The native runtime should eventually mirror that split directly:
+Ingrid should eventually mirror that split directly:
 
 - RC runtime
 - ARC runtime

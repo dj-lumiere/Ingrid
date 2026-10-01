@@ -4,19 +4,24 @@
 
 <h1 align="center">Ingrid</h1>
 
-<p align="center"><strong>The native runtime for RazorForge and Suflae.</strong></p>
+<p align="center"><strong>The foundation library for RazorForge and Suflae.</strong></p>
 
-Ingrid is the C runtime library that every [RazorForge](https://github.com/dj-lumiere/RazorForge) and
-[Suflae](https://github.com/dj-lumiere/Suflae) program links against. It provides what the standard
-library cannot express in the languages themselves:
+[RazorForge](https://github.com/dj-lumiere/RazorForge) and [Suflae](https://github.com/dj-lumiere/Suflae) share
+one standard library underneath their own, and Ingrid is that layer. It has two parts.
 
-- memory allocation, crash reporting, and stack traces
+**C APIs**, most of them thin layers over the operating system, for what the languages can't reach on their own:
+
+- memory allocation, crash output, and stack traces
 - console, file, and async I/O
-- the task runtime: coroutines, OS threads, channels, locks, and waiting
+- coroutines, OS threads, channels, locks, and waiting
 - time, random numbers, and process signals
 - numeric support that plain LLVM intrinsics do not cover
 
-The standard library owns the language-facing API; Ingrid supplies only the primitives under it.
+**Libraries written in [Tessera](https://github.com/dj-lumiere/Tessera)**: math, hashing, cryptography, and
+algorithms, written once so that both languages build on one implementation instead of each carrying its own.
+They come next; the C APIs are what every program links against today.
+
+The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
 ## Layout
 
