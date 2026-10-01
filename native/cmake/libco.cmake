@@ -5,7 +5,7 @@
 # Used by: RazorForge/Suflae green-thread runtime backend
 #
 # To install:
-#   git clone --depth 1 <your-libco-fork> native/libco
+#   git clone --depth 1 <your-libco-fork> Ingrid/native/libco
 
 set(LIBCO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libco")
 
@@ -66,6 +66,6 @@ else()
 
     message(STATUS "")
     message(STATUS "libco not found. To enable stackful green-thread contexts:")
-    message(STATUS "  clone or vendor libco into native/libco")
+    message(STATUS "  clone or vendor libco into Ingrid/native/libco")
     message(STATUS "")
 endif()

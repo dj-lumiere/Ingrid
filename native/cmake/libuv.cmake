@@ -6,7 +6,7 @@
 # Used by: RazorForge/Suflae async runtime backend
 #
 # To install:
-#   git clone --depth 1 https://github.com/libuv/libuv.git native/libuv
+#   git clone --depth 1 https://github.com/libuv/libuv.git Ingrid/native/libuv
 
 set(LIBUV_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libuv")
 set(LIBUV_INCLUDE_DIR "${LIBUV_DIR}/include")
@@ -175,6 +175,6 @@ else()
 
     message(STATUS "")
     message(STATUS "libuv not found. To enable async I/O runtime support:")
-    message(STATUS "  git clone --depth 1 https://github.com/libuv/libuv.git native/libuv")
+    message(STATUS "  git clone --depth 1 https://github.com/libuv/libuv.git Ingrid/native/libuv")
     message(STATUS "")
 endif()
