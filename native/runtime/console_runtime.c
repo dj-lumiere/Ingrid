@@ -22,13 +22,17 @@
 // call there costs a write() syscall + reader round-trip per print, throttling piped
 // output to a fraction of native speed. Buffered output is still delivered: libc flushes
 // at exit, every rf_console_ask_* flushes before reading, rf_console_flush() is explicit,
-// and rf_crash_text() flushes stdout before reporting.
+// and rf_crash_text() flushes stdout before reporting. RF_FLUSH_STDOUT=1 flushes after every
+// show() on a pipe as well, so a test harness keeps the output written before a hang or a crash.
 static int rf_stdout_is_tty = -1;
 
 static int rf_stdout_interactive(void)
 {
     if (rf_stdout_is_tty < 0)
-        rf_stdout_is_tty = rf_isatty(rf_fileno(stdout)) ? 1 : 0;
+    {
+        const char* force = getenv("RF_FLUSH_STDOUT");
+        rf_stdout_is_tty = (force != NULL && force[0] == '1') || rf_isatty(rf_fileno(stdout)) ? 1 : 0;
+    }
     return rf_stdout_is_tty;
 }
 
