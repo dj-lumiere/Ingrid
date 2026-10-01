@@ -22,7 +22,7 @@
 // call there costs a write() syscall + reader round-trip per print, throttling piped
 // output to a fraction of native speed. Buffered output is still delivered: libc flushes
 // at exit, every rf_console_ask_* flushes before reading, rf_console_flush() is explicit,
-// and rf_crash() flushes stdout before reporting.
+// and rf_crash_text() flushes stdout before reporting.
 static int rf_stdout_is_tty = -1;
 
 static int rf_stdout_interactive(void)

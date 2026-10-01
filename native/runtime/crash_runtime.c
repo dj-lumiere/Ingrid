@@ -83,30 +83,9 @@ static void rf_fput_utf32(const int32_t* text, int64_t count)
     }
 }
 
-void rf_crash(const char* type_name, int64_t type_len,
-              const char* file, int64_t file_len,
-              int32_t line, int32_t col,
-              const int32_t* message_utf32, int64_t message_len)
-{
-    // Flush any buffered stdout first: rf_console_show no longer flushes per call when
-    // stdout is piped, so partial program output could otherwise be lost or appear after
-    // the crash report. (exit() below also flushes, but do it up front for ordering.)
-    fflush(stdout);
-    fprintf(stderr, "\033[91m%.*s: ", (int)type_len, type_name);
-    rf_fput_utf32(message_utf32, message_len);
-
-    fprintf(stderr, "\nat %.*s:%d:%d\n", (int)file_len, file, line, col);
-
-    if (g_stack_printer)
-        g_stack_printer();
-
-    fprintf(stderr, "\033[0m");
-    fflush(stderr);
-    exit(RF_EXIT_CRASH);
-}
-
-// rf_crash with every text as a Text's UTF-32 data: the crash path the builder writes (`crash_report` in
-// Core) passes the error type's name, the message and the file as Text values.
+// Reports a runtime crash and exits. Every text is a Text's UTF-32 data: the crash path the builder writes
+// (`crash_report` in Core) passes the error type's name, the message and the file as Text values.
+// Buffered stdout is flushed first so program output appears before the report.
 void rf_crash_text(const int32_t* type_name, int64_t type_len,
                    const int32_t* file, int64_t file_len,
                    int32_t line, int32_t col,
