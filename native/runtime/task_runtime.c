@@ -731,6 +731,13 @@ int rf_task_spawn_threaded(rf_task* task, rf_task_entry_fn entry, void* userdata
         return 0;
     }
 
+    // Idempotent: a thread recipe is spawned by the first verb that runs it (retrieve, gather, race,
+    // execute), and a verb may reach an already-running task again. Only a NEW task starts a thread.
+    if (task->status != RF_TASK_NEW)
+    {
+        return task->completion.kind == RF_TASK_COMPLETION_ERROR ? 0 : 1;
+    }
+
     backend = rf_task_thread_backend(task);
     if (backend == NULL)
     {
