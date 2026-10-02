@@ -12,15 +12,15 @@ import Standard::Os
 
 global RESULT_LEN: @USize
 
+/// From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
+/// requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping.
+global MAP_DELTA: @USize
+
 /// The length of the last buffer a routine here returned.
 #export("rf_get_result_len")
 routine rf_get_result_len() -> U64
     block entry():
         return(RESULT_LEN.load().to<U64>())
-
-/// From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
-/// requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping.
-global MAP_DELTA: @USize
 
 #export("rf_file_map_delta")
 routine rf_file_map_delta() -> U64
@@ -167,6 +167,9 @@ routine ResultBuffer.fail(self: @Self) -> @Byte
 
 // -- files by handle -----------------------------------------------------------------
 
+/// The open files by handle.
+global FILE_TABLE: @Array<OpenFile, 256>
+
 preset MAX_OPEN_FILES: USize = 256
 preset FILE_BUFFER:    USize = 8192
 
@@ -179,9 +182,6 @@ record OpenFile
     buffer : @Byte
     start  : USize
     end    : USize
-
-/// The open files by handle.
-global FILE_TABLE: @Array<OpenFile, 256>
 
 /// The open file for a handle, or null.
 routine open_file(fd: S32) -> @OpenFile
@@ -224,7 +224,8 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
         branch place.used.load()
             ? slot(f, writer, buffer, i.add(1))
             : continue
-        place.store(OpenFile { file: f, used: true, writer: writer, eof: false, buffer: buffer, start: 0, end: 0 })
+        place.store(OpenFile { file: f, used: true, writer: writer, eof: false, buffer: buffer,
+            start: 0, end: 0 })
         return(i.to<S32>())
 
     block full(opened: FileHandle, buffer: Addr):
@@ -305,7 +306,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
         branch out.room(FILE_BUFFER)
             ? continue
             : return(out.fail())
-        at  : @Byte                   = out.buf.load().stride(out.len.load())
+        at  : @Byte                  = out.buf.load().stride(out.len.load())
         got : Result<USize, FsError> = of.file.read_bytes(at, FILE_BUFFER)
         when got:
             .Success(n) -> read(of, out, n)
@@ -467,8 +468,8 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 /// len bytes of data as the NUL-terminated path's whole file: len, or -1.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     block entry():
-        r : Result<Unit, FsError> = File.at(CStr.from_ptr(cpath).to_bytes()).write_all(
-                Bytes.from_ptr(data, len.max(0).to<USize>()))
+        r : Result<Unit, FsError> = File.at(CStr.from_ptr(cpath).to_bytes()).write_all(Bytes.from_ptr(
+            data, len.max(0).to<USize>()))
         branch r.is_success()
             ? return(len.max(0))
             : return(-1)
@@ -581,7 +582,7 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 #export("rf_fs_remove")
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
     block entry():
-        p : Bytes                       = path_of(path, len)
+        p : Bytes                     = path_of(path, len)
         m : Result<Metadata, FsError> = File.at(p).link_metadata()
         when m:
             .Success(info) -> kind(p, info.kind)
@@ -602,7 +603,8 @@ routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
 #export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry():
-        copied : Result<U64, FsError> = File.at(path_of(src, src_len)).copy_to(File.at(path_of(dst, dst_len)))
+        copied : Result<U64, FsError> = File.at(path_of(src,
+            src_len)).copy_to(File.at(path_of(dst, dst_len)))
         branch copied.is_success()
             ? return(0)
             : return(-1)
@@ -619,8 +621,8 @@ routine move_across(a: Bytes, b: Bytes) -> S32
 #export("rf_fs_move")
 routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry():
-        a : Bytes                  = path_of(src, src_len)
-        b : Bytes                  = path_of(dst, dst_len)
+        a : Bytes                 = path_of(src, src_len)
+        b : Bytes                 = path_of(dst, dst_len)
         r : Result<Unit, FsError> = File.at(a).move_to(File.at(b))
         when r:
             .Success        -> return(0)
@@ -635,8 +637,8 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 #export("rf_fs_move_no_replace")
 routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry():
-        a : Bytes                  = path_of(src, src_len)
-        b : Bytes                  = path_of(dst, dst_len)
+        a : Bytes                 = path_of(src, src_len)
+        b : Bytes                 = path_of(dst, dst_len)
         r : Result<Unit, FsError> = File.at(a).move_to_if_absent(File.at(b))
         when r:
             .Success        -> return(0)
@@ -688,8 +690,12 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
         jump stamped(digits, decimal(mtime.max(0).to<U64>(), digits))
 
     block stamped(digits: @Byte, dl: USize):
-        sep  : USize = self.len.load().gt(0) ? 1 : 0
-        kind : USize = typed ? dl.add(2) : 0
+        sep : USize = self.len.load().gt(0)
+            ? 1
+            : 0
+        kind : USize = typed
+            ? dl.add(2)
+            : 0
         branch self.room(sep.add(kind).add(name.length()))
             ? continue
             : return(false)
@@ -739,7 +745,8 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
             : add(out, iter, d, false, 0)
         m : Result<Metadata, FsError> = iter.entry_metadata()
         when m:
-            .Success(info) -> add(out, iter, d, info.kind.eq(FileKind.Directory), seconds(info.modified_ns))
+            .Success(info) -> add(out, iter, d, info.kind.eq(FileKind.Directory),
+                seconds(info.modified_ns))
             .Failure       -> add(out, iter, d, d.kind.eq(FileKind.Directory), 0)
 
     block add(out: @ResultBuffer, iter: @DirIter, d: DirEntry, is_dir: Bool, mtime: S64):
@@ -875,7 +882,7 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
 #export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
     block entry():
-        p : Bytes                  = path_of(path, path_len)
+        p : Bytes                       = path_of(path, path_len)
         r : Result<FileHandle, FsError> = File.at(p).open_read_write()
         when r:
             .Success(f)     -> sized(f)
@@ -941,7 +948,8 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 routine map_window(path: @Byte, len: S32, offset: USize, length: USize, write: Bool) -> @Byte
     block entry():
         MAP_DELTA.store(0)
-        r : Result<Mapping, FsError> = File.at(path_of(path, len)).map(write, offset.to<U64>(), length)
+        r : Result<Mapping, FsError> = File.at(path_of(path,
+            len)).map(write, offset.to<U64>(), length)
         when r:
             .Success(m) -> mapped(m)
             .Failure    -> return(no_result())

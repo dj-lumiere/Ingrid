@@ -11,16 +11,24 @@ module Ingrid::Runtime
 import Standard::Alloc
 import Standard::Os
 
+global NEXT_TASK_ID: @U64 <- 1
+/// The threaded task running on this thread, or null.
+#threadlocal
+global CURRENT_TASK: @@Task
+
+/// The heap allocator the runtime's threads start with (Thread.spawn keeps the pointer until the thread runs).
+global RUNTIME_HEAP: @Allocator
+
+global RUNTIME_HEAP_READY: @U32
+
 // rf_task_kind, rf_task_status, rf_task_completion_kind (razorforge_runtime.h).
 preset TASK_SUSPENDED: U32 = 0
 preset TASK_THREADED:  U32 = 1
-
 preset TASK_NEW:       U32 = 0
 preset TASK_READY:     U32 = 1
 preset TASK_RUNNING:   U32 = 2
 preset TASK_PARKED:    U32 = 3
 preset TASK_COMPLETED: U32 = 4
-
 preset COMPLETION_PENDING:   U32 = 0
 preset COMPLETION_VALUE:     U32 = 1
 preset COMPLETION_ERROR:     U32 = 2
@@ -59,15 +67,11 @@ record Task
     race_sched              : @Sched  // the scheduler of a race! over a set that has it
     race_waiter             : @Coro  // that race!'s coroutine, or null for a thread racer
 
-global NEXT_TASK_ID: @U64 <- 1
-
-/// The threaded task running on this thread, or null.
-#threadlocal
-global CURRENT_TASK: @@Task
-
-/// The heap allocator the runtime's threads start with (Thread.spawn keeps the pointer until the thread runs).
-global RUNTIME_HEAP: @Allocator
-global RUNTIME_HEAP_READY: @U32
+/// What a task's thread starts with, freed by the thread.
+record ThreadedStart
+    task     : @Task
+    entry    : Callable<(@Task, Addr), Void>
+    userdata : Addr
 
 routine runtime_heap() -> @Allocator
     block entry():
@@ -460,18 +464,12 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
     block finish():
         return(task.completion.load())
 
-/// What a task's thread starts with, freed by the thread.
-record ThreadedStart
-    task     : @Task
-    entry    : Callable<(@Task, Addr), Void>
-    userdata : Addr
-
 routine threaded_task_main(raw: Addr) -> Void
     block entry():
-        start : @ThreadedStart = raw.to<@ThreadedStart>()
-        task  : @Task          = start.task.load()
-        body  : Callable<(@Task, Addr), Void> = start.entry.load()
-        userdata : Addr         = start.userdata.load()
+        start    : @ThreadedStart                = raw.to<@ThreadedStart>()
+        task     : @Task                         = start.task.load()
+        body     : Callable<(@Task, Addr), Void> = start.entry.load()
+        userdata : Addr                          = start.userdata.load()
         c_free(start)
         task.status.atomic_store(TASK_RUNNING)
         CURRENT_TASK.store(task)
@@ -490,7 +488,9 @@ routine threaded_task_main(raw: Addr) -> Void
             ? continue
             : unlocked(task, false, null)
         task.reaped.store(true)
-        box : Addr = task.detached.load() ? task.value_payload.load() : null
+        box : Addr = task.detached.load()
+            ? task.value_payload.load()
+            : null
         branch box.is_null()
             ? unlocked(task, true, null)
             : continue
@@ -519,7 +519,8 @@ routine threaded_task_main(raw: Addr) -> Void
 /// Starts a threaded task's routine on a thread of its own: 1, or 0 for a task that can't. A task already started
 /// isn't started again (the first verb that runs it starts it).
 #export("rf_task_spawn_threaded")
-routine rf_task_spawn_threaded(task: @Task, entry: Callable<(@Task, Addr), Void>, userdata: Addr) -> CInt
+routine rf_task_spawn_threaded(task: @Task, entry: Callable<(@Task, Addr), Void>,
+    userdata: Addr) -> CInt
     block entry():
         branch task.is_null().bitor(entry.addr().is_null())
             ? return(0)

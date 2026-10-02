@@ -133,6 +133,9 @@ routine rf_random_u64() -> U64
 
 // -- the wall clock ------------------------------------------------------------------
 
+/// The time between 1601-01-01 (a FILETIME's start) and the Unix epoch, in 100 ns ticks.
+preset EPOCH_TICKS: U64 = 116444736000000000
+
 /// rf_Moment: seconds since the Unix epoch and the nanoseconds after them.
 record Moment
     seconds     : S64
@@ -142,20 +145,18 @@ record FileTime
     low  : U32
     high : U32
 
-#[external("c"), symbol("GetSystemTimePreciseAsFileTime"), callconv("stdcall"), target(os: "windows")]
+#[external("c"), symbol("GetSystemTimePreciseAsFileTime"), callconv("stdcall"),
+    target(os: "windows")]
 routine c_get_system_time_precise_as_file_time(time: @FileTime) -> Void
-
-/// The time between 1601-01-01 (a FILETIME's start) and the Unix epoch, in 100 ns ticks.
-preset EPOCH_TICKS: U64 = 116444736000000000
 
 #[export("rf_moment_now"), target(os: "windows")]
 routine rf_moment_now() -> Moment
     block entry():
         claim ft : @FileTime <- FileTime { low: 0, high: 0 }
         c_get_system_time_precise_as_file_time(ft)
-        ticks : U64 = ft.high.load().to<U64>().shl(32).bitor(ft.low.load().to<U64>()).sub(EPOCH_TICKS)
+        ticks : U64    = ft.high.load().to<U64>().shl(32).bitor(ft.low.load().to<U64>()).sub(EPOCH_TICKS)
         now   : Moment = Moment { seconds: ticks.div(10000000).to<S64>(),
-                nanoseconds: ticks.mod(10000000).mul(100).to<U32>() }
+            nanoseconds: ticks.mod(10000000).mul(100).to<U32>() }
         return(now)
 
 #[external("c"), symbol("clock_gettime"), target(os: not "windows")]
@@ -167,7 +168,8 @@ routine rf_moment_now() -> Moment
         claim ts : @Timespec <- Timespec { sec: 0, nsec: 0 }
         // CLOCK_REALTIME
         c_clock_gettime_real(0, ts)
-        now : Moment = Moment { seconds: ts.sec.load().to<S64>(), nanoseconds: ts.nsec.load().to_wrap<U32>() }
+        now : Moment = Moment { seconds: ts.sec.load().to<S64>(),
+            nanoseconds: ts.nsec.load().to_wrap<U32>() }
         return(now)
 
 // -- FFI test helpers ----------------------------------------------------------------

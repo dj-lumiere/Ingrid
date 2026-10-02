@@ -25,12 +25,24 @@ import Standard::Alloc
 import Standard::Fiber
 import Standard::Os
 
+/// The scheduler driving this thread, or null.
+#threadlocal
+global CURRENT_SCHED: @@Sched
+/// This thread's pool worker index, or -1.
+#threadlocal
+global WORKER_ID: @SSize <- -1
+/// This worker's xorshift state for picking a steal victim.
+#threadlocal
+global STEAL_RNG: @U32
+/// The process pool: 0 none, 1 being made, 2 made.
+global POOL_STATE: @U32
+global POOL: @@Sched
+
 preset SCHED_IDLE:     U32 = 0
 preset SCHED_QUEUED:   U32 = 1
 preset SCHED_RUNNING:  U32 = 2
 preset SCHED_NOTIFIED: U32 = 3
 preset SCHED_DONE:     U32 = 4
-
 preset PARK_NONE:     U32 = 0
 preset PARK_TIMER:    U32 = 1  // into the timer heap at wake_ns
 preset PARK_EXTERNAL: U32 = 2  // in no list: only a wake queues it
@@ -38,8 +50,8 @@ preset PARK_YIELD:    U32 = 3  // queued again at once, behind the others
 
 /// The all-idle condition must hold this many times in a row, each after a grace wait, before it is a deadlock.
 preset DEADLOCK_CONFIRMS: U64 = 3
-preset DEADLOCK_GRACE_NS: U64 = 2000000
 
+preset DEADLOCK_GRACE_NS: U64 = 2000000
 preset WORKERS_MAX: U64 = 4096
 
 /// A worker's run deque: a ring of coroutines, its capacity a power of two.
@@ -67,22 +79,6 @@ record Sched
     lock             : Mutex
     cond             : Cond  // idle workers wait here
     block_cond       : Cond  // top-level retrieve!/race! callers wait here
-
-/// The scheduler driving this thread, or null.
-#threadlocal
-global CURRENT_SCHED: @@Sched
-
-/// This thread's pool worker index, or -1.
-#threadlocal
-global WORKER_ID: @SSize <- -1
-
-/// This worker's xorshift state for picking a steal victim.
-#threadlocal
-global STEAL_RNG: @U32
-
-/// The process pool: 0 none, 1 being made, 2 made.
-global POOL_STATE: @U32
-global POOL: @@Sched
 
 #noinline
 routine current_sched() -> @Sched
@@ -156,10 +152,10 @@ routine Deque.pop_bottom(self: @Self) -> @Coro
         branch empty
             ? none()
             : continue
-        b    : USize   = self.bottom.load().sub(1)
+        b : USize = self.bottom.load().sub(1)
         self.bottom.store(b)
-        slot : @@Coro  = self.slot(b)
-        c    : @Coro   = slot.load()
+        slot : @@Coro = self.slot(b)
+        c    : @Coro  = slot.load()
         slot.store(null)
         self.lock.unlock()
         return(c)
@@ -356,9 +352,11 @@ routine Sched.insert_timer(self: @Self, c: @Coro) -> Void
             : put()
 
     block grow():
-        cap  : SSize  = self.timer_cap.load()
-        ncap : SSize  = cap.eq(0) ? 16 : cap.mul(2)
-        heap : Addr   = c_realloc(self.timer_heap.load(), ncap.to<USize>().mul(sizeof<@Coro>()))
+        cap  : SSize = self.timer_cap.load()
+        ncap : SSize = cap.eq(0)
+            ? 16
+            : cap.mul(2)
+        heap : Addr = c_realloc(self.timer_heap.load(), ncap.to<USize>().mul(sizeof<@Coro>()))
         branch heap.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to grow scheduler timer heap")
             : continue
@@ -379,7 +377,7 @@ routine Sched.timer_pop_min(self: @Self) -> @Coro
         branch self.timer_count.load().eq(0)
             ? return(null)
             : continue
-        top  : @Coro = self.timer_at(0)
+        top : @Coro = self.timer_at(0)
         top.timer_idx.store(-1)
         last : SSize = self.timer_count.load().sub(1)
         self.timer_count.store(last)
@@ -684,12 +682,12 @@ routine Sched.run_coro(self: @Self, c: @Coro) -> Void
     // A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
     // leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
     block parked():
-        intent   : U32  = c.park_intent.load()
+        intent : U32 = c.park_intent.load()
         c.park_intent.store(PARK_NONE)
-        notified : Bool = c.sched_state.atomic_load().eq(SCHED_NOTIFIED)
-        id       : SSize = worker_id()
+        notified : Bool   = c.sched_state.atomic_load().eq(SCHED_NOTIFIED)
+        id       : SSize  = worker_id()
         deques   : @Deque = self.deques.load()
-        fast     : Bool = id.ge(0).bitand(deques.is_not_null()).bitand(notified.bitor(intent.eq(PARK_YIELD)))
+        fast     : Bool   = id.ge(0).bitand(deques.is_not_null()).bitand(notified.bitor(intent.eq(PARK_YIELD)))
         branch fast
             ? requeue_local(id, deques)
             : slow(intent)
@@ -825,10 +823,10 @@ routine Sched.step(self: @Self) -> Bool
     // Nothing ready, no timer: only a wake from another thread can help. Without one promised, with someone
     // waiting for a coroutine and every other worker idle, it is a deadlock once it persists.
     block parked():
-        pending  : Bool = self.live.load().gt(0).bitand(self.cross_wakers.load().eq(0))
-        awaited  : Bool = self.waiters.load().gt(0)
-        last     : Bool = self.workers_idle.load().add(1).eq(self.workers_total.load())
-        stuck    : Bool = pending.bitand(awaited).bitand(last)
+        pending : Bool = self.live.load().gt(0).bitand(self.cross_wakers.load().eq(0))
+        awaited : Bool = self.waiters.load().gt(0)
+        last    : Bool = self.workers_idle.load().add(1).eq(self.workers_total.load())
+        stuck   : Bool = pending.bitand(awaited).bitand(last)
         branch stuck
             ? suspect()
             : wait()
@@ -848,7 +846,7 @@ routine Sched.step(self: @Self) -> Bool
     block deadlock():
         self.lock.unlock()
         rf_throw("DeadlockError",
-                "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Launch background feeders with `.execute()` and await the rest with `.retrieve()`/`.gather()`.")
+            "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Launch background feeders with `.execute()` and await the rest with `.retrieve()`/`.gather()`.")
 
     block wait():
         self.workers_idle.load().add(1).store_into(self.workers_idle)
@@ -941,13 +939,13 @@ routine rf_sched_current() -> @Sched
 
 // -- the process pool ----------------------------------------------------------------
 
+/// The allocator the pool's threads start with, made once.
+global POOL_ALLOC: @Allocator
+
 /// A worker's start: its scheduler and index, freed by the worker.
 record WorkerStart
     sched : @Sched
     index : SSize
-
-/// The allocator the pool's threads start with, made once.
-global POOL_ALLOC: @Allocator
 
 routine worker_main(raw: Addr) -> Void
     block entry():
@@ -991,7 +989,8 @@ routine pool_start() -> @Sched
         branch i.eq(n)
             ? return(s)
             : continue
-        start : @WorkerStart = zeroed<WorkerStart>(1, "Failed to allocate pool worker startup argument")
+        start : @WorkerStart = zeroed<WorkerStart>(1,
+            "Failed to allocate pool worker startup argument")
         start.store(WorkerStart { sched: s, index: i })
         Thread.spawn(worker_main.to<Callable>(), start, POOL_ALLOC).detach()
         jump spawn(s, n, i.add(1))

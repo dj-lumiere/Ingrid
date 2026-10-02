@@ -14,6 +14,11 @@ import Standard::Os
 // variable's control block. A native build gets it from compiler-rt; the JIT gets this one, compiler-rt's accessor
 // redone, with this library's own (real) thread-locals for each thread's objects.
 
+#threadlocal
+global EMUTLS: @@EmutlsArray
+global EMUTLS_LOCK: @Mutex
+global EMUTLS_NEXT: @USize
+
 /// compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
 /// initial value or null for zeros.
 record EmutlsControl
@@ -26,12 +31,6 @@ record EmutlsControl
 record EmutlsArray
     size : USize
     data : @Addr
-
-#threadlocal
-global EMUTLS: @@EmutlsArray
-
-global EMUTLS_LOCK: @Mutex
-global EMUTLS_NEXT: @USize
 
 #[external("c"), symbol("_aligned_malloc"), target(os: "windows")]
 routine c_aligned_malloc(size: USize, align: USize) -> Addr
@@ -96,7 +95,8 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
             ? continue
             : object(arr, index)
         grown : Addr = c_realloc(arr.data.load(), index.mul(sizeof<Addr>()))
-        c_memset(grown.to<@Byte>().stride(have.mul(sizeof<Addr>())), 0, index.sub(have).mul(sizeof<Addr>()))
+        c_memset(grown.to<@Byte>().stride(have.mul(sizeof<Addr>())), 0,
+            index.sub(have).mul(sizeof<Addr>()))
         arr.data.store(grown.to<@Addr>())
         arr.size.store(index)
         jump object(arr, index)

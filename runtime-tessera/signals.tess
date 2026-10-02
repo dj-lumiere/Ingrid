@@ -14,6 +14,12 @@ module Ingrid::Runtime
 
 import Standard::Os
 
+global INTERRUPT_HANDLERS: @HandlerList
+global TERMINATE_HANDLERS: @HandlerList
+/// Guards the lists and the one-time setup.
+global SIGNALS_LOCK: @Mutex
+global SIGNALS_INSTALLED: @Bool
+
 preset SIG_INTERRUPT: S32 = 0
 preset SIG_TERMINATE: S32 = 1
 
@@ -26,12 +32,6 @@ record HandlerList
     items : @HandlerEntry
     count : USize
     cap   : USize
-
-global INTERRUPT_HANDLERS: @HandlerList
-global TERMINATE_HANDLERS: @HandlerList
-/// Guards the lists and the one-time setup.
-global SIGNALS_LOCK: @Mutex
-global SIGNALS_INSTALLED: @Bool
 
 /// Calls one handler: the box's first word is the function, which takes the box (and the context).
 routine invoke(e: HandlerEntry) -> Void
@@ -88,7 +88,9 @@ routine dispatch(list: @HandlerList) -> Void
 
 routine dispatch_which(which: S32) -> Void
     block entry():
-        list : @HandlerList = which.eq(SIG_TERMINATE) ? TERMINATE_HANDLERS : INTERRUPT_HANDLERS
+        list : @HandlerList = which.eq(SIG_TERMINATE)
+            ? TERMINATE_HANDLERS
+            : INTERRUPT_HANDLERS
         dispatch(list)
         return()
 
@@ -98,9 +100,11 @@ routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
         branch n.eq(self.cap.load())
             ? continue
             : put(n)
-        cap   : USize = self.cap.load()
-        ncap  : USize = cap.eq(0) ? 4 : cap.mul(2)
-        grown : Addr  = c_realloc(self.items.load(), ncap.mul(sizeof<HandlerEntry>()))
+        cap  : USize = self.cap.load()
+        ncap : USize = cap.eq(0)
+            ? 4
+            : cap.mul(2)
+        grown : Addr = c_realloc(self.items.load(), ncap.mul(sizeof<HandlerEntry>()))
         // out of memory: the registration is dropped, as registration is best-effort
         branch grown.is_null()
             ? return()
@@ -117,7 +121,9 @@ routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
 routine register_entry(which: S32, entry: HandlerEntry) -> Void
     block entry():
         SIGNALS_LOCK.lock()
-        list : @HandlerList = which.eq(SIG_TERMINATE) ? TERMINATE_HANDLERS : INTERRUPT_HANDLERS
+        list : @HandlerList = which.eq(SIG_TERMINATE)
+            ? TERMINATE_HANDLERS
+            : INTERRUPT_HANDLERS
         list.append(entry)
         branch SIGNALS_INSTALLED.load()
             ? done()
@@ -146,7 +152,8 @@ routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> 
 // -- Windows: the console's control handler ------------------------------------------
 
 #[external("c"), symbol("SetConsoleCtrlHandler"), callconv("stdcall"), target(os: "windows")]
-routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,), CInt>, add: CInt) -> CInt
+routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,), CInt>,
+    add: CInt) -> CInt
 
 /// On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
 /// (the end of the process) from happening.
@@ -155,9 +162,9 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
     block entry():
         // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1; CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
         when:
-            ctrl_type.le(1)                                        -> interrupt()
+            ctrl_type.le(1)                                               -> interrupt()
             ctrl_type.eq(2).bitor(ctrl_type.eq(5)).bitor(ctrl_type.eq(6)) -> terminate()
-            else                                                   -> return(0)
+            else                                                          -> return(0)
 
     block interrupt():
         dispatch_which(SIG_INTERRUPT)
@@ -180,6 +187,9 @@ routine install_signal_dispatch() -> Void
 /// [0] read by the dispatch thread, [1] written by the signal handler.
 global SELF_PIPE: @Array<CInt, 2> <- { -1, -1 }
 
+preset SIGINT:  CInt = 2
+preset SIGTERM: CInt = 15
+
 /// struct sigaction, for a plain handler with SA_RESTART. Linux: handler, mask (128 bytes), flags, restorer;
 /// macOS: handler, mask (4 bytes), flags.
 #target(os: "linux")
@@ -200,9 +210,6 @@ routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
 
 #[external("c"), symbol("sigemptyset"), target(os: not "windows")]
 routine c_sigemptyset(set: Addr) -> CInt
-
-preset SIGINT:  CInt = 2
-preset SIGTERM: CInt = 15
 
 #target(os: "linux")
 routine sa_restart() -> CInt
@@ -232,7 +239,9 @@ private routine errno() -> CInt
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
     block entry():
-        code : U8 = signo.eq(SIGTERM) ? 1 : 0
+        code : U8 = signo.eq(SIGTERM)
+            ? 1
+            : 0
         claim byte : @U8 <- code
         jump write(byte)
 

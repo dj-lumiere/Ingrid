@@ -15,7 +15,6 @@ import Standard::Alloc
 import Standard::Os
 
 preset IO_THREADS: USize = 4
-
 preset IO_READ_FILE:   U32 = 0
 preset IO_WRITE_FILE:  U32 = 1
 preset IO_RUN_PROCESS: U32 = 2
@@ -49,6 +48,16 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
 
 // -- requests and the I/O threads ----------------------------------------------------
 
+global IO_LOCK: @Mutex
+global IO_WORK: @Cond
+global IO_HEAD: @@IoReq
+global IO_TAIL: @@IoReq
+/// 1 once the I/O threads run; until then the work runs inline.
+global IO_OK: @U32
+/// The length of the last read, set just before rf_io_read_file_all returns and read right after.
+#threadlocal
+global IO_LAST_LEN: @U64
+
 record IoReq
     kind     : U32
     sched    : @Sched  // the parked coroutine's scheduler
@@ -59,17 +68,6 @@ record IoReq
     data_len : S64
     result   : S64  // bytes read or written, negative on an error
     proc     : @ProcState
-
-global IO_LOCK: @Mutex
-global IO_WORK: @Cond
-global IO_HEAD: @@IoReq
-global IO_TAIL: @@IoReq
-/// 1 once the I/O threads run; until then the work runs inline.
-global IO_OK: @U32
-
-/// The length of the last read, set just before rf_io_read_file_all returns and read right after.
-#threadlocal
-global IO_LAST_LEN: @U64
 
 #export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
@@ -316,6 +314,19 @@ routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
 // Tessera's Standard::Os runs the program; this is the rf_* boundary over it. Every string is a malloc'd copy, and
 // the captured streams come back malloc'd and NUL-terminated (the caller frees them).
 
+/// The captured result of the last subprocess, set just before rf_proc_run returns and read right after.
+#threadlocal
+global PROC_SIGNAL: @CInt
+
+#threadlocal
+global PROC_OUT: @@Byte
+#threadlocal
+global PROC_OUT_LEN: @U64
+#threadlocal
+global PROC_ERR: @@Byte
+#threadlocal
+global PROC_ERR_LEN: @U64
+
 /// A subprocess to run (a command line for the shell, or a program and its arguments), and once it ran, how.
 record ProcState
     shell        : Bool  // program is a command line for the platform shell
@@ -332,18 +343,6 @@ record ProcState
     spawn_failed : Bool
     output       : Bytes
     errors       : Bytes
-
-/// The captured result of the last subprocess, set just before rf_proc_run returns and read right after.
-#threadlocal
-global PROC_SIGNAL: @CInt
-#threadlocal
-global PROC_OUT: @@Byte
-#threadlocal
-global PROC_OUT_LEN: @U64
-#threadlocal
-global PROC_ERR: @@Byte
-#threadlocal
-global PROC_ERR_LEN: @U64
 
 #export("rf_proc_term_signal")
 routine rf_proc_term_signal() -> S32
@@ -452,11 +451,12 @@ routine proc_run_blocking(st: @ProcState) -> Void
 
     block run(alloc: @Allocator, directory: Option<Bytes>):
         options : ProcessOptions = ProcessOptions { directory: directory, env: st.env.load(),
-                env_count: st.env_count.load(), stdin: InputMode.Null, stdout: OutputMode.Capture,
-                stderr: OutputMode.Capture }
+            env_count: st.env_count.load(), stdin: InputMode.Null, stdout: OutputMode.Capture,
+            stderr: OutputMode.Capture }
         branch st.shell.load()
             ? ran(run_shell(st.program.load(), options, alloc))
-            : ran(run_process(st.program.load(), st.args.load(), st.arg_count.load(), options, alloc))
+            : ran(run_process(st.program.load(), st.args.load(), st.arg_count.load(), options,
+                alloc))
 
     block ran(r: Result<ProcessOutput, ProcessError>):
         when r:
@@ -572,7 +572,8 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         jump put(n)
 
     block put(n: USize):
-        b.env.load().stride(n).store(EnvVar { name: owned_copy(key, key_len), value: owned_copy(val, val_len) })
+        b.env.load().stride(n).store(EnvVar { name: owned_copy(key, key_len),
+            value: owned_copy(val, val_len) })
         b.env_count.store(n.add(1))
         return()
 

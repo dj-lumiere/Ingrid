@@ -12,14 +12,13 @@ module Ingrid::Runtime
 import Standard::Format
 import Standard::Os
 
+global TRACE_MODE: @CInt <- 1
+
 preset TRACE_NONE:     CInt = 0
 preset TRACE_PLATFORM: CInt = 1
 preset TRACE_SHADOW:   CInt = 2
-
 /// The exit status of every runtime crash: 0x52, 'R' for Runtime error.
 preset CRASH_STATUS: CInt = 0x52
-
-global TRACE_MODE: @CInt <- 1
 
 /// value in hex: digits digits (zeros in front), uppercase or not, on stderr.
 routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
@@ -33,8 +32,12 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
             : continue
         d : U8 = v.bitand(15).to<U8>()
         // '0' + d, or 'a' / 'A' + d - 10
-        letter : U8 = upper ? 55 : 87
-        c      : U8 = d.lt(10) ? d.add(48) : d.add(letter)
+        letter : U8 = upper
+            ? 55
+            : 87
+        c : U8 = d.lt(10)
+            ? d.add(48)
+            : d.add(letter)
         text.stride(left.sub(1)).store(c.bits())
         jump digit(text, v.shr(4), left.sub(1))
 
@@ -76,16 +79,26 @@ routine print_stack_for_mode() -> Void
 routine rf_throw(error_type: CStr, message: CStr) -> Void
     block entry():
         rf_console_flush()
-        kind : CStr  = error_type.data.is_null() ? "Error" : error_type
-        text : CStr  = message.data.is_null() ? "" : message
-        k    : Bytes = kind.to_bytes()
-        m    : Bytes = text.to_bytes()
+        kind : CStr = error_type.data.is_null()
+            ? "Error"
+            : error_type
+        text : CStr = message.data.is_null()
+            ? ""
+            : message
+        k : Bytes = kind.to_bytes()
+        m : Bytes = text.to_bytes()
         Err.write("\x1B[91m\n{k}: {m}\n")
         print_stack_for_mode()
         Err.write("\x1B[0m\n")
         exit(CRASH_STATUS)
 
 // -- the platform stack: Windows -----------------------------------------------------
+
+/// SYMBOL_INFO's size, and where its MaxNameLen and Name are.
+preset SYMBOL_INFO_SIZE:     U32   = 88
+preset SYMBOL_INFO_MAX_NAME: USize = 80
+preset SYMBOL_INFO_NAME:     USize = 84
+preset MAX_SYM_NAME:         U32   = 2000
 
 #[external("c"), symbol("RtlCaptureStackBackTrace"), callconv("stdcall"), target(os: "windows")]
 routine c_capture_stack_back_trace(skip: U32, count: U32, frames: @Addr, hash: Addr) -> U16
@@ -99,16 +112,10 @@ routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
 #[external("c"), symbol("SymFromAddr"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
 
-/// SYMBOL_INFO's size, and where its MaxNameLen and Name are.
-preset SYMBOL_INFO_SIZE:     U32   = 88
-preset SYMBOL_INFO_MAX_NAME: USize = 80
-preset SYMBOL_INFO_NAME:     USize = 84
-preset MAX_SYM_NAME:         U32   = 2000
-
 #target(os: "windows")
 routine print_platform_stack() -> Void
     block entry():
-        claim stack  : @Array<Addr, 64> <- uninit
+        claim stack : @Array<Addr, 64> <- uninit
         // skip this helper's frame
         frames  : U16  = c_capture_stack_back_trace(1, 64, stack.to<@Addr>(), null)
         process : Addr = c_get_current_process()
@@ -183,7 +190,7 @@ routine print_platform_stack() -> Void
 
 #[external("c"), symbol("AddVectoredExceptionHandler"), callconv("stdcall"), target(os: "windows")]
 routine c_add_vectored_exception_handler(first: U32,
-        handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
+    handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
 
 /// Every exception passes through here first: in a tracing mode it prints the stack, then lets the search go on
 /// (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
@@ -193,9 +200,9 @@ routine exception_handler(pointers: @Addr) -> CInt
         branch TRACE_MODE.load().eq(TRACE_NONE)
             ? return(0)
             : continue
-        exception : Addr = pointers.load()
-        code      : U32  = exception.to<@U32>().load()
-        name : Bytes = exception_name(code).to_bytes()
+        exception : Addr  = pointers.load()
+        code      : U32   = exception.to<@U32>().load()
+        name      : Bytes = exception_name(code).to_bytes()
         rf_console_flush()
         Err.write("\x1B[91m\n{name} (code 0x")
         write_hex(code.to<U64>(), 8, true)
@@ -221,16 +228,16 @@ routine install_fault_handlers() -> Void
 
 // -- fault handlers: POSIX -----------------------------------------------------------
 
+preset SIGILL:  CInt = 4
+preset SIGABRT: CInt = 6
+preset SIGFPE:  CInt = 8
+preset SIGSEGV: CInt = 11
+
 #[external("c"), symbol("signal"), target(os: not "windows")]
 routine c_signal(signo: CInt, handler: Callable<(CInt,), Void>) -> Addr
 
 #[external("c"), symbol("raise"), target(os: not "windows")]
 routine c_raise(signo: CInt) -> CInt
-
-preset SIGILL:  CInt = 4
-preset SIGABRT: CInt = 6
-preset SIGFPE:  CInt = 8
-preset SIGSEGV: CInt = 11
 
 #target(os: "linux")
 routine sigbus() -> CInt
