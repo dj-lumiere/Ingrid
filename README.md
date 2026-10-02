@@ -7,40 +7,40 @@
 <p align="center"><strong>The foundation library for RazorForge and Suflae.</strong></p>
 
 [RazorForge](https://github.com/dj-lumiere/RazorForge) and [Suflae](https://github.com/dj-lumiere/Suflae) share
-one standard library underneath their own, and Ingrid is that layer. It has two parts.
+one standard library underneath their own, and Ingrid is that layer. It is written in
+[Tessera](https://github.com/dj-lumiere/Tessera), with no C of its own: the C library and the operating system are
+called as external libraries. It has two parts.
 
-**C APIs**, most of them thin layers over the operating system, for what the languages can't reach on their own:
+**The runtime library** (`runtime-tessera/`, built into `razorforge_runtime`), for what the languages can't reach
+on their own:
 
-- memory allocation, crash output, and stack traces
-- console, file, and async I/O
-- coroutines, OS threads, channels, locks, and waiting
+- crash output and stack traces
+- console and file I/O, and blocking I/O on the runtime's own threads
+- coroutines, the scheduler, OS threads, channels, and monitors
 - time, random numbers, and process signals
-- numeric support that plain LLVM intrinsics do not cover
 
-**Libraries written in [Tessera](https://github.com/dj-lumiere/Tessera)**: math, hashing, cryptography, and
-algorithms, written once so that both languages build on one implementation instead of each carrying its own.
-They come next; the C APIs are what every program links against today.
+**Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
+Roamed entity runtime and its cycle collector, and the panic handler. Math, hashing, cryptography, and algorithms
+move here next, written once so that both languages build on one implementation.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
 ## Layout
 
 ```
+runtime-tessera/  # The runtime library (module Ingrid::Runtime)
+tessera/          # Linked into every RazorForge and Suflae module
 native/
-├── runtime/   # Runtime sources (.c)
-├── include/   # Public headers
-├── cmake/     # Build configuration
-├── tests/     # Native tests
-├── build.sh   # Build on Linux and macOS
-└── build.bat  # Build on Windows
+├── CMakeLists.txt
+├── build.sh      # Build on Linux and macOS
+└── build.bat     # Build on Windows
 ```
 
 ## Building
 
-Ingrid builds with CMake 3.20+ and Clang (plus Ninja on Windows), and the Tessera builder: the runtime's
-coroutine stacks and context switch are Tessera code (`runtime-tessera/`), compiled into the runtime library. It
-needs no third-party C library. With [Tessera](https://github.com/dj-lumiere/Tessera) checked out next to Ingrid
-and built (`dotnet build`), CMake finds the builder on its own; otherwise set `TESSERA_DLL` to `tessera.dll`:
+Ingrid builds with CMake 3.20+ and Clang (plus Ninja on Windows), and the Tessera builder. It needs no
+third-party library. With [Tessera](https://github.com/dj-lumiere/Tessera) checked out next to Ingrid and built
+(`dotnet build`), CMake finds the builder on its own; otherwise set `TESSERA_DLL` to `tessera.dll`:
 
 ```bash
 cd native && ./build.sh        # Windows: build.bat

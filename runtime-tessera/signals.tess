@@ -1,0 +1,269 @@
+// The current process's signals for the stdlib's Signals module: when_interrupted (Ctrl-C, SIGINT) and
+// when_terminated (SIGTERM, the console closing). Not a child's signal (rf_proc_term_signal) and not SignalCaster.
+//
+// Registering a handler takes over the signal: the process no longer ends on it by itself, the RazorForge handlers
+// decide. They run outside signal context: on POSIX the signal handler only writes one byte to a pipe (the
+// self-pipe trick, async-signal-safe) and a thread of its own reads it and runs the handlers; on Windows the
+// console already calls its handler on a thread of its own.
+//
+// A handler is a RazorForge Routine value's closure box: its first word is the function, called with the box (and
+// for a context handler the context, the raw pointer of a Roamed or Guarded handle). Registration lasts the
+// process's life, so the boxes are never freed.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+preset SIG_INTERRUPT: S32 = 0
+preset SIG_TERMINATE: S32 = 1
+
+record HandlerEntry
+    box     : Addr
+    ctx     : Addr
+    has_ctx : Bool
+
+record HandlerList
+    items : @HandlerEntry
+    count : USize
+    cap   : USize
+
+global INTERRUPT_HANDLERS: @HandlerList
+global TERMINATE_HANDLERS: @HandlerList
+/// Guards the lists and the one-time setup.
+global SIGNALS_LOCK: @Mutex
+global SIGNALS_INSTALLED: @Bool
+
+/// Calls one handler: the box's first word is the function, which takes the box (and the context).
+routine invoke(e: HandlerEntry) -> Void
+    block entry():
+        branch e.box.is_null()
+            ? return()
+            : continue
+        fn : Addr = e.box.to<@Addr>().load()
+        branch e.has_ctx
+            ? with_ctx(fn)
+            : continue
+        claim plain : @Addr <- fn
+        call : Callable<(Addr,), Void> = plain.to<@Callable<(Addr,), Void>>().load()
+        call.call(e.box)
+        return()
+
+    block with_ctx(fn: Addr):
+        claim slot : @Addr <- fn
+        call : Callable<(Addr, Addr), Void> = slot.to<@Callable<(Addr, Addr), Void>>().load()
+        call.call(e.box, e.ctx)
+        return()
+
+/// Runs every handler of a list, from a copy taken under the lock (a handler may register more).
+routine dispatch(list: @HandlerList) -> Void
+    block entry():
+        SIGNALS_LOCK.lock()
+        n : USize = list.count.load()
+        branch n.eq(0)
+            ? none()
+            : continue
+        bytes    : USize = n.mul(sizeof<HandlerEntry>())
+        snapshot : Addr  = c_malloc(bytes)
+        branch snapshot.is_null()
+            ? none()
+            : continue
+        c_memcpy(snapshot, list.items.load(), bytes)
+        SIGNALS_LOCK.unlock()
+        jump run(snapshot.to<@HandlerEntry>(), n, 0)
+
+    block none():
+        SIGNALS_LOCK.unlock()
+        return()
+
+    block run(snapshot: @HandlerEntry, n: USize, i: USize):
+        branch i.eq(n)
+            ? done(snapshot)
+            : continue
+        invoke(snapshot.stride(i).load())
+        jump run(snapshot, n, i.add(1))
+
+    block done(snapshot: @HandlerEntry):
+        c_free(snapshot)
+        return()
+
+routine dispatch_which(which: S32) -> Void
+    block entry():
+        list : @HandlerList = which.eq(SIG_TERMINATE) ? TERMINATE_HANDLERS : INTERRUPT_HANDLERS
+        dispatch(list)
+        return()
+
+routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
+    block entry():
+        n : USize = self.count.load()
+        branch n.eq(self.cap.load())
+            ? continue
+            : put(n)
+        cap   : USize = self.cap.load()
+        ncap  : USize = cap.eq(0) ? 4 : cap.mul(2)
+        grown : Addr  = c_realloc(self.items.load(), ncap.mul(sizeof<HandlerEntry>()))
+        // out of memory: the registration is dropped, as registration is best-effort
+        branch grown.is_null()
+            ? return()
+            : continue
+        self.items.store(grown.to<@HandlerEntry>())
+        self.cap.store(ncap)
+        jump put(n)
+
+    block put(n: USize):
+        self.items.load().stride(n).store(entry)
+        self.count.store(n.add(1))
+        return()
+
+routine register_entry(which: S32, entry: HandlerEntry) -> Void
+    block entry():
+        SIGNALS_LOCK.lock()
+        list : @HandlerList = which.eq(SIG_TERMINATE) ? TERMINATE_HANDLERS : INTERRUPT_HANDLERS
+        list.append(entry)
+        branch SIGNALS_INSTALLED.load()
+            ? done()
+            : continue
+        install_signal_dispatch()
+        jump done()
+
+    block done():
+        SIGNALS_LOCK.unlock()
+        return()
+
+/// A Routine[(), None] handler for which: 0 interrupt (SIGINT, Ctrl-C), 1 terminate (SIGTERM, the console closing).
+#export("rf_signal_register")
+routine rf_signal_register(which: S32, handler_box: Addr) -> Void
+    block entry():
+        register_entry(which, HandlerEntry { box: handler_box, ctx: null, has_ctx: false })
+        return()
+
+/// A Routine[(Ctx,), None] handler, called with context each time the signal comes.
+#export("rf_signal_register_ctx")
+routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> Void
+    block entry():
+        register_entry(which, HandlerEntry { box: handler_box, ctx: context, has_ctx: true })
+        return()
+
+// -- Windows: the console's control handler ------------------------------------------
+
+#[external("c"), symbol("SetConsoleCtrlHandler"), callconv("stdcall"), target(os: "windows")]
+routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,), CInt>, add: CInt) -> CInt
+
+/// On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
+/// (the end of the process) from happening.
+#[target(os: "windows"), callconv("stdcall")]
+routine console_ctrl_handler(ctrl_type: U32) -> CInt
+    block entry():
+        // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1; CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
+        when:
+            ctrl_type.le(1)                                        -> interrupt()
+            ctrl_type.eq(2).bitor(ctrl_type.eq(5)).bitor(ctrl_type.eq(6)) -> terminate()
+            else                                                   -> return(0)
+
+    block interrupt():
+        dispatch_which(SIG_INTERRUPT)
+        return(1)
+
+    block terminate():
+        dispatch_which(SIG_TERMINATE)
+        return(1)
+
+/// Called with the lock held.
+#target(os: "windows")
+routine install_signal_dispatch() -> Void
+    block entry():
+        c_set_console_ctrl_handler(console_ctrl_handler.to<Callable>(), 1)
+        SIGNALS_INSTALLED.store(true)
+        return()
+
+// -- POSIX: the self-pipe ------------------------------------------------------------
+
+/// [0] read by the dispatch thread, [1] written by the signal handler.
+global SELF_PIPE: @Array<CInt, 2> <- { -1, -1 }
+
+/// struct sigaction, for a plain handler with SA_RESTART. Linux: handler, mask (128 bytes), flags, restorer;
+/// macOS: handler, mask (4 bytes), flags.
+#target(os: "linux")
+record SigAction
+    handler  : Callable<(CInt,), Void>
+    mask     : Array<U64, 16>
+    flags    : CInt
+    restorer : Addr
+
+#target(os: "macos")
+record SigAction
+    handler : Callable<(CInt,), Void>
+    mask    : U32
+    flags   : CInt
+
+#[external("c"), symbol("sigaction"), target(os: not "windows")]
+routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
+
+#[external("c"), symbol("sigemptyset"), target(os: not "windows")]
+routine c_sigemptyset(set: Addr) -> CInt
+
+preset SIGINT:  CInt = 2
+preset SIGTERM: CInt = 15
+
+#target(os: "linux")
+routine sa_restart() -> CInt
+    block entry():
+        return(0x10000000)
+
+#target(os: "macos")
+routine sa_restart() -> CInt
+    block entry():
+        return(2)
+
+/// Async-signal-safe: writes the which-code byte and returns.
+#target(os: not "windows")
+routine posix_signal_handler(signo: CInt) -> Void
+    block entry():
+        code : U8 = signo.eq(SIGTERM) ? 1 : 0
+        claim byte : @U8 <- code
+        jump write(byte)
+
+    block write(byte: @U8):
+        rc : SSize = c_write_fd(SELF_PIPE.to<@CInt>().stride(1).load(), byte, 1)
+        branch rc.lt(0).bitand(errno().eq(4))
+            ? write(byte)
+            : return()
+
+/// Reads which-codes from the pipe and runs the handlers.
+#target(os: not "windows")
+routine signal_dispatch_main(raw: Addr) -> Void
+    block entry():
+        claim code : @U8 <- 0
+        jump read(code)
+
+    block read(code: @U8):
+        rc : SSize = c_read_fd(SELF_PIPE.to<@CInt>().load(), code, 1)
+        branch rc.eq(1)
+            ? got(code)
+            : continue
+        branch rc.lt(0).bitand(errno().eq(4))
+            ? read(code)
+            : return()
+
+    block got(code: @U8):
+        dispatch_which(code.load().to<S32>())
+        jump read(code)
+
+/// Called with the lock held. If the pipe or the thread can't be made, nothing is installed and a later
+/// registration tries again.
+#target(os: not "windows")
+routine install_signal_dispatch() -> Void
+    block entry():
+        fds : @CInt = SELF_PIPE.to<@CInt>()
+        branch c_pipe(fds).ne(0)
+            ? return()
+            : continue
+        Thread.spawn(signal_dispatch_main.to<Callable>(), null, runtime_heap()).detach()
+        claim sa : @SigAction <- uninit
+        c_memset(sa, 0, sizeof<SigAction>())
+        sa.handler.store(posix_signal_handler.to<Callable>())
+        c_sigemptyset(sa.mask)
+        sa.flags.store(sa_restart())
+        c_sigaction(SIGINT, sa, null)
+        c_sigaction(SIGTERM, sa, null)
+        SIGNALS_INSTALLED.store(true)
+        return()

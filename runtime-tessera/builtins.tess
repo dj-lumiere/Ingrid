@@ -1,0 +1,219 @@
+// What the in-process JIT resolves from this library that a native build gets from compiler-rt or libgcc: 128-bit
+// integer division (__udivti3 and the rest) and emulated thread-local storage (__emutls_get_address). The JIT looks
+// them up in this library's exports. (The F16 and BF16 conversions come from Tessera's standard library, which
+// exports them on Windows.)
+//
+// The division routines can't use 128-bit division themselves, which would call them: it is binary long division
+// on 128-bit shifts, compares and subtractions, with a 64-bit fast path.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+/// Leading zero bits of x, 128 for 0.
+routine clz128(x: U128) -> U64
+    block entry():
+        hi : U64 = x.shr(64).to_wrap<U64>()
+        branch hi.ne(0)
+            ? return(hi.leading_zeros())
+            : return(x.to_wrap<U64>().leading_zeros().add(64))
+
+/// a / b and a % b, for b > a > 0 not holding: the general case.
+routine long_divide(a: U128, b: U128) -> (U128, U128)
+    block entry():
+        shift : U64 = clz128(b).sub(clz128(a))
+        jump step(a, b.shl(shift.to<U128>()), 0, shift.add(1))
+
+    block step(a: U128, b: U128, q: U128, left: U64):
+        branch left.eq(0)
+            ? return({ q, a })
+            : continue
+        fits : Bool = a.ge(b)
+        branch fits
+            ? take(a, b, q, left)
+            : step(a, b.shr(1), q.shl(1), left.sub(1))
+
+    block take(a: U128, b: U128, q: U128, left: U64):
+        jump step(a.sub(b), b.shr(1), q.shl(1).bitor(1), left.sub(1))
+
+/// a / b and a % b. Division by zero gives all ones and 0, as compiler-rt's does (C leaves it undefined).
+routine udivmod(a: U128, b: U128) -> (U128, U128)
+    block entry():
+        when:
+            b.eq(0) -> return({ U128.MAX, 0 })
+            b.gt(a) -> return({ 0, a })
+            b.eq(a) -> return({ 1, 0 })
+            else    -> continue
+        small : Bool = b.shr(64).eq(0).bitand(a.shr(64).eq(0))
+        branch small
+            ? continue
+            : return(long_divide(a, b))
+        x : U64 = a.to_wrap<U64>()
+        y : U64 = b.to_wrap<U64>()
+        return({ x.div(y).to<U128>(), x.mod(y).to<U128>() })
+
+#[export("__udivti3"), target(size: 64)]
+routine udivti3(a: U128, b: U128) -> U128
+    block entry():
+        q, r = udivmod(a, b)
+        return(q)
+
+#[export("__umodti3"), target(size: 64)]
+routine umodti3(a: U128, b: U128) -> U128
+    block entry():
+        q, r = udivmod(a, b)
+        return(r)
+
+#[export("__udivmodti4"), target(size: 64)]
+routine udivmodti4(a: U128, b: U128, rem: @U128) -> U128
+    block entry():
+        q, r = udivmod(a, b)
+        branch rem.is_null()
+            ? return(q)
+            : continue
+        rem.store(r)
+        return(q)
+
+/// |x| as unsigned (S128.MIN's magnitude too).
+routine magnitude(x: S128) -> U128
+    block entry():
+        u : U128 = bitcast<S128, U128>(x)
+        branch x.lt(0)
+            ? return(0.sub_wrap(u))
+            : return(u)
+
+routine signed(u: U128, negative: Bool) -> S128
+    block entry():
+        branch negative
+            ? return(bitcast<U128, S128>(0.sub_wrap(u)))
+            : return(bitcast<U128, S128>(u))
+
+/// The quotient truncates toward zero, as C's does.
+#[export("__divti3"), target(size: 64)]
+routine divti3(a: S128, b: S128) -> S128
+    block entry():
+        q, r = udivmod(magnitude(a), magnitude(b))
+        return(signed(q, a.lt(0).bitxor(b.lt(0))))
+
+/// The remainder has the dividend's sign, as C's does.
+#[export("__modti3"), target(size: 64)]
+routine modti3(a: S128, b: S128) -> S128
+    block entry():
+        q, r = udivmod(magnitude(a), magnitude(b))
+        return(signed(r, a.lt(0)))
+
+// -- emulated thread-local storage ---------------------------------------------------
+//
+// LLVM's JIT lowers thread_local globals to the emulated-TLS ABI, which calls __emutls_get_address with the
+// variable's control block. A native build gets it from compiler-rt; the JIT gets this one, compiler-rt's accessor
+// redone, with this library's own (real) thread-locals for each thread's objects.
+
+/// compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
+/// initial value or null for zeros.
+record EmutlsControl
+    size  : USize
+    align : USize
+    index : USize
+    value : Addr
+
+/// One thread's objects, by slot.
+record EmutlsArray
+    size : USize
+    data : @Addr
+
+#threadlocal
+global EMUTLS: @@EmutlsArray
+
+global EMUTLS_LOCK: @Mutex
+global EMUTLS_NEXT: @USize
+
+#[external("c"), symbol("_aligned_malloc"), target(os: "windows")]
+routine c_aligned_malloc(size: USize, align: USize) -> Addr
+
+#[external("c"), symbol("posix_memalign"), target(os: not "windows")]
+routine c_posix_memalign(out: @Addr, align: USize, size: USize) -> CInt
+
+#[external("c"), symbol("memset")]
+routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
+
+#target(os: "windows")
+routine aligned_alloc(size: USize, align: USize) -> Addr
+    block entry():
+        return(c_aligned_malloc(size, align.max(sizeof<Addr>())))
+
+#target(os: not "windows")
+routine aligned_alloc(size: USize, align: USize) -> Addr
+    block entry():
+        claim p : @Addr <- null
+        branch c_posix_memalign(p, align.max(sizeof<Addr>()), size).eq(0)
+            ? return(p.load())
+            : return(null)
+
+/// This thread's object for control, made (from its initial value, or zeroed) on the thread's first use.
+#export("__emutls_get_address")
+routine emutls_get_address(control: @EmutlsControl) -> Addr
+    block entry():
+        index : USize = control.index.atomic_load()
+        branch index.eq(0)
+            ? assign()
+            : array(index)
+
+    block assign():
+        EMUTLS_LOCK.lock()
+        current : USize = control.index.load()
+        branch current.eq(0)
+            ? continue
+            : assigned(current)
+        next : USize = EMUTLS_NEXT.load().add(1)
+        EMUTLS_NEXT.store(next)
+        control.index.atomic_store(next)
+        jump assigned(next)
+
+    block assigned(index: USize):
+        EMUTLS_LOCK.unlock()
+        jump array(index)
+
+    block array(index: USize):
+        arr : @EmutlsArray = EMUTLS.load()
+        branch arr.is_null()
+            ? fresh(index)
+            : sized(arr, index)
+
+    block fresh(index: USize):
+        made : @EmutlsArray = zeroed<EmutlsArray>(1, "Failed to allocate thread-local storage")
+        EMUTLS.store(made)
+        jump sized(made, index)
+
+    block sized(arr: @EmutlsArray, index: USize):
+        have : USize = arr.size.load()
+        branch have.lt(index)
+            ? continue
+            : object(arr, index)
+        grown : Addr = c_realloc(arr.data.load(), index.mul(sizeof<Addr>()))
+        c_memset(grown.to<@Byte>().stride(have.mul(sizeof<Addr>())), 0, index.sub(have).mul(sizeof<Addr>()))
+        arr.data.store(grown.to<@Addr>())
+        arr.size.store(index)
+        jump object(arr, index)
+
+    block object(arr: @EmutlsArray, index: USize):
+        slot : @Addr = arr.data.load().stride(index.sub(1))
+        obj  : Addr  = slot.load()
+        branch obj.is_null()
+            ? make(slot)
+            : return(obj)
+
+    block make(slot: @Addr):
+        size : USize = control.size.load()
+        made : Addr  = aligned_alloc(size, control.align.load())
+        init : Addr  = control.value.load()
+        branch init.is_null()
+            ? zero(slot, made, size)
+            : continue
+        c_memcpy(made, init, size)
+        slot.store(made)
+        return(made)
+
+    block zero(slot: @Addr, made: Addr, size: USize):
+        c_memset(made, 0, size)
+        slot.store(made)
+        return(made)

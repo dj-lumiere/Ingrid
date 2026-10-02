@@ -4,7 +4,7 @@
 //
 // The runtime library is shared (razorforge_runtime.dll / .so / .dylib), and this code is compiled into it, so a
 // routine RazorForge calls is exported under its C name (#export), and calls into the rest of the library (the crash
-// report, the call-chain shadow stacks, rf_invalidate) are #external("c").
+// report) go through the C library.
 
 module Ingrid::Runtime
 
@@ -30,24 +30,12 @@ routine c_getenv(name: CStr) -> @Byte
 
 // -- the rest of the runtime library -------------------------------------------------
 
-/// A runtime error with the RazorForge crash report and exit status (stacktrace.c).
-#[external("c"), symbol("__rf_throw"), noreturn]
-routine rf_throw(error_type: CStr, message: CStr) -> Void
-
-/// A coroutine's own call-chain shadow stack (stacktrace.c): null when tracing is off. activate swaps one in and
-/// returns the one it replaced.
-#[external("c"), symbol("__rf_stack_coro_create")]
-routine rf_stack_coro_create() -> Addr
-
-#[external("c"), symbol("__rf_stack_coro_destroy")]
-routine rf_stack_coro_destroy(handle: Addr) -> Void
-
-#[external("c"), symbol("__rf_stack_activate")]
-routine rf_stack_activate(handle: Addr) -> Addr
-
-/// Frees a block from rf_allocate_dynamic (memory.c): a result box.
-#[external("c"), symbol("rf_invalidate")]
+/// Frees a block from rf_allocate_dynamic (Ingrid/tessera/memory.tess, in the program): a result box. A C heap block,
+/// so free reclaims it here too.
 routine rf_invalidate(ptr: Addr) -> Void
+    block entry():
+        c_free(ptr)
+        return()
 
 /// count zeroed Ts, or the runtime's out-of-memory error naming what.
 routine zeroed<T>(count: USize, what: CStr) -> @T

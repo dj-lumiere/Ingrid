@@ -47,7 +47,6 @@ record Coro
     initial_spawned  : Bool  // spawned once: a second spawn does nothing
     detached         : Bool  // execute(): the worker that completes it frees it
     awaiter          : @Coro  // a coroutine waiting for this one to finish
-    shadow_stack     : Addr  // its call-chain shadow stack, which moves with it between workers
     completion_seq   : U64  // when it finished, in completion order (race! picks the first); U64.MAX until then
     stack            : Addr  // the bottom of its stack
     sp               : Addr  // its stack pointer while it isn't running
@@ -113,7 +112,6 @@ routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_siz
         coro.userdata.store(userdata)
         coro.timer_idx.store(-1)
         coro.completion_seq.store(U64.MAX)
-        coro.shadow_stack.store(rf_stack_coro_create())
         reserve : USize = stack_size.eq(0) ? DEFAULT_STACK : stack_size
         stack   : Addr  = stack_alloc(reserve)
         branch stack.is_null()
@@ -137,12 +135,10 @@ routine rf_coro_resume(coro: @Coro) -> U32
         branch coro.status.atomic_load().eq(CORO_COMPLETED)
             ? return(CORO_COMPLETED)
             : continue
-        prev        : @Coro = current_coro()
+        prev : @Coro = current_coro()
         CURRENT_CORO.store(coro)
-        prev_shadow : Addr  = rf_stack_activate(coro.shadow_stack.load())
         coro.status.atomic_store(CORO_RUNNING)
         switch_stack(coro.resumer_sp, coro.sp.load())
-        rf_stack_activate(prev_shadow)
         CURRENT_CORO.store(prev)
         return(coro.status.atomic_load())
 
@@ -206,13 +202,12 @@ routine rf_coro_delete(coro: @Coro) -> Void
             : continue
         stack : Addr = coro.stack.load()
         branch stack.is_null()
-            ? shadow()
+            ? free()
             : continue
         stack_free(stack)
-        jump shadow()
+        jump free()
 
-    block shadow():
-        rf_stack_coro_destroy(coro.shadow_stack.load())
+    block free():
         c_free(coro)
         return()
 

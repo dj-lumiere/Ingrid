@@ -1,0 +1,194 @@
+// Small things the standard library binds: the platform libm's exact float operations (remainder, fdim, nextafter,
+// scalbn, ilogb, and the B64 cbrt that seeds B128's Newton step), a cryptographically random word, the wall-clock
+// time, and two helpers the FFI tests call with a struct holding a callback.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+// -- libm ----------------------------------------------------------------------------
+
+#[external("c"), symbol("remainderf")]
+routine c_remainderf(x: F32, y: F32) -> F32
+
+#[external("c"), symbol("fdimf")]
+routine c_fdimf(x: F32, y: F32) -> F32
+
+#[external("c"), symbol("nextafterf")]
+routine c_nextafterf(x: F32, y: F32) -> F32
+
+#[external("c"), symbol("scalbnf")]
+routine c_scalbnf(x: F32, n: CInt) -> F32
+
+#[external("c"), symbol("ilogbf")]
+routine c_ilogbf(x: F32) -> CInt
+
+#[external("c"), symbol("cbrt")]
+routine c_cbrt(x: F64) -> F64
+
+#[external("c"), symbol("remainder")]
+routine c_remainder(x: F64, y: F64) -> F64
+
+#[external("c"), symbol("fdim")]
+routine c_fdim(x: F64, y: F64) -> F64
+
+#[external("c"), symbol("nextafter")]
+routine c_nextafter(x: F64, y: F64) -> F64
+
+#[external("c"), symbol("scalbn")]
+routine c_scalbn(x: F64, n: CInt) -> F64
+
+#[external("c"), symbol("ilogb")]
+routine c_ilogb(x: F64) -> CInt
+
+#export("rf_b32_remainder")
+routine rf_b32_remainder(x: F32, y: F32) -> F32
+    block entry():
+        return(c_remainderf(x, y))
+
+#export("rf_b32_fdim")
+routine rf_b32_fdim(x: F32, y: F32) -> F32
+    block entry():
+        return(c_fdimf(x, y))
+
+#export("rf_b32_nextafter")
+routine rf_b32_nextafter(x: F32, y: F32) -> F32
+    block entry():
+        return(c_nextafterf(x, y))
+
+/// An exponent beyond what C's int holds overflows or underflows the same either way, so it is clamped.
+#export("rf_b32_scalbn")
+routine rf_b32_scalbn(x: F32, n: S64) -> F32
+    block entry():
+        return(c_scalbnf(x, n.to_clamp<CInt>()))
+
+#export("rf_b32_ilogb")
+routine rf_b32_ilogb(x: F32) -> S64
+    block entry():
+        return(c_ilogbf(x).to<S64>())
+
+#export("rf_b64_cbrt")
+routine rf_b64_cbrt(x: F64) -> F64
+    block entry():
+        return(c_cbrt(x))
+
+#export("rf_b64_remainder")
+routine rf_b64_remainder(x: F64, y: F64) -> F64
+    block entry():
+        return(c_remainder(x, y))
+
+#export("rf_b64_fdim")
+routine rf_b64_fdim(x: F64, y: F64) -> F64
+    block entry():
+        return(c_fdim(x, y))
+
+#export("rf_b64_nextafter")
+routine rf_b64_nextafter(x: F64, y: F64) -> F64
+    block entry():
+        return(c_nextafter(x, y))
+
+#export("rf_b64_scalbn")
+routine rf_b64_scalbn(x: F64, n: S64) -> F64
+    block entry():
+        return(c_scalbn(x, n.to_clamp<CInt>()))
+
+#export("rf_b64_ilogb")
+routine rf_b64_ilogb(x: F64) -> S64
+    block entry():
+        return(c_ilogb(x).to<S64>())
+
+// -- a random word -------------------------------------------------------------------
+
+#[external("c"), symbol("BCryptGenRandom"), callconv("stdcall"), target(os: "windows")]
+routine c_bcrypt_gen_random(algorithm: Addr, buffer: @U64, size: U32, flags: U32) -> CInt
+
+#[external("c"), symbol("getrandom"), target(os: "linux")]
+routine c_getrandom(buffer: @U64, size: USize, flags: U32) -> SSize
+
+#[external("c"), symbol("getentropy"), target(os: "macos")]
+routine c_getentropy(buffer: @U64, size: USize) -> CInt
+
+/// 64 cryptographically random bits from the operating system.
+#[export("rf_random_u64"), target(os: "windows")]
+routine rf_random_u64() -> U64
+    block entry():
+        claim value : @U64 <- 0
+        // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+        c_bcrypt_gen_random(null, value, 8, 2)
+        return(value.load())
+
+#[export("rf_random_u64"), target(os: "linux")]
+routine rf_random_u64() -> U64
+    block entry():
+        claim value : @U64 <- 0
+        c_getrandom(value, 8, 0)
+        return(value.load())
+
+#[export("rf_random_u64"), target(os: "macos")]
+routine rf_random_u64() -> U64
+    block entry():
+        claim value : @U64 <- 0
+        c_getentropy(value, 8)
+        return(value.load())
+
+// -- the wall clock ------------------------------------------------------------------
+
+/// rf_Moment: seconds since the Unix epoch and the nanoseconds after them.
+record Moment
+    seconds     : S64
+    nanoseconds : U32
+
+record FileTime
+    low  : U32
+    high : U32
+
+#[external("c"), symbol("GetSystemTimePreciseAsFileTime"), callconv("stdcall"), target(os: "windows")]
+routine c_get_system_time_precise_as_file_time(time: @FileTime) -> Void
+
+/// The time between 1601-01-01 (a FILETIME's start) and the Unix epoch, in 100 ns ticks.
+preset EPOCH_TICKS: U64 = 116444736000000000
+
+#[export("rf_moment_now"), target(os: "windows")]
+routine rf_moment_now() -> Moment
+    block entry():
+        claim ft : @FileTime <- FileTime { low: 0, high: 0 }
+        c_get_system_time_precise_as_file_time(ft)
+        ticks : U64 = ft.high.load().to<U64>().shl(32).bitor(ft.low.load().to<U64>()).sub(EPOCH_TICKS)
+        now   : Moment = Moment { seconds: ticks.div(10000000).to<S64>(),
+                nanoseconds: ticks.mod(10000000).mul(100).to<U32>() }
+        return(now)
+
+#[external("c"), symbol("clock_gettime"), target(os: not "windows")]
+routine c_clock_gettime_real(clock: CInt, out: @Timespec) -> CInt
+
+#[export("rf_moment_now"), target(os: not "windows")]
+routine rf_moment_now() -> Moment
+    block entry():
+        claim ts : @Timespec <- Timespec { sec: 0, nsec: 0 }
+        // CLOCK_REALTIME
+        c_clock_gettime_real(0, ts)
+        now : Moment = Moment { seconds: ts.sec.load().to<S64>(), nanoseconds: ts.nsec.load().to_wrap<U32>() }
+        return(now)
+
+// -- FFI test helpers ----------------------------------------------------------------
+//
+// A C API that keeps a callback and its userdata in a struct and calls cb(arg, ud): RazorForge's routine value is
+// the pair { fn, bound }, which lays out as that struct, so a record with a Routine field goes to such an API as it
+// is. These two exist only for the tests that check it.
+
+record CallbackInfo
+    cb : Callable<(S32, Addr), S32>
+    ud : Addr
+
+#export("rf_test_invoke_cbinfo")
+routine rf_test_invoke_cbinfo(info: @CallbackInfo, arg: S32) -> S32
+    block entry():
+        cb : Callable<(S32, Addr), S32> = info.cb.load()
+        return(cb.call(arg, info.ud.load()))
+
+/// The struct passed by value.
+#export("rf_test_invoke_cbinfo_byval")
+routine rf_test_invoke_cbinfo_byval(info: CallbackInfo, arg: S32) -> S32
+    block entry():
+        cb : Callable<(S32, Addr), S32> = info.cb
+        return(cb.call(arg, info.ud))

@@ -1,0 +1,595 @@
+// Files and the filesystem: open / read / write / close by handle, memory-mapped views, and the filesystem
+// operations (existence, directories, copy, move, remove, listing, metadata, paths, permissions).
+//
+// A routine that returns bytes returns a malloc'd, NUL-terminated buffer (the caller frees it with rf_invalidate)
+// and its length through rf_get_result_len, as RazorForge takes no out parameter here. Paths come as a pointer and
+// a byte count. On Windows the calls are the Win32 ANSI ones; elsewhere POSIX.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+global RESULT_LEN: @USize
+
+/// The length of the last buffer a routine here returned.
+#export("rf_get_result_len")
+routine rf_get_result_len() -> U64
+    block entry():
+        return(RESULT_LEN.load().to<U64>())
+
+/// From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
+/// requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping.
+global MAP_DELTA: @USize
+
+#export("rf_file_map_delta")
+routine rf_file_map_delta() -> U64
+    block entry():
+        return(MAP_DELTA.load().to<U64>())
+
+/// A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
+routine empty_map() -> @Byte
+    block entry():
+        return(inttoptr<USize, @Byte>(1))
+
+/// A failure: no buffer, length 0.
+routine no_result() -> @Byte
+    block entry():
+        RESULT_LEN.store(0)
+        return(null)
+
+routine result(buf: @Byte, len: USize) -> @Byte
+    block entry():
+        RESULT_LEN.store(len)
+        return(buf)
+
+/// A malloc'd copy of the NUL-terminated s, with its length as the result; null in, null out.
+routine dup_result(s: @Byte) -> @Byte
+    block entry():
+        branch s.is_null()
+            ? return(no_result())
+            : continue
+        len  : USize = c_strlen(s)
+        copy : @Byte = strdupn(s, len.to<S32>())
+        branch copy.is_null()
+            ? return(no_result())
+            : return(result(copy, len))
+
+/// len bytes at s, copied into a malloc'd, NUL-terminated buffer, as the result.
+routine bytes_result(s: @Byte, len: USize) -> @Byte
+    block entry():
+        buf : Addr = c_malloc(len.add(1))
+        branch buf.is_null()
+            ? return(no_result())
+            : continue
+        c_memcpy(buf, s, len)
+        buf.to<@Byte>().stride(len).store(0x00)
+        return(result(buf.to<@Byte>(), len))
+
+// -- files by handle (the C library's streams) ---------------------------------------
+
+#[external("c"), symbol("fgetc")]
+routine c_fgetc(stream: Addr) -> CInt
+
+#[external("c"), symbol("feof")]
+routine c_feof(stream: Addr) -> CInt
+
+preset MAX_OPEN_FILES: USize = 256
+
+/// The open streams by handle.
+global FILE_TABLE: @Array<Addr, 256>
+
+routine file_of(fd: S32) -> Addr
+    block entry():
+        branch fd.lt(0).bitor(fd.ge(256))
+            ? return(null)
+            : return(FILE_TABLE.to<@Addr>().stride(fd.to<USize>()).load())
+
+/// mode: 0 read, 1 write, 2 append. A handle, or -1.
+#export("rf_file_open")
+routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
+    block entry():
+        cpath : @Byte = strdupn(path, path_len)
+        branch cpath.is_null()
+            ? return(-1)
+            : continue
+        when:
+            mode.eq(0) -> opened(cpath, c_fopen(cpath, "rb"))
+            mode.eq(1) -> opened(cpath, c_fopen(cpath, "wb"))
+            mode.eq(2) -> opened(cpath, c_fopen(cpath, "ab"))
+            else       -> bad(cpath)
+
+    block bad(cpath: @Byte):
+        c_free(cpath)
+        return(-1)
+
+    block opened(cpath: @Byte, f: Addr):
+        c_free(cpath)
+        branch f.is_null()
+            ? return(-1)
+            : slot(f, 0)
+
+    block slot(f: Addr, i: USize):
+        branch i.eq(MAX_OPEN_FILES)
+            ? full(f)
+            : continue
+        place : @Addr = FILE_TABLE.to<@Addr>().stride(i)
+        branch place.load().is_null()
+            ? continue
+            : slot(f, i.add(1))
+        place.store(f)
+        return(i.to<S32>())
+
+    block full(f: Addr):
+        c_fclose(f)
+        return(-1)
+
+#export("rf_file_close")
+routine rf_file_close(fd: S32) -> Void
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return()
+            : continue
+        c_fclose(f)
+        FILE_TABLE.to<@Addr>().stride(fd.to<USize>()).store(null)
+        return()
+
+/// The rest of the file from where the stream is.
+#export("rf_file_read_all")
+routine rf_file_read_all(fd: S32) -> @Byte
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return(no_result())
+            : continue
+        start : CLong = c_ftell(f)
+        // SEEK_END, then back (SEEK_SET)
+        c_fseek(f, 0, 2)
+        end : CLong = c_ftell(f)
+        c_fseek(f, start, 0)
+        remaining : USize = end.sub(start).to<USize>()
+        buf : Addr = c_malloc(remaining.add(1))
+        branch buf.is_null()
+            ? return(no_result())
+            : continue
+        got : USize = c_fread(buf.to<@Byte>(), 1, remaining, f)
+        buf.to<@Byte>().stride(got).store(0x00)
+        return(result(buf.to<@Byte>(), got))
+
+/// One line, without its '\n' (and any '\r').
+#export("rf_file_read_line")
+routine rf_file_read_line(fd: S32) -> @Byte
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return(no_result())
+            : continue
+        buf : Addr = c_malloc(256)
+        branch buf.is_null()
+            ? return(no_result())
+            : next(f, buf.to<@Byte>(), 256, 0)
+
+    block next(f: Addr, buf: @Byte, cap: USize, len: USize):
+        c : CInt = c_fgetc(f)
+        branch c.eq(-1).bitor(c.eq(10))
+            ? done(buf, len)
+            : continue
+        branch c.eq(13)
+            ? next(f, buf, cap, len)
+            : continue
+        branch len.add(1).ge(cap)
+            ? grow(f, buf, cap, len, c)
+            : put(f, buf, cap, len, c)
+
+    block grow(f: Addr, buf: @Byte, cap: USize, len: USize, c: CInt):
+        bigger : Addr = c_realloc(buf, cap.mul(2))
+        branch bigger.is_null()
+            ? failed(buf)
+            : put(f, bigger.to<@Byte>(), cap.mul(2), len, c)
+
+    block put(f: Addr, buf: @Byte, cap: USize, len: USize, c: CInt):
+        buf.stride(len).store(c.to_wrap<U8>().bits())
+        jump next(f, buf, cap, len.add(1))
+
+    block failed(buf: @Byte):
+        c_free(buf)
+        return(no_result())
+
+    block done(buf: @Byte, len: USize):
+        buf.stride(len).store(0x00)
+        return(result(buf, len))
+
+/// Up to count bytes.
+#export("rf_file_read_bytes")
+routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return(no_result())
+            : continue
+        buf : Addr = c_malloc(count.add(1))
+        branch buf.is_null()
+            ? return(no_result())
+            : continue
+        got : USize = c_fread(buf.to<@Byte>(), 1, count, f)
+        buf.to<@Byte>().stride(got).store(0x00)
+        return(result(buf.to<@Byte>(), got))
+
+/// The bytes written.
+#export("rf_file_write")
+routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return(0)
+            : return(c_fwrite(ptr, 1, len, f))
+
+#export("rf_file_flush")
+routine rf_file_flush(fd: S32) -> Void
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return()
+            : continue
+        c_fflush(f)
+        return()
+
+#export("rf_file_is_eof")
+routine rf_file_is_eof(fd: S32) -> Bool
+    block entry():
+        f : Addr = file_of(fd)
+        branch f.is_null()
+            ? return(true)
+            : return(c_feof(f).ne(0))
+
+// -- paths (no OS calls) -------------------------------------------------------------
+
+routine is_sep(c: Byte) -> Bool
+    block entry():
+        return(c.eq(b'/').bitor(c.eq(b'\\')))
+
+/// a + "/" + b (no separator added after one already there).
+#export("rf_fs_join_path")
+routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
+    block entry():
+        al : USize = a_len.to<USize>()
+        bl : USize = b_len.to<USize>()
+        branch al.gt(0)
+            ? last(al, bl)
+            : build(al, bl, 0)
+
+    block last(al: USize, bl: USize):
+        branch is_sep(a.stride(al.sub(1)).load())
+            ? build(al, bl, 0)
+            : build(al, bl, 1)
+
+    block build(al: USize, bl: USize, sep: USize):
+        total : USize = al.add(sep).add(bl)
+        buf   : Addr  = c_malloc(total.add(1))
+        branch buf.is_null()
+            ? return(no_result())
+            : continue
+        out : @Byte = buf.to<@Byte>()
+        c_memcpy(out, a, al)
+        branch sep.eq(1)
+            ? slash(out, al, bl, total)
+            : tail(out, al, sep, bl, total)
+
+    block slash(out: @Byte, al: USize, bl: USize, total: USize):
+        out.stride(al).store(b'/')
+        jump tail(out, al, 1, bl, total)
+
+    block tail(out: @Byte, al: USize, sep: USize, bl: USize, total: USize):
+        c_memcpy(out.stride(al.add(sep)), b, bl)
+        out.stride(total).store(0x00)
+        return(result(out, total))
+
+/// The parent directory: "/a/b/c" gives "/a/b", "a/b" gives "a", "file.txt" gives "", and "/" stays the root.
+#export("rf_fs_parent_path")
+routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
+    block entry():
+        branch len.le(0)
+            ? return(bytes_result(path, 0))
+            : continue
+        jump trim(len.sub(1))
+
+    block trim(end: S32):
+        branch end.gt(0).bitand(is_sep(path.stride(end.to<USize>()).load()))
+            ? trim(end.sub(1))
+            : find(end)
+
+    block find(i: S32):
+        branch i.lt(0)
+            ? return(bytes_result(path, 0))
+            : continue
+        branch is_sep(path.stride(i.to<USize>()).load())
+            ? parent(i)
+            : find(i.sub(1))
+
+    // Separators before the last one go too, but the root "/" stays.
+    block parent(pend: S32):
+        branch pend.gt(0)
+            ? continue
+            : root()
+        branch is_sep(path.stride(pend.sub(1).to<USize>()).load())
+            ? parent(pend.sub(1))
+            : return(bytes_result(path, pend.to<USize>()))
+
+    block root():
+        branch is_sep(path.load())
+            ? return(bytes_result(path, 1))
+            : return(bytes_result(path, 0))
+
+/// Where the file name starts and ends (trailing separators left out).
+routine name_span(path: @Byte, len: S32) -> (USize, USize)
+    block entry():
+        jump trim(len.to<USize>())
+
+    block trim(end: USize):
+        branch end.gt(0)
+            ? continue
+            : return({ 0, 0 })
+        branch is_sep(path.stride(end.sub(1)).load())
+            ? trim(end.sub(1))
+            : find(end, end)
+
+    block find(end: USize, i: USize):
+        branch i.eq(0)
+            ? return({ 0, end })
+            : continue
+        branch is_sep(path.stride(i.sub(1)).load())
+            ? return({ i, end })
+            : find(end, i.sub(1))
+
+/// The last component: "/a/b/file.txt" gives "file.txt".
+#export("rf_fs_file_name")
+routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
+    block entry():
+        branch len.le(0)
+            ? return(bytes_result(path, 0))
+            : continue
+        start, end = name_span(path, len)
+        return(bytes_result(path.stride(start), end.sub(start)))
+
+/// The last '.' of a name, after its first character, or 0 (no extension; a hidden file's dot doesn't count).
+routine last_dot(name: @Byte, len: USize) -> USize
+    block entry():
+        branch len.lt(2)
+            ? return(0)
+            : look(len.sub(1))
+
+    block look(i: USize):
+        branch i.eq(0)
+            ? return(0)
+            : continue
+        branch name.stride(i).load().eq(b'.')
+            ? return(i)
+            : look(i.sub(1))
+
+/// The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
+#export("rf_fs_file_stem")
+routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
+    block entry():
+        branch len.le(0)
+            ? return(bytes_result(path, 0))
+            : continue
+        start, end = name_span(path, len)
+        name : @Byte = path.stride(start)
+        n    : USize = end.sub(start)
+        dot  : USize = last_dot(name, n)
+        branch dot.eq(0)
+            ? return(bytes_result(name, n))
+            : return(bytes_result(name, dot))
+
+/// The extension without its dot: "file.txt" gives "txt", "file" gives "".
+#export("rf_fs_extension")
+routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
+    block entry():
+        branch len.le(0)
+            ? return(bytes_result(path, 0))
+            : continue
+        start, end = name_span(path, len)
+        name : @Byte = path.stride(start)
+        n    : USize = end.sub(start)
+        dot  : USize = last_dot(name, n)
+        branch dot.eq(0)
+            ? return(bytes_result(name, 0))
+            : return(bytes_result(name.stride(dot.add(1)), n.sub(dot).sub(1)))
+
+/// A directory listing line: '\n' between entries.
+record Listing
+    buf : @Byte
+    len : USize
+    cap : USize
+
+routine Listing.start(self: @Self) -> Bool
+    block entry():
+        buf : Addr = c_malloc(256)
+        self.buf.store(buf.to<@Byte>())
+        self.len.store(0)
+        self.cap.store(256)
+        return(buf.is_not_null())
+
+/// Room for n more bytes and the NUL: false if the buffer can't grow.
+routine Listing.room(self: @Self, n: USize) -> Bool
+    block entry():
+        need : USize = self.len.load().add(n).add(1)
+        branch need.gt(self.cap.load())
+            ? grow(self.cap.load().mul(2))
+            : return(true)
+
+    block grow(cap: USize):
+        branch need_more(self, n, cap)
+            ? grow(cap.mul(2))
+            : continue
+        bigger : Addr = c_realloc(self.buf.load(), cap)
+        branch bigger.is_null()
+            ? return(false)
+            : continue
+        self.buf.store(bigger.to<@Byte>())
+        self.cap.store(cap)
+        return(true)
+
+routine need_more(l: @Listing, n: USize, cap: USize) -> Bool
+    block entry():
+        return(l.len.load().add(n).add(1).gt(cap))
+
+routine Listing.put(self: @Self, data: @Byte, n: USize) -> Void
+    block entry():
+        c_memcpy(self.buf.load().stride(self.len.load()), data, n)
+        self.len.load().add(n).store_into(self.len)
+        return()
+
+routine Listing.byte(self: @Self, b: Byte) -> Void
+    block entry():
+        self.buf.load().stride(self.len.load()).store(b)
+        self.len.load().add(1).store_into(self.len)
+        return()
+
+/// One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0).
+routine Listing.entry(self: @Self, name: @Byte, typed: Bool, is_dir: Bool, mtime: S64) -> Bool
+    block entry():
+        claim digits : @Array<Byte, 24> <- uninit
+        branch typed
+            ? stamp(name, digits.to<@Byte>())
+            : stamped(name, digits.to<@Byte>(), 0)
+
+    block stamp(name: @Byte, digits: @Byte):
+        jump stamped(name, digits, decimal(mtime.max(0).to<U64>(), digits))
+
+    block stamped(name: @Byte, digits: @Byte, dl: USize):
+        nl   : USize = c_strlen(name)
+        sep  : USize = self.len.load().gt(0) ? 1 : 0
+        kind : USize = typed ? dl.add(2) : 0
+        branch self.room(sep.add(kind).add(nl))
+            ? continue
+            : return(false)
+        branch sep.eq(1)
+            ? newline(name, nl, typed, is_dir, digits, dl)
+            : body(name, nl, typed, is_dir, digits, dl)
+
+    block newline(name: @Byte, nl: USize, typed: Bool, is_dir: Bool, digits: @Byte, dl: USize):
+        self.byte(b'\n')
+        jump body(name, nl, typed, is_dir, digits, dl)
+
+    block body(name: @Byte, nl: USize, typed: Bool, is_dir: Bool, digits: @Byte, dl: USize):
+        branch typed
+            ? continue
+            : named(name, nl)
+        self.byte(is_dir ? b'd' : b'f')
+        self.put(digits, dl)
+        self.byte(b' ')
+        jump named(name, nl)
+
+    block named(name: @Byte, nl: USize):
+        self.put(name, nl)
+        return(true)
+
+routine Listing.finish(self: @Self) -> @Byte
+    block entry():
+        n : USize = self.len.load()
+        self.buf.load().stride(n).store(0x00)
+        return(result(self.buf.load(), n))
+
+/// v in decimal into out: the digit count.
+routine decimal(v: U64, out: @Byte) -> USize
+    block entry():
+        claim rev : @Array<Byte, 24> <- uninit
+        jump digit(v, rev.to<@Byte>(), 0)
+
+    block digit(v: U64, rev: @Byte, n: USize):
+        rev.stride(n).store(v.mod(10).to<U8>().add(48).bits())
+        rest : U64 = v.div(10)
+        branch rest.eq(0)
+            ? copy(rev, n.add(1), 0)
+            : digit(rest, rev, n.add(1))
+
+    block copy(rev: @Byte, n: USize, i: USize):
+        branch i.eq(n)
+            ? return(n)
+            : continue
+        out.stride(i).store(rev.stride(n.sub(1).sub(i)).load())
+        jump copy(rev, n, i.add(1))
+
+routine is_dot_entry(name: @Byte) -> Bool
+    block entry():
+        first : Byte = name.load()
+        branch first.eq(b'.')
+            ? continue
+            : return(false)
+        second : Byte = name.stride(1).load()
+        branch second.eq(0x00)
+            ? return(true)
+            : continue
+        return(second.eq(b'.').bitand(name.stride(2).load().eq(0x00)))
+
+// -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
+
+global META_SIZE: @S64
+global META_MODIFIED: @S64
+global META_CREATED: @S64
+global META_IS_DIRECTORY: @Bool
+global META_READONLY: @Bool
+
+#export("rf_fs_meta_size")
+routine rf_fs_meta_size() -> S64
+    block entry():
+        return(META_SIZE.load())
+
+#export("rf_fs_meta_modified")
+routine rf_fs_meta_modified() -> S64
+    block entry():
+        return(META_MODIFIED.load())
+
+#export("rf_fs_meta_created")
+routine rf_fs_meta_created() -> S64
+    block entry():
+        return(META_CREATED.load())
+
+#export("rf_fs_meta_is_directory")
+routine rf_fs_meta_is_directory() -> Bool
+    block entry():
+        return(META_IS_DIRECTORY.load())
+
+#export("rf_fs_meta_readonly")
+routine rf_fs_meta_readonly() -> Bool
+    block entry():
+        return(META_READONLY.load())
+
+/// Whether s is a string with something in it (not null, not "").
+routine nonempty(s: @Byte) -> Bool
+    block entry():
+        branch s.is_null()
+            ? return(false)
+            : return(s.load().ne(0x00))
+
+/// The user's home directory, or null when it can't be told.
+#[export("rf_fs_home_dir"), target(os: not "windows")]
+routine rf_fs_home_dir() -> @Byte
+    block entry():
+        home : @Byte = c_getenv("HOME")
+        branch nonempty(home)
+            ? return(dup_result(home))
+            : return(no_result())
+
+#[export("rf_fs_home_dir"), target(os: "windows")]
+routine rf_fs_home_dir() -> @Byte
+    block entry():
+        profile : @Byte = c_getenv("USERPROFILE")
+        branch nonempty(profile)
+            ? return(dup_result(profile))
+            : continue
+        drive : @Byte = c_getenv("HOMEDRIVE")
+        path  : @Byte = c_getenv("HOMEPATH")
+        branch drive.is_null().bitor(path.is_null())
+            ? return(no_result())
+            : continue
+        dl  : USize = c_strlen(drive)
+        pl  : USize = c_strlen(path)
+        buf : Addr  = c_malloc(dl.add(pl).add(1))
+        branch buf.is_null()
+            ? return(no_result())
+            : continue
+        c_memcpy(buf, drive, dl)
+        c_memcpy(buf.to<@Byte>().stride(dl), path, pl.add(1))
+        return(result(buf.to<@Byte>(), dl.add(pl)))

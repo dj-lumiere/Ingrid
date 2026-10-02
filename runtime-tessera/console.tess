@@ -1,0 +1,297 @@
+// The console (show, alert, ask), the OS side of the crash report (writing to stderr, flushing, exiting with the
+// crash status), process start-up, and C-string helpers.
+//
+// Standard output is flushed after every show when it is an interactive terminal, so prompts and progress appear
+// at once; on a pipe or a file the C library buffers it (a flush per call costs a system call and a reader's round
+// trip per print). Buffered output still arrives: at exit, before every ask, on rf_console_flush, and before a crash
+// report. RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a
+// hang or a crash.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+#[external("c"), symbol("getchar")]
+routine c_getchar() -> CInt
+
+#[external("c"), symbol("fread")]
+routine c_fread_stream(buf: Addr, size: USize, count: USize, stream: Addr) -> USize
+
+#[external("c"), symbol("strcpy")]
+routine c_strcpy(dest: @Byte, src: @Byte) -> @Byte
+
+#[external("c"), symbol("strcmp")]
+routine c_strcmp(a: @Byte, b: @Byte) -> CInt
+
+#[external("c"), symbol("_isatty"), target(os: "windows")]
+routine c_isatty(fd: CInt) -> CInt
+
+#[external("c"), symbol("_fileno"), target(os: "windows")]
+routine c_fileno(stream: Addr) -> CInt
+
+#[external("c"), symbol("isatty"), target(os: not "windows")]
+routine c_isatty(fd: CInt) -> CInt
+
+#[external("c"), symbol("fileno"), target(os: not "windows")]
+routine c_fileno(stream: Addr) -> CInt
+
+preset EOF: CInt = -1
+
+/// Whether standard output is interactive (or RF_FLUSH_STDOUT=1 asks for a flush per show): -1 until asked.
+global STDOUT_INTERACTIVE: @CInt <- -1
+
+routine stdout_interactive() -> Bool
+    block entry():
+        cached : CInt = STDOUT_INTERACTIVE.load()
+        branch cached.ge(0)
+            ? return(cached.eq(1))
+            : continue
+        force : @Byte = c_getenv("RF_FLUSH_STDOUT")
+        branch force.is_null()
+            ? terminal()
+            : continue
+        branch force.load().eq(b'1')
+            ? decide(true)
+            : terminal()
+
+    block terminal():
+        jump decide(c_isatty(c_fileno(stdout_stream())).ne(0))
+
+    block decide(interactive: Bool):
+        STDOUT_INTERACTIVE.store(interactive ? 1 : 0)
+        return(interactive)
+
+#export("rf_console_show")
+routine rf_console_show(ptr: @Byte, count: USize) -> Void
+    block entry():
+        out : Addr = stdout_stream()
+        c_fwrite_stream(ptr, 1, count, out)
+        branch stdout_interactive()
+            ? continue
+            : return()
+        c_fflush_stream(out)
+        return()
+
+/// On stderr, in magenta.
+#export("rf_console_alert")
+routine rf_console_alert(ptr: @Byte, count: USize) -> Void
+    block entry():
+        err : Addr = stderr_stream()
+        c_fputs("\x1B[95m", err)
+        c_fwrite_stream(ptr, 1, count, err)
+        c_fputs("\x1B[0m", err)
+        c_fflush_stream(err)
+        return()
+
+#export("rf_console_flush")
+routine rf_console_flush() -> Void
+    block entry():
+        c_fflush_stream(stdout_stream())
+        return()
+
+/// Characters from stdin until one in stops (or the end), after skipping any in skip: a malloc'd, NUL-terminated
+/// string, or null at the end of the input. Flushes stdout first.
+routine read_token(stop_space: Bool) -> @Byte
+    block entry():
+        c_fflush_stream(stdout_stream())
+        jump skip()
+
+    block skip():
+        c : CInt = c_getchar()
+        branch c.eq(EOF)
+            ? return(null)
+            : continue
+        branch is_stop(c, stop_space)
+            ? skip()
+            : first(c)
+
+    block first(c: CInt):
+        buf : Addr = c_malloc(256)
+        branch buf.is_null()
+            ? return(null)
+            : continue
+        buf.to<@Byte>().store(c.to_wrap<U8>().bits())
+        jump more(buf.to<@Byte>(), 256, 1)
+
+    block more(buf: @Byte, cap: USize, len: USize):
+        c : CInt = c_getchar()
+        branch c.eq(EOF).bitor(is_stop(c, stop_space))
+            ? done(buf, len)
+            : continue
+        branch len.add(1).ge(cap)
+            ? grow(buf, cap, len, c)
+            : put(buf, cap, len, c)
+
+    block grow(buf: @Byte, cap: USize, len: USize, c: CInt):
+        bigger : Addr = c_realloc(buf, cap.mul(2))
+        branch bigger.is_null()
+            ? failed(buf)
+            : put(bigger.to<@Byte>(), cap.mul(2), len, c)
+
+    block put(buf: @Byte, cap: USize, len: USize, c: CInt):
+        buf.stride(len).store(c.to_wrap<U8>().bits())
+        jump more(buf, cap, len.add(1))
+
+    block failed(buf: @Byte):
+        c_free(buf)
+        return(null)
+
+    block done(buf: @Byte, len: USize):
+        buf.stride(len).store(0x00)
+        return(buf)
+
+/// A line ends at '\n' or '\r'; a word also at ' ' or '\t'.
+routine is_stop(c: CInt, word: Bool) -> Bool
+    block entry():
+        line  : Bool = c.eq(10).bitor(c.eq(13))
+        space : Bool = c.eq(32).bitor(c.eq(9))
+        return(line.bitor(word.bitand(space)))
+
+/// The next non-empty line from stdin, without its end, or null at the end of the input.
+#export("rf_console_ask_line")
+routine rf_console_ask_line() -> @Byte
+    block entry():
+        return(read_token(false))
+
+/// The next word from stdin, or null at the end of the input.
+#export("rf_console_ask_word")
+routine rf_console_ask_word() -> @Byte
+    block entry():
+        return(read_token(true))
+
+/// Up to count bytes from stdin, NUL-terminated.
+#export("rf_console_ask_bytes")
+routine rf_console_ask_bytes(count: USize) -> @Byte
+    block entry():
+        c_fflush_stream(stdout_stream())
+        buf : Addr = c_malloc(count.add(1))
+        branch buf.is_null()
+            ? return(null)
+            : continue
+        got : USize = c_fread_stream(buf, 1, count, stdin_stream())
+        buf.to<@Byte>().stride(got).store(0x00)
+        return(buf.to<@Byte>())
+
+/// The rest of stdin, NUL-terminated.
+#export("rf_console_ask_all")
+routine rf_console_ask_all() -> @Byte
+    block entry():
+        c_fflush_stream(stdout_stream())
+        buf : Addr = c_malloc(1024)
+        branch buf.is_null()
+            ? return(null)
+            : more(buf.to<@Byte>(), 1024, 0)
+
+    block more(buf: @Byte, cap: USize, len: USize):
+        c : CInt = c_getchar()
+        branch c.eq(EOF)
+            ? done(buf, len)
+            : continue
+        branch len.add(1).ge(cap)
+            ? grow(buf, cap, len, c)
+            : put(buf, cap, len, c)
+
+    block grow(buf: @Byte, cap: USize, len: USize, c: CInt):
+        bigger : Addr = c_realloc(buf, cap.mul(2))
+        branch bigger.is_null()
+            ? failed(buf)
+            : put(bigger.to<@Byte>(), cap.mul(2), len, c)
+
+    block put(buf: @Byte, cap: USize, len: USize, c: CInt):
+        buf.stride(len).store(c.to_wrap<U8>().bits())
+        jump more(buf, cap, len.add(1))
+
+    block failed(buf: @Byte):
+        c_free(buf)
+        return(null)
+
+    block done(buf: @Byte, len: USize):
+        buf.stride(len).store(0x00)
+        return(buf)
+
+// -- the crash report's OS side ------------------------------------------------------
+
+/// Bytes on stderr as they are, with no color or newline.
+#export("rf_console_error")
+routine rf_console_error(ptr: @Byte, count: USize) -> Void
+    block entry():
+        branch ptr.is_null().bitor(count.eq(0))
+            ? return()
+            : continue
+        c_fwrite_stream(ptr, 1, count, stderr_stream())
+        return()
+
+/// Flushes stdout, so a program's output appears before the crash report that follows it.
+#export("rf_flush_output")
+routine rf_flush_output() -> Void
+    block entry():
+        c_fflush_stream(stdout_stream())
+        return()
+
+/// Ends the program with the crash status, after the report.
+#[export("rf_crash_exit"), noreturn]
+routine rf_crash_exit() -> Void
+    block entry():
+        c_fflush_stream(stderr_stream())
+        c_exit(CRASH_STATUS)
+
+// -- start-up ------------------------------------------------------------------------
+
+#[external("c"), symbol("SetConsoleCP"), callconv("stdcall"), target(os: "windows")]
+routine c_set_console_cp(page: U32) -> CInt
+
+#[external("c"), symbol("SetConsoleOutputCP"), callconv("stdcall"), target(os: "windows")]
+routine c_set_console_output_cp(page: U32) -> CInt
+
+#[external("c"), symbol("GetStdHandle"), callconv("stdcall"), target(os: "windows")]
+routine c_get_std_handle(which: U32) -> Addr
+
+#[external("c"), symbol("GetConsoleMode"), callconv("stdcall"), target(os: "windows")]
+routine c_get_console_mode(console: Addr, mode: @U32) -> CInt
+
+#[external("c"), symbol("SetConsoleMode"), callconv("stdcall"), target(os: "windows")]
+routine c_set_console_mode(console: Addr, mode: U32) -> CInt
+
+/// Process start-up: the I/O threads start on the main thread, and on Windows the console takes UTF-8 and ANSI
+/// colors on stderr.
+#[export("rf_runtime_init"), target(os: "windows")]
+routine rf_runtime_init() -> Void
+    block entry():
+        rf_io_runtime_init()
+        c_set_console_cp(65001)
+        c_set_console_output_cp(65001)
+        // STD_ERROR_HANDLE
+        err : Addr = c_get_std_handle(0xFFFFFFF4)
+        branch ptrtoint<Addr, U64>(err).eq(U64.MAX)
+            ? return()
+            : continue
+        claim mode : @U32 <- 0
+        branch c_get_console_mode(err, mode).ne(0)
+            ? continue
+            : return()
+        // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        c_set_console_mode(err, mode.load().bitor(4))
+        return()
+
+#[export("rf_runtime_init"), target(os: not "windows")]
+routine rf_runtime_init() -> Void
+    block entry():
+        rf_io_runtime_init()
+        return()
+
+// -- C strings -----------------------------------------------------------------------
+
+#export("rf_cstr_count")
+routine rf_cstr_count(cstr: @Byte) -> USize
+    block entry():
+        return(c_strlen(cstr))
+
+#export("rf_cstr_copy")
+routine rf_cstr_copy(dest: @Byte, src: @Byte) -> @Byte
+    block entry():
+        return(c_strcpy(dest, src))
+
+#export("rf_cstr_compare")
+routine rf_cstr_compare(a: @Byte, b: @Byte) -> S32
+    block entry():
+        return(c_strcmp(a, b))

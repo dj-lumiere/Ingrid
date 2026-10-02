@@ -1,0 +1,144 @@
+// The heap allocation the builder's code and the standard library call: zeroed or not, reallocated, freed, copied,
+// filled, and a scratch region released in bulk. They are in every module (this library is llvm-linked into each),
+// so the optimizer sees through them to malloc / calloc / free.
+//
+// An allocation that fails is a runtime error (OutOfMemoryError) with the crash report, never a null pointer that
+// would crash later with no diagnosis.
+
+import Standard::Format
+import Standard::Os
+
+#[external("c"), symbol("calloc")]
+private routine c_calloc(count: USize, size: USize) -> Addr
+
+#[external("c"), symbol("malloc")]
+private routine c_malloc(size: USize) -> Addr
+
+#[external("c"), symbol("realloc")]
+private routine c_realloc(ptr: Addr, size: USize) -> Addr
+
+#[external("c"), symbol("free")]
+private routine c_free(ptr: Addr) -> Void
+
+#[external("c"), symbol("memmove")]
+private routine c_memmove(dst: Addr, src: Addr, n: USize) -> Addr
+
+#[external("c"), symbol("memset")]
+private routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
+
+/// A runtime error with the crash report and exit status (the runtime library).
+#[external("c"), symbol("__rf_throw"), noreturn]
+private routine rf_throw(error_type: CStr, message: CStr) -> Void
+
+/// "Failed to <what> <bytes> bytes", as an OutOfMemoryError.
+#noreturn
+private routine out_of_memory(what: Bytes, bytes: U64) -> Void
+    block entry():
+        claim buffer : @Array<Byte, 128> <- uninit
+        claim out    : @SliceWriter      <- SliceWriter.construct(buffer.to<@Byte>(), 127)
+        write(out, "Failed to {what} {bytes} bytes")
+        text : Bytes = out.load().to_bytes()
+        buffer.to<@Byte>().stride(text.length).store(0x00)
+        rf_throw("OutOfMemoryError", CStr.from_ptr(buffer.to<@Byte>()))
+
+/// bytes zeroed bytes.
+#export("rf_allocate_dynamic")
+routine rf_allocate_dynamic(bytes: U64) -> Addr
+    block entry():
+        p : Addr = c_calloc(bytes.to<USize>(), 1)
+        branch p.is_null()
+            ? out_of_memory("allocate", bytes)
+            : return(p)
+
+/// bytes bytes the caller writes before reading.
+#export("rf_allocate_dynamic_uninit")
+routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
+    block entry():
+        p : Addr = c_malloc(bytes.to<USize>())
+        branch p.is_null()
+            ? out_of_memory("allocate", bytes)
+            : return(p)
+
+/// Frees a block; null is fine.
+#export("rf_invalidate")
+routine rf_invalidate(ptr: Addr) -> Void
+    block entry():
+        c_free(ptr)
+        return()
+
+/// Reallocating to 0 bytes may give null: that is a free, not a failure.
+#export("rf_reallocate_dynamic")
+routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
+    block entry():
+        p : Addr = c_realloc(ptr, bytes.to<USize>())
+        branch p.is_null().bitand(bytes.ne(0))
+            ? out_of_memory("reallocate to", bytes)
+            : return(p)
+
+/// Copies bytes bytes, the regions may overlap. A null address or no bytes does nothing.
+#export("rf_copy_bytes_at")
+routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -> Void
+    block entry():
+        branch src_address.eq(0).bitor(dst_address.eq(0)).bitor(bytes.eq(0))
+            ? return()
+            : continue
+        c_memmove(inttoptr<USize, Addr>(dst_address), inttoptr<USize, Addr>(src_address), bytes)
+        return()
+
+/// Fills bytes bytes with value. A null address or no bytes does nothing.
+#export("rf_set_bytes_at")
+routine rf_set_bytes_at(dest_address: USize, value: U8, bytes: U64) -> Void
+    block entry():
+        branch dest_address.eq(0).bitor(bytes.eq(0))
+            ? return()
+            : continue
+        c_memset(inttoptr<USize, Addr>(dest_address), value.to<CInt>(), bytes.to<USize>())
+        return()
+
+// -- the scratch region --------------------------------------------------------------
+//
+// A thread's stack of zeroed temporary blocks, released in bulk: a caller takes a mark, allocates any number of
+// blocks, and releases back to the mark, which frees every block since. For computations whose intermediates alias
+// one another (the Real engine shares limb buffers between temporaries). Marks nest in stack order. The region is
+// the thread's, so a computation doesn't suspend between its mark and its release.
+
+record RegionBlock
+    prev : @RegionBlock
+
+#threadlocal
+global REGION_TOP: @@RegionBlock
+
+/// The current top: release to it to free everything allocated after.
+#export("rf_region_mark")
+routine rf_region_mark() -> U64
+    block entry():
+        return(ptrtoint<@RegionBlock, U64>(REGION_TOP.load()))
+
+/// bytes zeroed bytes in this thread's region.
+#export("rf_region_alloc")
+routine rf_region_alloc(bytes: U64) -> Addr
+    block entry():
+        p : Addr = c_calloc(1, sizeof<RegionBlock>().add(bytes.to<USize>()))
+        branch p.is_null()
+            ? out_of_memory("allocate scratch", bytes)
+            : continue
+        node : @RegionBlock = p.to<@RegionBlock>()
+        node.prev.store(REGION_TOP.load())
+        REGION_TOP.store(node)
+        return(node.stride(1))
+
+/// Frees every block allocated since mark.
+#export("rf_region_release")
+routine rf_region_release(mark: U64) -> Void
+    block entry():
+        stop : @RegionBlock = inttoptr<U64, @RegionBlock>(mark)
+        jump next(stop)
+
+    block next(stop: @RegionBlock):
+        top : @RegionBlock = REGION_TOP.load()
+        branch top.is_null().bitor(top.ptr_eq(stop))
+            ? return()
+            : continue
+        REGION_TOP.store(top.prev.load())
+        c_free(top)
+        jump next(stop)

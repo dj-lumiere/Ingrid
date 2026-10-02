@@ -1,0 +1,327 @@
+// The runtime's crash: __rf_throw writes the error and a stack trace to stderr and exits with the crash status, and
+// in the modes that trace, a hardware fault (an access violation, a division by zero, an illegal instruction) prints
+// the stack before the process dies.
+//
+// Three trace modes, set at startup by __rf_set_trace_mode:
+//   0  none (release-time, release-space): no trace
+//   1  platform (release): the native stack, function names from the debug information
+//   2  shadow (debug): the RF call chain, which the builder's own trace helpers keep now; this one stays empty
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+preset TRACE_NONE:     CInt = 0
+preset TRACE_PLATFORM: CInt = 1
+preset TRACE_SHADOW:   CInt = 2
+
+/// The exit status of every runtime crash: 0x52, 'R' for Runtime error.
+preset CRASH_STATUS: CInt = 0x52
+
+global TRACE_MODE: @CInt <- 1
+
+// -- the C library's streams ---------------------------------------------------------
+
+#[external("c"), symbol("fprintf"), variadic]
+routine c_fprintf(stream: Addr, format: CStr) -> CInt
+
+#[external("c"), symbol("fputs")]
+routine c_fputs(text: CStr, stream: Addr) -> CInt
+
+#[external("c"), symbol("fwrite")]
+routine c_fwrite_stream(buf: Addr, size: USize, count: USize, stream: Addr) -> USize
+
+#[external("c"), symbol("fflush")]
+routine c_fflush_stream(stream: Addr) -> CInt
+
+#[external("c"), symbol("exit"), noreturn]
+routine c_exit(status: CInt) -> Void
+
+#[external("c"), symbol("stdin"), target(os: "linux")]
+global C_STDIN: @Addr
+
+#[external("c"), symbol("stdout"), target(os: "linux")]
+global C_STDOUT: @Addr
+
+#[external("c"), symbol("stderr"), target(os: "linux")]
+global C_STDERR: @Addr
+
+#[external("c"), symbol("__stdinp"), target(os: "macos")]
+global C_STDIN: @Addr
+
+#[external("c"), symbol("__stdoutp"), target(os: "macos")]
+global C_STDOUT: @Addr
+
+#[external("c"), symbol("__stderrp"), target(os: "macos")]
+global C_STDERR: @Addr
+
+/// The UCRT's stdin, stdout, stderr: index 0, 1, 2.
+#[external("c"), symbol("__acrt_iob_func"), target(os: "windows")]
+routine c_acrt_iob_func(index: U32) -> Addr
+
+#target(os: not "windows")
+routine stdin_stream() -> Addr
+    block entry():
+        return(C_STDIN.load())
+
+#target(os: not "windows")
+routine stdout_stream() -> Addr
+    block entry():
+        return(C_STDOUT.load())
+
+#target(os: not "windows")
+routine stderr_stream() -> Addr
+    block entry():
+        return(C_STDERR.load())
+
+#target(os: "windows")
+routine stdin_stream() -> Addr
+    block entry():
+        return(c_acrt_iob_func(0))
+
+#target(os: "windows")
+routine stdout_stream() -> Addr
+    block entry():
+        return(c_acrt_iob_func(1))
+
+#target(os: "windows")
+routine stderr_stream() -> Addr
+    block entry():
+        return(c_acrt_iob_func(2))
+
+// -- the crash -----------------------------------------------------------------------
+
+/// Sets the trace mode, and in a tracing mode installs the fault handlers.
+#export("__rf_set_trace_mode")
+routine rf_set_trace_mode(mode: CInt) -> Void
+    block entry():
+        TRACE_MODE.store(mode)
+        branch mode.ne(TRACE_NONE)
+            ? continue
+            : return()
+        install_fault_handlers()
+        return()
+
+routine print_stack_for_mode() -> Void
+    block entry():
+        mode : CInt = TRACE_MODE.load()
+        when:
+            mode.eq(TRACE_SHADOW)   -> shadow()
+            mode.eq(TRACE_PLATFORM) -> platform()
+            else                    -> return()
+
+    block shadow():
+        c_fputs("  <stack empty>\n", stderr_stream())
+        return()
+
+    block platform():
+        print_platform_stack()
+        return()
+
+/// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status.
+#[export("__rf_throw"), noreturn]
+routine rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry():
+        err  : Addr = stderr_stream()
+        kind : CStr = error_type.data.is_null() ? "Error" : error_type
+        text : CStr = message.data.is_null() ? "" : message
+        c_fprintf(err, "\x1B[91m\n%s: %s\n", kind.data, text.data)
+        print_stack_for_mode()
+        c_fputs("\x1B[0m\n", err)
+        c_fflush_stream(err)
+        c_exit(CRASH_STATUS)
+
+// -- the platform stack: Windows -----------------------------------------------------
+
+#[external("c"), symbol("RtlCaptureStackBackTrace"), callconv("stdcall"), target(os: "windows")]
+routine c_capture_stack_back_trace(skip: U32, count: U32, frames: @Addr, hash: Addr) -> U16
+
+#[external("c"), symbol("GetCurrentProcess"), callconv("stdcall"), target(os: "windows")]
+routine c_get_current_process() -> Addr
+
+#[external("c"), symbol("SymInitialize"), callconv("stdcall"), target(os: "windows")]
+routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
+
+#[external("c"), symbol("SymFromAddr"), callconv("stdcall"), target(os: "windows")]
+routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
+
+/// SYMBOL_INFO's size, and where its MaxNameLen and Name are.
+preset SYMBOL_INFO_SIZE:     U32   = 88
+preset SYMBOL_INFO_MAX_NAME: USize = 80
+preset SYMBOL_INFO_NAME:     USize = 84
+preset MAX_SYM_NAME:         U32   = 2000
+
+#target(os: "windows")
+routine print_platform_stack() -> Void
+    block entry():
+        claim stack  : @Array<Addr, 64> <- uninit
+        // skip this helper's frame
+        frames  : U16  = c_capture_stack_back_trace(1, 64, stack.to<@Addr>(), null)
+        process : Addr = c_get_current_process()
+        c_sym_initialize(process, null, 1)
+        // SYMBOL_INFO and room for its name, 8-aligned
+        claim buffer : @Array<U64, 262> <- uninit
+        sym : @Byte = buffer.to<@Byte>()
+        sym.to<@U32>().store(SYMBOL_INFO_SIZE)
+        sym.stride(SYMBOL_INFO_MAX_NAME).to<@U32>().store(MAX_SYM_NAME)
+        err : Addr = stderr_stream()
+        c_fputs("Stack trace:\n", err)
+        jump frame(stack.to<@Addr>(), frames.to<U32>(), process, sym, err, 0)
+
+    block frame(stack: @Addr, frames: U32, process: Addr, sym: @Byte, err: Addr, i: U32):
+        branch i.eq(frames)
+            ? return()
+            : continue
+        address : U64 = ptrtoint<Addr, U64>(stack.stride(i.to<USize>()).load())
+        branch c_sym_from_addr(process, address, null, sym).ne(0)
+            ? named(stack, frames, process, sym, err, i)
+            : continue
+        c_fprintf(err, "  %u: at 0x%016llx\n", i, address)
+        jump frame(stack, frames, process, sym, err, i.add(1))
+
+    block named(stack: @Addr, frames: U32, process: Addr, sym: @Byte, err: Addr, i: U32):
+        c_fprintf(err, "  %u: at %s\n", i, sym.stride(SYMBOL_INFO_NAME))
+        jump frame(stack, frames, process, sym, err, i.add(1))
+
+// -- the platform stack: POSIX -------------------------------------------------------
+
+#[external("c"), symbol("backtrace"), target(os: not "windows")]
+routine c_backtrace(frames: @Addr, size: CInt) -> CInt
+
+#[external("c"), symbol("backtrace_symbols"), target(os: not "windows")]
+routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
+
+/// Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
+#target(os: not "windows")
+routine print_platform_stack() -> Void
+    block entry():
+        claim stack : @Array<Addr, 64> <- uninit
+        frames  : CInt   = c_backtrace(stack.to<@Addr>(), 64)
+        symbols : @@Byte = c_backtrace_symbols(stack.to<@Addr>(), frames)
+        err     : Addr   = stderr_stream()
+        c_fputs("Stack trace:\n", err)
+        jump frame(stack.to<@Addr>(), frames, symbols, err, 2)
+
+    block frame(stack: @Addr, frames: CInt, symbols: @@Byte, err: Addr, i: CInt):
+        branch i.ge(frames)
+            ? done(symbols)
+            : continue
+        branch symbols.is_null()
+            ? raw(stack, frames, symbols, err, i)
+            : continue
+        c_fprintf(err, "  %d: %s\n", i.sub(2), symbols.stride(i.to<USize>()).load())
+        jump frame(stack, frames, symbols, err, i.add(1))
+
+    block raw(stack: @Addr, frames: CInt, symbols: @@Byte, err: Addr, i: CInt):
+        c_fprintf(err, "  %d: %p\n", i.sub(2), stack.stride(i.to<USize>()).load())
+        jump frame(stack, frames, symbols, err, i.add(1))
+
+    block done(symbols: @@Byte):
+        c_free(symbols)
+        return()
+
+// -- fault handlers: Windows ---------------------------------------------------------
+
+#[external("c"), symbol("AddVectoredExceptionHandler"), callconv("stdcall"), target(os: "windows")]
+routine c_add_vectored_exception_handler(first: U32,
+        handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
+
+/// Every exception passes through here first: in a tracing mode it prints the stack, then lets the search go on
+/// (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
+#[target(os: "windows"), callconv("stdcall")]
+routine exception_handler(pointers: @Addr) -> CInt
+    block entry():
+        branch TRACE_MODE.load().eq(TRACE_NONE)
+            ? return(0)
+            : continue
+        exception : Addr = pointers.load()
+        code      : U32  = exception.to<@U32>().load()
+        name   : CStr = exception_name(code)
+        err    : Addr = stderr_stream()
+        c_fprintf(err, "\x1B[91m\n%s (code 0x%08lX)\n\x1B[0m", name.data, code)
+        c_fflush_stream(err)
+        print_platform_stack()
+        c_fflush_stream(err)
+        return(0)
+
+#target(os: "windows")
+routine exception_name(code: U32) -> CStr
+    block entry():
+        when:
+            code.eq(0xC0000005) -> return("AccessViolation")
+            code.eq(0xC0000094) -> return("DivisionByZero")
+            code.eq(0xC000001D) -> return("IllegalInstruction")
+            code.eq(0xC00000FD) -> return("StackOverflow")
+            else                -> return("Exception")
+
+#target(os: "windows")
+routine install_fault_handlers() -> Void
+    block entry():
+        c_add_vectored_exception_handler(1, exception_handler.to<Callable>())
+        return()
+
+// -- fault handlers: POSIX -----------------------------------------------------------
+
+#[external("c"), symbol("signal"), target(os: not "windows")]
+routine c_signal(signo: CInt, handler: Callable<(CInt,), Void>) -> Addr
+
+#[external("c"), symbol("raise"), target(os: not "windows")]
+routine c_raise(signo: CInt) -> CInt
+
+preset SIGILL:  CInt = 4
+preset SIGABRT: CInt = 6
+preset SIGFPE:  CInt = 8
+preset SIGSEGV: CInt = 11
+
+#target(os: "linux")
+routine sigbus() -> CInt
+    block entry():
+        return(7)
+
+#target(os: "macos")
+routine sigbus() -> CInt
+    block entry():
+        return(10)
+
+/// Prints the fault's name and the stack, then restores the default and raises the signal again, so the process
+/// ends with the status the signal gives.
+#target(os: not "windows")
+routine fault_handler(signo: CInt) -> Void
+    block entry():
+        branch TRACE_MODE.load().eq(TRACE_NONE)
+            ? reraise()
+            : continue
+        name : CStr = signal_name(signo)
+        err  : Addr = stderr_stream()
+        c_fprintf(err, "\x1B[91m\n%s\n\x1B[0m", name.data)
+        c_fflush_stream(err)
+        print_platform_stack()
+        c_fflush_stream(err)
+        jump reraise()
+
+    block reraise():
+        c_signal(signo, null)
+        c_raise(signo)
+        return()
+
+#target(os: not "windows")
+routine signal_name(signo: CInt) -> CStr
+    block entry():
+        when:
+            signo.eq(SIGSEGV)  -> return("SegmentationFault")
+            signo.eq(SIGFPE)   -> return("FloatingPointException / DivisionByZero")
+            signo.eq(SIGILL)   -> return("IllegalInstruction")
+            signo.eq(sigbus()) -> return("BusError")
+            signo.eq(SIGABRT)  -> return("Abort")
+            else               -> return("Signal")
+
+#target(os: not "windows")
+routine install_fault_handlers() -> Void
+    block entry():
+        handler : Callable<(CInt,), Void> = fault_handler.to<Callable>()
+        c_signal(SIGSEGV, handler)
+        c_signal(SIGFPE, handler)
+        c_signal(SIGILL, handler)
+        c_signal(sigbus(), handler)
+        c_signal(SIGABRT, handler)
+        return()
