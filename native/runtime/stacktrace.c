@@ -321,7 +321,7 @@ void __rf_stack_pop(void)
 // Shadow-stack ownership handoff for the M:N scheduler
 // ----------------------------------------------------------------------------
 // A coroutine owns its own shadow stack so its RF-level call chain survives migration across OS
-// worker threads. coro_runtime.c drives these three at the context-switch boundary.
+// worker threads. runtime-tessera/coro.tess drives these three at the context-switch boundary.
 // ============================================================================
 
 // Allocate an empty shadow stack for a new coroutine, or NULL when tracing is off (RF_TRACE_NONE

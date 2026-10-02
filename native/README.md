@@ -55,7 +55,6 @@ native/
 │   ├── runtime_init.c
 │   ├── cstring_runtime.c
 │   ├── console_runtime.c
-│   ├── duration_wait.c
 │   ├── crash_runtime.c
 │   ├── shared_locks.c
 │   ├── memory.c
@@ -63,9 +62,6 @@ native/
 │   ├── text_functions.c
 │   ├── file_functions.c
 │   ├── moment.c
-│   ├── task_runtime.c
-│   ├── concurrency_context.c
-│   ├── async_io.c
 │   ├── math_functions.c
 │   ├── decimal_functions.c
 │   ├── bignum_functions.c
@@ -74,7 +70,16 @@ native/
 │   └── types.h
 ├── cmake/
 │   └── *.cmake
-└── <vendored libraries>/
+../runtime-tessera/  // the coroutine runtime and blocking I/O, in Tessera
+├── sync.tess  // what the rest shares: C calls, a condition variable, the clock, the panic handler
+├── coro.tess  // a coroutine: create / resume / yield / abandon, the cancellation shadow stack
+├── sched.tess  // the scheduler: the worker pool, deques and stealing, timers, park/wake, deadlock detection
+├── race.tess  // race!
+├── task.tess  // result tasks and threaded tasks
+├── channel.tess  // channels
+├── monitor.tess  // SignalCaster
+├── io.tess  // whole-file reads and writes and subprocesses on the I/O threads
+└── context.tess  // the older context entry points, and waitfor on a thread
 ```
 
 ## Runtime Layers
@@ -88,7 +93,6 @@ Files:
 - [runtime_init.c](../native/runtime/runtime_init.c)
 - [cstring_runtime.c](../native/runtime/cstring_runtime.c)
 - [console_runtime.c](../native/runtime/console_runtime.c)
-- [duration_wait.c](../native/runtime/duration_wait.c)
 - [crash_runtime.c](../native/runtime/crash_runtime.c)
 - [shared_locks.c](../native/runtime/shared_locks.c)
 - [memory.c](../native/runtime/memory.c)
@@ -107,7 +111,7 @@ Responsibilities:
 - `rf_crash`, `rf_trace_push`, `rf_trace_pop`
 - console and file primitives
 - clock/time primitives
-- `rf_waitfor_duration` for `waitfor 5s`
+- `rf_waitfor_duration` for `waitfor 5s` ([context.tess](../runtime-tessera/context.tess))
 
 This layer is scheduler-agnostic. It should not know whether code is running in a normal routine, a threaded routine, or
 a suspended routine.
@@ -116,7 +120,7 @@ a suspended routine.
 
 Files:
 
-- [task_runtime.c](../native/runtime/task_runtime.c)
+- [task.tess](../runtime-tessera/task.tess)
 - [Task.rf](../Standard/RazorForge/Core/Types/Task.rf)
 
 Responsibilities:
@@ -139,8 +143,10 @@ The language-facing type is intentionally thin:
 
 Files:
 
-- [concurrency_context.c](../native/runtime/concurrency_context.c)
-- [async_io.c](../native/runtime/async_io.c)
+- [coro.tess](../runtime-tessera/coro.tess), [sched.tess](../runtime-tessera/sched.tess),
+  [race.tess](../runtime-tessera/race.tess), [channel.tess](../runtime-tessera/channel.tess),
+  [monitor.tess](../runtime-tessera/monitor.tess)
+- [io.tess](../runtime-tessera/io.tess)
 
 Responsibilities:
 
@@ -150,10 +156,10 @@ Responsibilities:
 Backends, the same on every operating system:
 
 - context switching and coroutine stacks: Ingrid's Tessera code
-  ([runtime-tessera/coroutine.tess](../runtime-tessera/coroutine.tess)), compiled into this library: Tessera's
+  ([runtime-tessera/coro.tess](../runtime-tessera/coro.tess)), compiled into this library: Tessera's
   `switch_stack` and its stack allocator (pages reserved, committed as the stack grows, a no-access page at the
   bottom; on Windows a guard page the OS moves down, with the thread block's stack fields switched along)
-- blocking I/O: the runtime's own I/O threads ([async_io.c](../native/runtime/async_io.c)); a coroutine parks while
+- blocking I/O: the runtime's own I/O threads ([io.tess](../runtime-tessera/io.tess)); a coroutine parks while
   one of them runs the call and is woken when it is done. Subprocesses use `fork`/`execvp` or `CreateProcessW`
   with their output read through pipes.
 
@@ -215,12 +221,12 @@ The current concurrency model is:
 
 Planned runtime split:
 
-- `task_runtime.c`
+- `task.tess`
   task state, completion, dependencies
-- `concurrency_context.c`
-  stackful green-task context backend
-- `async_io.c`
-  timer + async event backend
+- `coro.tess`, `sched.tess`
+  stackful coroutines and the scheduler pool
+- `io.tess`
+  blocking I/O on the runtime's I/O threads
 - future OS thread backend
   native thread spawn/join/wakeup
 

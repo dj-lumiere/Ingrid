@@ -3,8 +3,8 @@
  *
  * Backs the stdlib `Signals` module: `when_interrupted(handler)` (Ctrl-C / SIGINT) and
  * `when_terminated(handler)` (SIGTERM / console-close). This is DISTINCT from
- * async_io.c's `rf_proc_term_signal` (which reports the signal that killed a CHILD
- * process) and from signal_runtime.c's `SignalCaster` (a condition-variable monitor).
+ * io.tess's `rf_proc_term_signal` (which reports the signal that killed a CHILD
+ * process) and from monitor.tess's `SignalCaster` (a condition-variable monitor).
  *
  * Model (decided 2026-08-28 — dedicated dispatch thread + suppress-default):
  *

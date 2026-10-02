@@ -4,8 +4,8 @@
 #include <windows.h>
 #endif
 
-/* Start the async I/O event loop on the main thread (async_io.c). Done here so libuv init never runs
- * on a demand-paged coroutine green stack, which the Windows deep-frame CRT/Win32 paths reject. */
+/* Start the I/O threads on the main thread (runtime-tessera/io.tess), so a coroutine's blocking call
+ * is only a submit and a park. */
 extern void rf_io_runtime_init(void);
 
 void rf_runtime_init(void)

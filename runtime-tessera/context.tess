@@ -1,0 +1,61 @@
+// The older context entry points, and waitfor on a plain thread.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+record ContextRuntime
+    reserved : U64
+
+/// Coroutines switch through Standard::Fiber's switch_stack, on every operating system.
+#export("rf_context_backend_name")
+routine rf_context_backend_name() -> CStr
+    block entry():
+        return("tessera")
+
+#export("rf_context_backend_state")
+routine rf_context_backend_state() -> CInt
+    block entry():
+        return(1)
+
+#export("rf_context_runtime_create")
+routine rf_context_runtime_create() -> @ContextRuntime
+    block entry():
+        return(zeroed<ContextRuntime>(1, "Failed to allocate context runtime"))
+
+#export("rf_context_runtime_destroy")
+routine rf_context_runtime_destroy(runtime: @ContextRuntime) -> Void
+    block entry():
+        c_free(runtime)
+        return()
+
+/// Runs the routine to completion on the calling thread (coroutines go through rf_coro_create / rf_sched_spawn).
+#export("rf_context_runtime_spawn")
+routine rf_context_runtime_spawn(runtime: @ContextRuntime, entry: Callable<(Addr,), Void>, userdata: Addr,
+        stack_size: USize) -> CInt
+    block entry():
+        branch entry.addr().is_null()
+            ? return(0)
+            : continue
+        entry.call(userdata)
+        return(1)
+
+/// Waits the calling thread for duration_seconds and duration_nanoseconds.
+#export("rf_waitfor_duration")
+routine rf_waitfor_duration(duration_seconds: S64, duration_nanoseconds: U32) -> Void
+    block entry():
+        branch duration_seconds.lt(0)
+            ? return()
+            : continue
+        span     : U64 = duration_seconds.to<U64>().mul_clamp(1000000000).add_clamp(duration_nanoseconds.to<U64>())
+        deadline : U64 = monotonic_ns().add_clamp(span)
+        claim never : @U32 <- 0
+        jump wait(deadline, never)
+
+    block wait(deadline: U64, never: @U32):
+        now : U64 = monotonic_ns()
+        branch now.ge(deadline)
+            ? return()
+            : continue
+        wait_on_for(never, 0, deadline.sub(now))
+        jump wait(deadline, never)

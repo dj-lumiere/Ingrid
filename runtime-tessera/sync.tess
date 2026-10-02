@@ -1,0 +1,175 @@
+// What the rest of Ingrid's runtime code shares: the C library and runtime routines it calls, a condition variable
+// over Standard::Os's Mutex, the clock, the identity of the calling thread, and the panic handler of the Tessera
+// code in this library.
+//
+// The runtime library is shared (razorforge_runtime.dll / .so / .dylib), and this code is compiled into it, so a
+// routine RazorForge calls is exported under its C name (#export), and calls into the rest of the library (the crash
+// report, the call-chain shadow stacks, rf_invalidate) are #external("c").
+
+module Ingrid::Runtime
+
+import Standard::Format
+import Standard::Os
+
+// -- the C library -------------------------------------------------------------------
+
+#[external("c"), symbol("calloc")]
+routine c_calloc(count: USize, size: USize) -> Addr
+
+#[external("c"), symbol("realloc")]
+routine c_realloc(ptr: Addr, size: USize) -> Addr
+
+#[external("c"), symbol("malloc")]
+routine c_malloc(size: USize) -> Addr
+
+#[external("c"), symbol("free")]
+routine c_free(ptr: Addr) -> Void
+
+#[external("c"), symbol("getenv")]
+routine c_getenv(name: CStr) -> @Byte
+
+// -- the rest of the runtime library -------------------------------------------------
+
+/// A runtime error with the RazorForge crash report and exit status (stacktrace.c).
+#[external("c"), symbol("__rf_throw"), noreturn]
+routine rf_throw(error_type: CStr, message: CStr) -> Void
+
+/// A coroutine's own call-chain shadow stack (stacktrace.c): null when tracing is off. activate swaps one in and
+/// returns the one it replaced.
+#[external("c"), symbol("__rf_stack_coro_create")]
+routine rf_stack_coro_create() -> Addr
+
+#[external("c"), symbol("__rf_stack_coro_destroy")]
+routine rf_stack_coro_destroy(handle: Addr) -> Void
+
+#[external("c"), symbol("__rf_stack_activate")]
+routine rf_stack_activate(handle: Addr) -> Addr
+
+/// Frees a block from rf_allocate_dynamic (memory.c): a result box.
+#[external("c"), symbol("rf_invalidate")]
+routine rf_invalidate(ptr: Addr) -> Void
+
+/// count zeroed Ts, or the runtime's out-of-memory error naming what.
+routine zeroed<T>(count: USize, what: CStr) -> @T
+require T: typename
+    block entry():
+        p : Addr = c_calloc(count, sizeof<T>())
+        branch p.is_null()
+            ? rf_throw("OutOfMemoryError", what)
+            : return(p.to<@T>())
+
+// -- a condition variable ------------------------------------------------------------
+//
+// A waiter reads seq while it holds the mutex, unlocks, and sleeps while seq still holds what it read. A signal
+// changes seq first, so a waiter that read it before the signal doesn't sleep through it. Callers signal with the
+// mutex held, as everywhere in this runtime. A wait may return without a signal; callers check their condition
+// again.
+
+record Cond
+    seq : U32
+
+routine Cond.wait(self: @Self, m: @Mutex) -> Void
+    block entry():
+        seen : U32 = self.seq.atomic_load()
+        m.unlock()
+        wait_on(self.seq, seen)
+        m.lock()
+        return()
+
+/// wait, giving up after ns nanoseconds.
+routine Cond.wait_ns(self: @Self, m: @Mutex, ns: U64) -> Void
+    block entry():
+        seen : U32 = self.seq.atomic_load()
+        m.unlock()
+        wait_on_for(self.seq, seen, ns)
+        m.lock()
+        return()
+
+routine Cond.signal(self: @Self) -> Void
+    block entry():
+        self.seq.atomic_fetch_add(1)
+        wake_one(self.seq)
+        return()
+
+routine Cond.broadcast(self: @Self) -> Void
+    block entry():
+        self.seq.atomic_fetch_add(1)
+        wake_all(self.seq)
+        return()
+
+// -- the clock and the calling thread ------------------------------------------------
+
+/// The monotonic nanosecond clock the scheduler's timers use, for the timed-await bridge.
+#export("rf_monotonic_now_ns")
+routine rf_monotonic_now_ns() -> U64
+    block entry():
+        return(monotonic_ns())
+
+#[external("c"), symbol("GetCurrentThreadId"), callconv("stdcall"), target(os: "windows")]
+routine c_get_current_thread_id() -> U32
+
+#[external("c"), symbol("pthread_self"), target(os: not "windows")]
+routine c_pthread_self() -> Addr
+
+/// A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
+/// detecting a re-entrant claim).
+#[export("rf_current_thread_id"), target(os: "windows")]
+routine rf_current_thread_id() -> U64
+    block entry():
+        return(c_get_current_thread_id().to<U64>())
+
+#[export("rf_current_thread_id"), target(os: not "windows")]
+routine rf_current_thread_id() -> U64
+    block entry():
+        return(ptrtoint<Addr, U64>(c_pthread_self()))
+
+/// The environment variable name as a positive integer, or 0 when it is unset, empty, not a number, or not
+/// positive.
+routine env_positive(name: CStr) -> U64
+    block entry():
+        text  : @Byte = c_getenv(name)
+        unset : Bool  = text.is_null()
+        branch unset
+            ? return(0)
+            : digit(text, 0, 0)
+
+    block digit(text: @Byte, i: USize, value: U64):
+        c    : U8   = text.stride(i).load().to<U8>()
+        more : Bool = c.ge(48).bitand(c.le(57))
+        branch more
+            ? add(text, i, value, c)
+            : return(value)
+
+    block add(text: @Byte, i: USize, value: U64, c: U8):
+        next : U64 = value.mul_clamp(10).add_clamp(c.sub(48).to<U64>())
+        jump digit(text, i.add(1), next)
+
+// -- the panic handler of this library's Tessera code --------------------------------
+
+/// A panic in this library's Tessera code (a broken stdlib contract) is a RazorForge runtime error, with the same
+/// crash report and exit status as any other.
+#[export("tessera_panic_handler"), noreturn]
+routine runtime_panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
+    block entry():
+        claim buffer : @Array<Byte, 1024> <- uninit
+        claim out    : @SliceWriter      <- SliceWriter.construct(buffer.to<@Byte>(), 1023)
+        write_str(out, code.description())
+        none : Bool = message.length.eq(0)
+        branch none
+            ? where(out, buffer)
+            : continue
+        write(out, ": {message}")
+        jump where(out, buffer)
+
+    block where(out: @SliceWriter, buffer: @Array<Byte, 1024>):
+        nowhere : Bool = place.is_null()
+        branch nowhere
+            ? finish(out, buffer)
+            : continue
+        write(out, " (at {place.file.load()}:{place.line.load()}:{place.column.load()})")
+        jump finish(out, buffer)
+
+    block finish(out: @SliceWriter, buffer: @Array<Byte, 1024>):
+        text : Bytes = out.load().to_bytes()
+        buffer.to<@Byte>().stride(text.length).store(0x00)
+        rf_throw("TesseraPanic", CStr.from_ptr(buffer.to<@Byte>()))

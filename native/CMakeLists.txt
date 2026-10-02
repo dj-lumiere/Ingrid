@@ -33,13 +33,13 @@ include_directories(include)
 #  in docs/licenses.)
 
 # ============================================================================
-# Third-party libraries: none. Coroutine stacks and switching are Ingrid's Tessera code (below), and
-# blocking I/O runs on the runtime's own I/O threads (runtime/async_io.c). A stdlib module that needs a
-# C library adds it here when it is written.
+# Third-party libraries: none. The coroutine runtime (stacks and switching, the scheduler, tasks, channels,
+# SignalCaster) and blocking I/O on the runtime's own I/O threads are Ingrid's Tessera code (below). A stdlib
+# module that needs a C library adds it here when it is written.
 # ============================================================================
 
 # ============================================================================
-# Ingrid's runtime code written in Tessera (../runtime-tessera): the coroutine stack and context switch.
+# Ingrid's runtime code written in Tessera (../runtime-tessera): the coroutine runtime and blocking I/O.
 # The Tessera builder (TESSERA_DLL, which the RazorForge build passes in; a checkout's own Tessera build
 # otherwise) compiles it to LLVM IR, and clang compiles that into an object of the runtime DLL.
 # ============================================================================
@@ -106,7 +106,6 @@ add_library(razorforge_runtime SHARED
     runtime/runtime_init.c
     runtime/cstring_runtime.c
     runtime/console_runtime.c
-    runtime/duration_wait.c
     runtime/crash_runtime.c
     runtime/shared_locks.c
     runtime/memory.c
@@ -116,14 +115,7 @@ add_library(razorforge_runtime SHARED
     runtime/rf_divide.c
     runtime/text_functions.c
     runtime/file_functions.c
-    runtime/task_runtime.c
-    runtime/concurrency_context.c
-    runtime/coro_runtime.c
-    runtime/tessera_panic.c
     "${INGRID_RUNTIME_OBJ}"
-    runtime/async_io.c
-    runtime/channel_runtime.c
-    runtime/signal_runtime.c
     runtime/process_signals.c
     runtime/random.c
     runtime/emutls_runtime.c
@@ -140,7 +132,8 @@ endif()
 
 # Link DbgHelp for stack trace symbol resolution on Windows
 if(WIN32)
-    target_link_libraries(razorforge_runtime dbghelp)
+    # dbghelp: stack traces. synchronization: WaitOnAddress, the waits of the Tessera runtime code.
+    target_link_libraries(razorforge_runtime dbghelp synchronization)
 endif()
 
 # On Windows, compile the compiler-rt shim (128-bit integer division builtins) straight into the
@@ -207,8 +200,7 @@ install(FILES include/razorforge_runtime.h
 message(STATUS "")
 message(STATUS "RazorForge Native Configuration:")
 message(STATUS "  ── Modules ──")
-message(STATUS "  coroutine switch:                 Tessera (../runtime-tessera)")
-message(STATUS "  blocking I/O:                     the runtime's I/O threads (runtime/async_io.c)")
+message(STATUS "  coroutines, scheduler, I/O:       Tessera (../runtime-tessera)")
 message(STATUS "  ── Platform ──")
 message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  Compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")

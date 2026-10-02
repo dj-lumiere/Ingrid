@@ -1,0 +1,169 @@
+// RazorForge's SignalCaster: a monitor (a lock and a wait set). A waiter takes the lock, checks its condition, and
+// waits while it doesn't hold; wait releases the lock, suspends, and takes it again when woken. A coroutine parks
+// (a cast on any thread wakes it), a plain thread waits on the condition variable. Refcounted, so the agents that
+// synchronize through it share one.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+/// rf_signal.
+record Monitor
+    lock     : Mutex  // the monitor lock, which guards the caller's condition
+    cond     : Cond  // threads wait here
+    waiters  : @ChannelWaiter  // parked coroutines
+    refcount : U32
+
+#export("rf_signal_create")
+routine rf_signal_create() -> @Monitor
+    block entry():
+        sig : @Monitor = zeroed<Monitor>(1, "failed to allocate SignalCaster")
+        sig.refcount.store(1)
+        return(sig)
+
+#export("rf_signal_add_ref")
+routine rf_signal_add_ref(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.lock()
+        sig.refcount.load().add(1).store_into(sig.refcount)
+        sig.lock.unlock()
+        return()
+
+/// Drops a handle; the monitor is freed with the last.
+#export("rf_signal_drop")
+routine rf_signal_drop(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.lock()
+        refs : U32 = sig.refcount.load()
+        left : U32 = refs.sub_clamp(1)
+        sig.refcount.store(left)
+        sig.lock.unlock()
+        branch left.eq(0)
+            ? continue
+            : return()
+        c_free(sig)
+        return()
+
+#export("rf_signal_lock")
+routine rf_signal_lock(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.lock()
+        return()
+
+#export("rf_signal_unlock")
+routine rf_signal_unlock(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.unlock()
+        return()
+
+/// Waits for a cast, holding the monitor lock: releases it, suspends, and takes it again.
+#export("rf_signal_wait")
+routine rf_signal_wait(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sched : @Sched = rf_sched_current()
+        coro  : @Coro  = current_coro()
+        branch sched.is_null().bitor(coro.is_null())
+            ? thread()
+            : continue
+        claim node : @ChannelWaiter <- ChannelWaiter { sched: sched, coro: coro, next: sig.waiters.load() }
+        sig.waiters.store(node)
+        sig.lock.unlock()
+        // a cast may come from another thread: not a deadlock meanwhile
+        rf_sched_arm_cross_waker(sched)
+        rf_sched_park_external()
+        rf_sched_disarm_cross_waker(sched)
+        sig.lock.lock()
+        unlink(sig.waiters, node)
+        return()
+
+    block thread():
+        sig.cond.wait(sig.lock)
+        return()
+
+/// rf_signal_wait for at most timeout_ns: 1 if woken before the deadline (check the condition again), 0 if it
+/// passed.
+#export("rf_signal_wait_deadline")
+routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
+    block entry():
+        branch sig.is_null()
+            ? return(0)
+            : continue
+        deadline : U64    = monotonic_ns().add_clamp(timeout_ns)
+        sched    : @Sched = rf_sched_current()
+        coro     : @Coro  = current_coro()
+        branch sched.is_null().bitor(coro.is_null())
+            ? thread(deadline)
+            : continue
+        claim node : @ChannelWaiter <- ChannelWaiter { sched: sched, coro: coro, next: sig.waiters.load() }
+        sig.waiters.store(node)
+        sig.lock.unlock()
+        rf_sched_park_deadline(timeout_ns)
+        sig.lock.lock()
+        unlink(sig.waiters, node)
+        jump result(deadline)
+
+    block thread(deadline: U64):
+        sig.cond.wait_ns(sig.lock, timeout_ns)
+        jump result(deadline)
+
+    block result(deadline: U64):
+        branch monotonic_ns().ge(deadline)
+            ? return(0)
+            : return(1)
+
+/// Wakes one waiter: a parked coroutine if there is one, else a thread.
+#export("rf_signal_cast_one")
+routine rf_signal_cast_one(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.lock()
+        w : @ChannelWaiter = sig.waiters.load()
+        branch w.is_null()
+            ? thread()
+            : continue
+        rf_sched_wake(w.sched.load(), w.coro.load())
+        sig.lock.unlock()
+        return()
+
+    block thread():
+        sig.cond.signal()
+        sig.lock.unlock()
+        return()
+
+#export("rf_signal_cast_all")
+routine rf_signal_cast_all(sig: @Monitor) -> Void
+    block entry():
+        branch sig.is_null()
+            ? return()
+            : continue
+        sig.lock.lock()
+        jump next(sig.waiters.load())
+
+    block next(w: @ChannelWaiter):
+        branch w.is_null()
+            ? done()
+            : continue
+        rf_sched_wake(w.sched.load(), w.coro.load())
+        jump next(w.next.load())
+
+    block done():
+        sig.cond.broadcast()
+        sig.lock.unlock()
+        return()

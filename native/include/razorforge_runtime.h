@@ -140,7 +140,7 @@ uint64_t rf_current_thread_id(void);
 
 /* Identity of the current logical execution context: the coroutine (rf_coro*) if inside one — stable
  * across worker migration, which is exactly why Roamed's reentrant lock keys on it and NOT the OS
- * thread — else the OS thread id. Only equality matters. See rf_current_task_id in coro_runtime.c. */
+ * thread — else the OS thread id. Only equality matters. See rf_current_task_id in runtime-tessera/coro.tess. */
 uint64_t rf_current_task_id(void);
 
 rf_task_kind rf_task_kind_get(rf_task* task);
@@ -383,7 +383,7 @@ uint64_t rf_sched_worker_count(void);
 
 /* Refcounted ring buffer carrying payload pointers between agents. feed (full) and next (empty)
  * park the caller inside a coroutine (rf_sched_park_external + rf_sched_wake) or block it on a plain
- * thread — the same uncolored contract as retrieve!/waitfor. Backed by channel_runtime.c. */
+ * thread — the same uncolored contract as retrieve!/waitfor. Backed by runtime-tessera/channel.tess. */
 typedef struct rf_channel rf_channel;
 
 /* Create a channel. capacity = buffered slots; 0 = rendezvous (feed waits for a taker). Throws
@@ -417,7 +417,7 @@ uint64_t rf_channel_capacity(rf_channel* chan);
 /* A self-contained monitor (internal mutex + wait set). wait is UNCOLORED: it parks a coroutine
  * (rf_sched_park_external + rf_sched_wake) or blocks a plain thread on the internal condvar, releasing
  * and re-acquiring the monitor lock around the suspend. Refcounted so it can be shared across agents.
- * Backed by signal_runtime.c. */
+ * Backed by runtime-tessera/monitor.tess. */
 typedef struct rf_signal rf_signal;
 
 /* Create a monitor (refcount 1). Throws OutOfMemoryError on allocation failure. */

@@ -1,0 +1,328 @@
+// RazorForge's channels (Hopper[T] / Conveyor[T]): a refcounted ring buffer of payload pointers between agents.
+//
+// A consumer waiting for an item, or a producer waiting for room, parks when it is a scheduler-driven coroutine
+// (woken by rf_sched_wake from the other side, on any thread) and blocks on the channel's condition variable on a
+// plain thread: the same either-way contract as retrieve! and waitfor.
+//
+// capacity N >= 1 buffers N items and feed waits while they are full; capacity 0 is a rendezvous, where feed also
+// waits until a consumer has taken its item. Producer and consumer handles are counted apart: the last producer
+// dropping closes the channel (consumers drain it, then see it closed), and the channel is freed when both counts
+// reach 0.
+
+module Ingrid::Runtime
+
+import Standard::Os
+
+/// A parked coroutine, in a node on its own stack while it is linked.
+record ChannelWaiter
+    sched : @Sched
+    coro  : @Coro
+    next  : @ChannelWaiter
+
+/// rf_channel.
+record Channel
+    lock           : Mutex
+    cond           : Cond  // threads waiting for room or for an item
+    slots          : @Addr
+    capacity       : U64  // buffered items; 0 is a rendezvous
+    slot_cap       : U64  // max(capacity, 1)
+    head           : U64
+    count          : U64
+    producer_refs  : U32
+    consumer_refs  : U32
+    closed         : Bool
+    not_full_head  : @ChannelWaiter  // producers parked for room
+    not_empty_head : @ChannelWaiter  // consumers parked for an item
+
+/// Wakes every coroutine on list and every waiting thread; each checks again and unlinks itself. The caller holds
+/// the lock.
+routine Channel.wake_all(self: @Self, list: @ChannelWaiter) -> Void
+    block entry():
+        jump next(list)
+
+    block next(w: @ChannelWaiter):
+        branch w.is_null()
+            ? threads()
+            : continue
+        rf_sched_wake(w.sched.load(), w.coro.load())
+        jump next(w.next.load())
+
+    block threads():
+        self.cond.broadcast()
+        return()
+
+#export("rf_channel_create")
+routine rf_channel_create(capacity: U64) -> @Channel
+    block entry():
+        slot_cap : U64 = capacity.eq(0) ? 1 : capacity
+        branch slot_cap.gt(USize.MAX.to<U64>().div(sizeof<Addr>().to<U64>()))
+            ? rf_throw("OutOfMemoryError", "channel capacity too large to allocate")
+            : continue
+        chan : @Channel = zeroed<Channel>(1, "failed to allocate channel")
+        chan.slots.store(zeroed<Addr>(slot_cap.to<USize>(), "failed to allocate channel buffer"))
+        chan.capacity.store(capacity)
+        chan.slot_cap.store(slot_cap)
+        chan.producer_refs.store(1)
+        chan.consumer_refs.store(1)
+        return(chan)
+
+/// Frees the channel once both counts are 0. The caller doesn't hold the lock.
+routine Channel.maybe_free(self: @Self) -> Void
+    block entry():
+        branch self.producer_refs.load().eq(0).bitand(self.consumer_refs.load().eq(0))
+            ? continue
+            : return()
+        c_free(self.slots.load())
+        c_free(self)
+        return()
+
+#export("rf_channel_add_feeder")
+routine rf_channel_add_feeder(chan: @Channel) -> Void
+    block entry():
+        branch chan.is_null()
+            ? return()
+            : continue
+        chan.lock.lock()
+        chan.producer_refs.load().add(1).store_into(chan.producer_refs)
+        chan.lock.unlock()
+        return()
+
+#export("rf_channel_add_consumer")
+routine rf_channel_add_consumer(chan: @Channel) -> Void
+    block entry():
+        branch chan.is_null()
+            ? return()
+            : continue
+        chan.lock.lock()
+        chan.consumer_refs.load().add(1).store_into(chan.consumer_refs)
+        chan.lock.unlock()
+        return()
+
+/// The last producer dropping closes the channel: consumers drain what is left, then see it closed.
+#export("rf_channel_drop_feeder")
+routine rf_channel_drop_feeder(chan: @Channel) -> Void
+    block entry():
+        branch chan.is_null()
+            ? return()
+            : continue
+        chan.lock.lock()
+        refs : U32 = chan.producer_refs.load()
+        left : U32 = refs.sub_clamp(1)
+        chan.producer_refs.store(left)
+        branch left.eq(0).bitand(chan.closed.load().bitnot())
+            ? continue
+            : done()
+        chan.closed.store(true)
+        chan.wake_all(chan.not_empty_head.load())
+        jump done()
+
+    block done():
+        chan.lock.unlock()
+        chan.maybe_free()
+        return()
+
+/// With no consumer left, producers waiting for room wake and fail instead of waiting forever.
+#export("rf_channel_drop_consumer")
+routine rf_channel_drop_consumer(chan: @Channel) -> Void
+    block entry():
+        branch chan.is_null()
+            ? return()
+            : continue
+        chan.lock.lock()
+        refs : U32 = chan.consumer_refs.load()
+        left : U32 = refs.sub_clamp(1)
+        chan.consumer_refs.store(left)
+        branch left.eq(0)
+            ? continue
+            : done()
+        chan.wake_all(chan.not_full_head.load())
+        jump done()
+
+    block done():
+        chan.lock.unlock()
+        chan.maybe_free()
+        return()
+
+#export("rf_channel_close")
+routine rf_channel_close(chan: @Channel) -> Void
+    block entry():
+        branch chan.is_null()
+            ? return()
+            : continue
+        chan.lock.lock()
+        branch chan.closed.load()
+            ? done()
+            : continue
+        chan.closed.store(true)
+        chan.wake_all(chan.not_empty_head.load())
+        chan.wake_all(chan.not_full_head.load())
+        jump done()
+
+    block done():
+        chan.lock.unlock()
+        return()
+
+/// Waits once: a coroutine parks with a node on list, a thread waits on the condition variable. The caller holds
+/// the lock before and after, and checks its condition again.
+routine Channel.wait(self: @Self, list: @@ChannelWaiter) -> Void
+    block entry():
+        sched : @Sched = rf_sched_current()
+        coro  : @Coro  = current_coro()
+        branch sched.is_null().bitor(coro.is_null())
+            ? thread()
+            : continue
+        claim node : @ChannelWaiter <- ChannelWaiter { sched: sched, coro: coro, next: list.load() }
+        list.store(node)
+        self.lock.unlock()
+        rf_sched_park_external()
+        self.lock.lock()
+        unlink(list, node)
+        return()
+
+    block thread():
+        self.cond.wait(self.lock)
+        return()
+
+routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
+    block entry():
+        jump look(list)
+
+    block look(at: @@ChannelWaiter):
+        w : @ChannelWaiter = at.load()
+        branch w.is_null()
+            ? return()
+            : continue
+        branch w.ptr_eq(node)
+            ? continue
+            : look(w.next)
+        at.store(node.next.load())
+        node.next.store(null)
+        return()
+
+/// Sends one payload: 1, or 0 when the channel is closed or has no consumer. Waits while it is full, and for a
+/// rendezvous until a consumer took the item. A cancelled agent stops waiting.
+#export("rf_channel_feed")
+routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
+    block entry():
+        branch chan.is_null()
+            ? return(0)
+            : continue
+        chan.lock.lock()
+        jump room()
+
+    block room():
+        full : Bool = chan.count.load().eq(chan.slot_cap.load())
+        open : Bool = chan.closed.load().bitnot().bitand(chan.consumer_refs.load().gt(0))
+        branch full.bitand(open)
+            ? continue
+            : put()
+        branch rf_cancel_requested().eq(0)
+            ? continue
+            : fail()
+        chan.wait(chan.not_full_head)
+        jump room()
+
+    block put():
+        branch chan.closed.load().bitor(chan.consumer_refs.load().eq(0))
+            ? fail()
+            : continue
+        cap  : U64 = chan.slot_cap.load()
+        tail : U64 = chan.head.load().add(chan.count.load()).mod(cap)
+        chan.slots.load().stride(tail.to<USize>()).store(payload)
+        chan.count.load().add(1).store_into(chan.count)
+        chan.wake_all(chan.not_empty_head.load())
+        branch chan.capacity.load().eq(0)
+            ? taken()
+            : sent()
+
+    // A rendezvous: not over until this item was taken.
+    block taken():
+        pending : Bool = chan.count.load().gt(0).bitand(chan.closed.load().bitnot())
+        waiting : Bool = pending.bitand(chan.consumer_refs.load().gt(0))
+        branch waiting
+            ? continue
+            : sent()
+        branch rf_cancel_requested().eq(0)
+            ? continue
+            : sent()
+        chan.wait(chan.not_full_head)
+        jump taken()
+
+    block sent():
+        chan.lock.unlock()
+        return(1)
+
+    block fail():
+        chan.lock.unlock()
+        return(0)
+
+/// Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
+/// was cancelled.
+#export("rf_channel_next")
+routine rf_channel_next(chan: @Channel) -> Addr
+    block entry():
+        branch chan.is_null()
+            ? return(null)
+            : continue
+        chan.lock.lock()
+        jump item()
+
+    block item():
+        empty : Bool = chan.count.load().eq(0)
+        branch empty.bitand(chan.closed.load().bitnot())
+            ? continue
+            : take()
+        branch rf_cancel_requested().eq(0)
+            ? continue
+            : none()
+        chan.wait(chan.not_empty_head)
+        jump item()
+
+    block take():
+        branch chan.count.load().eq(0)
+            ? none()
+            : continue
+        head    : U64  = chan.head.load()
+        slot    : @Addr = chan.slots.load().stride(head.to<USize>())
+        payload : Addr = slot.load()
+        slot.store(null)
+        chan.head.store(head.add(1).mod(chan.slot_cap.load()))
+        chan.count.load().sub(1).store_into(chan.count)
+        chan.wake_all(chan.not_full_head.load())
+        chan.lock.unlock()
+        return(payload)
+
+    block none():
+        chan.lock.unlock()
+        return(null)
+
+#export("rf_channel_count")
+routine rf_channel_count(chan: @Channel) -> U64
+    block entry():
+        branch chan.is_null()
+            ? return(0)
+            : continue
+        chan.lock.lock()
+        n : U64 = chan.count.load()
+        chan.lock.unlock()
+        return(n)
+
+#export("rf_channel_is_closed")
+routine rf_channel_is_closed(chan: @Channel) -> U32
+    block entry():
+        branch chan.is_null()
+            ? return(1)
+            : continue
+        chan.lock.lock()
+        closed : Bool = chan.closed.load()
+        chan.lock.unlock()
+        branch closed
+            ? return(1)
+            : return(0)
+
+#export("rf_channel_capacity")
+routine rf_channel_capacity(chan: @Channel) -> U64
+    block entry():
+        branch chan.is_null()
+            ? return(0)
+            : return(chan.capacity.load())

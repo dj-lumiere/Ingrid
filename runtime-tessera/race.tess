@@ -1,0 +1,224 @@
+// race!: waits until the first of a set of agents (coroutines and threaded tasks, in List order) finishes.
+//
+// The pool's workers drive the coroutine competitors; the racer only waits. Inside a coroutine it parks, registered
+// as the awaiter of every coroutine competitor and as the race waiter of every task, and re-polls when woken. On a
+// plain thread it waits on the pool's block_cond. The first to finish is the smallest completion stamp among the
+// finished ones, not the lowest index, so a late scan that finds several finished still picks the right one.
+
+module Ingrid::Runtime
+
+/// rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
+record Race
+    handles : @Addr
+    kinds   : @U8
+    count   : SSize
+    cap     : SSize
+
+#export("rf_race_begin")
+routine rf_race_begin() -> @Race
+    block entry():
+        r : @Race = zeroed<Race>(1, "Failed to allocate race competitor set")
+        return(r)
+
+routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
+    block entry():
+        branch self.is_null()
+            ? return()
+            : continue
+        n : SSize = self.count.load()
+        branch n.eq(self.cap.load())
+            ? continue
+            : put(n)
+        cap     : SSize = n.eq(0) ? 4 : n.mul(2)
+        handles : Addr  = c_realloc(self.handles.load(), cap.to<USize>().mul(sizeof<Addr>()))
+        kinds   : Addr  = c_realloc(self.kinds.load(), cap.to<USize>())
+        branch handles.is_null().bitor(kinds.is_null())
+            ? rf_throw("OutOfMemoryError", "Failed to grow race competitor set")
+            : continue
+        self.handles.store(handles.to<@Addr>())
+        self.kinds.store(kinds.to<@U8>())
+        self.cap.store(cap)
+        jump put(n)
+
+    block put(n: SSize):
+        self.handles.load().stride(n).store(handle)
+        self.kinds.load().stride(n).store(kind)
+        self.count.store(n.add(1))
+        return()
+
+#export("rf_race_add_coro")
+routine rf_race_add_coro(r: @Race, c: @Coro) -> Void
+    block entry():
+        r.push(c, 0)
+        return()
+
+#export("rf_race_add_task")
+routine rf_race_add_task(r: @Race, t: @Task) -> Void
+    block entry():
+        r.push(t, 1)
+        return()
+
+routine Race.handle(self: @Self, i: SSize) -> Addr
+    block entry():
+        return(self.handles.load().stride(i).load())
+
+routine Race.is_task(self: @Self, i: SSize) -> Bool
+    block entry():
+        return(self.kinds.load().stride(i).load().eq(1))
+
+/// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
+/// to; each keeps a cross-thread wake promised meanwhile.
+routine Race.register(self: @Self, s: @Sched, coro: @Coro, on: Bool) -> Void
+    block entry():
+        jump next(0)
+
+    block next(i: SSize):
+        branch i.eq(self.count.load())
+            ? return()
+            : continue
+        branch self.is_task(i)
+            ? continue
+            : next(i.add(1))
+        task : @Task = self.handle(i).to<@Task>()
+        branch on
+            ? arm(i, task)
+            : disarm(i, task)
+
+    block arm(i: SSize, task: @Task):
+        rf_task_race_register(task, s, coro)
+        rf_sched_arm_cross_waker(s)
+        jump next(i.add(1))
+
+    block disarm(i: SSize, task: @Task):
+        rf_task_race_register(task, null, null)
+        rf_sched_disarm_cross_waker(s)
+        jump next(i.add(1))
+
+/// Sets the awaiter of every coroutine competitor that still has this one to awaiter (or clears it).
+routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
+    block entry():
+        jump next(0)
+
+    block next(i: SSize):
+        branch i.eq(self.count.load())
+            ? return()
+            : continue
+        branch self.is_task(i).bitor(self.handle(i).is_null())
+            ? next(i.add(1))
+            : continue
+        c : @Coro = self.handle(i).to<@Coro>()
+        branch set
+            ? point(i, c)
+            : clear(i, c)
+
+    block point(i: SSize, c: @Coro):
+        c.awaiter.store(awaiter)
+        jump next(i.add(1))
+
+    block clear(i: SSize, c: @Coro):
+        branch c.awaiter.load().ptr_eq(awaiter)
+            ? continue
+            : next(i.add(1))
+        c.awaiter.store(null)
+        jump next(i.add(1))
+
+/// The index of the first competitor to finish, or -1 while none has.
+routine Race.winner(self: @Self) -> SSize
+    block entry():
+        jump next(0, -1, U64.MAX)
+
+    block next(i: SSize, best: SSize, best_seq: U64):
+        branch i.eq(self.count.load())
+            ? return(best)
+            : continue
+        branch self.is_task(i)
+            ? task(i, best, best_seq)
+            : coro(i, best, best_seq)
+
+    block coro(i: SSize, best: SSize, best_seq: U64):
+        c : @Coro = self.handle(i).to<@Coro>()
+        branch c.is_null()
+            ? next(i.add(1), best, best_seq)
+            : continue
+        branch finished(c)
+            ? consider(i, best, best_seq, c.completion_seq.atomic_load())
+            : next(i.add(1), best, best_seq)
+
+    block task(i: SSize, best: SSize, best_seq: U64):
+        t : @Task = self.handle(i).to<@Task>()
+        branch rf_task_status_get(t).eq(TASK_COMPLETED)
+            ? consider(i, best, best_seq, rf_task_completion_seq(t))
+            : next(i.add(1), best, best_seq)
+
+    block consider(i: SSize, best: SSize, best_seq: U64, seq: U64):
+        better : Bool = best.lt(0).bitor(seq.lt(best_seq))
+        branch better
+            ? next(i.add(1), i, seq)
+            : next(i.add(1), best, best_seq)
+
+/// Waits until one competitor finishes: its index in List order, or -1 for an empty set.
+#export("rf_race_wait")
+routine rf_race_wait(r: @Race) -> SSize
+    block entry():
+        branch r.is_null()
+            ? return(-1)
+            : continue
+        branch r.count.load().eq(0)
+            ? return(-1)
+            : continue
+        s    : @Sched = rf_sched_thread_default()
+        self : @Coro  = current_coro()
+        r.register(s, self, true)
+        s.lock.lock()
+        s.waiters.load().add(1).store_into(s.waiters)
+        branch self.is_null()
+            ? poll(s, self)
+            : continue
+        r.await_coros(self, true)
+        jump poll(s, self)
+
+    block poll(s: @Sched, self: @Coro):
+        winner : SSize = r.winner()
+        branch winner.ge(0)
+            ? over(s, self, winner)
+            : continue
+        branch self.is_null()
+            ? blocking(s, self)
+            : continue
+        // A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
+        s.lock.unlock()
+        rf_sched_park_external()
+        s.lock.lock()
+        jump poll(s, self)
+
+    block blocking(s: @Sched, self: @Coro):
+        s.block_cond.wait(s.lock)
+        jump poll(s, self)
+
+    block over(s: @Sched, self: @Coro, winner: SSize):
+        branch self.is_null()
+            ? continue
+            : clear(s, self, winner)
+        jump finish(s, self, winner)
+
+    block clear(s: @Sched, self: @Coro, winner: SSize):
+        r.await_coros(self, false)
+        jump finish(s, self, winner)
+
+    block finish(s: @Sched, self: @Coro, winner: SSize):
+        s.waiters.load().sub(1).store_into(s.waiters)
+        s.lock.unlock()
+        r.register(s, null, false)
+        return(winner)
+
+/// Frees the set, not the competitors (their Agents still own them).
+#export("rf_race_end")
+routine rf_race_end(r: @Race) -> Void
+    block entry():
+        branch r.is_null()
+            ? return()
+            : continue
+        c_free(r.handles.load())
+        c_free(r.kinds.load())
+        c_free(r)
+        return()
