@@ -69,7 +69,6 @@ add_library(razorforge_runtime SHARED
     runtime/console_runtime.c
     runtime/duration_wait.c
     runtime/crash_runtime.c
-    runtime/tessera_panic.c
     runtime/shared_locks.c
     runtime/memory.c
     runtime/stacktrace.c
