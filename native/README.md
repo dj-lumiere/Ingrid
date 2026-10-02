@@ -28,9 +28,7 @@ native/
 ├── sync.tess  // what the rest shares: C calls, a condition variable, the clock, the panic handler
 ├── trace.tess  // the crash: __rf_throw, stack traces, fault handlers, the standard streams
 ├── console.tess  // show / alert / ask, crash output and exit, runtime init, C-string helpers
-├── files.tess  // files by handle, memory-mapped views, the filesystem (shared part)
-├── files_windows.tess  // files.tess on Windows (Win32)
-├── files_posix.tess  // files.tess on Linux and macOS
+├── files.tess  // the rf_* files and filesystem calls over Tessera's Standard::Os: handles, mappings, listings
 ├── numeric.tess  // libm's exact float operations, a random word, the wall clock, FFI test helpers
 ├── signals.tess  // when_interrupted / when_terminated
 ├── builtins.tess  // what the JIT would otherwise get from compiler-rt: emulated TLS

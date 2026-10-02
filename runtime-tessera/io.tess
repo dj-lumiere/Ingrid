@@ -22,30 +22,6 @@ preset IO_RUN_PROCESS: U32 = 2
 
 // -- the C library -------------------------------------------------------------------
 
-#[external("c"), symbol("fopen")]
-routine c_fopen(path: @Byte, mode: CStr) -> Addr
-
-#[external("c"), symbol("fseek")]
-routine c_fseek(f: Addr, offset: CLong, whence: CInt) -> CInt
-
-#[external("c"), symbol("ftell")]
-routine c_ftell(f: Addr) -> CLong
-
-#[external("c"), symbol("rewind")]
-routine c_rewind(f: Addr) -> Void
-
-#[external("c"), symbol("fread")]
-routine c_fread(buf: @Byte, size: USize, count: USize, f: Addr) -> USize
-
-#[external("c"), symbol("fwrite")]
-routine c_fwrite(buf: @Byte, size: USize, count: USize, f: Addr) -> USize
-
-#[external("c"), symbol("fflush")]
-routine c_fflush(f: Addr) -> CInt
-
-#[external("c"), symbol("fclose")]
-routine c_fclose(f: Addr) -> CInt
-
 #[external("c"), symbol("memcpy")]
 routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
 
@@ -109,53 +85,17 @@ routine io_do_work(req: @IoReq) -> Void
             else                   -> process()
 
     block read():
-        f : Addr = c_fopen(req.path.load(), "rb")
-        branch f.is_null()
-            ? return()
-            : continue
-        // SEEK_END
-        branch c_fseek(f, 0, 2).ne(0)
-            ? fail(f)
-            : continue
-        size : CLong = c_ftell(f)
-        branch size.lt(0)
-            ? fail(f)
-            : continue
-        c_rewind(f)
-        n   : USize = size.to<USize>()
-        buf : Addr  = c_malloc(n.add(1))
-        branch buf.is_null()
-            ? fail(f)
-            : continue
-        got : USize = c_fread(buf.to<@Byte>(), 1, n, f)
-        c_fclose(f)
-        buf.to<@Byte>().stride(got).store(0x00)
-        req.data.store(buf.to<@Byte>())
-        req.result.store(got.to<S64>())
-        return()
-
-    block fail(f: Addr):
-        c_fclose(f)
+        claim data : @@Byte <- null
+        got : S64 = read_whole_file(req.path.load(), data)
+        branch got.ge(0)
+            ? continue
+            : return()
+        req.data.store(data.load())
+        req.result.store(got)
         return()
 
     block write():
-        f : Addr = c_fopen(req.path.load(), "wb")
-        branch f.is_null()
-            ? return()
-            : continue
-        len : S64 = req.data_len.load()
-        branch len.gt(0)
-            ? put(f, len)
-            : written(f, len, 0)
-
-    block put(f: Addr, len: S64):
-        jump written(f, len, c_fwrite(req.data.load(), 1, len.to<USize>(), f))
-
-    block written(f: Addr, len: S64, n: USize):
-        flushed : Bool  = c_fflush(f).eq(0)
-        c_fclose(f)
-        whole   : Bool  = flushed.bitand(n.to<S64>().eq(len))
-        req.result.store(whole ? n.to<S64>() : -1)
+        req.result.store(write_whole_file(req.path.load(), req.data.load(), req.data_len.load()))
         return()
 
     block process():
