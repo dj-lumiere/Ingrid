@@ -21,8 +21,7 @@
  *      already dispatches on its own OS thread, so the handler runs the closures there.
  *
  * An RF handler is a `Routine[(), None]` value — a heap closure box whose first word is
- * the function pointer `void (*)(void* closure)` (the uniform lambda ABI; see
- * rf_cyclic_invoke_hook in coro_runtime.c). We store the box pointer (calloc'd by
+ * the function pointer `void (*)(void* closure)` (the uniform lambda ABI). We store the box pointer (calloc'd by
  * rf_allocate_dynamic, never moved/freed) and invoke it by loading field 0 and passing
  * the box back as the hidden leading argument. Registration is process-lifetime: the
  * boxes are intentionally leaked (they live until exit), so no ownership dance is needed.

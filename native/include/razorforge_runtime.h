@@ -143,45 +143,6 @@ uint64_t rf_current_thread_id(void);
  * thread — else the OS thread id. Only equality matters. See rf_current_task_id in coro_runtime.c. */
 uint64_t rf_current_task_id(void);
 
-/* §4 nested-monitor deadlock detector (opt-in via RF_DEADLOCK_DETECT=1). A contended Roamed
- * escaped-lock acquire registers its wait (self waits for holder) then walks the wait graph; a
- * cycle aborts loudly. wait_end clears the wait once acquired. No-ops unless enabled. */
-void rf_deadlock_wait_begin(uint64_t self, uint64_t holder);
-void rf_deadlock_wait_end(uint64_t self);
-
-// Cycle collector (Bacon-Rajan synchronous recycler) — native buffers backing the RF-side collector
-// (Core/Memory/CycleCollector.rf). See internal-wiki/v0.4.x-cycle-collector.md.
-//
-// rf_cyclic_add_candidate is the SOLE collector entry point: a Roamed strong-decrement that leaves the
-// count > 0 reports the controller here as a possible cycle root (the RF side dedups via the
-// controller `buffered` flag first). Pure-RF programs with no Roamed cycles never call it.
-void rf_cyclic_add_candidate(void* obj);
-uint64_t rf_cyclic_roots_count(void);
-void* rf_cyclic_roots_at(uint64_t i);
-void rf_cyclic_roots_clear(void);
-void rf_cyclic_roots_remove_front(uint64_t n);  // drop the first n (processed) candidates, keep late ones
-void rf_cyclic_roots_remove(void* ptr);         // drop one candidate about to be freed (eager release path)
-// scratch = one controller's children, filled by its trace hook and drained by RF.
-void rf_cyclic_scratch_reset(void);
-uint64_t rf_cyclic_scratch_count(void);
-void* rf_cyclic_scratch_at(uint64_t i);
-void rf_cyclic_visit_child(void* child_ctrl);      // called by a per-type trace hook
-// reap = deferred-free buffer for collected white controllers.
-void rf_cyclic_reap_push(void* ctrl);
-uint64_t rf_cyclic_reap_count(void);
-void* rf_cyclic_reap_at(uint64_t i);
-void rf_cyclic_reap_clear(void);
-void rf_cyclic_trace_into_scratch(void* trace_hook, void* controller);  // SOLE trace indirect-call site
-void rf_cyclic_invoke_free(void* free_hook, void* controller);          // free indirect-call site
-// Auto-collection trigger (candidate-set threshold; RF_CC_THRESHOLD env, default 128).
-int rf_cyclic_should_collect(void);
-void rf_cyclic_enter_collect(void);
-void rf_cyclic_exit_collect(void);
-// Stop-the-world cooperation: mutators (RoamController hold/unhold) bracket their count/state mutation in
-// the shared lock; enter/exit_collect above take it EXCLUSIVE. See coro_runtime.c for the full protocol.
-void rf_cyclic_lock_shared(void);
-void rf_cyclic_unlock_shared(void);
-
 rf_task_kind rf_task_kind_get(rf_task* task);
 rf_task_status rf_task_status_get(rf_task* task);
 /* Global completion-order stamp (shared with coroutines); UINT64_MAX until the task completes. Used by

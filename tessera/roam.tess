@@ -1,0 +1,402 @@
+// The runtime behind a Roamed entity, shared by the RazorForge and Suflae standard libraries: the reference count,
+// the one-way promotion to atomic counting when the entity reaches another task, the task-keyed reentrant lock, weak
+// observers, and the candidate reports to the cycle collector. Each language keeps a thin generic wrapper
+// (RazorForge's `RoamController[T]`) whose methods call these routines on the controller's address.
+//
+// The cycle collector itself, with its buffers and the world lock, is in cycle.tess. The only native calls left are
+// the task scheduler's (the current task and yielding), which is the runtime's own.
+
+import Standard::Alloc
+import Standard::Collections
+import Standard::Os
+
+/// The state every handle to one Roamed entity shares. The layout is the one RazorForge's `RoamController[T]`
+/// entity has, field for field (a test compares the two), so the generic wrapper passes its own address here.
+record RoamHeader
+    /// Strong handles. Plain while the entity is local to its task, atomic once escaped.
+    count : U64
+    /// Weak observers. They keep the header (as a tombstone) alive, not the entity.
+    weak : U64
+    /// 1 once the entity's data has been freed, by the last strong release or by the cycle collector.
+    dead : U8
+    /// 1 once the entity has reached another task. Flipped once, never back.
+    escaped : U8
+    /// The entity.
+    data : Addr
+    /// The exclusive lock (0 free, 1 held). Used only once escaped.
+    locked : U8
+    /// The task holding the lock, 0 when free. Keyed to the task, not the thread, since tasks migrate.
+    holder_task : U64
+    /// How many times the holder has entered the lock.
+    depth : U64
+    /// The cycle collector's mark for this entity (LIVE, SCANNING, GARBAGE, SUSPECTED).
+    state : S32
+    /// Whether this header sits in the collector's candidate buffer.
+    buffered : Bool
+    /// The entity type's trace routine (visits its Roamed fields), or null for a type that cannot form a cycle.
+    trace_hook : Addr
+    /// The entity type's collector free routine (tears down its fields other than Roamed ones, frees it).
+    free_hook : Addr
+    /// The entity type's destroy routine, run when the last strong handle goes.
+    drop_hook : Addr
+
+// ── The task scheduler (native) ──────────────────────────────────────────
+
+#[external("c"), symbol("rf_current_task_id")]
+private routine current_task_id() -> U64
+
+#[external("c"), symbol("rf_coro_yield")]
+private routine coro_yield() -> Void
+
+/// Frees a header's memory. Controllers are allocated from the C heap (calloc), which the heap allocator frees.
+routine free_header_memory(header: @RoamHeader) -> Void
+    block entry():
+        claim alloc : @Allocator <- make_heap_allocator()
+        header.free(alloc)
+        return()
+
+// ── Reference counting ─────────────────────────────────────────────────────
+
+/// Adds a strong handle. The count changes inside the collector's shared lock, so a collection pass (which
+/// adjusts counts while it traces) never races it.
+#[export("ingrid_roam_hold"), inline]
+routine roam_hold(header: @RoamHeader) -> Void
+    block entry():
+        world_enter()
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        branch escaped
+            ? shared()
+            : local()
+
+    block shared():
+        previous : U64 = header.count.atomic_fetch_add(1)
+        jump done()
+
+    block local():
+        header.count.load().add(1).store_into(header.count)
+        jump done()
+
+    block done():
+        world_leave()
+        return()
+
+/// Drops a strong handle. The last one destroys the entity (deterministic teardown) and frees the header unless a
+/// weak observer still holds it; any other release reports the entity to the cycle collector as a possible root.
+/// All of it runs inside the collector's shared lock, so a pass never frees a header it is tracing.
+#[export("ingrid_roam_unhold"), inline]
+routine roam_unhold(header: @RoamHeader) -> Void
+    block entry():
+        world_enter()
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        branch escaped
+            ? shared()
+            : local()
+
+    block shared():
+        previous : U64  = header.count.atomic_fetch_sub(1)
+        last     : Bool = previous.eq(1)
+        branch last
+            ? release_data(true)
+            : candidate()
+
+    block local():
+        remaining : U64 = header.count.load().sub(1)
+        remaining.store_into(header.count)
+        last : Bool = remaining.eq(0)
+        branch last
+            ? release_data(false)
+            : candidate()
+
+    block release_data(escaped: Bool):
+        // A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
+        branch header.buffered.load()
+            ? unbuffer(escaped)
+            : drop(escaped)
+
+    block unbuffer(escaped: Bool):
+        remove_candidate(header)
+        jump drop(escaped)
+
+    block drop(escaped: Bool):
+        run_hook(header.drop_hook.load(), header.data.load())
+        header.dead.atomic_store(1)
+        weak : U64 = escaped
+            ? header.weak.atomic_load()
+            : header.weak.load()
+        branch weak.eq(0)
+            ? free_header()
+            : done()
+
+    block free_header():
+        free_header_memory(header)
+        jump done()
+
+    block candidate():
+        mark_candidate(header)
+        jump done()
+
+    block done():
+        world_leave()
+        return()
+
+/// Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
+/// trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
+private routine mark_candidate(header: @RoamHeader) -> Void
+    block entry():
+        acyclic : Bool = header.trace_hook.load().to<@Byte>().is_null()
+        branch acyclic
+            ? return()
+            : continue
+        branch header.buffered.load()
+            ? return()
+            : continue
+        true.store_into(header.buffered)
+        SUSPECTED.store_into(header.state)
+        add_candidate(header)
+        return()
+
+/// Calls an entity type's hook (destroy, trace or free) on the entity. An `Addr` is not callable, so the code
+/// address goes through a slot read back as the Callable.
+routine run_hook(hook: Addr, entity: Addr) -> Void
+    block entry():
+        claim slot : @Addr <- hook
+        callee : Callable<(Addr,), Void> = slot.to<@Callable<(Addr,), Void>>().load()
+        callee.call(entity)
+        return()
+
+/// The number of strong handles, a snapshot.
+#[export("ingrid_roam_strong_count"), inline]
+routine roam_strong_count(header: @RoamHeader) -> U64
+    block entry():
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        count   : U64  = escaped
+            ? header.count.atomic_load()
+            : header.count.load()
+        return(count)
+
+// ── Weak observers ─────────────────────────────────────────────────────────
+
+/// Adds a weak observer. Only ever called through a handle already held, so the header is alive.
+#[export("ingrid_roam_observe")]
+routine roam_observe(header: @RoamHeader) -> Void
+    block entry():
+        world_enter()
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        branch escaped
+            ? shared()
+            : local()
+
+    block shared():
+        previous : U64 = header.weak.atomic_fetch_add(1)
+        jump done()
+
+    block local():
+        header.weak.load().add(1).store_into(header.weak)
+        jump done()
+
+    block done():
+        world_leave()
+        return()
+
+/// Drops a weak observer. The last one leaving a dead entity frees the header.
+#[export("ingrid_roam_unobserve")]
+routine roam_unobserve(header: @RoamHeader) -> Void
+    block entry():
+        world_enter()
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        branch escaped
+            ? shared()
+            : local()
+
+    block shared():
+        previous : U64 = header.weak.atomic_fetch_sub(1)
+        jump check(previous.eq(1))
+
+    block local():
+        remaining : U64 = header.weak.load().sub(1)
+        remaining.store_into(header.weak)
+        jump check(remaining.eq(0))
+
+    block check(last: Bool):
+        dead : Bool = header.dead.atomic_load().eq(1)
+        branch last.bitand(dead)
+            ? free_header()
+            : done()
+
+    block free_header():
+        free_header_memory(header)
+        jump done()
+
+    block done():
+        world_leave()
+        return()
+
+/// Whether the entity's data has been freed. Safe on a tombstone: it reads only the `dead` flag.
+#[export("ingrid_roam_is_destroyed"), inline]
+routine roam_is_destroyed(header: @RoamHeader) -> Bool
+    block entry():
+        return(header.dead.atomic_load().eq(1))
+
+/// The collector's finalizer, after the free hook has torn the entity down: marks it dead and frees the header
+/// unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
+#[export("ingrid_roam_cyclic_finalize")]
+routine roam_cyclic_finalize(header: @RoamHeader) -> Void
+    block entry():
+        header.dead.atomic_store(1)
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        weak    : U64  = escaped
+            ? header.weak.atomic_load()
+            : header.weak.load()
+        branch weak.eq(0)
+            ? free_header()
+            : return()
+
+    block free_header():
+        free_header_memory(header)
+        return()
+
+// ── Escape ─────────────────────────────────────────────────────────────────
+
+/// Whether the entity has reached another task.
+#[export("ingrid_roam_is_escaped"), inline]
+routine roam_is_escaped(header: @RoamHeader) -> Bool
+    block entry():
+        return(header.escaped.atomic_load().eq(1))
+
+/// Promotes the entity, and every entity reachable from it through Roamed fields, to escaped: atomic counting and
+/// the lock from now on. Runs on the owner before the handle is published, so nothing races the flip. Escape is a
+/// property of the graph, since whatever the entity reaches the other task reaches too. Iterative over an explicit
+/// worklist (a deep graph would overflow the stack), and already-escaped headers end the walk, so cycles terminate.
+#[export("ingrid_roam_promote")]
+routine roam_promote(header: @RoamHeader) -> Void
+    block entry():
+        branch header.escaped.atomic_load().eq(1)
+            ? return()
+            : continue
+        claim alloc : @Allocator  <- make_heap_allocator()
+        claim work  : @List<Addr> <- .construct(alloc)
+        claim kids  : @List<Addr> <- .construct(alloc)
+        work.push(header)
+        jump next(work, kids)
+
+    block next(work: @List<Addr>, kids: @List<Addr>):
+        branch work.load().is_empty()
+            ? finish(work, kids)
+            : continue
+        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        branch node.escaped.atomic_load().eq(1)
+            ? next(work, kids)
+            : continue
+        node.holder_task.atomic_store(0)
+        0.store_into(node.depth)
+        node.escaped.atomic_store(1)
+        children(node, kids)
+        jump push(work, kids, 0, kids.load().length())
+
+    block push(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize):
+        branch i.ge(n)
+            ? next(work, kids)
+            : continue
+        work.push(kids.load().get(i))
+        jump push(work, kids, i.add(1), n)
+
+    block finish(work: @List<Addr>, kids: @List<Addr>):
+        work.destruct()
+        kids.destruct()
+        return()
+
+// ── The task-keyed reentrant lock ──────────────────────────────────────────
+
+/// Enters the entity's lock when it has escaped (a local entity has no contention). Re-entry by the holding task
+/// only deepens the hold, so a member routine calling itself never deadlocks. A contended entry registers the wait
+/// with the deadlock detector and yields to the scheduler instead of spinning, so a holder parked on this worker
+/// can run.
+#[export("ingrid_roam_lock_enter"), inline]
+routine roam_lock_enter(header: @RoamHeader) -> Void
+    block entry():
+        branch header.escaped.atomic_load().eq(1)
+            ? acquire()
+            : return()
+
+    block acquire():
+        task : U64 = current_task_id()
+        jump attempt(task)
+
+    block attempt(task: U64):
+        held : Bool = header.locked.atomic_load().eq(1)
+        mine : Bool = header.holder_task.atomic_load().eq(task)
+        branch held.bitand(mine)
+            ? reenter(task)
+            : continue
+        taken : Result<U8, U8> = header.locked.atomic_compare_exchange(0, 1)
+        when taken:
+            .Success -> took(task)
+            .Failure -> contended(task)
+
+    block reenter(task: U64):
+        header.depth.load().add(1).store_into(header.depth)
+        jump acquired(task)
+
+    block took(task: U64):
+        header.holder_task.atomic_store(task)
+        1.store_into(header.depth)
+        jump acquired(task)
+
+    block contended(task: U64):
+        deadlock_wait_begin(task, header.holder_task.atomic_load())
+        coro_yield()
+        jump attempt(task)
+
+    block acquired(task: U64):
+        deadlock_wait_end(task)
+        return()
+
+/// Leaves one level of the lock. The outermost exit frees it, clearing the holder before the flag so a waiter never
+/// sees the old holder.
+#[export("ingrid_roam_lock_exit"), inline]
+routine roam_lock_exit(header: @RoamHeader) -> Void
+    block entry():
+        branch header.escaped.atomic_load().eq(1)
+            ? release()
+            : return()
+
+    block release():
+        depth : U64 = header.depth.load().sub(1)
+        depth.store_into(header.depth)
+        branch depth.eq(0)
+            ? unlock()
+            : return()
+
+    block unlock():
+        header.holder_task.atomic_store(0)
+        header.locked.atomic_store(0)
+        return()
+
+// ── Layout check ───────────────────────────────────────────────────────────
+
+/// The byte offset of RoamHeader's field `i` (in declaration order), for the test that compares this layout with
+/// RazorForge's `RoamController[T]`; 0xFFFFFFFFFFFFFFFF past the last field.
+#[export("ingrid_roam_field_offset")]
+routine roam_field_offset(i: U64) -> U64
+    block entry():
+        claim header : @RoamHeader <- uninit
+        when i:
+            0    -> at(header, header.count)
+            1    -> at(header, header.weak)
+            2    -> at(header, header.dead)
+            3    -> at(header, header.escaped)
+            4    -> at(header, header.data)
+            5    -> at(header, header.locked)
+            6    -> at(header, header.holder_task)
+            7    -> at(header, header.depth)
+            8    -> at(header, header.state)
+            9    -> at(header, header.buffered)
+            10   -> at(header, header.trace_hook)
+            11   -> at(header, header.free_hook)
+            12   -> at(header, header.drop_hook)
+            else -> return(U64.MAX)
+
+    block at(header: @RoamHeader, field: Addr):
+        base  : U64 = ptrtoint<Addr, U64>(header)
+        place : U64 = ptrtoint<Addr, U64>(field)
+        return(place.sub(base))

@@ -1,0 +1,55 @@
+// The panic handler for every RazorForge and Suflae program. Ingrid's Tessera code reaches it when a check fails
+// (an overflow, an index out of bounds, a failed allocation): Standard::Core's panic calls tessera_panic_handler,
+// and Ingrid is built without the standard library's own default, so this one is it. It reports like the default
+// (one line on stderr and the place), then exits with status 82, the status every RazorForge and Suflae crash
+// exits with.
+
+import Standard::Format
+import Standard::Os
+
+/// The exit status of a crash, the same for a builder-reported crash and a panic in Ingrid's code.
+preset CRASH_STATUS: CInt = 82
+
+#[export("tessera_panic_handler"), noreturn]
+routine panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
+    block entry():
+        text : Bytes = code.description()
+        eprint("runtime error: {text}")
+        raw   : U8   = bitcast<TrapCode, U8>(code)
+        known : Bool = raw.lt(64)
+        branch known
+            ? message()
+            : code(raw)
+
+    // A program's own codes (64 and up) have no description, so the number is written too.
+    block code(raw: U8):
+        eprint(" {raw}")
+        jump message()
+
+    block message():
+        none : Bool = message.length.eq(0)
+        branch none
+            ? finish()
+            : detail()
+
+    block detail():
+        eprint(": {message}")
+        jump finish()
+
+    block finish():
+        file : Bytes = place.file.load()
+        line : U32   = place.line.load()
+        eprint("\n  at {file}:{line}")
+        column : U32  = place.column.load()
+        whole  : Bool = column.eq(0)
+        branch whole
+            ? done()
+            : column(column)
+
+    block column(column: U32):
+        eprint(":{column}")
+        jump done()
+
+    block done():
+        eprint("\n")
+        c_exit(CRASH_STATUS)

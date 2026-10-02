@@ -1,0 +1,481 @@
+// The cycle collector for Roamed entities, shared by the RazorForge and Suflae standard libraries: a Bacon-Rajan
+// synchronous recycler (trial deletion). Reference counting alone leaks a cycle, since the cycle keeps its own counts
+// above zero. Every strong release that leaves a count above zero reports the entity here as a possible cycle root
+// (roam.tess), and a collection pass finds which of those are reachable only from each other and frees them.
+//
+// A pass stops the world: mutators change counts under the world lock held shared, a pass holds it exclusive. The
+// thread running a pass releases objects itself (a freed entity drops its other handles), and those releases must not
+// take the lock it already holds, so the collector thread is marked.
+
+import Standard::Alloc
+import Standard::Collections
+import Standard::Os
+
+/// Possible cycle roots, reported by strong releases.
+global ROOTS : @HeaderBuffer
+/// The children of the entity being traced, filled by its type's trace routine.
+global SCRATCH : @HeaderBuffer
+
+/// The garbage a pass found, freed once the walk is over (freeing during it would leave dangling addresses).
+global REAP : @HeaderBuffer
+
+/// Guards ROOTS, which two mutators holding the world lock shared can append to at once.
+global ROOTS_LOCK : @Mutex
+/// The world lock: the WRITER bit while a pass runs, else the number of mutators inside.
+global WORLD : @U32
+/// Whether this thread is running a pass (and so already holds the world lock exclusive).
+#threadlocal
+global IN_COLLECTOR : @Bool
+
+preset WRITER: U32 = 0x80000000
+preset LIVE: S32 = 0
+preset SCANNING: S32 = 1
+preset GARBAGE: S32 = 2
+preset SUSPECTED: S32 = 3
+
+/// A growable list of header addresses: the possible roots, one trace's children, or the garbage to free.
+record HeaderBuffer
+    items    : @Addr
+    count    : U64
+    capacity : U64
+
+// ── The world lock ─────────────────────────────────────────────────────────
+
+/// Enters the world as a mutator. Many mutators may be inside at once; a pass waits for them all to leave.
+routine world_enter() -> Void
+    block entry():
+        branch IN_COLLECTOR.load()
+            ? return()
+            : continue
+        jump attempt()
+
+    block attempt():
+        state : U32 = WORLD.atomic_load()
+        branch state.bitand(WRITER).eq(0)
+            ? join(state)
+            : park(state)
+
+    block join(state: U32):
+        joined : Result<U32, U32> = WORLD.atomic_compare_exchange(state, state.add(1))
+        when joined:
+            .Success -> return()
+            .Failure -> attempt()
+
+    block park(state: U32):
+        wait_on(WORLD, state)
+        jump attempt()
+
+/// Leaves the world as a mutator. The last one out wakes a waiting pass.
+routine world_leave() -> Void
+    block entry():
+        branch IN_COLLECTOR.load()
+            ? return()
+            : continue
+        previous : U32 = WORLD.atomic_fetch_sub(1)
+        branch previous.eq(1)
+            ? wake()
+            : return()
+
+    block wake():
+        wake_all(WORLD)
+        return()
+
+/// Stops the world for a pass: waits until no mutator is inside, then holds it alone.
+routine world_stop() -> Void
+    block entry():
+        jump attempt()
+
+    block attempt():
+        taken : Result<U32, U32> = WORLD.atomic_compare_exchange(0, WRITER)
+        when taken:
+            .Success        -> marked()
+            .Failure(found) -> park(found)
+
+    block park(found: U32):
+        wait_on(WORLD, found)
+        jump attempt()
+
+    block marked():
+        true.store_into(IN_COLLECTOR)
+        return()
+
+/// Restarts the world after a pass and wakes every mutator waiting for it.
+routine world_restart() -> Void
+    block entry():
+        false.store_into(IN_COLLECTOR)
+        WORLD.atomic_store(0)
+        wake_all(WORLD)
+        return()
+
+// ── Buffers ────────────────────────────────────────────────────────────────
+
+routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
+    block entry():
+        count    : U64  = buffer.count.load()
+        capacity : U64  = buffer.capacity.load()
+        full     : Bool = count.eq(capacity)
+        branch full
+            ? grow(count, capacity)
+            : put(count)
+
+    block grow(count: U64, capacity: U64):
+        larger : U64 = capacity.eq(0)
+            ? 16
+            : capacity.mul(2)
+        claim alloc : @Allocator <- make_heap_allocator()
+        grown : @Addr = reallocate<Addr>(alloc, buffer.items.load(), larger.to<USize>())
+        branch grown.is_null()
+            ? panic(TrapCode.AllocFailed)
+            : continue
+        grown.store_into(buffer.items)
+        larger.store_into(buffer.capacity)
+        jump put(count)
+
+    block put(count: U64):
+        buffer.items.load().stride(count.to<USize>()).store(item)
+        count.add(1).store_into(buffer.count)
+        return()
+
+routine buffer_clear(buffer: @HeaderBuffer) -> Void
+    block entry():
+        0.store_into(buffer.count)
+        return()
+
+routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
+    block entry():
+        item : Addr = buffer.items.load().stride(i.to<USize>()).load()
+        return(item.to<@RoamHeader>())
+
+/// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
+/// only from its own thread, with no mutator running).
+routine add_candidate(header: @RoamHeader) -> Void
+    block entry():
+        branch IN_COLLECTOR.load()
+            ? push()
+            : locked()
+
+    block locked():
+        ROOTS_LOCK.lock()
+        buffer_push(ROOTS, header)
+        ROOTS_LOCK.unlock()
+        return()
+
+    block push():
+        buffer_push(ROOTS, header)
+        return()
+
+/// Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
+/// the last root into its place (the order of roots doesn't matter).
+routine remove_candidate(header: @RoamHeader) -> Void
+    block entry():
+        branch IN_COLLECTOR.load()
+            ? search(false)
+            : locked()
+
+    block locked():
+        ROOTS_LOCK.lock()
+        jump search(true)
+
+    block search(unlock: Bool):
+        buffer_remove(ROOTS, header)
+        jump done(unlock)
+
+    block done(unlock: Bool):
+        branch unlock
+            ? release()
+            : return()
+
+    block release():
+        ROOTS_LOCK.unlock()
+        return()
+
+/// Removes `header` from `buffer` if it is there, moving the last item into its place.
+routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
+    block entry():
+        jump scan(0, buffer.count.load())
+
+    block scan(i: U64, n: U64):
+        branch i.ge(n)
+            ? return()
+            : continue
+        found : Bool = buffer_at(buffer, i).ptr_eq(header)
+        branch found
+            ? remove(i, n)
+            : scan(i.add(1), n)
+
+    block remove(i: U64, n: U64):
+        last  : U64  = n.sub(1)
+        moved : Addr = buffer.items.load().stride(last.to<USize>()).load()
+        buffer.items.load().stride(i.to<USize>()).store(moved)
+        last.store_into(buffer.count)
+        return()
+
+/// Called by a type's trace routine for each of the entity's Roamed fields: records that field's header as a child.
+#[export("ingrid_cyclic_visit_child")]
+routine visit_child(child: Addr) -> Void
+    block entry():
+        buffer_push(SCRATCH, child)
+        return()
+
+/// Puts the children of `node` (the headers its Roamed fields hold) into `kids`, replacing what was there. A type
+/// with no trace routine has no Roamed fields and so no children.
+routine children(node: @RoamHeader, kids: @List<Addr>) -> Void
+    block entry():
+        kids.clear()
+        trace : Addr = node.trace_hook.load()
+        branch trace.to<@Byte>().is_null()
+            ? return()
+            : continue
+        buffer_clear(SCRATCH)
+        run_hook(trace, node.data.load())
+        jump copy(0, SCRATCH.count.load())
+
+    block copy(i: U64, n: U64):
+        branch i.ge(n)
+            ? return()
+            : continue
+        kids.push(buffer_at(SCRATCH, i))
+        jump copy(i.add(1), n)
+
+// ── The three passes ───────────────────────────────────────────────────────
+
+/// Paints `root` and everything it reaches SCANNING, subtracting each internal edge from its target's count. What
+/// is left of a count afterwards is the references from outside the scanned graph.
+routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
+    block entry():
+        branch root.state.load().eq(SCANNING)
+            ? return()
+            : continue
+        SCANNING.store_into(root.state)
+        claim work : @List<Addr> <- .construct(alloc)
+        claim kids : @List<Addr> <- .construct(alloc)
+        work.push(root)
+        jump next(work, kids)
+
+    block next(work: @List<Addr>, kids: @List<Addr>):
+        branch work.load().is_empty()
+            ? finish(work, kids)
+            : continue
+        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        children(node, kids)
+        jump edges(work, kids, 0, kids.load().length())
+
+    block edges(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize):
+        branch i.ge(n)
+            ? next(work, kids)
+            : continue
+        kid : @RoamHeader = kids.load().get(i).to<@RoamHeader>()
+        kid.count.load().sub(1).store_into(kid.count)
+        branch kid.state.load().eq(SCANNING)
+            ? edges(work, kids, i.add(1), n)
+            : continue
+        SCANNING.store_into(kid.state)
+        work.push(kid)
+        jump edges(work, kids, i.add(1), n)
+
+    block finish(work: @List<Addr>, kids: @List<Addr>):
+        work.destruct()
+        kids.destruct()
+        return()
+
+/// Decides each SCANNING node: one with references from outside is live, with everything it reaches; one without
+/// is garbage for now, and its children are decided the same way.
+routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
+    block entry():
+        claim work : @List<Addr> <- .construct(alloc)
+        claim kids : @List<Addr> <- .construct(alloc)
+        work.push(root)
+        jump next(work, kids)
+
+    block next(work: @List<Addr>, kids: @List<Addr>):
+        branch work.load().is_empty()
+            ? finish(work, kids)
+            : continue
+        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        branch node.state.load().eq(SCANNING)
+            ? continue
+            : next(work, kids)
+        branch node.count.load().gt(0)
+            ? live(work, kids, node)
+            : continue
+        GARBAGE.store_into(node.state)
+        children(node, kids)
+        jump push(work, kids, 0, kids.load().length())
+
+    block live(work: @List<Addr>, kids: @List<Addr>, node: @RoamHeader):
+        scan_live(node, alloc)
+        jump next(work, kids)
+
+    block push(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize):
+        branch i.ge(n)
+            ? next(work, kids)
+            : continue
+        work.push(kids.load().get(i))
+        jump push(work, kids, i.add(1), n)
+
+    block finish(work: @List<Addr>, kids: @List<Addr>):
+        work.destruct()
+        kids.destruct()
+        return()
+
+/// Undoes the scan below a node that turned out live: paints its graph LIVE again and gives back each edge's count.
+routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
+    block entry():
+        LIVE.store_into(root.state)
+        claim work : @List<Addr> <- .construct(alloc)
+        claim kids : @List<Addr> <- .construct(alloc)
+        work.push(root)
+        jump next(work, kids)
+
+    block next(work: @List<Addr>, kids: @List<Addr>):
+        branch work.load().is_empty()
+            ? finish(work, kids)
+            : continue
+        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        children(node, kids)
+        jump edges(work, kids, 0, kids.load().length())
+
+    block edges(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize):
+        branch i.ge(n)
+            ? next(work, kids)
+            : continue
+        kid : @RoamHeader = kids.load().get(i).to<@RoamHeader>()
+        kid.count.load().add(1).store_into(kid.count)
+        branch kid.state.load().eq(LIVE)
+            ? edges(work, kids, i.add(1), n)
+            : continue
+        LIVE.store_into(kid.state)
+        work.push(kid)
+        jump edges(work, kids, i.add(1), n)
+
+    block finish(work: @List<Addr>, kids: @List<Addr>):
+        work.destruct()
+        kids.destruct()
+        return()
+
+/// Gathers the garbage reachable from `root` into REAP, painting it LIVE so no node is gathered twice. A node still
+/// in the roots buffer is left for a later pass.
+routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
+    block entry():
+        claim work : @List<Addr> <- .construct(alloc)
+        claim kids : @List<Addr> <- .construct(alloc)
+        work.push(root)
+        jump next(work, kids)
+
+    block next(work: @List<Addr>, kids: @List<Addr>):
+        branch work.load().is_empty()
+            ? finish(work, kids)
+            : continue
+        node     : @RoamHeader = work.pop().to<@RoamHeader>()
+        garbage  : Bool        = node.state.load().eq(GARBAGE)
+        buffered : Bool        = node.buffered.load()
+        branch garbage.bitand(buffered.bitnot())
+            ? continue
+            : next(work, kids)
+        LIVE.store_into(node.state)
+        buffer_push(REAP, node)
+        children(node, kids)
+        jump push(work, kids, 0, kids.load().length())
+
+    block push(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize):
+        branch i.ge(n)
+            ? next(work, kids)
+            : continue
+        work.push(kids.load().get(i))
+        jump push(work, kids, i.add(1), n)
+
+    block finish(work: @List<Addr>, kids: @List<Addr>):
+        work.destruct()
+        kids.destruct()
+        return()
+
+/// Runs one pass over the possible roots and frees the cyclic garbage it finds: how many entities it freed.
+#[export("ingrid_cyclic_collect")]
+routine collect() -> U64
+    block entry():
+        world_stop()
+        claim alloc : @Allocator  <- make_heap_allocator()
+        claim roots : @List<Addr> <- .construct(alloc)
+        jump mark(roots, alloc, 0, ROOTS.count.load())
+
+    // MarkRoots: a root still SUSPECTED seeds the scan; any other root is stale and only leaves the buffer.
+    block mark(roots: @List<Addr>, alloc: @Allocator, i: U64, n: U64):
+        branch i.ge(n)
+            ? marked(roots, alloc, n)
+            : continue
+        node : @RoamHeader = buffer_at(ROOTS, i)
+        branch node.state.load().eq(SUSPECTED)
+            ? seed(roots, alloc, i, n, node)
+            : continue
+        false.store_into(node.buffered)
+        jump mark(roots, alloc, i.add(1), n)
+
+    block seed(roots: @List<Addr>, alloc: @Allocator, i: U64, n: U64, node: @RoamHeader):
+        mark_scanning(node, alloc)
+        roots.push(node)
+        jump mark(roots, alloc, i.add(1), n)
+
+    // Exactly the n roots this pass took leave the buffer: a root reported while freeing must stay for a later pass.
+    block marked(roots: @List<Addr>, alloc: @Allocator, n: U64):
+        remove_front(ROOTS, n)
+        jump scanning(roots, alloc, 0, roots.load().length())
+
+    block scanning(roots: @List<Addr>, alloc: @Allocator, i: USize, n: USize):
+        branch i.ge(n)
+            ? gather(roots, alloc)
+            : continue
+        scan(roots.load().get(i).to<@RoamHeader>(), alloc)
+        jump scanning(roots, alloc, i.add(1), n)
+
+    block gather(roots: @List<Addr>, alloc: @Allocator):
+        buffer_clear(REAP)
+        jump gathering(roots, alloc, 0, roots.load().length())
+
+    block gathering(roots: @List<Addr>, alloc: @Allocator, i: USize, n: USize):
+        branch i.ge(n)
+            ? reap(roots, 0, REAP.count.load())
+            : continue
+        root : @RoamHeader = roots.load().get(i).to<@RoamHeader>()
+        false.store_into(root.buffered)
+        collect_garbage(root, alloc)
+        jump gathering(roots, alloc, i.add(1), n)
+
+    // Frees the garbage: each entity's type tears it down, then its header goes unless a weak observer remains.
+    block reap(roots: @List<Addr>, j: U64, m: U64):
+        branch j.ge(m)
+            ? done(roots, m)
+            : continue
+        node : @RoamHeader = buffer_at(REAP, j)
+        run_hook(node.free_hook.load(), node.data.load())
+        roam_cyclic_finalize(node)
+        jump reap(roots, j.add(1), m)
+
+    block done(roots: @List<Addr>, freed: U64):
+        buffer_clear(REAP)
+        roots.destruct()
+        world_restart()
+        return(freed)
+
+/// Removes the first n items of `buffer`, keeping any added after them.
+routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
+    block entry():
+        count : U64 = buffer.count.load()
+        branch n.ge(count)
+            ? clear()
+            : shift(0, count.sub(n))
+
+    block clear():
+        buffer_clear(buffer)
+        return()
+
+    block shift(k: U64, remaining: U64):
+        branch k.ge(remaining)
+            ? shifted(remaining)
+            : continue
+        moved : Addr = buffer.items.load().stride(n.add(k).to<USize>()).load()
+        buffer.items.load().stride(k.to<USize>()).store(moved)
+        jump shift(k.add(1), remaining)
+
+    block shifted(remaining: U64):
+        remaining.store_into(buffer.count)
+        return()
