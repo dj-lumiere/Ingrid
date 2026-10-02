@@ -1,7 +1,9 @@
 /*
- * coro_runtime.c — v0.2.0 stackful coroutine primitive (Phase 1: context-switch spike).
+ * coro_runtime.c — v0.2.0 stackful coroutine primitive.
  *
- * Thin, ABI-neutral wrapper over the vendored libco context switch. Exposes the four
+ * A coroutine's stack and its context switch come from Ingrid's Tessera runtime library
+ * (Ingrid/runtime-tessera/coroutine.tess, compiled into this DLL): the same code on every operating
+ * system, where this used to be Windows fibers on Windows and libco elsewhere. Exposes the four
  * substrate primitives the v0.2.0 design (§8)
  * names: create / resume / yield / delete. The cancellation shadow stack + rf_coro_abandon
  * (Phase 3) and the compiler instrumentation (Phases 4-5) build ON TOP of this; they are
@@ -11,7 +13,7 @@
  *   - rf_coro_resume() switches INTO a coroutine and blocks the caller until that coroutine
  *     parks (rf_coro_yield) or finishes (entry returns). It returns the resulting status.
  *   - rf_coro_yield() switches back OUT to whoever most recently resumed this coroutine.
- *   - libco runs the coroutine on the same OS thread, so the "currently running coroutine"
+ *   - The switch runs the coroutine on the same OS thread, so the "currently running coroutine"
  *     pointer is per-OS-thread (_Thread_local). It survives the stack swap because it lives
  *     in thread-local storage, not on either stack.
  */
@@ -31,18 +33,20 @@
 #include <unistd.h> // sysconf(_SC_NPROCESSORS_ONLN) — pool worker count
 #endif
 
-#ifdef HAVE_LIBCO
-#include "libco.h"
-#endif
+/* The coroutine stack and context switch (Ingrid/runtime-tessera/coroutine.tess). The stack is
+ * reserved, not committed: pages are committed as the stack grows into them, with a no-access page at
+ * the bottom, on every operating system (on Windows through a guard page the OS moves down, with the
+ * thread block's stack fields switched along with the stack). ingrid_coro_switch saves the registers
+ * the calling convention keeps on the current stack, stores its stack pointer through `from`, and
+ * returns on the stack `to` points into. */
+extern void* ingrid_coro_stack_alloc(size_t size);
+extern void  ingrid_coro_stack_free(void* stack);
+extern void* ingrid_coro_stack_init(void* stack, size_t size, void (*entry)(void));
+extern void  ingrid_coro_switch(void** from, void* to);
 
-/* A coroutine context-switch backend is available whenever we can run coroutines at all: native
- * Windows fibers on _WIN32, libco elsewhere. The SHARED coroutine machinery (cancellation frames,
- * abandon, rf_coro_current, the cooperative yield) gates on THIS, not on HAVE_LIBCO — so it never
- * depends on libco being linked on Windows, where libco is unused (the backend is fibers). The
- * backend-SPECIFIC parts still gate on `_WIN32` (fibers) vs `HAVE_LIBCO && !_WIN32` (libco). */
-#if defined(_WIN32) || defined(HAVE_LIBCO)
-  #define RF_HAVE_CORO 1
-#endif
+/* Coroutines run wherever the switch is built (x86-64 and AArch64); the shared machinery below
+ * (cancellation frames, abandon, rf_coro_current, the cooperative yield) gates on this. */
+#define RF_HAVE_CORO 1
 
 #include "rf_sync.h" /* portable rf_mutex / rf_cond — shared with the task↔coro bridge */
 
@@ -63,9 +67,9 @@ extern void* __rf_stack_activate(void* handle);
 /* Default coroutine stack reserve, in bytes, when the caller passes stack_size == 0. This is a
  * VIRTUAL reserve, not committed up front: pages back the stack only as it actually grows into them,
  * so a parked shallow coroutine charges roughly the pages it has touched — NOT a full megabyte —
- * letting a great many coroutines coexist. The demand growth is the OS's job on both backends:
- * Windows fibers (CreateFiberEx: small commit + this reserve, guard-page growth) and POSIX libco
- * stacks (mmap MAP_NORESERVE + a no-access guard page; see rf_coro_stack_alloc). A deep call chain is
+ * letting a great many coroutines coexist. The demand growth is the OS's job: Linux and macOS
+ * commit a page when it is first touched, and on Windows a guard page below the committed top moves
+ * down as the stack grows (ingrid_coro_stack_alloc). A deep call chain is
  * therefore safe — the stack grows on demand up to this reserve. (Design §9.2.) */
 #define RF_CORO_DEFAULT_STACK (1024u * 1024u)
 
@@ -152,15 +156,9 @@ struct rf_coro {
                                     * picks the SMALLEST seq among completed competitors (first-to-finish)
                                     * so the winner is order-correct even when a delayed scan sees
                                     * several already completed (the macOS coros-race bug).        */
-#if defined(_WIN32)
-    void* fiber;                   /* Windows fiber backing this coroutine (CreateFiberEx)        */
-    void* resumer_fiber;           /* fiber to switch back to on yield/finish                     */
-#elif defined(HAVE_LIBCO)
-    cothread_t thread;             /* libco context for this coroutine's own stack        */
-    cothread_t resumer;            /* context to switch back to on yield/finish           */
-    void* stack_region;            /* whole stack mapping (guard page included) for teardown     */
-    size_t stack_region_size;      /* byte length of stack_region; 0 if libco malloc'd it itself */
-#endif
+    void* stack;                   /* the bottom of this coroutine's stack (ingrid_coro_stack_alloc) */
+    void* sp;                      /* its stack pointer while it is not running                     */
+    void* resumer_sp;              /* the resumer's stack pointer while it runs: where yield returns */
 };
 
 /* Monotonic completion-order counter (defined below, near rf_race_wait). Forward-declared here
@@ -170,59 +168,13 @@ extern _Atomic uint64_t g_rf_completion_seq;
 /* The coroutine currently executing on THIS OS thread. NULL when running ordinary (non-coroutine)
  * code. Set by resume immediately before switching in so the trampoline, yield, cf_push/pop,
  * rf_coro_current, and the scheduler can recover their own rf_coro*. Thread-local: each OS thread
- * drives its own coroutines independently. Needed by BOTH the Windows fiber and libco backends. */
+ * drives its own coroutines independently. */
 static _Thread_local rf_coro* g_current_coro = NULL;
 
-#if defined(_WIN32)
-/* ---- Windows backend: native fibers ----------------------------------------------------------
- * A coroutine is a Windows fiber (CreateFiberEx) with a small initial commit and a large reserve.
- * Windows manages the fiber's stack like a thread stack: cheap up front (so very many coroutines
- * coexist) and demand-paged GUARD-PAGE GROWTH on deep calls — so ANY normal routine, including deep
- * C-runtime calls like fopen, works inside a coroutine. This replaces the VEH-demand-committed libco
- * stacks used on POSIX, whose user-mode fault handler could not run once a single large stack-pointer
- * drop (fopen's path buffer) exhausted the committed region. */
-#include <windows.h>
-
-static _Thread_local int g_thread_is_fiber = 0;
-
-/* Make THIS OS thread a fiber so SwitchToFiber works. Idempotent: if the thread is already a fiber,
- * ConvertThreadToFiber fails with ERROR_ALREADY_FIBER, which is fine — we only need to BE one. */
-static void rf_coro_ensure_thread_is_fiber(void)
-{
-    if (!g_thread_is_fiber) {
-        ConvertThreadToFiber(NULL);
-        g_thread_is_fiber = 1;
-    }
-}
-
-/* Fiber bootstrap (the CreateFiberEx start routine). Runs the user entry to completion on the
- * fiber's own Windows-managed stack, marks COMPLETED, then switches back to the resumer. It must
- * NEVER return — a fiber proc that returns terminates the whole OS thread — so the trailing
- * SwitchToFiber does not return: a COMPLETED coroutine is never resumed again, and $destroy deletes
- * the fiber. `self` comes from the fiber parameter. */
-static void __stdcall rf_coro_fiber_proc(void* param)
-{
-    rf_coro* self = (rf_coro*)param;
-    self->entry(self->userdata);
-    atomic_store_explicit(&self->completion_seq, atomic_fetch_add(&g_rf_completion_seq, 1),
-                          memory_order_relaxed);
-    atomic_thread_fence(memory_order_release); /* seq visible before the COMPLETED store (arm64) */
-    self->status = RF_CORO_COMPLETED;
-    SwitchToFiber(self->resumer_fiber);
-}
-#endif /* _WIN32 fiber backend */
-
-#if defined(HAVE_LIBCO) && !defined(_WIN32)
-
-/* Platform memory primitives for demand-paged coroutine stacks (rf_coro_stack_alloc). POSIX only —
- * Windows uses fibers above. */
-#include <sys/mman.h>
-#include <unistd.h>
-
-/* libco bootstrap. Runs on the coroutine's own stack the first time it is resumed. Recovers
- * `self` from the thread-local that resume just set, runs the user entry to completion, marks
- * COMPLETED, and switches back to the resumer. Control never falls off the end of this
- * function: the final co_switch does not return. */
+/* Bootstrap. Runs on the coroutine's own stack the first time it is resumed (the stack's first
+ * frame returns into it). Recovers `self` from the thread-local that resume just set, runs the user
+ * entry to completion, marks COMPLETED, and switches back to the resumer. Control never falls off
+ * the end of this function: the final switch does not return. */
 static void rf_coro_trampoline(void)
 {
     rf_coro* self = g_current_coro;
@@ -231,53 +183,9 @@ static void rf_coro_trampoline(void)
                           memory_order_relaxed);
     atomic_thread_fence(memory_order_release); /* seq visible before the COMPLETED store (arm64) */
     self->status = RF_CORO_COMPLETED;
-    co_switch(self->resumer);
+    ingrid_coro_switch(&self->sp, self->resumer_sp);
+    abort(); /* unreachable: a COMPLETED coroutine is never resumed */
 }
-
-/* Allocate a demand-paged coroutine stack of (at least) `usable` bytes and hand back the usable
- * region to give co_derive. POSIX only — Windows uses native fibers (the OS manages their stacks).
- * A no-access GUARD PAGE sits just below the usable region (the stack grows downward into it), so a
- * stack overflow faults cleanly instead of silently scribbling on the neighbouring allocation. The
- * mapping is MAP_NORESERVE, so the kernel commits pages only as the stack actually touches them and a
- * generous reserve stays cheap. *region / *region_size capture the WHOLE mapping (guard included) for
- * rf_coro_stack_free. Returns NULL on failure (the caller raises a runtime error). */
-static void* rf_coro_stack_alloc(size_t usable, void** region, size_t* region_size)
-{
-    long pgl = sysconf(_SC_PAGESIZE);
-    size_t pg = (pgl > 0) ? (size_t)pgl : 4096u;
-    size_t guard = pg;
-    size_t body = (usable + pg - 1) & ~(pg - 1);
-    size_t total = guard + body;
-    /* MAP_NORESERVE: do not reserve swap up front; pages commit on first touch (demand-paged). Keeps
-     * a generous reserve cheap so many coroutines can coexist. (max_map_count remains the kernel-side
-     * ceiling on the number of mappings; mmap returns MAP_FAILED past it → NULL → caller throws.) */
-#ifndef MAP_NORESERVE
-#define MAP_NORESERVE 0
-#endif
-    void* base = mmap(NULL, total, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (base == MAP_FAILED) {
-        return NULL;
-    }
-    if (mprotect(base, guard, PROT_NONE) != 0) {
-        munmap(base, total);
-        return NULL;
-    }
-    *region = base;
-    *region_size = total;
-    return (char*)base + guard;
-}
-
-/* Release a stack mapping from rf_coro_stack_alloc. NOT co_delete: that frees the libco handle with
- * LIBCO_FREE (plain free), but our stack is an mmap region, not malloc'd. */
-static void rf_coro_stack_free(void* region, size_t region_size)
-{
-    if (region == NULL) {
-        return;
-    }
-    munmap(region, region_size);
-}
-#endif /* HAVE_LIBCO && !_WIN32 */
 
 rf_coro* rf_coro_create(rf_context_entry_fn entry, void* userdata, size_t stack_size)
 {
@@ -298,43 +206,17 @@ rf_coro* rf_coro_create(rf_context_entry_fn entry, void* userdata, size_t stack_
     atomic_init(&coro->completion_seq, (uint64_t)-1); /* not completed yet (never the min in race!'s scan) */
     coro->shadow_stack = __rf_stack_coro_create(); /* NULL when tracing is off */
 
-#if defined(_WIN32)
-    /* Fiber with a small initial commit + large reserve: cheap per coroutine, and Windows grows the
-     * stack on demand (guard-page growth) so deep native calls inside the coroutine are safe.
-     * FIBER_FLAG_FLOAT_SWITCH preserves x87/SSE state across switches (required for correctness). */
-    SIZE_T reserve = (stack_size == 0) ? (SIZE_T)RF_CORO_DEFAULT_STACK : (SIZE_T)stack_size;
-    SIZE_T commit = 4u * 1024u;
-    coro->fiber = CreateFiberEx(commit, reserve, FIBER_FLAG_FLOAT_SWITCH, rf_coro_fiber_proc, coro);
-    if (coro->fiber == NULL) {
-        free(coro);
-        __rf_throw("OutOfMemoryError", "Failed to create coroutine fiber");
-        return NULL; /* unreachable */
-    }
-#elif defined(HAVE_LIBCO)
+    /* A reserved stack: cheap per coroutine, committed as it grows, so deep native calls inside the
+     * coroutine are safe (design §9.2). */
     size_t reserve = (stack_size == 0) ? (size_t)RF_CORO_DEFAULT_STACK : stack_size;
-    void* region;
-    size_t region_size;
-    void* usable = rf_coro_stack_alloc(reserve, &region, &region_size);
-    if (usable == NULL) {
+    coro->stack = ingrid_coro_stack_alloc(reserve);
+    if (coro->stack == NULL) {
         free(coro);
         __rf_throw("OutOfMemoryError",
                    "Failed to reserve coroutine stack (out of address space or commit limit)");
         return NULL; /* unreachable */
     }
-    /* Size given to co_derive = the usable body (whole mapping minus the leading header+guard). */
-    size_t body = region_size - (size_t)((char*)usable - (char*)region);
-    coro->thread = co_derive(usable, (unsigned int)body, rf_coro_trampoline);
-    if (coro->thread == NULL) {
-        rf_coro_stack_free(region, region_size);
-        free(coro);
-        __rf_throw("OutOfMemoryError", "Failed to derive coroutine context");
-        return NULL; /* unreachable */
-    }
-    coro->stack_region = region;
-    coro->stack_region_size = region_size;
-#else
-    (void)stack_size;
-#endif
+    coro->sp = ingrid_coro_stack_init(coro->stack, reserve, rf_coro_trampoline);
 
     return coro;
 }
@@ -348,42 +230,16 @@ rf_coro_status rf_coro_resume(rf_coro* coro)
         return RF_CORO_COMPLETED;
     }
 
-#if defined(_WIN32)
-    rf_coro_ensure_thread_is_fiber();      /* this OS thread must be a fiber to SwitchToFiber */
-    coro->resumer_fiber = GetCurrentFiber();
     rf_coro* prev = g_current_coro;
     g_current_coro = coro;
     void* prev_shadow = __rf_stack_activate(coro->shadow_stack); /* call chain follows the coroutine */
     coro->status = RF_CORO_RUNNING;
 
-    SwitchToFiber(coro->fiber); /* runs fiber_proc (first time) or returns from yield */
+    ingrid_coro_switch(&coro->resumer_sp, coro->sp); /* runs the trampoline (first time) or returns from yield */
 
     __rf_stack_activate(prev_shadow); /* restore the resumer's call chain */
     g_current_coro = prev;   /* the coroutine parked or finished; restore our context */
     return coro->status;     /* PARKED (yielded) or COMPLETED (entry returned)        */
-#elif defined(HAVE_LIBCO)
-    coro->resumer = co_active();
-    rf_coro* prev = g_current_coro;
-    g_current_coro = coro;
-    void* prev_shadow = __rf_stack_activate(coro->shadow_stack); /* call chain follows the coroutine */
-    coro->status = RF_CORO_RUNNING;
-
-    co_switch(coro->thread); /* runs trampoline (first time) or returns from yield */
-
-    __rf_stack_activate(prev_shadow); /* restore the resumer's call chain */
-    g_current_coro = prev;   /* the coroutine parked or finished; restore our context */
-    return coro->status;     /* PARKED (yielded) or COMPLETED (entry returned)        */
-#else
-    /* No context-switch backend: degrade to a synchronous run-to-completion so callers
-     * still make progress (yield becomes a no-op). */
-    coro->status = RF_CORO_RUNNING;
-    coro->entry(coro->userdata);
-    atomic_store_explicit(&coro->completion_seq, atomic_fetch_add(&g_rf_completion_seq, 1),
-                          memory_order_relaxed);
-    atomic_thread_fence(memory_order_release); /* seq visible before the COMPLETED store (arm64) */
-    coro->status = RF_CORO_COMPLETED;
-    return RF_CORO_COMPLETED;
-#endif
 }
 
 /* Pure context switch back to the resumer, marking PARKED. The low-level half of every suspend:
@@ -392,23 +248,13 @@ rf_coro_status rf_coro_resume(rf_coro* coro)
  * The public rf_coro_yield (cooperative) is defined after the scheduler, since it re-queues. */
 static void rf_coro_switch_out(void)
 {
-#if defined(_WIN32)
     rf_coro* self = g_current_coro;
     if (self == NULL) {
         return; /* not inside a coroutine — yielding the OS thread is meaningless here */
     }
     self->status = RF_CORO_PARKED;
-    SwitchToFiber(self->resumer_fiber);
+    ingrid_coro_switch(&self->sp, self->resumer_sp);
     /* Resumed: resume() has already set status back to RUNNING and g_current_coro to self. */
-#elif defined(HAVE_LIBCO)
-    rf_coro* self = g_current_coro;
-    if (self == NULL) {
-        return; /* not inside a coroutine — yielding the OS thread is meaningless here */
-    }
-    self->status = RF_CORO_PARKED;
-    co_switch(self->resumer);
-    /* Resumed: resume() has already set status back to RUNNING and g_current_coro to self. */
-#endif
 }
 
 rf_coro_status rf_coro_status_get(rf_coro* coro)
@@ -462,17 +308,9 @@ void rf_coro_delete(rf_coro* coro)
     if (coro == NULL) {
         return;
     }
-#if defined(_WIN32)
-    if (coro->fiber != NULL) {
-        DeleteFiber(coro->fiber); /* frees the Windows-managed fiber stack */
+    if (coro->stack != NULL) {
+        ingrid_coro_stack_free(coro->stack);
     }
-#elif defined(HAVE_LIBCO)
-    if (coro->thread != NULL) {
-        /* Release the stack mapping ourselves (guard page included). We must NOT co_delete it:
-         * co_delete frees the handle with plain free(), but our stack came from mmap/VirtualAlloc. */
-        rf_coro_stack_free(coro->stack_region, coro->stack_region_size);
-    }
-#endif
     __rf_stack_coro_destroy(coro->shadow_stack); /* free the migrating call-chain stack */
     free(coro);
 }
@@ -561,8 +399,8 @@ void rf_coro_abandon(rf_coro* coro)
 }
 
 /* The coroutine running on this OS thread, or NULL outside any coroutine. Exposes the
- * backend-agnostic g_current_coro so the scheduler and the task↔coro await bridge (task_runtime.c)
- * can recover the running coroutine regardless of which backend (fiber or libco) is in use. */
+ * g_current_coro so the scheduler and the task↔coro await bridge (task_runtime.c) can recover the
+ * running coroutine. */
 rf_coro* rf_coro_current(void)
 {
 #ifdef RF_HAVE_CORO

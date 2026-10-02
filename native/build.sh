@@ -7,7 +7,13 @@ mkdir -p build
 cd build
 
 echo "Configuring with CMake..."
-cmake .. -DCMAKE_BUILD_TYPE=Release -DRAZORFORGE_BUILD_VENDOR_LIBUV=ON
+# TESSERA_DLL (set by the RazorForge build) is the Tessera builder that compiles ../runtime-tessera; without it CMake
+# looks for the checkout's own Tessera build.
+TESSERA_ARGS=()
+if [[ -n "${TESSERA_DLL:-}" ]]; then
+    TESSERA_ARGS=(-DTESSERA_DLL="$TESSERA_DLL")
+fi
+cmake .. -DCMAKE_BUILD_TYPE=Release "${TESSERA_ARGS[@]}"
 
 echo "Building libraries..."
 cmake --build . --config Release

@@ -11,22 +11,16 @@ struct rf_context_runtime
     rf_U64 reserved;
 };
 
+/* The coroutine switch is Ingrid's Tessera runtime code (runtime-tessera/coroutine.tess), on every
+ * operating system. */
 const char* rf_context_backend_name(void)
 {
-#ifdef HAVE_LIBCO
-    return "libco";
-#else
-    return "none";
-#endif
+    return "tessera";
 }
 
 rf_runtime_backend_state rf_context_backend_state(void)
 {
-#ifdef HAVE_LIBCO
     return RF_RUNTIME_BACKEND_AVAILABLE;
-#else
-    return RF_RUNTIME_BACKEND_UNAVAILABLE;
-#endif
 }
 
 rf_context_runtime* rf_context_runtime_create(void)
@@ -49,22 +43,9 @@ int rf_context_runtime_spawn(rf_context_runtime* runtime, rf_context_entry_fn en
     (void)runtime;
     (void)stack_size;
 
-#ifdef HAVE_LIBCO
-    /*
-     * libco integration point:
-     * - create a stackful coroutine/fiber context
-     * - register `entry(userdata)` as the bootstrap routine
-     * - hand the resulting context to the RazorForge scheduler
-     *
-     * The wrapper boundary exists now so the rest of the runtime never calls
-     * libco APIs directly.
-     */
+    /* Coroutines go through coro_runtime.c (rf_coro_create / rf_sched_spawn); this older entry point
+     * runs the routine to completion on the calling thread. */
     if (entry == NULL) return 0;
     entry(userdata);
     return 1;
-#else
-    (void)entry;
-    (void)userdata;
-    return 0;
-#endif
 }

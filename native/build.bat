@@ -19,7 +19,12 @@ if %ERRORLEVEL% neq 0 (
     set "RF_CLANGXX=C:/Program Files/LLVM/bin/clang++.exe"
 )
 
-cmake .. -G "Ninja" -DCMAKE_C_COMPILER="%RF_CLANG%" -DCMAKE_CXX_COMPILER="%RF_CLANGXX%" -DCMAKE_BUILD_TYPE=Release -DRAZORFORGE_BUILD_VENDOR_LIBUV=ON
+REM TESSERA_DLL (set by the RazorForge build) is the Tessera builder that compiles ..\runtime-tessera; without it
+REM CMake looks for the checkout's own Tessera build.
+set "RF_TESSERA="
+if not "%TESSERA_DLL%"=="" set "RF_TESSERA=-DTESSERA_DLL=%TESSERA_DLL%"
+
+cmake .. -G "Ninja" -DCMAKE_C_COMPILER="%RF_CLANG%" -DCMAKE_CXX_COMPILER="%RF_CLANGXX%" -DCMAKE_BUILD_TYPE=Release %RF_TESSERA%
 
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!

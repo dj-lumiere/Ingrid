@@ -33,17 +33,56 @@ include_directories(include)
 #  in docs/licenses.)
 
 # ============================================================================
-# Third-party libraries (the runtime links libco and libuv; a stdlib module that needs another C
-# library adds it here when it is written)
+# Third-party libraries: none. Coroutine stacks and switching are Ingrid's Tessera code (below), and
+# blocking I/O runs on the runtime's own I/O threads (runtime/async_io.c). A stdlib module that needs a
+# C library adds it here when it is written.
 # ============================================================================
 
-# libco - Stackful coroutine/fiber backend
-# https://github.com/rxi/libco or compatible fork (public domain / ISC-like depending on fork)
-include(cmake/libco.cmake)
+# ============================================================================
+# Ingrid's runtime code written in Tessera (../runtime-tessera): the coroutine stack and context switch.
+# The Tessera builder (TESSERA_DLL, which the RazorForge build passes in; a checkout's own Tessera build
+# otherwise) compiles it to LLVM IR, and clang compiles that into an object of the runtime DLL.
+# ============================================================================
+if(NOT TESSERA_DLL)
+    foreach(config Debug Release)
+        set(candidate "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/bin/${config}/net10.0/tessera.dll")
+        if(EXISTS "${candidate}")
+            set(TESSERA_DLL "${candidate}")
+        endif()
+    endforeach()
+endif()
+if(NOT TESSERA_DLL OR NOT EXISTS "${TESSERA_DLL}")
+    message(FATAL_ERROR "The Tessera builder is needed for ../runtime-tessera: build ../../Tessera "
+                        "(dotnet build), or pass -DTESSERA_DLL=<path to tessera.dll>.")
+endif()
+message(STATUS "Tessera builder: ${TESSERA_DLL}")
 
-# libuv - Cross-platform async I/O and event loop
-# https://github.com/libuv/libuv (MIT)
-include(cmake/libuv.cmake)
+file(GLOB INGRID_RUNTIME_TESSERA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/*.tess")
+get_filename_component(TESSERA_DIR "${TESSERA_DLL}" DIRECTORY)
+file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/stdlib/*.tess")
+set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
+set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
+add_custom_command(
+    OUTPUT "${INGRID_RUNTIME_LL}"
+    COMMAND dotnet "${TESSERA_DLL}" build --emit-llvm --no-stdlib-exports --mode release
+            ${INGRID_RUNTIME_TESSERA} -o "${INGRID_RUNTIME_LL}"
+    DEPENDS ${INGRID_RUNTIME_TESSERA} ${TESSERA_STDLIB} "${TESSERA_DLL}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    COMMENT "Compiling Ingrid's runtime Tessera code"
+    VERBATIM)
+if(WIN32)
+    set(INGRID_RUNTIME_PIC "")
+else()
+    set(INGRID_RUNTIME_PIC "-fPIC")
+endif()
+add_custom_command(
+    OUTPUT "${INGRID_RUNTIME_OBJ}"
+    COMMAND "${CMAKE_C_COMPILER}" -c -O2 ${INGRID_RUNTIME_PIC} -Wno-override-module "${INGRID_RUNTIME_LL}"
+            -o "${INGRID_RUNTIME_OBJ}"
+    DEPENDS "${INGRID_RUNTIME_LL}"
+    COMMENT "Compiling ingrid_runtime_tessera.ll"
+    VERBATIM)
+set_source_files_properties("${INGRID_RUNTIME_OBJ}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
 
 # ============================================================================
@@ -80,6 +119,8 @@ add_library(razorforge_runtime SHARED
     runtime/task_runtime.c
     runtime/concurrency_context.c
     runtime/coro_runtime.c
+    runtime/tessera_panic.c
+    "${INGRID_RUNTIME_OBJ}"
     runtime/async_io.c
     runtime/channel_runtime.c
     runtime/signal_runtime.c
@@ -113,17 +154,6 @@ if(WIN32)
     endif()
 endif()
 
-# Link libco if available
-if(HAVE_LIBCO)
-    target_compile_definitions(razorforge_runtime PRIVATE HAVE_LIBCO)
-    target_link_libraries(razorforge_runtime rf_libco)
-endif()
-
-# Link libuv if available
-if(HAVE_LIBUV)
-    target_compile_definitions(razorforge_runtime PRIVATE HAVE_LIBUV)
-    target_link_libraries(razorforge_runtime uv_a)
-endif()
 
 
 # Set output directory
@@ -177,8 +207,8 @@ install(FILES include/razorforge_runtime.h
 message(STATUS "")
 message(STATUS "RazorForge Native Configuration:")
 message(STATUS "  ── Modules ──")
-message(STATUS "  libco (green-thread contexts):    ${HAVE_LIBCO}")
-message(STATUS "  libuv (async I/O loop):           ${HAVE_LIBUV}")
+message(STATUS "  coroutine switch:                 Tessera (../runtime-tessera)")
+message(STATUS "  blocking I/O:                     the runtime's I/O threads (runtime/async_io.c)")
 message(STATUS "  ── Platform ──")
 message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  Compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")

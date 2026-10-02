@@ -144,21 +144,23 @@ Files:
 
 Responsibilities:
 
-- stackful context switching backend for `suspended routine`
-- async event loop backend for timers, wakeups, and I/O readiness
+- stackful context switching for `suspended routine`
+- blocking I/O (whole-file reads and writes, subprocesses) without stopping the coroutine scheduler
 
-Current backend choices:
+Backends, the same on every operating system:
 
-- `libco` for stackful context switching
-- `libuv` for async I/O and event loop services
+- context switching and coroutine stacks: Ingrid's Tessera code
+  ([runtime-tessera/coroutine.tess](../runtime-tessera/coroutine.tess)), compiled into this library: Tessera's
+  `switch_stack` and its stack allocator (pages reserved, committed as the stack grows, a no-access page at the
+  bottom; on Windows a guard page the OS moves down, with the thread block's stack fields switched along)
+- blocking I/O: the runtime's own I/O threads ([async_io.c](../native/runtime/async_io.c)); a coroutine parks while
+  one of them runs the call and is woken when it is done. Subprocesses use `fork`/`execvp` or `CreateProcessW`
+  with their output read through pipes.
 
 The public rule is:
 
 - RazorForge code should call `rf_context_*` and `rf_async_*`
-- nothing outside `native/runtime` should call `libco` or `libuv` APIs directly
-
-Right now both wrappers are still stubs. The wrapper boundary is deliberate: it keeps the third-party library choice
-replaceable later.
+- nothing outside `native/runtime` should call the backends directly
 
 ### 4. Numeric and External-Library Bridges
 
@@ -247,13 +249,10 @@ Ingrid should eventually mirror that split directly:
 
 It should not collapse all of that into one anonymous “heap handle” abstraction.
 
-## Vendored Libraries
+## Third-Party Libraries
 
-These directories are vendored snapshots (fetched by CI and `build.sh`), not separate repos the runtime should expose
-directly. The runtime links two:
-
-- `libco`: stackful coroutine contexts
-- `libuv`: the async I/O event loop
+The runtime links none. It used to link `libco` (coroutine contexts) and `libuv` (the async I/O loop); both were
+replaced by Ingrid's own code, so a coroutine and a blocking call behave the same on every operating system.
 
 Libraries staged earlier for future stdlib modules were removed while nothing used them. The plan for each:
 
@@ -271,8 +270,8 @@ Primary files:
 - [CMakeLists.txt](../native/CMakeLists.txt)
 - [build.bat](../native/build.bat)
 - [build.sh](../native/build.sh)
-- [cmake/libco.cmake](../native/cmake/libco.cmake)
-- [cmake/libuv.cmake](../native/cmake/libuv.cmake)
+- [runtime-tessera](../runtime-tessera): Tessera code, compiled by the Tessera builder (`TESSERA_DLL`) into an
+  object of the runtime library
 
 ### Build outputs
 
@@ -310,14 +309,13 @@ Current reality:
 - `Task[T]` exists
 - `waitfor task` lowers through runtime calls
 - `waitfor 5s` lowers to `rf_waitfor_duration`
-- `libco` and `libuv` are vendored and wrapped
-- `concurrency_context.c` and `async_io.c` are still backend stubs
+- coroutines switch through Ingrid's Tessera code, and blocking I/O runs on the runtime's I/O threads
 - task waiting is still shallow and not yet a real blocking/parking scheduler
 
 Planned reality:
 
 - `threaded routine` spawns real OS-thread-backed tasks
-- `suspended routine` runs on a real scheduler backed by `libco`
+- `suspended routine` runs on a real scheduler
 - `waitfor` parks suspended tasks instead of blocking worker threads
 - `within` uses timer-backed wakeups
 - `after` uses real dependent task activation
@@ -345,9 +343,7 @@ When adding new native functionality, follow these rules.
 
 4. Prefer one runtime-owned state object over scattering task state across ad hoc globals.
 
-5. Treat vendored libraries as replaceable backends.
-
-- especially `libco` and `libuv`
+5. Keep backends behind the `rf_*` boundary, so one can be replaced without touching the compiler or stdlib.
 
 ## Immediate Priorities
 

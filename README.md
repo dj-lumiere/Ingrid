@@ -37,12 +37,12 @@ native/
 
 ## Building
 
-Ingrid builds with CMake 3.20+ and Clang (plus Ninja on Windows), against [libuv](https://github.com/libuv/libuv)
-and [libco](https://github.com/higan-emu/libco), which are not vendored:
+Ingrid builds with CMake 3.20+ and Clang (plus Ninja on Windows), and the Tessera builder: the runtime's
+coroutine stacks and context switch are Tessera code (`runtime-tessera/`), compiled into the runtime library. It
+needs no third-party C library. With [Tessera](https://github.com/dj-lumiere/Tessera) checked out next to Ingrid
+and built (`dotnet build`), CMake finds the builder on its own; otherwise set `TESSERA_DLL` to `tessera.dll`:
 
 ```bash
-git clone --depth 1 https://github.com/libuv/libuv.git native/libuv
-git clone --depth 1 https://github.com/higan-emu/libco.git native/libco
 cd native && ./build.sh        # Windows: build.bat
 ```
 
