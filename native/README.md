@@ -33,7 +33,7 @@ native/
 ├── files_posix.tess  // files.tess on Linux and macOS
 ├── numeric.tess  // libm's exact float operations, a random word, the wall clock, FFI test helpers
 ├── signals.tess  // when_interrupted / when_terminated
-├── builtins.tess  // what the JIT would otherwise get from compiler-rt: 128-bit division, emulated TLS
+├── builtins.tess  // what the JIT would otherwise get from compiler-rt: emulated TLS
 ├── coro.tess  // a coroutine: create / resume / yield / abandon, the cancellation shadow stack
 ├── sched.tess  // the scheduler: the worker pool, deques and stealing, timers, park/wake
 ├── race.tess  // race!
