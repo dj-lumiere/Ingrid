@@ -214,6 +214,20 @@ routine sa_restart() -> CInt
     block entry():
         return(2)
 
+#[external("c"), symbol("pipe"), target(os: not "windows")]
+private routine c_pipe(fds: @CInt) -> CInt
+
+#[external("c"), symbol("__errno_location"), target(os: "linux")]
+private routine c_errno_place() -> @CInt
+
+#[external("c"), symbol("__error"), target(os: "macos")]
+private routine c_errno_place() -> @CInt
+
+#target(os: not "windows")
+private routine errno() -> CInt
+    block entry():
+        return(c_errno_place().load())
+
 /// Async-signal-safe: writes the which-code byte and returns.
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
@@ -223,7 +237,7 @@ routine posix_signal_handler(signo: CInt) -> Void
         jump write(byte)
 
     block write(byte: @U8):
-        rc : SSize = c_write_fd(SELF_PIPE.to<@CInt>().stride(1).load(), byte, 1)
+        rc : SSize = c_write(SELF_PIPE.to<@CInt>().stride(1).load(), byte.to<@Byte>(), 1)
         branch rc.lt(0).bitand(errno().eq(4))
             ? write(byte)
             : return()
@@ -236,7 +250,7 @@ routine signal_dispatch_main(raw: Addr) -> Void
         jump read(code)
 
     block read(code: @U8):
-        rc : SSize = c_read_fd(SELF_PIPE.to<@CInt>().load(), code, 1)
+        rc : SSize = c_read(SELF_PIPE.to<@CInt>().load(), code.to<@Byte>(), 1)
         branch rc.eq(1)
             ? got(code)
             : continue

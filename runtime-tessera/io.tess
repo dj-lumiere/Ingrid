@@ -312,48 +312,26 @@ routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
         return()
 
 // -- subprocesses --------------------------------------------------------------------
+//
+// Tessera's Standard::Os runs the program; this is the rf_* boundary over it. Every string is a malloc'd copy, and
+// the captured streams come back malloc'd and NUL-terminated (the caller frees them).
 
+/// A subprocess to run (a command line for the shell, or a program and its arguments), and once it ran, how.
 record ProcState
-    argv        : @@Byte  // owned, null-terminated
-    cwd         : @Byte  // owned, or null to inherit
-    envp        : @@Byte  // owned, null-terminated "KEY=VALUE", or null to inherit
-    exit_status : S64
-    term_signal : CInt  // the signal that killed the child, or 0
-    spawn_err   : CInt  // not 0 when the child couldn't start
-    out_buf     : @Byte
-    out_len     : USize
-    out_cap     : USize
-    err_buf     : @Byte
-    err_len     : USize
-    err_cap     : USize
-
-/// Appends n bytes to a malloc'd, NUL-terminated buffer, growing it. On an allocation failure the bytes are dropped.
-routine buf_append(buf: @@Byte, len: @USize, cap: @USize, data: @Byte, n: USize) -> Void
-    block entry():
-        need : USize = len.load().add(n).add(1)
-        branch need.gt(cap.load())
-            ? grow(need, cap.load().eq(0) ? 256 : cap.load())
-            : put()
-
-    block grow(need: USize, ncap: USize):
-        branch need.gt(ncap)
-            ? grow(need, ncap.mul(2))
-            : continue
-        nb : Addr = c_realloc(buf.load(), ncap)
-        branch nb.is_null()
-            ? return()
-            : continue
-        buf.store(nb.to<@Byte>())
-        cap.store(ncap)
-        jump put()
-
-    block put():
-        at : @Byte = buf.load().stride(len.load())
-        c_memcpy(at, data, n)
-        l : USize = len.load().add(n)
-        len.store(l)
-        buf.load().stride(l).store(0x00)
-        return()
+    shell        : Bool  // program is a command line for the platform shell
+    program      : Bytes
+    args         : @Bytes
+    arg_count    : USize
+    arg_cap      : USize
+    directory    : Bytes  // empty: the parent's
+    env          : @EnvVar  // overrides of the parent's environment
+    env_count    : USize
+    env_cap      : USize
+    exit_status  : S64
+    term_signal  : CInt  // the signal that stopped the child, or 0
+    spawn_failed : Bool
+    output       : Bytes
+    errors       : Bytes
 
 /// The captured result of the last subprocess, set just before rf_proc_run returns and read right after.
 #threadlocal
@@ -392,38 +370,117 @@ routine rf_proc_errors_len() -> U64
     block entry():
         return(PROC_ERR_LEN.load())
 
-routine proc_state_new() -> @ProcState
+/// A malloc'd copy of n bytes of s (all of it before its NUL for n < 0); empty when that can't be had.
+routine owned_copy(s: @Byte, n: S32) -> Bytes
+    block entry():
+        len : USize = length_of(s, n)
+        d   : Addr  = c_malloc(len.max(1))
+        branch d.is_null()
+            ? return(Bytes.empty())
+            : continue
+        c_memcpy(d, s, len)
+        return(Bytes.from_ptr(d.to<@Byte>(), len))
+
+routine free_bytes(b: Bytes) -> Void
+    block entry():
+        c_free(b.data)
+        return()
+
+routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
     block entry():
         st : @ProcState = zeroed<ProcState>(1, "Failed to allocate subprocess state")
+        st.shell.store(shell)
+        st.program.store(program)
         st.exit_status.store(-1)
         return(st)
 
-/// Frees a null-terminated array of malloc'd strings.
-routine free_strings(list: @@Byte) -> Void
-    block entry():
-        branch list.is_null()
-            ? return()
-            : next(0)
-
-    block next(i: USize):
-        s : @Byte = list.stride(i).load()
-        branch s.is_null()
-            ? done()
-            : continue
-        c_free(s)
-        jump next(i.add(1))
-
-    block done():
-        c_free(list)
-        return()
-
-/// The captured streams go to the caller (through the thread-locals), not freed here.
+/// The strings, not the captured streams: those go to the caller.
 routine proc_state_free(st: @ProcState) -> Void
     block entry():
-        free_strings(st.argv.load())
-        free_strings(st.envp.load())
-        c_free(st.cwd.load())
+        free_bytes(st.program.load())
+        free_bytes(st.directory.load())
+        jump args(0)
+
+    block args(i: USize):
+        branch i.eq(st.arg_count.load())
+            ? env(0)
+            : continue
+        free_bytes(st.args.load().stride(i).load())
+        jump args(i.add(1))
+
+    block env(i: USize):
+        branch i.eq(st.env_count.load())
+            ? arrays()
+            : continue
+        v : EnvVar = st.env.load().stride(i).load()
+        free_bytes(v.name)
+        free_bytes(v.value)
+        jump env(i.add(1))
+
+    block arrays():
+        c_free(st.args.load())
+        c_free(st.env.load())
         c_free(st)
+        return()
+
+/// A captured stream as the caller takes it: malloc'd and NUL-terminated, or null when nothing came.
+routine terminated(b: Bytes) -> @Byte
+    block entry():
+        branch b.data.is_null()
+            ? return(null)
+            : continue
+        n   : USize = b.length()
+        buf : Addr  = c_realloc(b.data, n.add(1))
+        branch buf.is_null()
+            ? lost(b)
+            : continue
+        buf.to<@Byte>().stride(n).store(0x00)
+        return(buf.to<@Byte>())
+
+    block lost(b: Bytes):
+        c_free(b.data)
+        return(null)
+
+/// Runs the prepared subprocess, on whatever thread calls it, filling in how it went.
+routine proc_run_blocking(st: @ProcState) -> Void
+    block entry():
+        claim alloc : @Allocator <- make_heap_allocator()
+        dir : Bytes = st.directory.load()
+        branch dir.is_empty()
+            ? run(alloc, Option<Bytes>.Absent)
+            : run(alloc, Option<Bytes>.Present(dir))
+
+    block run(alloc: @Allocator, directory: Option<Bytes>):
+        options : ProcessOptions = ProcessOptions { directory: directory, env: st.env.load(),
+                env_count: st.env_count.load(), stdin: InputMode.Null, stdout: OutputMode.Capture,
+                stderr: OutputMode.Capture }
+        branch st.shell.load()
+            ? ran(run_shell(st.program.load(), options, alloc))
+            : ran(run_process(st.program.load(), st.args.load(), st.arg_count.load(), options, alloc))
+
+    block ran(r: Result<ProcessOutput, ProcessError>):
+        when r:
+            .Success(out) -> finished(out)
+            .Failure      -> failed()
+
+    block failed():
+        st.spawn_failed.store(true)
+        return()
+
+    block finished(out: ProcessOutput):
+        st.output.store(out.stdout)
+        st.errors.store(out.stderr)
+        when out.status:
+            .Exited(code)     -> exited(code)
+            .Signaled(signal) -> signaled(signal)
+
+    block exited(code: S32):
+        st.exit_status.store(code.to<S64>())
+        return()
+
+    block signaled(signal: S32):
+        st.exit_status.store(0)
+        st.term_signal.store(signal)
         return()
 
 /// Runs a prepared state, parking a scheduler-driven coroutine meanwhile, publishes the captured streams and the
@@ -435,1027 +492,93 @@ routine proc_exec(st: @ProcState) -> S64
         req.proc.store(st)
         io_run(req)
         PROC_SIGNAL.store(st.term_signal.load())
-        PROC_OUT.store(st.out_buf.load())
-        PROC_OUT_LEN.store(st.out_len.load().to<U64>())
-        PROC_ERR.store(st.err_buf.load())
-        PROC_ERR_LEN.store(st.err_len.load().to<U64>())
-        code : S64 = st.spawn_err.load().ne(0) ? -1 : st.exit_status.load()
+        PROC_OUT.store(terminated(st.output.load()))
+        PROC_OUT_LEN.store(st.output.load().length().to<U64>())
+        PROC_ERR.store(terminated(st.errors.load()))
+        PROC_ERR_LEN.store(st.errors.load().length().to<U64>())
+        failed : Bool = st.spawn_failed.load()
+        code   : S64  = st.exit_status.load()
         proc_state_free(st)
         c_free(req)
-        return(code)
+        branch failed
+            ? return(-1)
+            : return(code)
 
 /// Runs command through the platform shell (cmd /c, sh -c): pipes and globs, at the cost of shell quoting.
 #export("rf_proc_run")
 routine rf_proc_run(command: @Byte, command_len: S32) -> S64
     block entry():
-        st   : @ProcState = proc_state_new()
-        argv : @@Byte     = zeroed<@Byte>(4, "Failed to allocate subprocess argv")
-        argv.store(strdupn(shell_path().data, -1))
-        argv.stride(1).store(strdupn(shell_flag().data, -1))
-        argv.stride(2).store(strdupn(command, command_len))
-        st.argv.store(argv)
-        return(proc_exec(st))
+        return(proc_exec(proc_state_new(true, owned_copy(command, command_len))))
 
-#target(os: "windows")
-routine shell_path() -> CStr
-    block entry():
-        return("cmd.exe")
-
-#target(os: "windows")
-routine shell_flag() -> CStr
-    block entry():
-        return("/c")
-
-#target(os: not "windows")
-routine shell_path() -> CStr
-    block entry():
-        return("/bin/sh")
-
-#target(os: not "windows")
-routine shell_flag() -> CStr
-    block entry():
-        return("-c")
-
-/// rf_proc_builder: an executable and its argument vector, run with no shell.
-record ProcBuilder
-    argv       : @@Byte
-    argv_count : USize
-    argv_cap   : USize
-    cwd        : @Byte
-    envv       : @@Byte  // "KEY=VALUE" overrides, env_count of them
-    env_count  : USize
-    env_cap    : USize
-
+/// An executable and its arguments, run with no shell.
 #export("rf_proc_begin")
-routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcBuilder
+routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
     block entry():
-        b : @ProcBuilder = zeroed<ProcBuilder>(1, "Failed to allocate subprocess builder")
-        b.argv_cap.store(4)
-        argv : @@Byte = zeroed<@Byte>(4, "Failed to allocate subprocess argv")
-        argv.store(strdupn(file, file_len))
-        b.argv.store(argv)
-        b.argv_count.store(1)
-        return(b)
+        return(proc_state_new(false, owned_copy(file, file_len)))
 
 #export("rf_proc_add_arg")
-routine rf_proc_add_arg(b: @ProcBuilder, arg: @Byte, arg_len: S32) -> Void
+routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
     block entry():
         branch b.is_null()
             ? return()
             : continue
-        // room for the new argument and the null after it
-        branch b.argv_count.load().add(2).gt(b.argv_cap.load())
-            ? continue
-            : put()
-        ncap : USize = b.argv_cap.load().mul(2)
-        na   : Addr  = c_realloc(b.argv.load(), ncap.mul(sizeof<Addr>()))
-        branch na.is_null()
+        n : USize = b.arg_count.load()
+        branch n.lt(b.arg_cap.load())
+            ? put(n)
+            : continue
+        cap    : USize = b.arg_cap.load().mul(2).max(4)
+        bigger : Addr  = c_realloc(b.args.load(), cap.mul(sizeof<Bytes>()))
+        branch bigger.is_null()
             ? return()
             : continue
-        b.argv.store(na.to<@@Byte>())
-        b.argv_cap.store(ncap)
-        jump put()
+        b.args.store(bigger.to<@Bytes>())
+        b.arg_cap.store(cap)
+        jump put(n)
 
-    block put():
-        n : USize = b.argv_count.load()
-        b.argv.load().stride(n).store(strdupn(arg, arg_len))
-        b.argv_count.store(n.add(1))
-        b.argv.load().stride(n.add(1)).store(null)
+    block put(n: USize):
+        b.args.load().stride(n).store(owned_copy(arg, arg_len))
+        b.arg_count.store(n.add(1))
         return()
 
 /// An empty directory inherits the parent's.
 #export("rf_proc_set_cwd")
-routine rf_proc_set_cwd(b: @ProcBuilder, cwd: @Byte, cwd_len: S32) -> Void
+routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
     block entry():
         branch b.is_null()
             ? return()
             : continue
-        c_free(b.cwd.load())
-        b.cwd.store(null)
-        len : USize = length_of(cwd, cwd_len)
-        branch len.gt(0)
-            ? continue
-            : return()
-        b.cwd.store(strdupn(cwd, len.to<S32>()))
+        free_bytes(b.directory.load())
+        b.directory.store(owned_copy(cwd, cwd_len))
         return()
 
 /// An environment override, merged into the parent's environment at launch (PATH and the rest stay).
 #export("rf_proc_add_env")
-routine rf_proc_add_env(b: @ProcBuilder, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> Void
+routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> Void
     block entry():
         branch b.is_null()
             ? return()
             : continue
-        branch b.env_count.load().add(1).gt(b.env_cap.load())
-            ? continue
-            : put()
-        cap  : USize = b.env_cap.load()
-        ncap : USize = cap.eq(0) ? 4 : cap.mul(2)
-        ne   : Addr  = c_realloc(b.envv.load(), ncap.mul(sizeof<Addr>()))
-        branch ne.is_null()
-            ? return()
-            : continue
-        b.envv.store(ne.to<@@Byte>())
-        b.env_cap.store(ncap)
-        jump put()
-
-    block put():
-        kl    : USize = length_of(key, key_len)
-        vl    : USize = length_of(val, val_len)
-        entry : Addr  = c_malloc(kl.add(vl).add(2))
-        branch entry.is_null()
-            ? return()
-            : continue
-        e : @Byte = entry.to<@Byte>()
-        c_memcpy(e, key, kl)
-        e.stride(kl).store(b'=')
-        c_memcpy(e.stride(kl.add(1)), val, vl)
-        e.stride(kl.add(vl).add(1)).store(0x00)
         n : USize = b.env_count.load()
-        b.envv.load().stride(n).store(e)
+        branch n.lt(b.env_cap.load())
+            ? put(n)
+            : continue
+        cap    : USize = b.env_cap.load().mul(2).max(4)
+        bigger : Addr  = c_realloc(b.env.load(), cap.mul(sizeof<EnvVar>()))
+        branch bigger.is_null()
+            ? return()
+            : continue
+        b.env.store(bigger.to<@EnvVar>())
+        b.env_cap.store(cap)
+        jump put(n)
+
+    block put(n: USize):
+        b.env.load().stride(n).store(EnvVar { name: owned_copy(key, key_len), value: owned_copy(val, val_len) })
         b.env_count.store(n.add(1))
         return()
 
-/// The length of a "KEY=VALUE" entry's key.
-routine key_length(entry: @Byte) -> USize
-    block entry():
-        jump scan(0)
-
-    block scan(i: USize):
-        c : Byte = entry.stride(i).load()
-        branch c.eq(0x00).bitor(c.eq(b'='))
-            ? return(i)
-            : scan(i.add(1))
-
-routine same_key(a: @Byte, b: @Byte) -> Bool
-    block entry():
-        n : USize = key_length(a)
-        branch n.eq(key_length(b))
-            ? compare(n, 0)
-            : return(false)
-
-    block compare(n: USize, i: USize):
-        branch i.eq(n)
-            ? return(true)
-            : continue
-        branch a.stride(i).load().eq(b.stride(i).load())
-            ? compare(n, i.add(1))
-            : return(false)
-
-/// The parent's environment with the overrides applied (one replaces a parent entry with its key, or is added):
-/// null-terminated, the overrides moved in and the parent's entries copied. Null without overrides (inherit).
-routine merge_env(overrides: @@Byte, n: USize) -> @@Byte
-    block entry():
-        branch n.eq(0)
-            ? return(null)
-            : continue
-        parent : @@Byte = parent_environment()
-        jump count(parent, 0)
-
-    block count(parent: @@Byte, pc: USize):
-        branch parent.is_null()
-            ? counted(parent, pc)
-            : continue
-        branch parent.stride(pc).load().is_not_null()
-            ? count(parent, pc.add(1))
-            : counted(parent, pc)
-
-    block counted(parent: @@Byte, pc: USize):
-        env : @@Byte = zeroed<@Byte>(pc.add(n).add(1), "Failed to allocate subprocess environment")
-        jump copy(parent, pc, env, 0, 0)
-
-    block copy(parent: @@Byte, pc: USize, env: @@Byte, i: USize, k: USize):
-        branch i.eq(pc)
-            ? moves(env, k, 0)
-            : continue
-        entry : @Byte = parent.stride(i).load()
-        jump overridden(parent, pc, env, i, k, entry, 0)
-
-    block overridden(parent: @@Byte, pc: USize, env: @@Byte, i: USize, k: USize, entry: @Byte, j: USize):
-        branch j.eq(n)
-            ? keep(parent, pc, env, i, k, entry)
-            : continue
-        branch same_key(overrides.stride(j).load(), entry)
-            ? copy(parent, pc, env, i.add(1), k)
-            : overridden(parent, pc, env, i, k, entry, j.add(1))
-
-    block keep(parent: @@Byte, pc: USize, env: @@Byte, i: USize, k: USize, entry: @Byte):
-        env.stride(k).store(strdupn(entry, -1))
-        jump copy(parent, pc, env, i.add(1), k.add(1))
-
-    block moves(env: @@Byte, k: USize, j: USize):
-        branch j.eq(n)
-            ? return(env)
-            : continue
-        env.stride(k).store(overrides.stride(j).load())
-        jump moves(env, k.add(1), j.add(1))
-
 #export("rf_proc_run_built")
-routine rf_proc_run_built(b: @ProcBuilder) -> S64
+routine rf_proc_run_built(b: @ProcState) -> S64
     block entry():
         branch b.is_null()
             ? return(-1)
-            : continue
-        st : @ProcState = proc_state_new()
-        st.argv.store(b.argv.load())
-        st.cwd.store(b.cwd.load())
-        st.envp.store(merge_env(b.envv.load(), b.env_count.load()))
-        // the override strings moved into envp; only their array is freed
-        c_free(b.envv.load())
-        c_free(b)
-        return(proc_exec(st))
-
-// -- subprocesses on POSIX -----------------------------------------------------------
-
-#[external("c"), symbol("pipe"), target(os: not "windows")]
-routine c_pipe(fds: @CInt) -> CInt
-
-#[external("c"), symbol("fcntl"), variadic, target(os: not "windows")]
-routine c_fcntl(fd: CInt, cmd: CInt) -> CInt
-
-#[external("c"), symbol("open"), variadic, target(os: not "windows")]
-routine c_open(path: CStr, flags: CInt) -> CInt
-
-#[external("c"), symbol("fork"), target(os: not "windows")]
-routine c_fork() -> CInt
-
-#[external("c"), symbol("dup2"), target(os: not "windows")]
-routine c_dup2(from: CInt, to: CInt) -> CInt
-
-#[external("c"), symbol("chdir"), target(os: not "windows")]
-routine c_chdir(path: @Byte) -> CInt
-
-#[external("c"), symbol("write"), target(os: not "windows")]
-routine c_write_fd(fd: CInt, buf: Addr, count: USize) -> SSize
-
-#[external("c"), symbol("read"), target(os: not "windows")]
-routine c_read_fd(fd: CInt, buf: Addr, count: USize) -> SSize
-
-#[external("c"), symbol("close"), target(os: not "windows")]
-routine c_close(fd: CInt) -> CInt
-
-#[external("c"), symbol("_exit"), noreturn, target(os: not "windows")]
-routine c_exit_now(status: CInt) -> Void
-
-#[external("c"), symbol("execvp"), target(os: not "windows")]
-routine c_execvp(file: @Byte, argv: @@Byte) -> CInt
-
-#[external("c"), symbol("waitpid"), target(os: not "windows")]
-routine c_waitpid(pid: CInt, status: @CInt, options: CInt) -> CInt
-
-/// struct pollfd.
-record PollFd
-    fd      : CInt
-    events  : S16
-    revents : S16
-
-// nfds_t: unsigned long, the pointer width on Linux
-#[external("c"), symbol("poll"), target(os: "linux")]
-routine c_poll(fds: @PollFd, count: USize, timeout: CInt) -> CInt
-
-#[external("c"), symbol("poll"), target(os: "macos")]
-routine c_poll(fds: @PollFd, count: U32, timeout: CInt) -> CInt
-
-#[external("c"), symbol("__errno_location"), target(os: "linux")]
-routine c_errno_place() -> @CInt
-
-#[external("c"), symbol("__error"), target(os: "macos")]
-routine c_errno_place() -> @CInt
-
-#[external("c"), symbol("environ"), target(os: "linux")]
-global ENVIRON: @@@Byte
-
-#[external("c"), symbol("_NSGetEnviron"), target(os: "macos")]
-routine c_ns_get_environ() -> @@@Byte
-
-/// Where the process environment pointer (C's environ) lives: the C variable on Linux, and through _NSGetEnviron on
-/// macOS (as a dylib must).
-#target(os: "linux")
-routine environ_place() -> @@@Byte
-    block entry():
-        return(ENVIRON)
-
-#target(os: "macos")
-routine environ_place() -> @@@Byte
-    block entry():
-        return(c_ns_get_environ())
-
-#target(os: not "windows")
-routine parent_environment() -> @@Byte
-    block entry():
-        place : @@@Byte = environ_place()
-        branch place.is_null()
-            ? return(null)
-            : return(place.load())
-
-#target(os: "linux")
-routine o_cloexec() -> CInt
-    block entry():
-        return(0x80000)
-
-#target(os: "macos")
-routine o_cloexec() -> CInt
-    block entry():
-        return(0x1000000)
-
-#target(os: "linux")
-routine e_again() -> CInt
-    block entry():
-        return(11)
-
-#target(os: "macos")
-routine e_again() -> CInt
-    block entry():
-        return(35)
-
-#target(os: "linux")
-routine poll_fds(fds: @PollFd) -> CInt
-    block entry():
-        return(c_poll(fds, 2, -1))
-
-#target(os: "macos")
-routine poll_fds(fds: @PollFd) -> CInt
-    block entry():
-        return(c_poll(fds, 2, -1))
-
-#target(os: not "windows")
-routine errno() -> CInt
-    block entry():
-        return(c_errno_place().load())
-
-/// A pipe with close-on-exec on both ends: 0, or -1.
-#target(os: not "windows")
-routine cloexec_pipe(fds: @CInt) -> CInt
-    block entry():
-        branch c_pipe(fds).ne(0)
-            ? return(-1)
-            : continue
-        // F_SETFD, FD_CLOEXEC
-        c_fcntl(fds.load(), 2, 1)
-        c_fcntl(fds.stride(1).load(), 2, 1)
-        return(0)
-
-/// The child after fork: only async-signal-safe calls until exec. dup2 clears close-on-exec on the copies. If the
-/// directory change or the exec fails, errno goes to the parent through report.
-#[noreturn, target(os: not "windows")]
-routine proc_child(st: @ProcState, nul: CInt, out_w: CInt, err_w: CInt, report: CInt) -> Void
-    block entry():
-        branch nul.ge(0)
-            ? continue
-            : streams()
-        c_dup2(nul, 0)
-        jump streams()
-
-    block streams():
-        c_dup2(out_w, 1)
-        c_dup2(err_w, 2)
-        cwd : @Byte = st.cwd.load()
-        branch cwd.is_null()
-            ? environment()
-            : continue
-        branch c_chdir(cwd).eq(0)
-            ? environment()
-            : failed()
-
-    block environment():
-        envp : @@Byte = st.envp.load()
-        branch envp.is_null()
-            ? exec()
-            : continue
-        environ_place().store(envp)
-        jump exec()
-
-    block exec():
-        argv : @@Byte = st.argv.load()
-        c_execvp(argv.load(), argv)
-        jump failed()
-
-    block failed():
-        claim e : @CInt <- errno()
-        c_write_fd(report, e, 4)
-        c_exit_now(127)
-
-#target(os: not "windows")
-routine proc_run_blocking(st: @ProcState) -> Void
-    block entry():
-        st.exit_status.store(-1)
-        st.term_signal.store(0)
-        claim out_p  : @Array<CInt, 2> <- { -1, -1 }
-        claim err_p  : @Array<CInt, 2> <- { -1, -1 }
-        claim exec_p : @Array<CInt, 2> <- { -1, -1 }
-        branch cloexec_pipe(out_p.to<@CInt>()).ne(0)
-            ? spawn_failed()
-            : continue
-        branch cloexec_pipe(err_p.to<@CInt>()).ne(0)
-            ? close1(out_p.to<@CInt>())
-            : continue
-        branch cloexec_pipe(exec_p.to<@CInt>()).ne(0)
-            ? close2(out_p.to<@CInt>(), err_p.to<@CInt>())
-            : continue
-        nul : CInt = c_open("/dev/null", o_cloexec())
-        pid : CInt = c_fork()
-        branch pid.eq(0)
-            ? proc_child(st, nul, out_p.to<@CInt>().stride(1).load(), err_p.to<@CInt>().stride(1).load(),
-                    exec_p.to<@CInt>().stride(1).load())
-            : continue
-        c_close(out_p.to<@CInt>().stride(1).load())
-        c_close(err_p.to<@CInt>().stride(1).load())
-        c_close(exec_p.to<@CInt>().stride(1).load())
-        branch nul.ge(0)
-            ? continue
-            : forked(pid, out_p.to<@CInt>().load(), err_p.to<@CInt>().load(), exec_p.to<@CInt>().load())
-        c_close(nul)
-        jump forked(pid, out_p.to<@CInt>().load(), err_p.to<@CInt>().load(), exec_p.to<@CInt>().load())
-
-    block close1(out_p: @CInt):
-        c_close(out_p.load())
-        c_close(out_p.stride(1).load())
-        jump spawn_failed()
-
-    block close2(out_p: @CInt, err_p: @CInt):
-        c_close(out_p.load())
-        c_close(out_p.stride(1).load())
-        c_close(err_p.load())
-        c_close(err_p.stride(1).load())
-        jump spawn_failed()
-
-    block spawn_failed():
-        st.spawn_err.store(1)
-        return()
-
-    block forked(pid: CInt, out_r: CInt, err_r: CInt, exec_r: CInt):
-        branch pid.lt(0)
-            ? fork_failed(out_r, err_r, exec_r)
-            : continue
-        claim exec_errno : @CInt <- 0
-        jump report(pid, out_r, err_r, exec_r, exec_errno)
-
-    block fork_failed(out_r: CInt, err_r: CInt, exec_r: CInt):
-        c_close(out_r)
-        c_close(err_r)
-        c_close(exec_r)
-        jump spawn_failed()
-
-    block report(pid: CInt, out_r: CInt, err_r: CInt, exec_r: CInt, exec_errno: @CInt):
-        got : SSize = c_read_fd(exec_r, exec_errno, 4)
-        branch got.lt(0).bitand(errno().eq(4))
-            ? report(pid, out_r, err_r, exec_r, exec_errno)
-            : continue
-        c_close(exec_r)
-        // POLLIN
-        claim fds   : @Array<PollFd, 2> <- { PollFd { fd: out_r, events: 1, revents: 0 },
-                PollFd { fd: err_r, events: 1, revents: 0 } }
-        claim chunk : @Array<Byte, 4096> <- uninit
-        jump drain(pid, got, exec_errno, fds.to<@PollFd>(), chunk.to<@Byte>(), 2)
-
-    // Both pipes to their end, whichever has data.
-    block drain(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, chunk: @Byte, open: S32):
-        branch open.gt(0)
-            ? continue
-            : reap(pid, got, exec_errno, fds)
-        branch poll_fds(fds).lt(0)
-            ? interrupted(pid, got, exec_errno, fds, chunk, open)
-            : stream(pid, got, exec_errno, fds, chunk, open, 0)
-
-    block interrupted(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, chunk: @Byte, open: S32):
-        branch errno().eq(4)
-            ? drain(pid, got, exec_errno, fds, chunk, open)
-            : reap(pid, got, exec_errno, fds)
-
-    block stream(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, chunk: @Byte, open: S32, i: USize):
-        branch i.eq(2)
-            ? drain(pid, got, exec_errno, fds, chunk, open)
-            : continue
-        p  : @PollFd = fds.stride(i)
-        fd : CInt    = p.fd.load()
-        branch fd.lt(0).bitor(p.revents.load().eq(0))
-            ? stream(pid, got, exec_errno, fds, chunk, open, i.add(1))
-            : continue
-        n : SSize = c_read_fd(fd, chunk, 4096)
-        branch n.gt(0)
-            ? append(pid, got, exec_errno, fds, chunk, open, i, n)
-            : continue
-        e     : CInt = errno()
-        ended : Bool = n.eq(0).bitor(e.ne(4).bitand(e.ne(e_again())))
-        branch ended
-            ? continue
-            : stream(pid, got, exec_errno, fds, chunk, open, i.add(1))
-        c_close(fd)
-        p.fd.store(-1)
-        jump stream(pid, got, exec_errno, fds, chunk, open.sub(1), i.add(1))
-
-    block append(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, chunk: @Byte, open: S32, i: USize,
-            n: SSize):
-        branch i.eq(0)
-            ? out(pid, got, exec_errno, fds, chunk, open, i, n)
-            : continue
-        buf_append(st.err_buf, st.err_len, st.err_cap, chunk, n.to<USize>())
-        jump stream(pid, got, exec_errno, fds, chunk, open, i.add(1))
-
-    block out(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, chunk: @Byte, open: S32, i: USize,
-            n: SSize):
-        buf_append(st.out_buf, st.out_len, st.out_cap, chunk, n.to<USize>())
-        jump stream(pid, got, exec_errno, fds, chunk, open, i.add(1))
-
-    block reap(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd):
-        jump close_left(pid, got, exec_errno, fds, 0)
-
-    block close_left(pid: CInt, got: SSize, exec_errno: @CInt, fds: @PollFd, i: USize):
-        branch i.eq(2)
-            ? wait(pid, got, exec_errno)
-            : continue
-        fd : CInt = fds.stride(i).fd.load()
-        branch fd.ge(0)
-            ? continue
-            : close_left(pid, got, exec_errno, fds, i.add(1))
-        c_close(fd)
-        jump close_left(pid, got, exec_errno, fds, i.add(1))
-
-    block wait(pid: CInt, got: SSize, exec_errno: @CInt):
-        claim status : @CInt <- 0
-        jump waiting(pid, got, exec_errno, status)
-
-    block waiting(pid: CInt, got: SSize, exec_errno: @CInt, status: @CInt):
-        branch c_waitpid(pid, status, 0).lt(0).bitand(errno().eq(4))
-            ? waiting(pid, got, exec_errno, status)
-            : continue
-        // the exec failed: the child reported its errno
-        branch got.gt(0)
-            ? exec_failed(exec_errno)
-            : continue
-        s       : CInt = status.load()
-        low     : CInt = s.bitand(0x7F)
-        branch low.eq(0)
-            ? exited(s)
-            : continue
-        branch low.ne(0x7F)
-            ? signaled(low)
-            : return()
-
-    block exec_failed(exec_errno: @CInt):
-        e : CInt = exec_errno.load()
-        st.spawn_err.store(e.ne(0) ? e : 1)
-        return()
-
-    block exited(s: CInt):
-        st.exit_status.store(s.shr(8).bitand(0xFF).to<S64>())
-        return()
-
-    block signaled(low: CInt):
-        st.exit_status.store(0)
-        st.term_signal.store(low)
-        return()
-
-// -- subprocesses on Windows ---------------------------------------------------------
-
-#[external("c"), symbol("MultiByteToWideChar"), callconv("stdcall"), target(os: "windows")]
-routine c_multi_byte_to_wide_char(code_page: U32, flags: U32, s: @Byte, n: CInt, w: @U16, wn: CInt) -> CInt
-
-#[external("c"), symbol("wcslen"), target(os: "windows")]
-routine c_wcslen(s: @U16) -> USize
-
-#[external("c"), symbol("_wcsicmp"), target(os: "windows")]
-routine c_wcsicmp(a: @U16, b: @U16) -> CInt
-
-#[external("c"), symbol("__p__environ"), target(os: "windows")]
-routine c_p_environ() -> @@@Byte
-
-/// SECURITY_ATTRIBUTES.
-record SecurityAttributes
-    length         : U32
-    descriptor     : Addr
-    inherit_handle : CInt
-
-/// STARTUPINFOW.
-record StartupInfo
-    cb             : U32
-    reserved       : Addr
-    desktop        : Addr
-    title          : Addr
-    x              : U32
-    y              : U32
-    x_size         : U32
-    y_size         : U32
-    x_count_chars  : U32
-    y_count_chars  : U32
-    fill_attribute : U32
-    flags          : U32
-    show_window    : U16
-    cb_reserved2   : U16
-    reserved2      : Addr
-    std_input      : Addr
-    std_output     : Addr
-    std_error      : Addr
-
-/// PROCESS_INFORMATION.
-record ProcessInformation
-    process    : Addr
-    thread     : Addr
-    process_id : U32
-    thread_id  : U32
-
-#[external("c"), symbol("CreateFileW"), callconv("stdcall"), target(os: "windows")]
-routine c_create_file(name: @U16, access: U32, share: U32, security: @SecurityAttributes, disposition: U32,
-        flags: U32, template: Addr) -> Addr
-
-#[external("c"), symbol("CreatePipe"), callconv("stdcall"), target(os: "windows")]
-routine c_create_pipe(read: @Addr, write: @Addr, security: @SecurityAttributes, size: U32) -> CInt
-
-#[external("c"), symbol("SetHandleInformation"), callconv("stdcall"), target(os: "windows")]
-routine c_set_handle_information(handle: Addr, mask: U32, flags: U32) -> CInt
-
-#[external("c"), symbol("CreateProcessW"), callconv("stdcall"), target(os: "windows")]
-routine c_create_process(application: Addr, command_line: @U16, process_attrs: Addr, thread_attrs: Addr,
-        inherit: CInt, flags: U32, environment: Addr, directory: @U16, startup: @StartupInfo,
-        info: @ProcessInformation) -> CInt
-
-#[external("c"), symbol("ReadFile"), callconv("stdcall"), target(os: "windows")]
-routine c_read_file(handle: Addr, buffer: @Byte, size: U32, read: @U32, overlapped: Addr) -> CInt
-
-#[external("c"), symbol("WaitForSingleObject"), callconv("stdcall"), target(os: "windows")]
-routine c_wait_for_single_object(handle: Addr, millis: U32) -> U32
-
-#[external("c"), symbol("GetExitCodeProcess"), callconv("stdcall"), target(os: "windows")]
-routine c_get_exit_code_process(process: Addr, code: @U32) -> CInt
-
-#[external("c"), symbol("CloseHandle"), callconv("stdcall"), target(os: "windows")]
-routine c_close_handle(handle: Addr) -> CInt
-
-#target(os: "windows")
-routine parent_environment() -> @@Byte
-    block entry():
-        return(c_p_environ().load())
-
-/// UTF-8 to a malloc'd UTF-16 string, or null (for null too).
-#target(os: "windows")
-routine wide(s: @Byte) -> @U16
-    block entry():
-        branch s.is_null()
-            ? return(null)
-            : continue
-        // CP_UTF8
-        n : CInt = c_multi_byte_to_wide_char(65001, 0, s, -1, null, 0)
-        branch n.le(0)
-            ? return(null)
-            : continue
-        w : Addr = c_malloc(n.to<USize>().mul(2))
-        branch w.is_null()
-            ? return(null)
-            : continue
-        c_multi_byte_to_wide_char(65001, 0, s, -1, w.to<@U16>(), n)
-        return(w.to<@U16>())
-
-/// Whether one of the len units at s is a or b or c.
-#target(os: "windows")
-routine has_any(s: @U16, len: USize, a: U16, b: U16, c: U16) -> Bool
-    block entry():
-        jump look(0)
-
-    block look(i: USize):
-        branch i.eq(len)
-            ? return(false)
-            : continue
-        u : U16 = s.stride(i).load()
-        branch u.eq(a).bitor(u.eq(b)).bitor(u.eq(c))
-            ? return(true)
-            : look(i.add(1))
-
-/// Appends one argument to a command line as CommandLineToArgvW reads it back, quoted only when it has to be
-/// (empty, or holding a space, a tab or a quote), as libuv's quote_cmd_arg does. target has room for 2 * len + 3
-/// units. The end.
-#target(os: "windows")
-routine quote_arg(source: @U16, target: @U16) -> @U16
-    block entry():
-        len : USize = c_wcslen(source)
-        branch len.eq(0)
-            ? empty()
-            : continue
-        // ' ', '\t', '"'
-        branch has_any(source, len, 32, 9, 34)
-            ? continue
-            : plain(len)
-        // '"', '\\'
-        branch has_any(source, len, 34, 92, 34)
-            ? escaped(len)
-            : quoted(len)
-
-    block empty():
-        target.store(34)
-        target.stride(1).store(34)
-        return(target.stride(2))
-
-    block plain(len: USize):
-        c_memcpy(target, source, len.mul(2))
-        return(target.stride(len))
-
-    block quoted(len: USize):
-        target.store(34)
-        c_memcpy(target.stride(1), source, len.mul(2))
-        target.stride(len.add(1)).store(34)
-        return(target.stride(len.add(2)))
-
-    // Backslashes before a quote or before the closing quote are doubled, and a quote is escaped: built backwards,
-    // then reversed.
-    block escaped(len: USize):
-        target.store(34)
-        start : @U16 = target.stride(1)
-        jump back(len, start, start, true)
-
-    block back(i: USize, start: @U16, at: @U16, quote_hit: Bool):
-        branch i.eq(0)
-            ? reverse(start, at, start, at.stride(-1))
-            : continue
-        u : U16 = source.stride(i.sub(1)).load()
-        at.store(u)
-        branch quote_hit.bitand(u.eq(92))
-            ? doubled(i, start, at)
-            : continue
-        branch u.eq(34)
-            ? quote(i, start, at)
-            : back(i.sub(1), start, at.stride(1), false)
-
-    block doubled(i: USize, start: @U16, at: @U16):
-        at.stride(1).store(92)
-        jump back(i.sub(1), start, at.stride(2), true)
-
-    block quote(i: USize, start: @U16, at: @U16):
-        at.stride(1).store(92)
-        jump back(i.sub(1), start, at.stride(2), true)
-
-    block reverse(start: @U16, end: @U16, a: @U16, b: @U16):
-        branch ptrtoint<@U16, U64>(a).lt(ptrtoint<@U16, U64>(b))
-            ? continue
-            : close(end)
-        t : U16 = a.load()
-        a.store(b.load())
-        b.store(t)
-        jump reverse(start, end, a.stride(1), b.stride(-1))
-
-    block close(end: @U16):
-        end.store(34)
-        return(end.stride(1))
-
-/// The whole command line, each argument quoted as needed and separated by spaces: malloc'd, or null.
-#target(os: "windows")
-routine command_line(argv: @@Byte) -> @U16
-    block entry():
-        jump size(0, 1)
-
-    block size(i: USize, cap: USize):
-        arg : @Byte = argv.stride(i).load()
-        branch arg.is_null()
-            ? allocate(cap)
-            : size(i.add(1), cap.add(c_strlen(arg).mul(2)).add(4))
-
-    block allocate(cap: USize):
-        line : Addr = c_malloc(cap.mul(2))
-        branch line.is_null()
-            ? return(null)
-            : append(line.to<@U16>(), line.to<@U16>(), 0)
-
-    block append(line: @U16, pos: @U16, i: USize):
-        arg : @Byte = argv.stride(i).load()
-        branch arg.is_null()
-            ? finish(line, pos)
-            : continue
-        w : @U16 = wide(arg)
-        branch w.is_null()
-            ? fail(line)
-            : continue
-        branch i.gt(0)
-            ? space(line, pos, i, w)
-            : quote(line, pos, i, w)
-
-    block space(line: @U16, pos: @U16, i: USize, w: @U16):
-        pos.store(32)
-        jump quote(line, pos.stride(1), i, w)
-
-    block quote(line: @U16, pos: @U16, i: USize, w: @U16):
-        end : @U16 = quote_arg(w, pos)
-        c_free(w)
-        jump append(line, end, i.add(1))
-
-    block fail(line: @U16):
-        c_free(line)
-        return(null)
-
-    block finish(line: @U16, pos: @U16):
-        pos.store(0)
-        return(line)
-
-/// A Unicode environment block ("K=V\0...\0\0"), sorted as Windows expects: malloc'd, or null (for null too).
-#target(os: "windows")
-routine env_block(envp: @@Byte) -> @U16
-    block entry():
-        branch envp.is_null()
-            ? return(null)
-            : count(0)
-
-    block count(n: USize):
-        branch envp.stride(n).load().is_null()
-            ? continue
-            : count(n.add(1))
-        wides : @@U16 = zeroed<@U16>(n.add(1), "Failed to allocate the environment block")
-        jump widen(n, wides, 0, 1)
-
-    block widen(n: USize, wides: @@U16, i: USize, total: USize):
-        branch i.eq(n)
-            ? sort(n, wides, total, 1)
-            : continue
-        w : @U16 = wide(envp.stride(i).load())
-        branch w.is_null()
-            ? fail(n, wides)
-            : continue
-        wides.stride(i).store(w)
-        jump widen(n, wides, i.add(1), total.add(c_wcslen(w)).add(1))
-
-    // Insertion sort, case-insensitive.
-    block sort(n: USize, wides: @@U16, total: USize, i: USize):
-        branch i.ge(n)
-            ? build(n, wides, total)
-            : sink(n, wides, total, i, i)
-
-    block sink(n: USize, wides: @@U16, total: USize, i: USize, j: USize):
-        branch j.eq(0)
-            ? sort(n, wides, total, i.add(1))
-            : continue
-        a : @U16 = wides.stride(j.sub(1)).load()
-        b : @U16 = wides.stride(j).load()
-        branch c_wcsicmp(a, b).gt(0)
-            ? continue
-            : sort(n, wides, total, i.add(1))
-        wides.stride(j.sub(1)).store(b)
-        wides.stride(j).store(a)
-        jump sink(n, wides, total, i, j.sub(1))
-
-    block build(n: USize, wides: @@U16, total: USize):
-        memory : Addr = c_malloc(total.mul(2))
-        jump place(n, wides, memory.to<@U16>(), memory.to<@U16>(), 0)
-
-    block place(n: USize, wides: @@U16, memory: @U16, pos: @U16, i: USize):
-        branch i.eq(n)
-            ? finish(wides, memory, pos)
-            : continue
-        w : @U16 = wides.stride(i).load()
-        branch memory.is_null()
-            ? skip(n, wides, memory, pos, i, w)
-            : continue
-        len : USize = c_wcslen(w).add(1)
-        c_memcpy(pos, w, len.mul(2))
-        c_free(w)
-        jump place(n, wides, memory, pos.stride(len), i.add(1))
-
-    block skip(n: USize, wides: @@U16, memory: @U16, pos: @U16, i: USize, w: @U16):
-        c_free(w)
-        jump place(n, wides, memory, pos, i.add(1))
-
-    block finish(wides: @@U16, memory: @U16, pos: @U16):
-        c_free(wides)
-        branch memory.is_null()
-            ? return(null)
-            : continue
-        pos.store(0)
-        return(memory)
-
-    block fail(n: USize, wides: @@U16):
-        jump free_wides(wides, 0)
-
-    block free_wides(wides: @@U16, i: USize):
-        w : @U16 = wides.stride(i).load()
-        branch w.is_null()
-            ? freed(wides)
-            : continue
-        c_free(w)
-        jump free_wides(wides, i.add(1))
-
-    block freed(wides: @@U16):
-        c_free(wides)
-        return(null)
-
-/// Reads a pipe to its end into a buffer.
-record PipeReader
-    pipe : Addr
-    buf  : @@Byte
-    len  : @USize
-    cap  : @USize
-
-#target(os: "windows")
-routine read_pipe(raw: Addr) -> Void
-    block entry():
-        r : @PipeReader = raw.to<@PipeReader>()
-        claim chunk : @Array<Byte, 4096> <- uninit
-        claim n     : @U32               <- 0
-        jump next(r, chunk.to<@Byte>(), n)
-
-    block next(r: @PipeReader, chunk: @Byte, n: @U32):
-        ok : Bool = c_read_file(r.pipe.load(), chunk, 4096, n, null).ne(0)
-        branch ok.bitand(n.load().gt(0))
-            ? continue
-            : return()
-        buf_append(r.buf.load(), r.len.load(), r.cap.load(), chunk, n.load().to<USize>())
-        jump next(r, chunk, n)
-
-#target(os: "windows")
-routine proc_run_blocking(st: @ProcState) -> Void
-    block entry():
-        st.exit_status.store(-1)
-        st.term_signal.store(0)
-        line : @U16 = command_line(st.argv.load())
-        cwd_utf8 : @Byte = st.cwd.load()
-        cwd  : @U16 = wide(cwd_utf8)
-        envp : @@Byte = st.envp.load()
-        env  : @U16 = env_block(envp)
-        claim sa : @SecurityAttributes <- SecurityAttributes { length: sizeof<SecurityAttributes>().to<U32>(),
-                descriptor: null, inherit_handle: 1 }
-        claim out_r : @Addr <- null
-        claim out_w : @Addr <- null
-        claim err_r : @Addr <- null
-        claim err_w : @Addr <- null
-        // GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, OPEN_EXISTING
-        claim nul_name : @Array<U16, 4> <- { 78, 85, 76, 0 }
-        nul : Addr = c_create_file(nul_name.to<@U16>(), 0x80000000, 3, sa, 3, 0, null)
-        nul_ok   : Bool = ptrtoint<Addr, U64>(nul).ne(U64.MAX)
-        args_ok  : Bool = line.is_not_null().bitand(nul_ok)
-        dir_ok   : Bool = cwd_utf8.is_null().bitor(cwd.is_not_null())
-        env_ok   : Bool = envp.is_null().bitor(env.is_not_null())
-        ready    : Bool = args_ok.bitand(dir_ok).bitand(env_ok)
-        branch ready
-            ? continue
-            : spawn(st, line, cwd, env, nul, nul_ok, out_r, out_w, err_r, err_w, false)
-        pipes : Bool = c_create_pipe(out_r, out_w, sa, 0).ne(0).bitand(c_create_pipe(err_r, err_w, sa, 0).ne(0))
-        branch pipes
-            ? continue
-            : spawn(st, line, cwd, env, nul, nul_ok, out_r, out_w, err_r, err_w, false)
-        // the parent's ends stay out of the child (HANDLE_FLAG_INHERIT)
-        c_set_handle_information(out_r.load(), 1, 0)
-        c_set_handle_information(err_r.load(), 1, 0)
-        jump spawn(st, line, cwd, env, nul, nul_ok, out_r, out_w, err_r, err_w, true)
-
-    block spawn(st: @ProcState, line: @U16, cwd: @U16, env: @U16, nul: Addr, nul_ok: Bool, out_r: @Addr,
-            out_w: @Addr, err_r: @Addr, err_w: @Addr, ok: Bool):
-        claim pi : @ProcessInformation <- ProcessInformation { process: null, thread: null, process_id: 0,
-                thread_id: 0 }
-        branch ok
-            ? continue
-            : created(st, line, cwd, env, nul, nul_ok, out_r, out_w, err_r, err_w, pi, false)
-        // STARTF_USESTDHANDLES
-        claim si : @StartupInfo <- StartupInfo { cb: sizeof<StartupInfo>().to<U32>(), reserved: null, desktop: null,
-                title: null, x: 0, y: 0, x_size: 0, y_size: 0, x_count_chars: 0, y_count_chars: 0,
-                fill_attribute: 0, flags: 0x100, show_window: 0, cb_reserved2: 0, reserved2: null, std_input: nul,
-                std_output: out_w.load(), std_error: err_w.load() }
-        // CREATE_UNICODE_ENVIRONMENT
-        made : Bool = c_create_process(null, line, null, null, 1, 0x400, env, cwd, si, pi).ne(0)
-        jump created(st, line, cwd, env, nul, nul_ok, out_r, out_w, err_r, err_w, pi, made)
-
-    // The child's ends close here, so the pipes end when the child exits.
-    block created(st: @ProcState, line: @U16, cwd: @U16, env: @U16, nul: Addr, nul_ok: Bool, out_r: @Addr,
-            out_w: @Addr, err_r: @Addr, err_w: @Addr, pi: @ProcessInformation, made: Bool):
-        close_handle(out_w.load())
-        close_handle(err_w.load())
-        branch nul_ok
-            ? continue
-            : collect(st, line, cwd, env, out_r, err_r, pi, made)
-        c_close_handle(nul)
-        jump collect(st, line, cwd, env, out_r, err_r, pi, made)
-
-    block collect(st: @ProcState, line: @U16, cwd: @U16, env: @U16, out_r: @Addr, err_r: @Addr,
-            pi: @ProcessInformation, made: Bool):
-        branch made
-            ? continue
-            : failed(st, line, cwd, env, out_r, err_r)
-        claim err_reader : @PipeReader <- PipeReader { pipe: err_r.load(), buf: st.err_buf, len: st.err_len,
-                cap: st.err_cap }
-        claim out_reader : @PipeReader <- PipeReader { pipe: out_r.load(), buf: st.out_buf, len: st.out_len,
-                cap: st.out_cap }
-        helper : Thread = Thread.spawn(read_pipe.to<Callable>(), err_reader, runtime_heap())
-        read_pipe(out_reader)
-        helper.join()
-        // INFINITE
-        c_wait_for_single_object(pi.process.load(), U32.MAX)
-        claim code : @U32 <- 0
-        c_get_exit_code_process(pi.process.load(), code)
-        st.exit_status.store(code.load().to<S64>())
-        c_close_handle(pi.thread.load())
-        c_close_handle(pi.process.load())
-        jump cleanup(line, cwd, env, out_r, err_r)
-
-    block failed(st: @ProcState, line: @U16, cwd: @U16, env: @U16, out_r: @Addr, err_r: @Addr):
-        st.spawn_err.store(1)
-        jump cleanup(line, cwd, env, out_r, err_r)
-
-    block cleanup(line: @U16, cwd: @U16, env: @U16, out_r: @Addr, err_r: @Addr):
-        close_handle(out_r.load())
-        close_handle(err_r.load())
-        c_free(line)
-        c_free(cwd)
-        c_free(env)
-        return()
-
-#target(os: "windows")
-routine close_handle(handle: Addr) -> Void
-    block entry():
-        branch handle.is_null()
-            ? return()
-            : continue
-        c_close_handle(handle)
-        return()
+            : return(proc_exec(b))
