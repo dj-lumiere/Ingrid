@@ -61,9 +61,8 @@ set_target_properties(razorforge_runtime PROPERTIES LINKER_LANGUAGE C)
 # The libraries the runtime calls into, beyond the C library.
 if(WIN32)
     # The C runtime (msvcrt brings the UCRT and vcruntime, and the DLL's entry point): with no C source in the
-    # library, no object asks for it; legacy_stdio_definitions has fprintf, which the UCRT headers inline. dbghelp:
-    # stack traces; synchronization: WaitOnAddress; bcrypt: random words.
-    target_link_libraries(razorforge_runtime msvcrt legacy_stdio_definitions dbghelp synchronization bcrypt)
+    # library, no object asks for it. dbghelp: stack traces; synchronization: WaitOnAddress; bcrypt: random words.
+    target_link_libraries(razorforge_runtime msvcrt dbghelp synchronization bcrypt)
 elseif(APPLE)
     # libSystem has everything
 else()

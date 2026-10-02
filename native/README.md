@@ -56,7 +56,7 @@ for every target (`tessera check --target <triple> ../runtime-tessera/*.tess`).
 ## What It Links
 
 - Windows: `msvcrt` (the UCRT and vcruntime, and the DLL's entry point: with no C source, no object asks for them),
-  `legacy_stdio_definitions` (`fprintf`, which the UCRT headers inline), `dbghelp` (stack traces),
+  `dbghelp` (stack traces),
   `synchronization` (`WaitOnAddress`), `bcrypt` (random words).
 - Linux: `m`, `pthread`.
 - macOS: libSystem.

@@ -1,21 +1,18 @@
-// The console (show, alert, ask), the OS side of the crash report (writing to stderr, flushing, exiting with the
-// crash status), process start-up, and C-string helpers.
+// The console for RazorForge and Suflae (show, alert, ask), the OS side of the crash report (writing to stderr,
+// flushing, exiting with the crash status), process start-up, and C-string helpers, over Tessera's Standard::Os In,
+// Out, and Err.
 //
-// Standard output is flushed after every show when it is an interactive terminal, so prompts and progress appear
-// at once; on a pipe or a file the C library buffers it (a flush per call costs a system call and a reader's round
-// trip per print). Buffered output still arrives: at exit, before every ask, on rf_console_flush, and before a crash
-// report. RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a
-// hang or a crash.
+// What is RazorForge's here is the policy. Standard output is buffered, and flushed after every show when it is an
+// interactive terminal, so prompts and progress appear at once; on a pipe or a file it goes out a bufferful at a time
+// (a write per show costs a system call and a reader's round trip per print). Buffered output still arrives: at exit
+// (registered with atexit at start-up), before every ask, on rf_console_flush, and before a crash report.
+// RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
+// a crash. alert writes to stderr in magenta. ask_line skips empty lines.
 
 module Ingrid::Runtime
 
+import Standard::Alloc
 import Standard::Os
-
-#[external("c"), symbol("getchar")]
-routine c_getchar() -> CInt
-
-#[external("c"), symbol("fread")]
-routine c_fread_stream(buf: Addr, size: USize, count: USize, stream: Addr) -> USize
 
 #[external("c"), symbol("strcpy")]
 routine c_strcpy(dest: @Byte, src: @Byte) -> @Byte
@@ -23,21 +20,23 @@ routine c_strcpy(dest: @Byte, src: @Byte) -> @Byte
 #[external("c"), symbol("strcmp")]
 routine c_strcmp(a: @Byte, b: @Byte) -> CInt
 
-#[external("c"), symbol("_isatty"), target(os: "windows")]
-routine c_isatty(fd: CInt) -> CInt
+#[external("c"), symbol("atexit")]
+routine c_atexit(at_exit: Callable<(), Void>) -> CInt
 
-#[external("c"), symbol("_fileno"), target(os: "windows")]
-routine c_fileno(stream: Addr) -> CInt
+// -- standard output -----------------------------------------------------------------
 
-#[external("c"), symbol("isatty"), target(os: not "windows")]
-routine c_isatty(fd: CInt) -> CInt
+preset OUTPUT_BUFFER: USize = 8192
 
-#[external("c"), symbol("fileno"), target(os: not "windows")]
-routine c_fileno(stream: Addr) -> CInt
+/// What show has written and Out hasn't been given yet, behind a lock (shows come from every thread).
+record OutputBuffer
+    lock   : Mutex
+    bytes  : Array<Byte, OUTPUT_BUFFER>
+    length : USize
 
-preset EOF: CInt = -1
+global STDOUT: @OutputBuffer
 
-/// Whether standard output is interactive (or RF_FLUSH_STDOUT=1 asks for a flush per show): -1 until asked.
+/// Whether standard output is flushed after every show (an interactive terminal, or RF_FLUSH_STDOUT=1): -1 until
+/// asked.
 global STDOUT_INTERACTIVE: @CInt <- -1
 
 routine stdout_interactive() -> Bool
@@ -55,159 +54,147 @@ routine stdout_interactive() -> Bool
             : terminal()
 
     block terminal():
-        jump decide(c_isatty(c_fileno(stdout_stream())).ne(0))
+        jump decide(Out.is_terminal())
 
     block decide(interactive: Bool):
         STDOUT_INTERACTIVE.store(interactive ? 1 : 0)
         return(interactive)
 
+/// Gives Out what the buffer holds. The lock is held.
+routine OutputBuffer.drain(self: @Self) -> Void
+    block entry():
+        n : USize = self.length.load()
+        branch n.eq(0)
+            ? return()
+            : continue
+        Out.write_all(self.bytes.to<@Byte>(), n)
+        self.length.store(0)
+        return()
+
 #export("rf_console_show")
 routine rf_console_show(ptr: @Byte, count: USize) -> Void
     block entry():
-        out : Addr = stdout_stream()
-        c_fwrite_stream(ptr, 1, count, out)
+        out : @OutputBuffer = STDOUT
+        out.lock.lock()
+        branch out.length.load().add(count).gt(OUTPUT_BUFFER)
+            ? continue
+            : keep(out)
+        out.drain()
+        // What doesn't fit an empty buffer goes straight out.
+        branch count.ge(OUTPUT_BUFFER)
+            ? direct(out)
+            : keep(out)
+
+    block direct(out: @OutputBuffer):
+        Out.write_all(ptr, count)
+        jump done(out)
+
+    block keep(out: @OutputBuffer):
+        copy<Byte>(out.bytes.to<@Byte>().stride(out.length.load()), ptr, count)
+        out.length.load().add(count).store_into(out.length)
+        jump done(out)
+
+    block done(out: @OutputBuffer):
         branch stdout_interactive()
             ? continue
-            : return()
-        c_fflush_stream(out)
-        return()
+            : unlock(out)
+        out.drain()
+        jump unlock(out)
 
-/// On stderr, in magenta.
-#export("rf_console_alert")
-routine rf_console_alert(ptr: @Byte, count: USize) -> Void
-    block entry():
-        err : Addr = stderr_stream()
-        c_fputs("\x1B[95m", err)
-        c_fwrite_stream(ptr, 1, count, err)
-        c_fputs("\x1B[0m", err)
-        c_fflush_stream(err)
+    block unlock(out: @OutputBuffer):
+        out.lock.unlock()
         return()
 
 #export("rf_console_flush")
 routine rf_console_flush() -> Void
     block entry():
-        c_fflush_stream(stdout_stream())
+        out : @OutputBuffer = STDOUT
+        out.lock.lock()
+        out.drain()
+        out.lock.unlock()
         return()
 
-/// Characters from stdin until one in stops (or the end), after skipping any in skip: a malloc'd, NUL-terminated
-/// string, or null at the end of the input. Flushes stdout first.
-routine read_token(stop_space: Bool) -> @Byte
+/// On stderr, in magenta. Standard output goes first, so the two read in the order they were written.
+#export("rf_console_alert")
+routine rf_console_alert(ptr: @Byte, count: USize) -> Void
     block entry():
-        c_fflush_stream(stdout_stream())
-        jump skip()
+        rf_console_flush()
+        on  : Bytes = "\x1B[95m"
+        off : Bytes = "\x1B[0m"
+        Err.write_all(on.data, on.length())
+        Err.write_all(ptr, count)
+        Err.write_all(off.data, off.length())
+        return()
 
-    block skip():
-        c : CInt = c_getchar()
-        branch c.eq(EOF)
-            ? return(null)
-            : continue
-        branch is_stop(c, stop_space)
-            ? skip()
-            : first(c)
+// -- standard input ------------------------------------------------------------------
 
-    block first(c: CInt):
-        buf : Addr = c_malloc(256)
+/// text from the malloc heap as a NUL-terminated string the caller frees, or null.
+routine terminated_text(text: Bytes) -> @Byte
+    block entry():
+        n   : USize = text.length()
+        buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
-            ? return(null)
+            ? lost(text)
             : continue
-        buf.to<@Byte>().store(c.to_wrap<U8>().bits())
-        jump more(buf.to<@Byte>(), 256, 1)
+        buf.to<@Byte>().stride(n).store(0x00)
+        return(buf.to<@Byte>())
 
-    block more(buf: @Byte, cap: USize, len: USize):
-        c : CInt = c_getchar()
-        branch c.eq(EOF).bitor(is_stop(c, stop_space))
-            ? done(buf, len)
-            : continue
-        branch len.add(1).ge(cap)
-            ? grow(buf, cap, len, c)
-            : put(buf, cap, len, c)
-
-    block grow(buf: @Byte, cap: USize, len: USize, c: CInt):
-        bigger : Addr = c_realloc(buf, cap.mul(2))
-        branch bigger.is_null()
-            ? failed(buf)
-            : put(bigger.to<@Byte>(), cap.mul(2), len, c)
-
-    block put(buf: @Byte, cap: USize, len: USize, c: CInt):
-        buf.stride(len).store(c.to_wrap<U8>().bits())
-        jump more(buf, cap, len.add(1))
-
-    block failed(buf: @Byte):
-        c_free(buf)
+    block lost(text: Bytes):
+        c_free(text.data)
         return(null)
 
-    block done(buf: @Byte, len: USize):
-        buf.stride(len).store(0x00)
-        return(buf)
-
-/// A line ends at '\n' or '\r'; a word also at ' ' or '\t'.
-routine is_stop(c: CInt, word: Bool) -> Bool
+routine terminated_option(text: Option<Bytes>) -> @Byte
     block entry():
-        line  : Bool = c.eq(10).bitor(c.eq(13))
-        space : Bool = c.eq(32).bitor(c.eq(9))
-        return(line.bitor(word.bitand(space)))
+        when text:
+            .Present(t) -> return(terminated_text(t))
+            .Absent     -> return(null)
 
 /// The next non-empty line from stdin, without its end, or null at the end of the input.
 #export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
     block entry():
-        return(read_token(false))
+        rf_console_flush()
+        claim alloc : @Allocator <- heap()
+        jump next(alloc)
+
+    block next(alloc: @Allocator):
+        line : Option<Bytes> = In.read_line(alloc)
+        when line:
+            .Present(t) -> got(alloc, t)
+            .Absent     -> return(null)
+
+    block got(alloc: @Allocator, t: Bytes):
+        branch t.is_empty()
+            ? skip(alloc, t)
+            : return(terminated_text(t))
+
+    block skip(alloc: @Allocator, t: Bytes):
+        c_free(t.data)
+        jump next(alloc)
 
 /// The next word from stdin, or null at the end of the input.
 #export("rf_console_ask_word")
 routine rf_console_ask_word() -> @Byte
     block entry():
-        return(read_token(true))
+        rf_console_flush()
+        claim alloc : @Allocator <- heap()
+        return(terminated_option(In.read_word(alloc)))
 
 /// Up to count bytes from stdin, NUL-terminated.
 #export("rf_console_ask_bytes")
 routine rf_console_ask_bytes(count: USize) -> @Byte
     block entry():
-        c_fflush_stream(stdout_stream())
-        buf : Addr = c_malloc(count.add(1))
-        branch buf.is_null()
-            ? return(null)
-            : continue
-        got : USize = c_fread_stream(buf, 1, count, stdin_stream())
-        buf.to<@Byte>().stride(got).store(0x00)
-        return(buf.to<@Byte>())
+        rf_console_flush()
+        claim alloc : @Allocator <- heap()
+        return(terminated_text(In.read_count(count, alloc)))
 
 /// The rest of stdin, NUL-terminated.
 #export("rf_console_ask_all")
 routine rf_console_ask_all() -> @Byte
     block entry():
-        c_fflush_stream(stdout_stream())
-        buf : Addr = c_malloc(1024)
-        branch buf.is_null()
-            ? return(null)
-            : more(buf.to<@Byte>(), 1024, 0)
-
-    block more(buf: @Byte, cap: USize, len: USize):
-        c : CInt = c_getchar()
-        branch c.eq(EOF)
-            ? done(buf, len)
-            : continue
-        branch len.add(1).ge(cap)
-            ? grow(buf, cap, len, c)
-            : put(buf, cap, len, c)
-
-    block grow(buf: @Byte, cap: USize, len: USize, c: CInt):
-        bigger : Addr = c_realloc(buf, cap.mul(2))
-        branch bigger.is_null()
-            ? failed(buf)
-            : put(bigger.to<@Byte>(), cap.mul(2), len, c)
-
-    block put(buf: @Byte, cap: USize, len: USize, c: CInt):
-        buf.stride(len).store(c.to_wrap<U8>().bits())
-        jump more(buf, cap, len.add(1))
-
-    block failed(buf: @Byte):
-        c_free(buf)
-        return(null)
-
-    block done(buf: @Byte, len: USize):
-        buf.stride(len).store(0x00)
-        return(buf)
+        rf_console_flush()
+        claim alloc : @Allocator <- heap()
+        return(terminated_text(In.read_all(alloc)))
 
 // -- the crash report's OS side ------------------------------------------------------
 
@@ -218,65 +205,33 @@ routine rf_console_error(ptr: @Byte, count: USize) -> Void
         branch ptr.is_null().bitor(count.eq(0))
             ? return()
             : continue
-        c_fwrite_stream(ptr, 1, count, stderr_stream())
+        Err.write_all(ptr, count)
         return()
 
 /// Flushes stdout, so a program's output appears before the crash report that follows it.
 #export("rf_flush_output")
 routine rf_flush_output() -> Void
     block entry():
-        c_fflush_stream(stdout_stream())
+        rf_console_flush()
         return()
 
 /// Ends the program with the crash status, after the report.
 #[export("rf_crash_exit"), noreturn]
 routine rf_crash_exit() -> Void
     block entry():
-        c_fflush_stream(stderr_stream())
-        c_exit(CRASH_STATUS)
+        rf_console_flush()
+        exit(CRASH_STATUS)
 
 // -- start-up ------------------------------------------------------------------------
 
-#[external("c"), symbol("SetConsoleCP"), callconv("stdcall"), target(os: "windows")]
-routine c_set_console_cp(page: U32) -> CInt
-
-#[external("c"), symbol("SetConsoleOutputCP"), callconv("stdcall"), target(os: "windows")]
-routine c_set_console_output_cp(page: U32) -> CInt
-
-#[external("c"), symbol("GetStdHandle"), callconv("stdcall"), target(os: "windows")]
-routine c_get_std_handle(which: U32) -> Addr
-
-#[external("c"), symbol("GetConsoleMode"), callconv("stdcall"), target(os: "windows")]
-routine c_get_console_mode(console: Addr, mode: @U32) -> CInt
-
-#[external("c"), symbol("SetConsoleMode"), callconv("stdcall"), target(os: "windows")]
-routine c_set_console_mode(console: Addr, mode: U32) -> CInt
-
-/// Process start-up: the I/O threads start on the main thread, and on Windows the console takes UTF-8 and ANSI
-/// colors on stderr.
-#[export("rf_runtime_init"), target(os: "windows")]
+/// Process start-up: the I/O threads start on the main thread, standard output's buffer is flushed at exit, and
+/// stderr takes ANSI colors (on Windows a console needs asking).
+#export("rf_runtime_init")
 routine rf_runtime_init() -> Void
     block entry():
         rf_io_runtime_init()
-        c_set_console_cp(65001)
-        c_set_console_output_cp(65001)
-        // STD_ERROR_HANDLE
-        err : Addr = c_get_std_handle(0xFFFFFFF4)
-        branch ptrtoint<Addr, U64>(err).eq(U64.MAX)
-            ? return()
-            : continue
-        claim mode : @U32 <- 0
-        branch c_get_console_mode(err, mode).ne(0)
-            ? continue
-            : return()
-        // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-        c_set_console_mode(err, mode.load().bitor(4))
-        return()
-
-#[export("rf_runtime_init"), target(os: not "windows")]
-routine rf_runtime_init() -> Void
-    block entry():
-        rf_io_runtime_init()
+        c_atexit(rf_console_flush.to<Callable>())
+        Err.enable_colors()
         return()
 
 // -- C strings -----------------------------------------------------------------------
