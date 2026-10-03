@@ -43,8 +43,10 @@ routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
         jump put(n)
 
     block put(n: SSize):
-        self.handles.load().stride(n).store(handle)
-        self.kinds.load().stride(n).store(kind)
+        handle_slot : @Addr = self.handles.load().stride(n)
+        handle_slot.store(handle)
+        kind_slot : @U8 = self.kinds.load().stride(n)
+        kind_slot.store(kind)
         self.count.store(n.add(1))
         return()
 
@@ -62,11 +64,13 @@ routine rf_race_add_task(r: @Race, t: @Task) -> Void
 
 routine Race.handle(self: @Self, i: SSize) -> Addr
     block entry():
-        return(self.handles.load().stride(i).load())
+        slot : @Addr = self.handles.load().stride(i)
+        return(slot.load())
 
 routine Race.is_task(self: @Self, i: SSize) -> Bool
     block entry():
-        return(self.kinds.load().stride(i).load().eq(1))
+        slot : @U8 = self.kinds.load().stride(i)
+        return(slot.load().eq(1))
 
 /// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
 /// to; each keeps a cross-thread wake promised meanwhile.
@@ -172,7 +176,8 @@ routine rf_race_wait(r: @Race) -> SSize
         self : @Coro  = current_coro()
         r.register(s, self, true)
         s.lock.lock()
-        s.waiters.load().add(1).store_into(s.waiters)
+        next_waiters : SSize = s.waiters.load().add(1)
+        next_waiters.store_into(s.waiters)
         branch self.is_null()
             ? poll(s, self)
             : continue
@@ -208,7 +213,8 @@ routine rf_race_wait(r: @Race) -> SSize
         jump finish(s, self, winner)
 
     block finish(s: @Sched, self: @Coro, winner: SSize):
-        s.waiters.load().sub(1).store_into(s.waiters)
+        remaining_waiters : SSize = s.waiters.load().sub(1)
+        remaining_waiters.store_into(s.waiters)
         s.lock.unlock()
         r.register(s, null, false)
         return(winner)

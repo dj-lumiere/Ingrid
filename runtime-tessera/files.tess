@@ -51,7 +51,8 @@ routine bytes_result(s: @Byte, len: USize) -> @Byte
             ? return(no_result())
             : continue
         c_memcpy(buf, s, len)
-        buf.to<@Byte>().stride(len).store(0x00)
+        terminator : @Byte = buf.to<@Byte>().stride(len)
+        terminator.store(0x00)
         return(result(buf.to<@Byte>(), len))
 
 /// Text from the malloc heap (read_all and the like with heap()) made NUL-terminated in place, as the result.
@@ -67,7 +68,8 @@ routine owned_result(r: Result<Bytes, FsError>) -> @Byte
         branch buf.is_null()
             ? lost(text)
             : continue
-        buf.to<@Byte>().stride(n).store(0x00)
+        terminator : @Byte = buf.to<@Byte>().stride(n)
+        terminator.store(0x00)
         return(result(buf.to<@Byte>(), n))
 
     block lost(text: Bytes):
@@ -128,9 +130,11 @@ routine ResultBuffer.start(self: @Self, cap: USize) -> Bool
 /// Room for n more bytes and the NUL: false if the buffer can't grow.
 routine ResultBuffer.room(self: @Self, n: USize) -> Bool
     block entry():
-        need : USize = self.len.load().add(n).add(1)
-        branch need.gt(self.cap.load())
-            ? grow(self.cap.load().mul(2).max(need))
+        filled      : USize = self.len.load().add(n)
+        need        : USize = filled.add(1)
+        current_cap : USize = self.cap.load()
+        branch need.gt(current_cap)
+            ? grow(current_cap.mul(2).max(need))
             : return(true)
 
     block grow(cap: USize):
@@ -145,19 +149,23 @@ routine ResultBuffer.room(self: @Self, n: USize) -> Bool
 routine ResultBuffer.put(self: @Self, data: @Byte, n: USize) -> Void
     block entry():
         c_memcpy(self.buf.load().stride(self.len.load()), data, n)
-        self.len.load().add(n).store_into(self.len)
+        next_len : USize = self.len.load().add(n)
+        next_len.store_into(self.len)
         return()
 
 routine ResultBuffer.byte(self: @Self, b: Byte) -> Void
     block entry():
-        self.buf.load().stride(self.len.load()).store(b)
-        self.len.load().add(1).store_into(self.len)
+        slot : @Byte = self.buf.load().stride(self.len.load())
+        slot.store(b)
+        next_len : USize = self.len.load().add(1)
+        next_len.store_into(self.len)
         return()
 
 routine ResultBuffer.finish(self: @Self) -> @Byte
     block entry():
-        n : USize = self.len.load()
-        self.buf.load().stride(n).store(0x00)
+        n          : USize = self.len.load()
+        terminator : @Byte = self.buf.load().stride(n)
+        terminator.store(0x00)
         return(result(self.buf.load(), n))
 
 routine ResultBuffer.fail(self: @Self) -> @Byte
@@ -316,7 +324,8 @@ routine rf_file_read_all(fd: S32) -> @Byte
         branch n.eq(0)
             ? done(of, out)
             : continue
-        out.len.load().add(n).store_into(out.len)
+        next_len : USize = out.len.load().add(n)
+        next_len.store_into(out.len)
         jump more(of, out)
 
     block done(of: @OpenFile, out: @ResultBuffer):
@@ -345,8 +354,9 @@ routine rf_file_read_line(fd: S32) -> @Byte
             : return(out.finish())
 
     block byte(of: @OpenFile, out: @ResultBuffer):
-        at : USize = of.start.load()
-        c  : Byte  = of.buffer.load().stride(at).load()
+        at     : USize = of.start.load()
+        cursor : @Byte = of.buffer.load().stride(at)
+        c      : Byte  = cursor.load()
         of.start.store(at.add(1))
         when:
             c.eq(b'\n') -> return(out.finish())
@@ -386,9 +396,11 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
             : return(out.finish())
 
     block take(of: @OpenFile, out: @ResultBuffer, wanted: USize):
-        n : USize = of.end.load().sub(of.start.load()).min(wanted)
+        buffered : USize = of.end.load().sub(of.start.load())
+        n        : USize = buffered.min(wanted)
         out.put(of.buffer.load().stride(of.start.load()), n)
-        of.start.load().add(n).store_into(of.start)
+        next_start : USize = of.start.load().add(n)
+        next_start.store_into(of.start)
         jump next(of, out)
 
 /// The bytes written (all of them, or 0 on a failure).
@@ -399,7 +411,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
         branch of.is_null()
             ? return(0)
             : continue
-        branch of.end.load().add(len).gt(FILE_BUFFER)
+        needed : USize = of.end.load().add(len)
+        branch needed.gt(FILE_BUFFER)
             ? continue
             : keep(of)
         branch of.drain()
@@ -417,7 +430,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
 
     block keep(of: @OpenFile):
         c_memcpy(of.buffer.load().stride(of.end.load()), ptr, len)
-        of.end.load().add(len).store_into(of.end)
+        next_end : USize = of.end.load().add(len)
+        next_end.store_into(of.end)
         return(len)
 
 #export("rf_file_flush")
@@ -457,7 +471,8 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
         branch buf.is_null()
             ? lost(text)
             : continue
-        buf.to<@Byte>().stride(n).store(0x00)
+        terminator : @Byte = buf.to<@Byte>().stride(n)
+        terminator.store(0x00)
         data.store(buf.to<@Byte>())
         return(n.to<S64>())
 
@@ -483,7 +498,8 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
         first  : Bytes = path_of(a, a_len)
         second : Bytes = path_of(b, b_len)
         claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
-        branch out.start(first.length().add(second.length()).add(2))
+        joined_length : USize = first.length().add(second.length())
+        branch out.start(joined_length.add(2))
             ? continue
             : return(out.fail())
         out.put(first.data, first.length())
@@ -664,7 +680,8 @@ routine decimal(v: U64, out: @Byte) -> USize
         jump digit(v, rev.to<@Byte>(), 0)
 
     block digit(v: U64, rev: @Byte, n: USize):
-        rev.stride(n).store(v.mod(10).to<U8>().add(48).bits())
+        digit_value : U8 = v.mod(10).to<U8>()
+        rev.stride(n).store(digit_value.add(48).bits())
         rest : U64 = v.div(10)
         branch rest.eq(0)
             ? copy(rev, n.add(1), 0)
@@ -910,7 +927,8 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
 routine advise(m: Mapping) -> Void
     block entry():
         m.advise_sequential()
-        branch m.length().to<U64>().le(physical_memory().div(2))
+        mapped : U64 = m.length().to<U64>()
+        branch mapped.le(physical_memory().div(2))
             ? continue
             : return()
         m.prefetch()

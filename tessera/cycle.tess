@@ -132,7 +132,8 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
         jump put(count)
 
     block put(count: U64):
-        buffer.items.load().stride(count.to<USize>()).store(item)
+        slot : @Addr = buffer.items.load().stride(count.to<USize>())
+        slot.store(item)
         count.add(1).store_into(buffer.count)
         return()
 
@@ -143,7 +144,8 @@ routine buffer_clear(buffer: @HeaderBuffer) -> Void
 
 routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
     block entry():
-        item : Addr = buffer.items.load().stride(i.to<USize>()).load()
+        slot : @Addr = buffer.items.load().stride(i.to<USize>())
+        item : Addr  = slot.load()
         return(item.to<@RoamHeader>())
 
 /// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
@@ -204,9 +206,11 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
             : scan(i.add(1), n)
 
     block remove(i: U64, n: U64):
-        last  : U64  = n.sub(1)
-        moved : Addr = buffer.items.load().stride(last.to<USize>()).load()
-        buffer.items.load().stride(i.to<USize>()).store(moved)
+        last      : U64   = n.sub(1)
+        last_slot : @Addr = buffer.items.load().stride(last.to<USize>())
+        moved     : Addr  = last_slot.load()
+        hole      : @Addr = buffer.items.load().stride(i.to<USize>())
+        hole.store(moved)
         last.store_into(buffer.count)
         return()
 
@@ -264,8 +268,10 @@ routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
         branch i.ge(n)
             ? next(work, kids)
             : continue
-        kid : @RoamHeader = kids.load().get(i).to<@RoamHeader>()
-        kid.count.load().sub(1).store_into(kid.count)
+        kid_address : Addr        = kids.load().get(i)
+        kid         : @RoamHeader = kid_address.to<@RoamHeader>()
+        kid_count   : U64         = kid.count.load().sub(1)
+        kid_count.store_into(kid.count)
         branch kid.state.load().eq(SCANNING)
             ? edges(work, kids, i.add(1), n)
             : continue
@@ -339,8 +345,10 @@ routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
         branch i.ge(n)
             ? next(work, kids)
             : continue
-        kid : @RoamHeader = kids.load().get(i).to<@RoamHeader>()
-        kid.count.load().add(1).store_into(kid.count)
+        kid_address : Addr        = kids.load().get(i)
+        kid         : @RoamHeader = kid_address.to<@RoamHeader>()
+        kid_count   : U64         = kid.count.load().add(1)
+        kid_count.store_into(kid.count)
         branch kid.state.load().eq(LIVE)
             ? edges(work, kids, i.add(1), n)
             : continue
@@ -424,7 +432,8 @@ routine collect() -> U64
         branch i.ge(n)
             ? gather(roots, alloc)
             : continue
-        scan(roots.load().get(i).to<@RoamHeader>(), alloc)
+        root_address : Addr = roots.load().get(i)
+        scan(root_address.to<@RoamHeader>(), alloc)
         jump scanning(roots, alloc, i.add(1), n)
 
     block gather(roots: @List<Addr>, alloc: @Allocator):
@@ -435,7 +444,8 @@ routine collect() -> U64
         branch i.ge(n)
             ? reap(roots, 0, REAP.count.load())
             : continue
-        root : @RoamHeader = roots.load().get(i).to<@RoamHeader>()
+        root_address : Addr        = roots.load().get(i)
+        root         : @RoamHeader = root_address.to<@RoamHeader>()
         false.store_into(root.buffered)
         collect_garbage(root, alloc)
         jump gathering(roots, alloc, i.add(1), n)
@@ -472,8 +482,10 @@ routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
         branch k.ge(remaining)
             ? shifted(remaining)
             : continue
-        moved : Addr = buffer.items.load().stride(n.add(k).to<USize>()).load()
-        buffer.items.load().stride(k.to<USize>()).store(moved)
+        from_slot : @Addr = buffer.items.load().stride(n.add(k).to<USize>())
+        moved     : Addr  = from_slot.load()
+        to_slot   : @Addr = buffer.items.load().stride(k.to<USize>())
+        to_slot.store(moved)
         jump shift(k.add(1), remaining)
 
     block shifted(remaining: U64):

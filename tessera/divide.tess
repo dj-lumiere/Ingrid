@@ -26,7 +26,8 @@ preset RECIPROCAL_SEED: @Array<U16, 256> <- { 2045, 2037, 2029, 2021, 2013, 2005
 #inline
 routine high(a: U64, b: U64) -> U64
     block entry():
-        return(a.to<U128>().mul(b.to<U128>()).shr(64).to_wrap<U64>())
+        product : U128 = a.to<U128>().mul(b.to<U128>())
+        return(product.shr(64).to_wrap<U64>())
 
 /// The reciprocal of a normalized d (top bit set), for rf_udivrem_128_64_pre. On x86-64 the divide is hardware and
 /// this is 0.
@@ -38,18 +39,22 @@ routine rf_reciprocal_word(d: U64) -> U64
 #[export("rf_reciprocal_word"), target(arch: not "x86_64")]
 routine rf_reciprocal_word(d: U64) -> U64
     block entry():
-        d9  : U64  = d.shr(55)
-        v0  : U64  = RECIPROCAL_SEED.get(d9.sub(256).to<USize>()).to<U64>()
-        d40 : U64  = d.shr(24).add(1)
-        v1  : U64  = v0.shl(11).sub_wrap(v0.mul_wrap(v0).mul_wrap(d40).shr(40)).sub_wrap(1)
-        v2  : U64  = v1.shl(13).add_wrap(v1.mul_wrap(0x1000000000000000.sub_wrap(v1.mul_wrap(d40))).shr(47))
-        d0  : U64  = d.bitand(1)
-        d63 : U64  = d.shr(1).add(d0)
-        e   : U64  = v2.shr(1).bitand(0.sub_wrap(d0)).sub_wrap(v2.mul_wrap(d63))
-        v3a : U64  = high(v2, e)
-        v3  : U64  = v3a.shr(1).add_wrap(v2.shl(31))
-        t   : U128 = v3.to<U128>().mul_wrap(d.to<U128>()).add_wrap(d.to<U128>())
-        v4  : U64  = v3.sub_wrap(t.shr(64).to_wrap<U64>()).sub_wrap(d)
+        d9        : U64  = d.shr(55)
+        v0        : U64  = RECIPROCAL_SEED.get(d9.sub(256).to<USize>()).to<U64>()
+        d40       : U64  = d.shr(24).add(1)
+        v0sq_d40  : U64  = v0.mul_wrap(v0).mul_wrap(d40)
+        v1a       : U64  = v0.shl(11).sub_wrap(v0sq_d40.shr(40))
+        v1        : U64  = v1a.sub_wrap(1)
+        v2        : U64  = v1.shl(13).add_wrap(v1.mul_wrap(0x1000000000000000.sub_wrap(v1.mul_wrap(d40))).shr(47))
+        d0        : U64  = d.bitand(1)
+        d63       : U64  = d.shr(1).add(d0)
+        v2_masked : U64  = v2.shr(1).bitand(0.sub_wrap(d0))
+        e         : U64  = v2_masked.sub_wrap(v2.mul_wrap(d63))
+        v3a       : U64  = high(v2, e)
+        v3        : U64  = v3a.shr(1).add_wrap(v2.shl(31))
+        v3d       : U128 = v3.to<U128>().mul_wrap(d.to<U128>())
+        t         : U128 = v3d.add_wrap(d.to<U128>())
+        v4        : U64  = v3.sub_wrap(t.shr(64).to_wrap<U64>()).sub_wrap(d)
         return(v4)
 
 /// (hi × 2^64 + lo) / d for hi < d and d normalized, with v = rf_reciprocal_word(d): the quotient, and the
@@ -64,10 +69,14 @@ routine rf_udivrem_128_64_pre(hi: U64, lo: U64, d: U64, v: U64, rem: @U64) -> U6
 #[export("rf_udivrem_128_64_pre"), target(arch: not "x86_64")]
 routine rf_udivrem_128_64_pre(hi: U64, lo: U64, d: U64, v: U64, rem: @U64) -> U64
     block entry():
-        q  : U128 = v.to<U128>().mul_wrap(hi.to<U128>()).add_wrap(hi.to<U128>().shl(64).bitor(lo.to<U128>()))
-        q1 : U64  = q.shr(64).to_wrap<U64>().add_wrap(1)
-        q0 : U64  = q.to_wrap<U64>()
-        r  : U64  = lo.sub_wrap(q1.mul_wrap(d))
+        vh         : U128 = v.to<U128>().mul_wrap(hi.to<U128>())
+        hi_shifted : U128 = hi.to<U128>().shl(64)
+        n          : U128 = hi_shifted.bitor(lo.to<U128>())
+        q          : U128 = vh.add_wrap(n)
+        q_hi       : U64  = q.shr(64).to_wrap<U64>()
+        q1         : U64  = q_hi.add_wrap(1)
+        q0         : U64  = q.to_wrap<U64>()
+        r          : U64  = lo.sub_wrap(q1.mul_wrap(d))
         branch r.gt(q0)
             ? back(q1.sub_wrap(1), r.add_wrap(d))
             : back(q1, r)
@@ -92,6 +101,7 @@ routine rf_udivrem_128_64(hi: U64, lo: U64, d: U64, rem: @U64) -> U64
 #[export("rf_udivrem_128_64"), target(arch: not "x86_64")]
 routine rf_udivrem_128_64(hi: U64, lo: U64, d: U64, rem: @U64) -> U64
     block entry():
-        n : U128 = hi.to<U128>().shl(64).bitor(lo.to<U128>())
+        hi_shifted : U128 = hi.to<U128>().shl(64)
+        n          : U128 = hi_shifted.bitor(lo.to<U128>())
         rem.store(n.mod(d.to<U128>()).to_wrap<U64>())
         return(n.div(d.to<U128>()).to_wrap<U64>())

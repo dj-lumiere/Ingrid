@@ -114,7 +114,8 @@ routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
         jump put(n)
 
     block put(n: USize):
-        self.items.load().stride(n).store(entry)
+        slot : @HandlerEntry = self.items.load().stride(n)
+        slot.store(entry)
         self.count.store(n.add(1))
         return()
 
@@ -161,10 +162,11 @@ routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
     block entry():
         // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1; CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
+        closing : Bool = ctrl_type.eq(2).bitor(ctrl_type.eq(5))
         when:
-            ctrl_type.le(1)                                               -> interrupt()
-            ctrl_type.eq(2).bitor(ctrl_type.eq(5)).bitor(ctrl_type.eq(6)) -> terminate()
-            else                                                          -> return(0)
+            ctrl_type.le(1)                -> interrupt()
+            closing.bitor(ctrl_type.eq(6)) -> terminate()
+            else                           -> return(0)
 
     block interrupt():
         dispatch_which(SIG_INTERRUPT)
@@ -246,7 +248,8 @@ routine posix_signal_handler(signo: CInt) -> Void
         jump write(byte)
 
     block write(byte: @U8):
-        rc : SSize = c_write(SELF_PIPE.to<@CInt>().stride(1).load(), byte.to<@Byte>(), 1)
+        write_end : @CInt = SELF_PIPE.to<@CInt>().stride(1)
+        rc        : SSize = c_write(write_end.load(), byte.to<@Byte>(), 1)
         branch rc.lt(0).bitand(errno().eq(4))
             ? write(byte)
             : return()

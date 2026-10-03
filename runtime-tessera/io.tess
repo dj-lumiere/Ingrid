@@ -43,7 +43,8 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
             ? return(null)
             : continue
         c_memcpy(d, s, len)
-        d.to<@Byte>().stride(len).store(0x00)
+        terminator : @Byte = d.to<@Byte>().stride(len)
+        terminator.store(0x00)
         return(d.to<@Byte>())
 
 // -- requests and the I/O threads ----------------------------------------------------
@@ -404,14 +405,16 @@ routine proc_state_free(st: @ProcState) -> Void
         branch i.eq(st.arg_count.load())
             ? env(0)
             : continue
-        free_bytes(st.args.load().stride(i).load())
+        arg_slot : @Bytes = st.args.load().stride(i)
+        free_bytes(arg_slot.load())
         jump args(i.add(1))
 
     block env(i: USize):
         branch i.eq(st.env_count.load())
             ? arrays()
             : continue
-        v : EnvVar = st.env.load().stride(i).load()
+        env_slot : @EnvVar = st.env.load().stride(i)
+        v        : EnvVar  = env_slot.load()
         free_bytes(v.name)
         free_bytes(v.value)
         jump env(i.add(1))
@@ -433,7 +436,8 @@ routine terminated(b: Bytes) -> @Byte
         branch buf.is_null()
             ? lost(b)
             : continue
-        buf.to<@Byte>().stride(n).store(0x00)
+        terminator : @Byte = buf.to<@Byte>().stride(n)
+        terminator.store(0x00)
         return(buf.to<@Byte>())
 
     block lost(b: Bytes):
@@ -493,9 +497,11 @@ routine proc_exec(st: @ProcState) -> S64
         io_run(req)
         PROC_SIGNAL.store(st.term_signal.load())
         PROC_OUT.store(terminated(st.output.load()))
-        PROC_OUT_LEN.store(st.output.load().length().to<U64>())
+        output_length : USize = st.output.load().length()
+        PROC_OUT_LEN.store(output_length.to<U64>())
         PROC_ERR.store(terminated(st.errors.load()))
-        PROC_ERR_LEN.store(st.errors.load().length().to<U64>())
+        errors_length : USize = st.errors.load().length()
+        PROC_ERR_LEN.store(errors_length.to<U64>())
         failed : Bool = st.spawn_failed.load()
         code   : S64  = st.exit_status.load()
         proc_state_free(st)
@@ -526,8 +532,9 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         branch n.lt(b.arg_cap.load())
             ? put(n)
             : continue
-        cap    : USize = b.arg_cap.load().mul(2).max(4)
-        bigger : Addr  = c_realloc(b.args.load(), cap.mul(sizeof<Bytes>()))
+        doubled : USize = b.arg_cap.load().mul(2)
+        cap     : USize = doubled.max(4)
+        bigger  : Addr  = c_realloc(b.args.load(), cap.mul(sizeof<Bytes>()))
         branch bigger.is_null()
             ? return()
             : continue
@@ -536,7 +543,8 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         jump put(n)
 
     block put(n: USize):
-        b.args.load().stride(n).store(owned_copy(arg, arg_len))
+        slot : @Bytes = b.args.load().stride(n)
+        slot.store(owned_copy(arg, arg_len))
         b.arg_count.store(n.add(1))
         return()
 
@@ -562,8 +570,9 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         branch n.lt(b.env_cap.load())
             ? put(n)
             : continue
-        cap    : USize = b.env_cap.load().mul(2).max(4)
-        bigger : Addr  = c_realloc(b.env.load(), cap.mul(sizeof<EnvVar>()))
+        doubled : USize = b.env_cap.load().mul(2)
+        cap     : USize = doubled.max(4)
+        bigger  : Addr  = c_realloc(b.env.load(), cap.mul(sizeof<EnvVar>()))
         branch bigger.is_null()
             ? return()
             : continue
@@ -572,8 +581,8 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         jump put(n)
 
     block put(n: USize):
-        b.env.load().stride(n).store(EnvVar { name: owned_copy(key, key_len),
-            value: owned_copy(val, val_len) })
+        slot : @EnvVar = b.env.load().stride(n)
+        slot.store(EnvVar { name: owned_copy(key, key_len), value: owned_copy(val, val_len) })
         b.env_count.store(n.add(1))
         return()
 

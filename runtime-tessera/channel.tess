@@ -71,7 +71,8 @@ routine rf_channel_create(capacity: U64) -> @Channel
 /// Frees the channel once both counts are 0. The caller doesn't hold the lock.
 routine Channel.maybe_free(self: @Self) -> Void
     block entry():
-        branch self.producer_refs.load().eq(0).bitand(self.consumer_refs.load().eq(0))
+        no_producers : Bool = self.producer_refs.load().eq(0)
+        branch no_producers.bitand(self.consumer_refs.load().eq(0))
             ? continue
             : return()
         c_free(self.slots.load())
@@ -85,7 +86,8 @@ routine rf_channel_add_feeder(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        chan.producer_refs.load().add(1).store_into(chan.producer_refs)
+        next_producer_refs : U32 = chan.producer_refs.load().add(1)
+        next_producer_refs.store_into(chan.producer_refs)
         chan.lock.unlock()
         return()
 
@@ -96,7 +98,8 @@ routine rf_channel_add_consumer(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        chan.consumer_refs.load().add(1).store_into(chan.consumer_refs)
+        next_consumer_refs : U32 = chan.consumer_refs.load().add(1)
+        next_consumer_refs.store_into(chan.consumer_refs)
         chan.lock.unlock()
         return()
 
@@ -213,8 +216,9 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         jump room()
 
     block room():
-        full : Bool = chan.count.load().eq(chan.slot_cap.load())
-        open : Bool = chan.closed.load().bitnot().bitand(chan.consumer_refs.load().gt(0))
+        full       : Bool = chan.count.load().eq(chan.slot_cap.load())
+        not_closed : Bool = chan.closed.load().bitnot()
+        open       : Bool = not_closed.bitand(chan.consumer_refs.load().gt(0))
         branch full.bitand(open)
             ? continue
             : put()
@@ -228,10 +232,13 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         branch chan.closed.load().bitor(chan.consumer_refs.load().eq(0))
             ? fail()
             : continue
-        cap  : U64 = chan.slot_cap.load()
-        tail : U64 = chan.head.load().add(chan.count.load()).mod(cap)
-        chan.slots.load().stride(tail.to<USize>()).store(payload)
-        chan.count.load().add(1).store_into(chan.count)
+        cap         : U64   = chan.slot_cap.load()
+        linear_tail : U64   = chan.head.load().add(chan.count.load())
+        tail        : U64   = linear_tail.mod(cap)
+        tail_slot   : @Addr = chan.slots.load().stride(tail.to<USize>())
+        tail_slot.store(payload)
+        next_count : U64 = chan.count.load().add(1)
+        next_count.store_into(chan.count)
         chan.wake_all(chan.not_empty_head.load())
         branch chan.capacity.load().eq(0)
             ? taken()
@@ -239,8 +246,9 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
 
     // A rendezvous: not over until this item was taken.
     block taken():
-        pending : Bool = chan.count.load().gt(0).bitand(chan.closed.load().bitnot())
-        waiting : Bool = pending.bitand(chan.consumer_refs.load().gt(0))
+        has_items : Bool = chan.count.load().gt(0)
+        pending   : Bool = has_items.bitand(chan.closed.load().bitnot())
+        waiting   : Bool = pending.bitand(chan.consumer_refs.load().gt(0))
         branch waiting
             ? continue
             : sent()
@@ -289,7 +297,8 @@ routine rf_channel_next(chan: @Channel) -> Addr
         payload : Addr  = slot.load()
         slot.store(null)
         chan.head.store(head.add(1).mod(chan.slot_cap.load()))
-        chan.count.load().sub(1).store_into(chan.count)
+        remaining_count : U64 = chan.count.load().sub(1)
+        remaining_count.store_into(chan.count)
         chan.wake_all(chan.not_full_head.load())
         chan.lock.unlock()
         return(payload)
