@@ -44,6 +44,7 @@ native/
 ├── memory.tess  // rf_allocate_dynamic and the rest of the heap calls, scratch regions
 ├── divide.tess  // word division for the wide integers
 ├── random.tess  // splitmix64
+├── hash.tess  // SipHash-2-4, behind every hash(k0, k1) in the standard libraries
 ├── roam.tess  // the Roamed entity runtime: counts, promotion, the task-keyed lock
 ├── cycle.tess  // the cycle collector for Roamed entities
 ├── deadlock.tess  // the opt-in deadlock detector for the Roamed lock
