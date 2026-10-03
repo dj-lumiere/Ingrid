@@ -1,0 +1,43 @@
+// The deadlock detector off (RF_DEADLOCK_DETECT=0, set before its first use), as every program runs by default: even
+// a ring of waits is neither recorded nor reported.
+//
+// rf_crash_exit is the RazorForge runtime library's; this program defines it (exit status 82, as the runtime's), so a
+// report would fail the test on its exit status.
+
+import Standard::Format
+import Standard::Os
+
+#[external("c"), symbol("setenv"), target(os: ("linux", "macos"))]
+routine c_setenv(name: CStr, value: CStr, overwrite: CInt) -> CInt
+
+#[external("c"), symbol("_putenv_s"), target(os: "windows")]
+routine c_putenv_s(name: CStr, value: CStr) -> CInt
+
+#[export("rf_crash_exit"), noreturn]
+routine stub_crash_exit() -> Void
+    block entry()
+        Out.write("crash exit\n")
+        exit(82)
+
+#target(os: ("linux", "macos"))
+routine set_detector(value: CStr) -> Void
+    block entry()
+        c_setenv("RF_DEADLOCK_DETECT", value, 1)
+        return()
+
+#target(os: "windows")
+routine set_detector(value: CStr) -> Void
+    block entry()
+        c_putenv_s("RF_DEADLOCK_DETECT", value)
+        return()
+
+routine main() -> S32
+    block entry()
+        set_detector("0")
+        on : Bool = detector_on()
+        Out.write("detector on: {on}\n")
+        deadlock_wait_begin(1, 2)
+        deadlock_wait_begin(2, 1)
+        recorded : Bool = WAITS.at(0).used.load()
+        Out.write("a ring of waits: recorded {recorded}, no report\n")
+        return(0)

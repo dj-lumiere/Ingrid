@@ -1,0 +1,86 @@
+// (hi × 2^64 + lo) / d through Ingrid's word division, checked against big-integer results from a Python model. A
+// normalized divisor (top bit set) goes through both entry points, the reciprocal one with rf_reciprocal_word(d) (0 on
+// x86-64, where the divide is hardware), and both must agree; any other divisor goes through rf_udivrem_128_64 alone.
+// The cases sit on the edges: the smallest and largest normalized divisors, a quotient of U64.MAX (hi = d - 1, the
+// most the precondition hi < d allows), a remainder of d - 1, a zero dividend, divisors on a 32-bit limb boundary,
+// and two dividends each for the reciprocal form's two corrections of its quotient estimate (the second one is rare;
+// these were found by searching a Python model of the algorithm).
+
+import Standard::Format
+import Standard::Os
+
+/// Writes a U64 as 16 lowercase hex digits.
+routine write_word(value: U64) -> Void
+    block entry()
+        hex : Hex<U64> = Hex<U64> { value: value }
+        represent_with(Out.shared(), hex, FormatSpec.zero_padded(16))
+        return()
+
+routine write_case(hi: U64, lo: U64, d: U64, q: U64, r: U64) -> Void
+    block entry()
+        write_word(hi)
+        write_word(lo)
+        Out.write(" / ")
+        write_word(d)
+        Out.write(" = ")
+        write_word(q)
+        Out.write(" rem ")
+        write_word(r)
+        Out.write("\n")
+        return()
+
+/// A normalized divisor: both entry points, which must give the same quotient and remainder.
+routine check_normalized(hi: U64, lo: U64, d: U64) -> Void
+    block entry()
+        claim rem     : @U64 <- 0
+        claim rem_pre : @U64 <- 0
+        q      : U64  = rf_udivrem_128_64(hi, lo, d, rem)
+        v      : U64  = rf_reciprocal_word(d)
+        q_pre  : U64  = rf_udivrem_128_64_pre(hi, lo, d, v, rem_pre)
+        same_q : Bool = q.eq(q_pre)
+        same_r : Bool = rem.load().eq(rem_pre.load())
+        branch same_q.bitand(same_r)
+            ? continue
+            : crash("LogicBreachedError", "The reciprocal division disagrees with the plain one.")
+        write_case(hi, lo, d, q, rem.load())
+        return()
+
+/// Any divisor above hi: the plain entry point.
+routine check_plain(hi: U64, lo: U64, d: U64) -> Void
+    block entry()
+        claim rem : @U64 <- 0
+        q : U64 = rf_udivrem_128_64(hi, lo, d, rem)
+        write_case(hi, lo, d, q, rem.load())
+        return()
+
+routine main() -> S32
+    block entry()
+        check_normalized(0, 0, 0x8000000000000000)
+        check_normalized(0, 0x7FFFFFFFFFFFFFFF, 0x8000000000000000)
+        check_normalized(0, 0x8000000000000000, 0x8000000000000000)
+        check_normalized(0x7FFFFFFFFFFFFFFF, U64.MAX, 0x8000000000000000)
+        check_normalized(0x7FFFFFFFFFFFFFFF, 0, 0x8000000000000000)
+        check_normalized(0, U64.MAX, U64.MAX)
+        check_normalized(0xFFFFFFFFFFFFFFFE, U64.MAX, U64.MAX)
+        check_normalized(0xFFFFFFFFFFFFFFFE, 0, U64.MAX)
+        check_normalized(1, 0, 0x8000000000000001)
+        check_normalized(0x8000000000000000, 0, 0x8000000000000001)
+        check_normalized(0x8000000000000000, U64.MAX, 0x8000000000000001)
+        check_plain(0xFFFFFFFF, U64.MAX, 0x100000000)
+        check_normalized(0xDEADBEEF, 0x0123456789ABCDEF, 0xFFFFFFFF00000000)
+        check_normalized(0x7FFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFE, 0x8000000000000001)
+        check_normalized(0x123456789ABCDEF0, 0xFEDCBA9876543210, 0xF000000000000000)
+        check_normalized(0x1027C4D1C386BBC4, 0x1E2FEB89414C343C, 0x91B7584A2265B1F5)
+        check_normalized(0x35BF992DC9E9C616, 0x7CE42C8218072E8C, 0xE3EE7FD6FEDEDD7B)
+        check_normalized(0x8F192D8888B49373, 0xD4D5875DEB738F63, 0x98DBC06B1E74880A)
+        check_normalized(0x8C0CDE997F83E778, 0xC24225782918F47C, 0x8F9ABCF77FDF7BFE)
+        check_plain(0, 7, 1)
+        check_plain(0, U64.MAX, 1)
+        check_plain(0, 100, 7)
+        check_plain(5, 0, 6)
+        check_plain(0, 0, 3)
+        check_plain(2, U64.MAX, 3)
+        check_plain(0xFFFE, 0x1234, 0xFFFF)
+        check_plain(0x7FFFFFFF, U64.MAX, 0x80000000)
+        check_plain(0x80000000, 0, 0xFFFFFFFF)
+        return(0)

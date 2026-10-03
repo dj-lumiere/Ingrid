@@ -1,0 +1,90 @@
+// The crash handler (crash.tess) with no place and a trace deeper than the 32 frames the runtime keeps: the report
+// has no place line, the trace is read from the ring most recent first (40 pushes, so the newest sits in slot 7 and
+// the oldest kept is push 9), and its last line says how many frames there were in all.
+//
+// The handler reads the RazorForge runtime library's routines, which this program defines itself: the flush (it
+// says so on standard output, to show it comes before the report), the crash exit (status 82, as the runtime's),
+// and the ring of trace frames, push k (from 1) in slot (k - 1) mod 32 with line k. The report goes to standard
+// error, and the test runner compares standard output, so the program first points standard error at standard
+// output.
+
+import Standard::Format
+import Standard::Os
+
+global FRAMES : @Array<Frame, 32>
+
+preset DEPTH: S32 = 40
+
+/// A trace frame as the runtime keeps it.
+record Frame
+    routine_name : Addr
+    file         : Addr
+    line         : S32
+    column       : S32
+
+#[external("c"), symbol("dup2"), target(os: ("linux", "macos"))]
+routine c_dup2(from: CInt, to: CInt) -> CInt
+
+#[external("c"), symbol("GetStdHandle"), callconv("stdcall"), target(os: "windows")]
+routine win_get_std_handle(which: U32) -> Addr
+
+#[external("c"), symbol("SetStdHandle"), callconv("stdcall"), target(os: "windows")]
+routine win_set_std_handle(which: U32, handle: Addr) -> CInt
+
+#export("rf_flush_output")
+routine stub_flush_output() -> Void
+    block entry()
+        Out.write("[standard output flushed]\n")
+        return()
+
+#[export("rf_crash_exit"), noreturn]
+routine stub_crash_exit() -> Void
+    block entry()
+        exit(82)
+
+#export("_rf_trace_get_depth_shared")
+routine stub_trace_depth() -> S32
+    block entry()
+        return(DEPTH)
+
+#export("_rf_trace_get_frames_shared")
+routine stub_trace_frames() -> @Frame
+    block entry()
+        return(FRAMES.to<@Frame>())
+
+/// Points standard error at standard output.
+#target(os: ("linux", "macos"))
+routine merge_error_into_output() -> Void
+    block entry()
+        c_dup2(1, 2)
+        return()
+
+#target(os: "windows")
+routine merge_error_into_output() -> Void
+    block entry()
+        // STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+        output : Addr = win_get_std_handle(0xFFFFFFF5)
+        win_set_std_handle(0xFFFFFFF4, output)
+        return()
+
+/// Pushes frames 1 through DEPTH into the ring, the way a deep recursion would.
+routine fill_ring() -> Void
+    block entry()
+        jump push(1)
+
+    block push(k: S32)
+        branch k.gt(DEPTH)
+            ? return()
+            : continue
+        back : S32   = k.sub(1).bitand(31)
+        slot : USize = back.to<USize>()
+        FRAMES.set(slot, Frame { routine_name: "descend", file: "deep.rf", line: k, column: 5 })
+        jump push(k.add(1))
+
+routine main() -> S32
+    block entry()
+        merge_error_into_output()
+        fill_ring()
+        Out.write("before the crash\n")
+        crash_handler("IndexOutOfBoundsError", "Index 40 is out of bounds for a list of 40 items.",
+            null)

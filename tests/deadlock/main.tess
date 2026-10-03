@@ -1,0 +1,98 @@
+// The deadlock detector's bookkeeping on one thread, turned on through RF_DEADLOCK_DETECT before its first use. Waits
+// that form no cycle are recorded and cleared without a report: a wait on no holder, a task waiting on itself, and a
+// wait that ended before the opposite one began. Then three tasks wait in a ring (3 on 4, 4 on 5, 5 on 3), and the
+// last wait closes it: the detector reports the two tasks and exits through rf_crash_exit.
+//
+// rf_crash_exit is the RazorForge runtime library's; this program defines it (exit status 82, as the runtime's).
+// The report goes to standard error, and the test runner compares standard output, so the program first points
+// standard error at standard output.
+
+import Standard::Format
+import Standard::Os
+
+#[external("c"), symbol("dup2"), target(os: ("linux", "macos"))]
+routine c_dup2(from: CInt, to: CInt) -> CInt
+
+#[external("c"), symbol("setenv"), target(os: ("linux", "macos"))]
+routine c_setenv(name: CStr, value: CStr, overwrite: CInt) -> CInt
+
+#[external("c"), symbol("GetStdHandle"), callconv("stdcall"), target(os: "windows")]
+routine win_get_std_handle(which: U32) -> Addr
+
+#[external("c"), symbol("SetStdHandle"), callconv("stdcall"), target(os: "windows")]
+routine win_set_std_handle(which: U32, handle: Addr) -> CInt
+
+#[external("c"), symbol("_putenv_s"), target(os: "windows")]
+routine c_putenv_s(name: CStr, value: CStr) -> CInt
+
+#[export("rf_crash_exit"), noreturn]
+routine stub_crash_exit() -> Void
+    block entry()
+        Out.write("crash exit\n")
+        exit(82)
+
+/// Points standard error at standard output.
+#target(os: ("linux", "macos"))
+routine merge_error_into_output() -> Void
+    block entry()
+        c_dup2(1, 2)
+        return()
+
+#target(os: "windows")
+routine merge_error_into_output() -> Void
+    block entry()
+        // STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+        output : Addr = win_get_std_handle(0xFFFFFFF5)
+        win_set_std_handle(0xFFFFFFF4, output)
+        return()
+
+#target(os: ("linux", "macos"))
+routine set_detector(value: CStr) -> Void
+    block entry()
+        c_setenv("RF_DEADLOCK_DETECT", value, 1)
+        return()
+
+#target(os: "windows")
+routine set_detector(value: CStr) -> Void
+    block entry()
+        c_putenv_s("RF_DEADLOCK_DETECT", value)
+        return()
+
+routine show_waits(label: Bytes) -> Void
+    block entry()
+        jump count_used(0, 0)
+
+    block count_used(i: USize, used: USize)
+        branch i.ge(WAIT_SLOTS)
+            ? done(used)
+            : continue
+        slot : @DeadlockWait = WAITS.at(i)
+        here : USize         = slot.used.load().to<USize>()
+        jump count_used(i.add(1), used.add(here))
+
+    block done(used: USize)
+        Out.write("{label}: {used} waiting\n")
+        return()
+
+routine main() -> S32
+    block entry()
+        merge_error_into_output()
+        set_detector("1")
+        on : Bool = detector_on()
+        Out.write("detector on: {on}\n")
+        deadlock_wait_begin(1, 0)
+        deadlock_wait_begin(1, 1)
+        show_waits("no holder, or itself")
+        deadlock_wait_begin(1, 2)
+        show_waits("1 waits on 2")
+        deadlock_wait_end(1)
+        deadlock_wait_begin(2, 1)
+        show_waits("1 got it, 2 waits on 1")
+        deadlock_wait_end(2)
+        show_waits("2 got it")
+        deadlock_wait_begin(3, 4)
+        deadlock_wait_begin(4, 5)
+        show_waits("3 waits on 4, 4 on 5")
+        deadlock_wait_begin(5, 3)
+        Out.write("not reached\n")
+        return(0)

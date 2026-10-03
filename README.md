@@ -30,6 +30,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 ```
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
+tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt
 ├── build.sh      # Build on Linux and macOS
@@ -50,6 +51,26 @@ You rarely need to do this by hand: building [Anvila](https://github.com/dj-lumi
 language project) builds Ingrid first, and `StageIngridRuntime.targets` copies the built libraries
 next to each executable. The full workspace setup is in the
 [RazorForge README](https://github.com/dj-lumiere/RazorForge#from-source).
+
+## Tests
+
+`tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
+the reference test vectors, splitmix64, the word division on its edge cases, the Roamed counts and lock, the cycle
+collector, the deadlock detector, the heap calls, and the crash report. Each test is a directory with a `config.toml`
+that lists the `tessera/` files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit`
+(exit status) next to it. The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the
+trace, the current task, ...) are defined in the test itself, so a test needs nothing but the builder. With Tessera
+checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
+
+```bash
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll test tests
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll check runtime-tessera/*.tess   # also tessera/*.tess, --target <triple>
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll fmt --check runtime-tessera tessera tests
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll lint runtime-tessera tessera tests
+```
+
+CI runs these on Linux, Windows, and macOS, beside the workspace build that tests Ingrid through RazorForge and
+Suflae.
 
 ## License
 

@@ -1,0 +1,209 @@
+// The Roamed entity runtime on one thread, through its exported routines on headers laid out as RoamHeader: strong
+// and weak counts and the teardown they trigger, the candidate report to the cycle collector, promotion of a graph to
+// escaped, and the task-keyed lock (re-entry, release, and a contended entry that yields until the holder lets go).
+//
+// The runtime calls two routines of the RazorForge runtime library, which this program defines itself: the current
+// task (always task 7 here) and the scheduler's yield, which counts its calls and, the first time, releases the lock
+// that the contended entry waits on, as the holding task would.
+
+import Standard::Alloc
+import Standard::Format
+import Standard::Os
+
+/// The header the contended lock entry waits on, released by the first yield.
+global CONTENDED : @@RoamHeader <- null
+/// How many times the runtime yielded.
+global YIELDS : @U64
+
+/// An entity: an id, and the header of the entity its one Roamed field holds (null for none).
+record Node
+    id    : U64
+    child : Addr
+
+#export("rf_current_task_id")
+routine stub_current_task_id() -> U64
+    block entry()
+        return(7)
+
+#export("rf_coro_yield")
+routine stub_coro_yield() -> Void
+    block entry()
+        yields : U64 = YIELDS.load().add(1)
+        yields.store_into(YIELDS)
+        waited : @RoamHeader = CONTENDED.load()
+        branch waited.is_null()
+            ? return()
+            : continue
+        waited.holder_task.atomic_store(0)
+        waited.locked.atomic_store(0)
+        CONTENDED.store(null)
+        return()
+
+/// The deadlock detector's exit; never reached here (the detector is off unless RF_DEADLOCK_DETECT asks for it).
+#[export("rf_crash_exit"), noreturn]
+routine stub_crash_exit() -> Void
+    block entry()
+        exit(82)
+
+/// The entity type's destroy routine: reports which entity went and frees it.
+routine drop_node(entity: Addr) -> Void
+    block entry()
+        node : @Node = entity.to<@Node>()
+        id   : U64   = node.id.load()
+        Out.write("  destroyed node {id}\n")
+        claim alloc : @Allocator <- make_heap_allocator()
+        node.free(alloc)
+        return()
+
+/// The entity type's trace routine: hands the collector the header its Roamed field holds.
+routine trace_node(entity: Addr) -> Void
+    block entry()
+        node  : @Node = entity.to<@Node>()
+        child : Addr  = node.child.load()
+        branch child.to<@Byte>().is_null()
+            ? return()
+            : continue
+        visit_child(child)
+        return()
+
+/// A new entity with one strong handle, from the C heap as the runtime frees it. A cyclic type has a trace routine.
+routine new_entity(id: U64, child: Addr, cyclic: Bool) -> @RoamHeader
+    block entry()
+        claim alloc : @Allocator <- make_heap_allocator()
+        node   : @Node       = allocate<Node>(alloc, 1)
+        header : @RoamHeader = allocate<RoamHeader>(alloc, 1)
+        id.store_into(node.id)
+        child.store_into(node.child)
+        trace : Addr = cyclic
+            ? trace_node.addr()
+            : null
+        header.store(RoamHeader { count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+            holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace, free_hook: null,
+            drop_hook: drop_node.addr() })
+        return(header)
+
+routine show_counts(label: Bytes, header: @RoamHeader) -> Void
+    block entry()
+        strong    : U64  = roam_strong_count(header)
+        weak      : U64  = header.weak.load()
+        destroyed : Bool = roam_is_destroyed(header)
+        Out.write("{label}: strong {strong}, weak {weak}, destroyed {destroyed}\n")
+        return()
+
+routine show_lock(label: Bytes, header: @RoamHeader) -> Void
+    block entry()
+        locked : U8  = header.locked.load()
+        holder : U64 = header.holder_task.load()
+        depth  : U64 = header.depth.load()
+        Out.write("{label}: locked {locked}, holder {holder}, depth {depth}\n")
+        return()
+
+/// hold and unhold on a local entity, the last unhold destroying it while a weak observer keeps the header.
+routine counts() -> Void
+    block entry()
+        Out.write("counts\n")
+        a : @RoamHeader = new_entity(1, null, false)
+        show_counts("new", a)
+        roam_hold(a)
+        roam_hold(a)
+        show_counts("held twice", a)
+        roam_unhold(a)
+        show_counts("released once", a)
+        roam_observe(a)
+        show_counts("observed", a)
+        roam_unhold(a)
+        roam_unhold(a)
+        show_counts("released", a)
+        roam_unobserve(a)
+        Out.write("observer gone, header freed\n")
+        b : @RoamHeader = new_entity(2, null, false)
+        roam_unhold(b)
+        Out.write("no observer, header freed with the entity\n")
+        return()
+
+/// A release that leaves a cyclic entity alive reports it to the collector once; an acyclic one is never reported.
+routine candidates() -> Void
+    block entry()
+        Out.write("candidates\n")
+        acyclic : @RoamHeader = new_entity(3, null, false)
+        cyclic  : @RoamHeader = new_entity(4, null, true)
+        roam_hold(acyclic)
+        roam_unhold(acyclic)
+        roam_hold(cyclic)
+        roam_hold(cyclic)
+        roam_unhold(cyclic)
+        roam_unhold(cyclic)
+        acyclic_buffered : Bool = acyclic.buffered.load()
+        cyclic_buffered  : Bool = cyclic.buffered.load()
+        state            : S32  = cyclic.state.load()
+        Out.write("acyclic buffered {acyclic_buffered}, cyclic buffered {cyclic_buffered}, state {state}\n")
+        // The last release takes it out of the candidate buffer before freeing it.
+        roam_unhold(cyclic)
+        roam_unhold(acyclic)
+        roots : U64 = ROOTS.count.load()
+        Out.write("candidates left: {roots}\n")
+        return()
+
+/// Promotion escapes the entity and everything it reaches; counting goes atomic, and a second promotion stops at once.
+routine promotion() -> Void
+    block entry()
+        Out.write("promotion\n")
+        leaf   : @RoamHeader = new_entity(6, null, true)
+        parent : @RoamHeader = new_entity(5, leaf, true)
+        before : Bool        = roam_is_escaped(parent)
+        roam_promote(parent)
+        roam_promote(parent)
+        parent_escaped : Bool = roam_is_escaped(parent)
+        leaf_escaped   : Bool = roam_is_escaped(leaf)
+        Out.write("escaped before {before}, parent {parent_escaped}, leaf {leaf_escaped}\n")
+        roam_hold(parent)
+        show_counts("escaped, held", parent)
+        roam_unhold(parent)
+        show_counts("escaped, released", parent)
+        roam_unhold(leaf)
+        roam_unhold(parent)
+        return()
+
+/// The lock does nothing on a local entity; on an escaped one it is reentrant for its task, and a contended entry
+/// yields until the holder releases it.
+routine locking() -> Void
+    block entry()
+        Out.write("lock\n")
+        local : @RoamHeader = new_entity(7, null, false)
+        roam_lock_enter(local)
+        show_lock("local entered", local)
+        roam_lock_exit(local)
+        roam_unhold(local)
+        shared : @RoamHeader = new_entity(8, null, false)
+        roam_promote(shared)
+        roam_lock_enter(shared)
+        show_lock("entered", shared)
+        roam_lock_enter(shared)
+        show_lock("re-entered", shared)
+        roam_lock_exit(shared)
+        show_lock("left once", shared)
+        roam_lock_exit(shared)
+        show_lock("left", shared)
+        jump contended(shared)
+
+    block contended(shared: @RoamHeader)
+        shared.locked.atomic_store(1)
+        shared.holder_task.atomic_store(9)
+        1.store_into(shared.depth)
+        CONTENDED.store(shared)
+        roam_lock_enter(shared)
+        yields : U64 = YIELDS.load()
+        Out.write("yields: {yields}\n")
+        show_lock("taken after the holder left", shared)
+        roam_lock_exit(shared)
+        show_lock("left", shared)
+        roam_unhold(shared)
+        return()
+
+routine main() -> S32
+    block entry()
+        counts()
+        candidates()
+        promotion()
+        locking()
+        return(0)

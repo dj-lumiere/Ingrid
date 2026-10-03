@@ -1,7 +1,8 @@
 name: Build and Test
 
 # The shared workspace build (Anvila's workspace.yaml): Ingrid is tested at this commit against master of
-# the other workspace repositories.
+# the other workspace repositories. The tessera job checks Ingrid's Tessera code with the Tessera builder alone and
+# runs Ingrid's own golden tests (tests/).
 
 on:
   push:
@@ -9,6 +10,130 @@ on:
   pull_request:
     branches: [master]
 
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
 jobs:
   workspace:
     uses: dj-lumiere/Anvila/.github/workflows/workspace.yaml@master
+
+  # Ingrid at this commit next to Tessera's master, the layout the tests' manifests and native/ expect. Every host
+  # type-checks both Tessera directories and runs the golden tests; the Linux leg also checks the other targets
+  # (check needs only clang to accept the IR, no sysroot), the formatting, and the chain length.
+  tessera:
+    name: tessera (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+            cross: aarch64-macos-none x86-windows-msvc
+          - os: windows-latest
+            target: x86_64-windows-msvc
+            cross: ''
+          - os: macos-latest
+            target: aarch64-macos-none
+            cross: ''
+    defaults:
+      run:
+        shell: bash
+    env:
+      TESSERA: dotnet ${{ github.workspace }}/Tessera/bin/Release/net10.0/tessera.dll
+
+    steps:
+      - name: Checkout Ingrid
+        uses: actions/checkout@v4
+        with:
+          path: Ingrid
+
+      - name: Checkout Tessera
+        uses: actions/checkout@v4
+        with:
+          repository: dj-lumiere/Tessera
+          path: Tessera
+          ref: master
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # The LLVM Tessera's own CI tests with, installed the same way.
+      - name: Install LLVM 21 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # A failed download must fail the step: piped into bash, an empty script would succeed and leave the
+          # runner's own clang in place.
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 21
+          test -x /usr/bin/clang-21
+          sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-21 /usr/local/bin/ld.lld
+          clang --version | grep -q 'clang version 21' || { clang --version; echo 'clang is not LLVM 21'; exit 1; }
+
+      - name: Cache LLVM 21 (Windows)
+        if: runner.os == 'Windows'
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm21
+          key: llvm-21.1.8-win64
+
+      - name: Download LLVM 21 (Windows)
+        if: runner.os == 'Windows' && steps.cache-llvm.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          curl.exe -L -o llvm.tar.xz "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/clang+llvm-21.1.8-x86_64-pc-windows-msvc.tar.xz"
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM download failed' }
+          New-Item -ItemType Directory -Force C:\llvm21 | Out-Null
+          tar -xf llvm.tar.xz -C C:\llvm21 --strip-components=1
+          if ($LASTEXITCODE -ne 0) { throw 'LLVM extract failed' }
+          Remove-Item llvm.tar.xz
+
+      - name: Put LLVM 21 on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH 'C:\llvm21\bin'
+
+      # Keg-only; GITHUB_PATH entries are prepended, so this shadows Apple clang.
+      - name: Install LLVM 21 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@21
+          echo "$(brew --prefix llvm@21)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: clang --version
+
+      - name: Build the Tessera builder
+        id: build
+        run: dotnet build Tessera/Tessera.csproj --configuration Release
+
+      - name: Check formatting
+        if: matrix.target == 'x86_64-linux-gnu'
+        working-directory: Ingrid
+        run: $TESSERA fmt --check runtime-tessera tessera tests
+
+      - name: Check chain length
+        if: matrix.target == 'x86_64-linux-gnu'
+        working-directory: Ingrid
+        run: $TESSERA lint runtime-tessera tessera tests
+
+      - name: Check the runtime library and the linked-in code
+        working-directory: Ingrid
+        run: |
+          for target in ${{ matrix.target }} ${{ matrix.cross }}; do
+            echo "::group::$target"
+            $TESSERA check --target "$target" runtime-tessera/*.tess
+            $TESSERA check --target "$target" tessera/*.tess
+            echo "::endgroup::"
+          done
+
+      # Runs even when a check failed, so one run shows both.
+      - name: Golden tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: Ingrid
+        run: $TESSERA test tests

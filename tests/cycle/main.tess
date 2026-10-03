@@ -1,0 +1,173 @@
+// The cycle collector (ingrid_cyclic_collect) on one thread: a pass stops the world, which here has no other mutator.
+// Entities are nodes with one Roamed field; their trace routine reports the field's header, their free routine says
+// which node the collector freed. A cycle held only by itself is freed whole; a cycle that something outside still
+// holds is left alone with its counts restored; an entity whose release was reported but which is no cycle is
+// dropped from the candidates without being freed; and a weak observer keeps a collected entity's header as a
+// tombstone.
+//
+// roam.tess calls two routines of the RazorForge runtime library and deadlock.tess a third, defined here so the
+// program links: the current task, the scheduler's yield, and the crash exit (none of them runs on one thread).
+
+import Standard::Alloc
+import Standard::Format
+import Standard::Os
+
+/// An entity: an id, and the header of the entity its one Roamed field holds (null for none).
+record Node
+    id    : U64
+    child : Addr
+
+#export("rf_current_task_id")
+routine stub_current_task_id() -> U64
+    block entry()
+        return(1)
+
+#export("rf_coro_yield")
+routine stub_coro_yield() -> Void
+    block entry()
+        return()
+
+#[export("rf_crash_exit"), noreturn]
+routine stub_crash_exit() -> Void
+    block entry()
+        exit(82)
+
+/// The entity type's trace routine: hands the collector the header its Roamed field holds.
+routine trace_node(entity: Addr) -> Void
+    block entry()
+        node  : @Node = entity.to<@Node>()
+        child : Addr  = node.child.load()
+        branch child.to<@Byte>().is_null()
+            ? return()
+            : continue
+        visit_child(child)
+        return()
+
+/// The entity type's collector free routine: reports which node went and frees it (its Roamed field is the
+/// collector's to account for).
+routine free_node(entity: Addr) -> Void
+    block entry()
+        node : @Node = entity.to<@Node>()
+        id   : U64   = node.id.load()
+        Out.write("  freed node {id}\n")
+        claim alloc : @Allocator <- make_heap_allocator()
+        node.free(alloc)
+        return()
+
+/// The entity type's destroy routine, for the last strong release.
+routine drop_node(entity: Addr) -> Void
+    block entry()
+        node : @Node = entity.to<@Node>()
+        id   : U64   = node.id.load()
+        Out.write("  destroyed node {id}\n")
+        claim alloc : @Allocator <- make_heap_allocator()
+        node.free(alloc)
+        return()
+
+/// A new entity with one strong handle and no Roamed field yet, from the C heap as the runtime frees it.
+routine new_entity(id: U64) -> @RoamHeader
+    block entry()
+        claim alloc : @Allocator <- make_heap_allocator()
+        node   : @Node       = allocate<Node>(alloc, 1)
+        header : @RoamHeader = allocate<RoamHeader>(alloc, 1)
+        id.store_into(node.id)
+        node.child.store(null)
+        header.store(RoamHeader { count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+            holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
+            free_hook: free_node.addr(), drop_hook: drop_node.addr() })
+        return(header)
+
+/// Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
+routine link(owner: @RoamHeader, target: @RoamHeader) -> Void
+    block entry()
+        node : @Node = owner.data.load().to<@Node>()
+        roam_hold(target)
+        node.child.store(target)
+        return()
+
+routine collect_and_show(label: Bytes) -> Void
+    block entry()
+        freed : U64 = collect()
+        roots : U64 = ROOTS.count.load()
+        Out.write("{label}: freed {freed}, candidates left {roots}\n")
+        return()
+
+routine show_count(label: Bytes, header: @RoamHeader) -> Void
+    block entry()
+        strong : U64 = roam_strong_count(header)
+        state  : S32 = header.state.load()
+        Out.write("{label}: strong {strong}, state {state}\n")
+        return()
+
+/// a <-> b, the program's own handles dropped: the pair is garbage.
+routine orphaned_cycle() -> Void
+    block entry()
+        Out.write("orphaned cycle\n")
+        a : @RoamHeader = new_entity(1)
+        b : @RoamHeader = new_entity(2)
+        link(a, b)
+        link(b, a)
+        roam_unhold(b)
+        roam_unhold(a)
+        collect_and_show("pass")
+        collect_and_show("second pass")
+        return()
+
+/// c <-> d with the program still holding d: nothing is freed and the counts come back; once d's handle goes too,
+/// the pair is freed.
+routine held_cycle() -> Void
+    block entry()
+        Out.write("held cycle\n")
+        c : @RoamHeader = new_entity(3)
+        d : @RoamHeader = new_entity(4)
+        link(c, d)
+        link(d, c)
+        roam_unhold(c)
+        collect_and_show("pass")
+        show_count("c", c)
+        show_count("d", d)
+        roam_unhold(d)
+        collect_and_show("after the last handle")
+        return()
+
+/// e -> f, no cycle: the candidate e is left alone; releasing e destroys it the ordinary way.
+routine no_cycle() -> Void
+    block entry()
+        Out.write("no cycle\n")
+        e : @RoamHeader = new_entity(5)
+        f : @RoamHeader = new_entity(6)
+        link(e, f)
+        roam_unhold(f)
+        roam_hold(e)
+        roam_unhold(e)
+        collect_and_show("pass")
+        show_count("e", e)
+        show_count("f", f)
+        roam_unhold(e)
+        roam_unhold(f)
+        return()
+
+/// g <-> h, observed weakly: collected, but g's header stays as a dead tombstone until the observer goes.
+routine observed_cycle() -> Void
+    block entry()
+        Out.write("observed cycle\n")
+        g : @RoamHeader = new_entity(7)
+        h : @RoamHeader = new_entity(8)
+        link(g, h)
+        link(h, g)
+        roam_observe(g)
+        roam_unhold(h)
+        roam_unhold(g)
+        collect_and_show("pass")
+        destroyed : Bool = roam_is_destroyed(g)
+        Out.write("g destroyed {destroyed}\n")
+        roam_unobserve(g)
+        return()
+
+routine main() -> S32
+    block entry()
+        orphaned_cycle()
+        held_cycle()
+        no_cycle()
+        observed_cycle()
+        return(0)

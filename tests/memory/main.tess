@@ -1,0 +1,106 @@
+// The heap calls every RazorForge and Suflae program makes (memory.tess): zeroed and uninitialized allocation,
+// reallocation (keeping the contents, and to 0 bytes as a free), overlapping copies, fills, the no-op cases (a null
+// address or no bytes), the scratch region's nested marks, and last an allocation that can't succeed, which is an
+// OutOfMemoryError through the runtime's __rf_throw.
+//
+// __rf_throw is the RazorForge runtime library's; this program defines it: it writes the error to standard output and
+// exits with status 82, as the runtime's crash does.
+
+import Standard::Format
+import Standard::Os
+
+#[export("__rf_throw"), noreturn]
+routine stub_rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry()
+        kind : Bytes = error_type.to_bytes()
+        text : Bytes = message.to_bytes()
+        Out.write("{kind}: {text}\n")
+        exit(82)
+
+/// Writes `count` bytes at `p` as decimal numbers.
+routine show_bytes(label: Bytes, p: @U8, count: USize) -> Void
+    block entry()
+        Out.write("{label}:")
+        jump next(0)
+
+    block next(i: USize)
+        branch i.ge(count)
+            ? done()
+            : continue
+        value : U8 = p.stride(i).load()
+        Out.write(" {value}")
+        jump next(i.add(1))
+
+    block done()
+        Out.write("\n")
+        return()
+
+/// Stores 1, 2, ... count at `p`.
+routine fill_counting(p: @U8, count: USize) -> Void
+    block entry()
+        jump next(0)
+
+    block next(i: USize)
+        branch i.ge(count)
+            ? return()
+            : continue
+        value : U8 = i.add(1).to<U8>()
+        p.stride(i).store(value)
+        jump next(i.add(1))
+
+routine address_of(p: @U8) -> USize
+    block entry()
+        return(ptrtoint<@U8, USize>(p))
+
+routine heap() -> Void
+    block entry()
+        zeroed : @U8 = rf_allocate_dynamic(8).to<@U8>()
+        show_bytes("zeroed", zeroed, 8)
+        fill_counting(zeroed, 8)
+        grown : @U8 = rf_reallocate_dynamic(zeroed, 16).to<@U8>()
+        show_bytes("grown, contents kept", grown, 8)
+        rf_copy_bytes_at(address_of(grown.stride(2)), address_of(grown), 6)
+        show_bytes("copied forward over itself", grown, 8)
+        rf_copy_bytes_at(address_of(grown), address_of(grown.stride(2)), 6)
+        show_bytes("copied back", grown, 8)
+        rf_set_bytes_at(address_of(grown.stride(1)), 255, 3)
+        show_bytes("filled", grown, 8)
+        rf_set_bytes_at(0, 7, 3)
+        rf_set_bytes_at(address_of(grown), 7, 0)
+        rf_copy_bytes_at(0, address_of(grown), 4)
+        rf_copy_bytes_at(address_of(grown), 0, 4)
+        rf_copy_bytes_at(address_of(grown.stride(4)), address_of(grown), 0)
+        show_bytes("after the no-op calls", grown, 8)
+        gone      : Addr = rf_reallocate_dynamic(grown, 0)
+        raw       : @U8  = rf_allocate_dynamic_uninit(4).to<@U8>()
+        has_block : Bool = raw.is_not_null()
+        Out.write("uninitialized block: {has_block}\n")
+        rf_invalidate(raw)
+        rf_invalidate(gone)
+        rf_invalidate(null)
+        return()
+
+routine region() -> Void
+    block entry()
+        outer : U64 = rf_region_mark()
+        Out.write("empty region mark: {outer}\n")
+        first : @U8 = rf_region_alloc(16).to<@U8>()
+        show_bytes("region block, zeroed", first, 16)
+        inner : U64 = rf_region_mark()
+        rf_region_alloc(32)
+        rf_region_alloc(8)
+        moved : Bool = rf_region_mark().ne(inner)
+        rf_region_release(inner)
+        back_inner : Bool = rf_region_mark().eq(inner)
+        rf_region_release(outer)
+        back_outer : Bool = rf_region_mark().eq(outer)
+        Out.write("mark moved: {moved}, released to the inner mark: {back_inner}, to the outer: {back_outer}\n")
+        return()
+
+routine main() -> S32
+    block entry()
+        heap()
+        region()
+        rf_allocate_dynamic(U64.MAX)
+        Out.write("not reached\n")
+        return(0)
