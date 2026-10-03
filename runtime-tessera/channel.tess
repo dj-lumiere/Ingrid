@@ -37,23 +37,23 @@ record Channel
 /// Wakes every coroutine on list and every waiting thread; each checks again and unlinks itself. The caller holds
 /// the lock.
 routine Channel.wake_all(self: @Self, list: @ChannelWaiter) -> Void
-    block entry():
+    block entry()
         jump next(list)
 
-    block next(w: @ChannelWaiter):
+    block next(w: @ChannelWaiter)
         branch w.is_null()
             ? threads()
             : continue
         rf_sched_wake(w.sched.load(), w.coro.load())
         jump next(w.next.load())
 
-    block threads():
+    block threads()
         self.cond.broadcast()
         return()
 
 #export("rf_channel_create")
 routine rf_channel_create(capacity: U64) -> @Channel
-    block entry():
+    block entry()
         slot_cap : U64 = capacity.eq(0)
             ? 1
             : capacity
@@ -70,7 +70,7 @@ routine rf_channel_create(capacity: U64) -> @Channel
 
 /// Frees the channel once both counts are 0. The caller doesn't hold the lock.
 routine Channel.maybe_free(self: @Self) -> Void
-    block entry():
+    block entry()
         no_producers : Bool = self.producer_refs.load().eq(0)
         branch no_producers.bitand(self.consumer_refs.load().eq(0))
             ? continue
@@ -81,7 +81,7 @@ routine Channel.maybe_free(self: @Self) -> Void
 
 #export("rf_channel_add_feeder")
 routine rf_channel_add_feeder(chan: @Channel) -> Void
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return()
             : continue
@@ -93,7 +93,7 @@ routine rf_channel_add_feeder(chan: @Channel) -> Void
 
 #export("rf_channel_add_consumer")
 routine rf_channel_add_consumer(chan: @Channel) -> Void
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return()
             : continue
@@ -106,7 +106,7 @@ routine rf_channel_add_consumer(chan: @Channel) -> Void
 /// The last producer dropping closes the channel: consumers drain what is left, then see it closed.
 #export("rf_channel_drop_feeder")
 routine rf_channel_drop_feeder(chan: @Channel) -> Void
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return()
             : continue
@@ -121,7 +121,7 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
         chan.wake_all(chan.not_empty_head.load())
         jump done()
 
-    block done():
+    block done()
         chan.lock.unlock()
         chan.maybe_free()
         return()
@@ -129,7 +129,7 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
 /// With no consumer left, producers waiting for room wake and fail instead of waiting forever.
 #export("rf_channel_drop_consumer")
 routine rf_channel_drop_consumer(chan: @Channel) -> Void
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return()
             : continue
@@ -143,14 +143,14 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
         chan.wake_all(chan.not_full_head.load())
         jump done()
 
-    block done():
+    block done()
         chan.lock.unlock()
         chan.maybe_free()
         return()
 
 #export("rf_channel_close")
 routine rf_channel_close(chan: @Channel) -> Void
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return()
             : continue
@@ -163,14 +163,14 @@ routine rf_channel_close(chan: @Channel) -> Void
         chan.wake_all(chan.not_full_head.load())
         jump done()
 
-    block done():
+    block done()
         chan.lock.unlock()
         return()
 
 /// Waits once: a coroutine parks with a node on list, a thread waits on the condition variable. The caller holds
 /// the lock before and after, and checks its condition again.
 routine Channel.wait(self: @Self, list: @@ChannelWaiter) -> Void
-    block entry():
+    block entry()
         sched : @Sched = rf_sched_current()
         coro  : @Coro  = current_coro()
         branch sched.is_null().bitor(coro.is_null())
@@ -184,15 +184,15 @@ routine Channel.wait(self: @Self, list: @@ChannelWaiter) -> Void
         unlink(list, node)
         return()
 
-    block thread():
+    block thread()
         self.cond.wait(self.lock)
         return()
 
 routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
-    block entry():
+    block entry()
         jump look(list)
 
-    block look(at: @@ChannelWaiter):
+    block look(at: @@ChannelWaiter)
         w : @ChannelWaiter = at.load()
         branch w.is_null()
             ? return()
@@ -208,14 +208,14 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
 /// rendezvous until a consumer took the item. A cancelled agent stops waiting.
 #export("rf_channel_feed")
 routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return(0)
             : continue
         chan.lock.lock()
         jump room()
 
-    block room():
+    block room()
         full       : Bool = chan.count.load().eq(chan.slot_cap.load())
         not_closed : Bool = chan.closed.load().bitnot()
         open       : Bool = not_closed.bitand(chan.consumer_refs.load().gt(0))
@@ -228,7 +228,7 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         chan.wait(chan.not_full_head)
         jump room()
 
-    block put():
+    block put()
         branch chan.closed.load().bitor(chan.consumer_refs.load().eq(0))
             ? fail()
             : continue
@@ -245,7 +245,7 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
             : sent()
 
     // A rendezvous: not over until this item was taken.
-    block taken():
+    block taken()
         has_items : Bool = chan.count.load().gt(0)
         pending   : Bool = has_items.bitand(chan.closed.load().bitnot())
         waiting   : Bool = pending.bitand(chan.consumer_refs.load().gt(0))
@@ -258,11 +258,11 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         chan.wait(chan.not_full_head)
         jump taken()
 
-    block sent():
+    block sent()
         chan.lock.unlock()
         return(1)
 
-    block fail():
+    block fail()
         chan.lock.unlock()
         return(0)
 
@@ -270,14 +270,14 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
 /// was cancelled.
 #export("rf_channel_next")
 routine rf_channel_next(chan: @Channel) -> Addr
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return(null)
             : continue
         chan.lock.lock()
         jump item()
 
-    block item():
+    block item()
         empty : Bool = chan.count.load().eq(0)
         branch empty.bitand(chan.closed.load().bitnot())
             ? continue
@@ -288,7 +288,7 @@ routine rf_channel_next(chan: @Channel) -> Addr
         chan.wait(chan.not_empty_head)
         jump item()
 
-    block take():
+    block take()
         branch chan.count.load().eq(0)
             ? none()
             : continue
@@ -303,13 +303,13 @@ routine rf_channel_next(chan: @Channel) -> Addr
         chan.lock.unlock()
         return(payload)
 
-    block none():
+    block none()
         chan.lock.unlock()
         return(null)
 
 #export("rf_channel_count")
 routine rf_channel_count(chan: @Channel) -> U64
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return(0)
             : continue
@@ -320,7 +320,7 @@ routine rf_channel_count(chan: @Channel) -> U64
 
 #export("rf_channel_is_closed")
 routine rf_channel_is_closed(chan: @Channel) -> U32
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return(1)
             : continue
@@ -333,7 +333,7 @@ routine rf_channel_is_closed(chan: @Channel) -> U32
 
 #export("rf_channel_capacity")
 routine rf_channel_capacity(chan: @Channel) -> U64
-    block entry():
+    block entry()
         branch chan.is_null()
             ? return(0)
             : return(chan.capacity.load())

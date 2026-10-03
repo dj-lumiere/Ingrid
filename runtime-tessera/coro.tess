@@ -63,12 +63,12 @@ record Coro
 /// Read again at every call: after a switch the thread may be another one.
 #noinline
 routine current_coro() -> @Coro
-    block entry():
+    block entry()
         c : @Coro = CURRENT_CORO.load()
         return(c)
 
 routine next_completion_seq() -> U64
-    block entry():
+    block entry()
         seq : U64 = COMPLETION_SEQ.atomic_fetch_add(1)
         return(seq)
 
@@ -76,7 +76,7 @@ routine next_completion_seq() -> U64
 /// time.
 #noreturn
 routine coro_trampoline() -> Void
-    block entry():
+    block entry()
         self : @Coro                   = current_coro()
         body : Callable<(Addr,), Void> = self.entry.load()
         body.call(self.userdata.load())
@@ -86,14 +86,14 @@ routine coro_trampoline() -> Void
         unreachable
 
 routine stack_alloc(size: USize) -> Addr
-    block entry():
+    block entry()
         stacks : Allocator                     = make_stack_allocator()
         alloc  : Callable<(Addr, USize), Addr> = stacks.alloc_fn
         stack  : Addr                          = alloc.call(stacks.state, size)
         return(stack)
 
 routine stack_free(stack: Addr) -> Void
-    block entry():
+    block entry()
         stacks : Allocator                    = make_stack_allocator()
         free   : Callable<(Addr, Addr), Void> = stacks.free_fn
         free.call(stacks.state, stack)
@@ -103,7 +103,7 @@ routine stack_free(stack: Addr) -> Void
 /// is first resumed. Null for a null entry.
 #export("rf_coro_create")
 routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_size: USize) -> @Coro
-    block entry():
+    block entry()
         branch entry.addr().is_null()
             ? return(null)
             : continue
@@ -123,7 +123,7 @@ routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_siz
         coro.sp.store(initial_stack(stack.to<@Byte>(), reserve, coro_trampoline.addr()))
         return(coro)
 
-    block no_stack(coro: @Coro):
+    block no_stack(coro: @Coro)
         c_free(coro)
         rf_throw("OutOfMemoryError",
             "Failed to reserve coroutine stack (out of address space or commit limit)")
@@ -131,7 +131,7 @@ routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_siz
 /// Switches into coro until it parks or finishes: its status then (CORO_PARKED or CORO_COMPLETED).
 #export("rf_coro_resume")
 routine rf_coro_resume(coro: @Coro) -> U32
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return(CORO_COMPLETED)
             : continue
@@ -147,7 +147,7 @@ routine rf_coro_resume(coro: @Coro) -> U32
 
 /// The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
 routine coro_switch_out() -> Void
-    block entry():
+    block entry()
         self : @Coro = current_coro()
         branch self.is_null()
             ? return()
@@ -158,7 +158,7 @@ routine coro_switch_out() -> Void
 
 #export("rf_coro_status_get")
 routine rf_coro_status_get(coro: @Coro) -> U32
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return(CORO_COMPLETED)
             : return(coro.status.atomic_load())
@@ -166,14 +166,14 @@ routine rf_coro_status_get(coro: @Coro) -> U32
 /// The coroutine running on this thread, or null.
 #export("rf_coro_current")
 routine rf_coro_current() -> @Coro
-    block entry():
+    block entry()
         return(current_coro())
 
 /// The current logical task, for Roamed's task-keyed lock: the coroutine (the same across worker migration) or,
 /// outside one, the OS thread. Only equality matters.
 #export("rf_current_task_id")
 routine rf_current_task_id() -> U64
-    block entry():
+    block entry()
         self : @Coro = current_coro()
         branch self.is_null()
             ? return(rf_current_thread_id())
@@ -182,7 +182,7 @@ routine rf_current_task_id() -> U64
 /// Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed.
 #export("rf_coro_request_cancel")
 routine rf_coro_request_cancel(coro: @Coro) -> Void
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return()
             : continue
@@ -191,7 +191,7 @@ routine rf_coro_request_cancel(coro: @Coro) -> Void
 
 #export("rf_coro_is_cancel_requested")
 routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return(0)
             : return(coro.cancel_requested.atomic_load())
@@ -199,7 +199,7 @@ routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
 /// Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon).
 #export("rf_coro_delete")
 routine rf_coro_delete(coro: @Coro) -> Void
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return()
             : continue
@@ -210,7 +210,7 @@ routine rf_coro_delete(coro: @Coro) -> Void
         stack_free(stack)
         jump free()
 
-    block free():
+    block free()
         c_free(coro)
         return()
 
@@ -218,7 +218,7 @@ routine rf_coro_delete(coro: @Coro) -> Void
 /// can reach its completion.
 #export("rf_coro_set_detached")
 routine rf_coro_set_detached(coro: @Coro) -> Void
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return()
             : continue
@@ -230,7 +230,7 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
 #export("rf_coro_cf_push")
 routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
     destroy_fn: Callable<(Addr,), Void>) -> Void
-    block entry():
+    block entry()
         self : @Coro = current_coro()
         branch frame.is_null().bitor(self.is_null())
             ? return()
@@ -245,7 +245,7 @@ routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
 /// it is.
 #export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
-    block entry():
+    block entry()
         self : @Coro = current_coro()
         branch self.is_null()
             ? return()
@@ -260,7 +260,7 @@ routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
 /// construction order), then the coroutine and its stack are freed. A completed one is just freed.
 #export("rf_coro_abandon")
 routine rf_coro_abandon(coro: @Coro) -> Void
-    block entry():
+    block entry()
         branch coro.is_null()
             ? return()
             : continue
@@ -272,15 +272,15 @@ routine rf_coro_abandon(coro: @Coro) -> Void
             ? stamp()
             : cancel()
 
-    block stamp():
+    block stamp()
         coro.completion_seq.atomic_store(next_completion_seq())
         jump cancel()
 
-    block cancel():
+    block cancel()
         coro.status.atomic_store(CORO_CANCELLED)
         jump frame(coro.cf_top.load())
 
-    block frame(f: @CancelFrame):
+    block frame(f: @CancelFrame)
         branch f.is_null()
             ? done()
             : continue
@@ -292,10 +292,10 @@ routine rf_coro_abandon(coro: @Coro) -> Void
         destroy.call(f.value_ptr.load())
         jump frame(prev)
 
-    block done():
+    block done()
         coro.cf_top.store(null)
         jump free()
 
-    block free():
+    block free()
         rf_coro_delete(coro)
         return()

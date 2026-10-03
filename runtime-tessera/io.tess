@@ -29,14 +29,14 @@ routine c_strlen(s: @Byte) -> USize
 
 /// n, or for n < 0 the length of s before its NUL.
 routine length_of(s: @Byte, n: S32) -> USize
-    block entry():
+    block entry()
         branch n.lt(0)
             ? return(c_strlen(s))
             : return(n.to<USize>())
 
 /// A NUL-terminated copy of n bytes of s (all of it before its NUL for n < 0), or null.
 routine strdupn(s: @Byte, n: S32) -> @Byte
-    block entry():
+    block entry()
         len : USize = length_of(s, n)
         d   : Addr  = c_malloc(len.add(1))
         branch d.is_null()
@@ -72,18 +72,18 @@ record IoReq
 
 #export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
-    block entry():
+    block entry()
         return(IO_LAST_LEN.load())
 
 routine io_do_work(req: @IoReq) -> Void
-    block entry():
+    block entry()
         kind : U32 = req.kind.load()
-        when:
+        when
             kind.eq(IO_READ_FILE)  -> read()
             kind.eq(IO_WRITE_FILE) -> write()
             else                   -> process()
 
-    block read():
+    block read()
         claim data : @@Byte <- null
         got : S64 = read_whole_file(req.path.load(), data)
         branch got.ge(0)
@@ -93,21 +93,21 @@ routine io_do_work(req: @IoReq) -> Void
         req.result.store(got)
         return()
 
-    block write():
+    block write()
         req.result.store(write_whole_file(req.path.load(), req.data.load(), req.data_len.load()))
         return()
 
-    block process():
+    block process()
         proc_run_blocking(req.proc.load())
         return()
 
 /// An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
 routine io_thread_main(raw: Addr) -> Void
-    block entry():
+    block entry()
         IO_LOCK.lock()
         jump look()
 
-    block look():
+    block look()
         req : @IoReq = IO_HEAD.load()
         branch req.is_null()
             ? sleep()
@@ -120,11 +120,11 @@ routine io_thread_main(raw: Addr) -> Void
         IO_TAIL.store(null)
         jump run(req)
 
-    block sleep():
+    block sleep()
         IO_WORK.wait(IO_LOCK)
         jump look()
 
-    block run(req: @IoReq):
+    block run(req: @IoReq)
         IO_LOCK.unlock()
         io_do_work(req)
         rf_sched_wake(req.sched.load(), req.coro.load())
@@ -134,25 +134,25 @@ routine io_thread_main(raw: Addr) -> Void
 /// only a submit and a park.
 #export("rf_io_runtime_init")
 routine rf_io_runtime_init() -> Void
-    block entry():
+    block entry()
         branch IO_OK.load().eq(1)
             ? return()
             : continue
         jump start(0)
 
-    block start(i: USize):
+    block start(i: USize)
         branch i.eq(IO_THREADS)
             ? continue
             : one(i)
         IO_OK.store(1)
         return()
 
-    block one(i: USize):
+    block one(i: USize)
         Thread.spawn(io_thread_main.to<Callable>(), null, runtime_heap()).detach()
         jump start(i.add(1))
 
 routine io_submit(req: @IoReq) -> Void
-    block entry():
+    block entry()
         IO_LOCK.lock()
         req.qnext.store(null)
         tail : @IoReq = IO_TAIL.load()
@@ -162,11 +162,11 @@ routine io_submit(req: @IoReq) -> Void
         tail.qnext.store(req)
         jump queued()
 
-    block first():
+    block first()
         IO_HEAD.store(req)
         jump queued()
 
-    block queued():
+    block queued()
         IO_TAIL.store(req)
         IO_WORK.signal()
         IO_LOCK.unlock()
@@ -175,7 +175,7 @@ routine io_submit(req: @IoReq) -> Void
 /// Runs a request to completion: inside a scheduler-driven coroutine on an I/O thread while the coroutine is
 /// parked, else here. The one park pairs with the I/O thread's one wake, which may come first.
 routine io_run(req: @IoReq) -> Void
-    block entry():
+    block entry()
         branch IO_OK.load().eq(1)
             ? continue
             : inline()
@@ -192,12 +192,12 @@ routine io_run(req: @IoReq) -> Void
         rf_sched_disarm_cross_waker(sched)
         return()
 
-    block inline():
+    block inline()
         io_do_work(req)
         return()
 
 routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
-    block entry():
+    block entry()
         req : @IoReq = zeroed<IoReq>(1, "Failed to allocate async I/O request")
         req.kind.store(kind)
         req.result.store(-1)
@@ -212,7 +212,7 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
 /// rf_io_get_result_len, or null (length 0) on an error.
 #export("rf_io_read_file_all")
 routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
-    block entry():
+    block entry()
         req : @IoReq = io_req_new(IO_READ_FILE, path, path_len)
         io_run(req)
         data   : @Byte = req.data.load()
@@ -225,7 +225,7 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
         IO_LAST_LEN.store(result.to<U64>())
         return(data)
 
-    block failed():
+    block failed()
         IO_LAST_LEN.store(0)
         return(null)
 
@@ -233,7 +233,7 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
 /// the caller's buffer needn't outlive the call.
 #export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
-    block entry():
+    block entry()
         req : @IoReq = io_req_new(IO_WRITE_FILE, path, path_len)
         len : S64    = data_len.max(0)
         req.data_len.store(len)
@@ -241,7 +241,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
             ? copy(req, len)
             : run(req)
 
-    block copy(req: @IoReq, len: S64):
+    block copy(req: @IoReq, len: S64)
         buf : Addr = c_malloc(len.to<USize>())
         branch buf.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O write buffer")
@@ -250,7 +250,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
         req.data.store(buf.to<@Byte>())
         jump run(req)
 
-    block run(req: @IoReq):
+    block run(req: @IoReq)
         io_run(req)
         result : S64 = req.result.load()
         c_free(req.data.load())
@@ -265,28 +265,28 @@ record AsyncRuntime
 
 #export("rf_async_backend_name")
 routine rf_async_backend_name() -> CStr
-    block entry():
+    block entry()
         return("threads")
 
 #export("rf_async_backend_state")
 routine rf_async_backend_state() -> CInt
-    block entry():
+    block entry()
         return(1)
 
 #export("rf_async_runtime_create")
 routine rf_async_runtime_create() -> @AsyncRuntime
-    block entry():
+    block entry()
         return(zeroed<AsyncRuntime>(1, "Failed to allocate async runtime"))
 
 #export("rf_async_runtime_destroy")
 routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> Void
-    block entry():
+    block entry()
         c_free(runtime)
         return()
 
 #export("rf_async_runtime_run_once")
 routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
-    block entry():
+    block entry()
         branch runtime.is_null()
             ? return(0)
             : continue
@@ -296,14 +296,14 @@ routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
 
 #export("rf_async_runtime_run_default")
 routine rf_async_runtime_run_default(runtime: @AsyncRuntime) -> CInt
-    block entry():
+    block entry()
         branch runtime.is_null()
             ? return(0)
             : return(1)
 
 #export("rf_async_runtime_stop")
 routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
-    block entry():
+    block entry()
         branch runtime.is_null()
             ? return()
             : continue
@@ -347,32 +347,32 @@ record ProcState
 
 #export("rf_proc_term_signal")
 routine rf_proc_term_signal() -> S32
-    block entry():
+    block entry()
         return(PROC_SIGNAL.load())
 
 #export("rf_proc_output")
 routine rf_proc_output() -> @Byte
-    block entry():
+    block entry()
         return(PROC_OUT.load())
 
 #export("rf_proc_output_len")
 routine rf_proc_output_len() -> U64
-    block entry():
+    block entry()
         return(PROC_OUT_LEN.load())
 
 #export("rf_proc_errors")
 routine rf_proc_errors() -> @Byte
-    block entry():
+    block entry()
         return(PROC_ERR.load())
 
 #export("rf_proc_errors_len")
 routine rf_proc_errors_len() -> U64
-    block entry():
+    block entry()
         return(PROC_ERR_LEN.load())
 
 /// A malloc'd copy of n bytes of s (all of it before its NUL for n < 0); empty when that can't be had.
 routine owned_copy(s: @Byte, n: S32) -> Bytes
-    block entry():
+    block entry()
         len : USize = length_of(s, n)
         d   : Addr  = c_malloc(len.max(1))
         branch d.is_null()
@@ -382,12 +382,12 @@ routine owned_copy(s: @Byte, n: S32) -> Bytes
         return(Bytes.from_ptr(d.to<@Byte>(), len))
 
 routine free_bytes(b: Bytes) -> Void
-    block entry():
+    block entry()
         c_free(b.data)
         return()
 
 routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
-    block entry():
+    block entry()
         st : @ProcState = zeroed<ProcState>(1, "Failed to allocate subprocess state")
         st.shell.store(shell)
         st.program.store(program)
@@ -396,12 +396,12 @@ routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
 
 /// The strings, not the captured streams: those go to the caller.
 routine proc_state_free(st: @ProcState) -> Void
-    block entry():
+    block entry()
         free_bytes(st.program.load())
         free_bytes(st.directory.load())
         jump args(0)
 
-    block args(i: USize):
+    block args(i: USize)
         branch i.eq(st.arg_count.load())
             ? env(0)
             : continue
@@ -409,7 +409,7 @@ routine proc_state_free(st: @ProcState) -> Void
         free_bytes(arg_slot.load())
         jump args(i.add(1))
 
-    block env(i: USize):
+    block env(i: USize)
         branch i.eq(st.env_count.load())
             ? arrays()
             : continue
@@ -419,7 +419,7 @@ routine proc_state_free(st: @ProcState) -> Void
         free_bytes(v.value)
         jump env(i.add(1))
 
-    block arrays():
+    block arrays()
         c_free(st.args.load())
         c_free(st.env.load())
         c_free(st)
@@ -427,33 +427,33 @@ routine proc_state_free(st: @ProcState) -> Void
 
 /// A captured stream as the caller takes it: malloc'd and NUL-terminated, or null when nothing came.
 routine terminated(b: Bytes) -> @Byte
-    block entry():
+    block entry()
         branch b.data.is_null()
             ? return(null)
             : continue
         n   : USize = b.length()
         buf : Addr  = c_realloc(b.data, n.add(1))
         branch buf.is_null()
-            ? lost(b)
+            ? lost()
             : continue
         terminator : @Byte = buf.to<@Byte>().stride(n)
         terminator.store(0x00)
         return(buf.to<@Byte>())
 
-    block lost(b: Bytes):
+    block lost()
         c_free(b.data)
         return(null)
 
 /// Runs the prepared subprocess, on whatever thread calls it, filling in how it went.
 routine proc_run_blocking(st: @ProcState) -> Void
-    block entry():
+    block entry()
         claim alloc : @Allocator <- make_heap_allocator()
         dir : Bytes = st.directory.load()
         branch dir.is_empty()
             ? run(alloc, Option<Bytes>.Absent)
             : run(alloc, Option<Bytes>.Present(dir))
 
-    block run(alloc: @Allocator, directory: Option<Bytes>):
+    block run(alloc: @Allocator, directory: Option<Bytes>)
         options : ProcessOptions = ProcessOptions { directory: directory, env: st.env.load(),
             env_count: st.env_count.load(), stdin: InputMode.Null, stdout: OutputMode.Capture,
             stderr: OutputMode.Capture }
@@ -462,27 +462,27 @@ routine proc_run_blocking(st: @ProcState) -> Void
             : ran(run_process(st.program.load(), st.args.load(), st.arg_count.load(), options,
                 alloc))
 
-    block ran(r: Result<ProcessOutput, ProcessError>):
-        when r:
+    block ran(r: Result<ProcessOutput, ProcessError>)
+        when r
             .Success(out) -> finished(out)
             .Failure      -> failed()
 
-    block failed():
+    block failed()
         st.spawn_failed.store(true)
         return()
 
-    block finished(out: ProcessOutput):
+    block finished(out: ProcessOutput)
         st.output.store(out.stdout)
         st.errors.store(out.stderr)
-        when out.status:
+        when out.status
             .Exited(code)     -> exited(code)
             .Signaled(signal) -> signaled(signal)
 
-    block exited(code: S32):
+    block exited(code: S32)
         st.exit_status.store(code.to<S64>())
         return()
 
-    block signaled(signal: S32):
+    block signaled(signal: S32)
         st.exit_status.store(0)
         st.term_signal.store(signal)
         return()
@@ -490,7 +490,7 @@ routine proc_run_blocking(st: @ProcState) -> Void
 /// Runs a prepared state, parking a scheduler-driven coroutine meanwhile, publishes the captured streams and the
 /// status, frees the state, and returns the exit code (-1 if the child couldn't start).
 routine proc_exec(st: @ProcState) -> S64
-    block entry():
+    block entry()
         req : @IoReq = zeroed<IoReq>(1, "Failed to allocate subprocess request")
         req.kind.store(IO_RUN_PROCESS)
         req.proc.store(st)
@@ -513,18 +513,18 @@ routine proc_exec(st: @ProcState) -> S64
 /// Runs command through the platform shell (cmd /c, sh -c): pipes and globs, at the cost of shell quoting.
 #export("rf_proc_run")
 routine rf_proc_run(command: @Byte, command_len: S32) -> S64
-    block entry():
+    block entry()
         return(proc_exec(proc_state_new(true, owned_copy(command, command_len))))
 
 /// An executable and its arguments, run with no shell.
 #export("rf_proc_begin")
 routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
-    block entry():
+    block entry()
         return(proc_state_new(false, owned_copy(file, file_len)))
 
 #export("rf_proc_add_arg")
 routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
-    block entry():
+    block entry()
         branch b.is_null()
             ? return()
             : continue
@@ -542,7 +542,7 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         b.arg_cap.store(cap)
         jump put(n)
 
-    block put(n: USize):
+    block put(n: USize)
         slot : @Bytes = b.args.load().stride(n)
         slot.store(owned_copy(arg, arg_len))
         b.arg_count.store(n.add(1))
@@ -551,7 +551,7 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
 /// An empty directory inherits the parent's.
 #export("rf_proc_set_cwd")
 routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
-    block entry():
+    block entry()
         branch b.is_null()
             ? return()
             : continue
@@ -562,7 +562,7 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
 /// An environment override, merged into the parent's environment at launch (PATH and the rest stay).
 #export("rf_proc_add_env")
 routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> Void
-    block entry():
+    block entry()
         branch b.is_null()
             ? return()
             : continue
@@ -580,7 +580,7 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         b.env_cap.store(cap)
         jump put(n)
 
-    block put(n: USize):
+    block put(n: USize)
         slot : @EnvVar = b.env.load().stride(n)
         slot.store(EnvVar { name: owned_copy(key, key_len), value: owned_copy(val, val_len) })
         b.env_count.store(n.add(1))
@@ -588,7 +588,7 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
 
 #export("rf_proc_run_built")
 routine rf_proc_run_built(b: @ProcState) -> S64
-    block entry():
+    block entry()
         branch b.is_null()
             ? return(-1)
             : return(proc_exec(b))

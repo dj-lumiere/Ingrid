@@ -35,7 +35,7 @@ record HandlerList
 
 /// Calls one handler: the box's first word is the function, which takes the box (and the context).
 routine invoke(e: HandlerEntry) -> Void
-    block entry():
+    block entry()
         branch e.box.is_null()
             ? return()
             : continue
@@ -48,7 +48,7 @@ routine invoke(e: HandlerEntry) -> Void
         call.call(e.box)
         return()
 
-    block with_ctx(fn: Addr):
+    block with_ctx(fn: Addr)
         claim slot : @Addr <- fn
         call : Callable<(Addr, Addr), Void> = slot.to<@Callable<(Addr, Addr), Void>>().load()
         call.call(e.box, e.ctx)
@@ -56,7 +56,7 @@ routine invoke(e: HandlerEntry) -> Void
 
 /// Runs every handler of a list, from a copy taken under the lock (a handler may register more).
 routine dispatch(list: @HandlerList) -> Void
-    block entry():
+    block entry()
         SIGNALS_LOCK.lock()
         n : USize = list.count.load()
         branch n.eq(0)
@@ -71,23 +71,23 @@ routine dispatch(list: @HandlerList) -> Void
         SIGNALS_LOCK.unlock()
         jump run(snapshot.to<@HandlerEntry>(), n, 0)
 
-    block none():
+    block none()
         SIGNALS_LOCK.unlock()
         return()
 
-    block run(snapshot: @HandlerEntry, n: USize, i: USize):
+    block run(snapshot: @HandlerEntry, n: USize, i: USize)
         branch i.eq(n)
             ? done(snapshot)
             : continue
         invoke(snapshot.stride(i).load())
         jump run(snapshot, n, i.add(1))
 
-    block done(snapshot: @HandlerEntry):
+    block done(snapshot: @HandlerEntry)
         c_free(snapshot)
         return()
 
 routine dispatch_which(which: S32) -> Void
-    block entry():
+    block entry()
         list : @HandlerList = which.eq(SIG_TERMINATE)
             ? TERMINATE_HANDLERS
             : INTERRUPT_HANDLERS
@@ -95,7 +95,7 @@ routine dispatch_which(which: S32) -> Void
         return()
 
 routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
-    block entry():
+    block entry()
         n : USize = self.count.load()
         branch n.eq(self.cap.load())
             ? continue
@@ -113,14 +113,14 @@ routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
         self.cap.store(ncap)
         jump put(n)
 
-    block put(n: USize):
+    block put(n: USize)
         slot : @HandlerEntry = self.items.load().stride(n)
         slot.store(entry)
         self.count.store(n.add(1))
         return()
 
 routine register_entry(which: S32, entry: HandlerEntry) -> Void
-    block entry():
+    block entry()
         SIGNALS_LOCK.lock()
         list : @HandlerList = which.eq(SIG_TERMINATE)
             ? TERMINATE_HANDLERS
@@ -132,21 +132,21 @@ routine register_entry(which: S32, entry: HandlerEntry) -> Void
         install_signal_dispatch()
         jump done()
 
-    block done():
+    block done()
         SIGNALS_LOCK.unlock()
         return()
 
 /// A Routine[(), None] handler for which: 0 interrupt (SIGINT, Ctrl-C), 1 terminate (SIGTERM, the console closing).
 #export("rf_signal_register")
 routine rf_signal_register(which: S32, handler_box: Addr) -> Void
-    block entry():
+    block entry()
         register_entry(which, HandlerEntry { box: handler_box, ctx: null, has_ctx: false })
         return()
 
 /// A Routine[(Ctx,), None] handler, called with context each time the signal comes.
 #export("rf_signal_register_ctx")
 routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> Void
-    block entry():
+    block entry()
         register_entry(which, HandlerEntry { box: handler_box, ctx: context, has_ctx: true })
         return()
 
@@ -160,26 +160,26 @@ routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,
 /// (the end of the process) from happening.
 #[target(os: "windows"), callconv("stdcall")]
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
-    block entry():
+    block entry()
         // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1; CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
         closing : Bool = ctrl_type.eq(2).bitor(ctrl_type.eq(5))
-        when:
+        when
             ctrl_type.le(1)                -> interrupt()
             closing.bitor(ctrl_type.eq(6)) -> terminate()
             else                           -> return(0)
 
-    block interrupt():
+    block interrupt()
         dispatch_which(SIG_INTERRUPT)
         return(1)
 
-    block terminate():
+    block terminate()
         dispatch_which(SIG_TERMINATE)
         return(1)
 
 /// Called with the lock held.
 #target(os: "windows")
 routine install_signal_dispatch() -> Void
-    block entry():
+    block entry()
         c_set_console_ctrl_handler(console_ctrl_handler.to<Callable>(), 1)
         SIGNALS_INSTALLED.store(true)
         return()
@@ -215,12 +215,12 @@ routine c_sigemptyset(set: Addr) -> CInt
 
 #target(os: "linux")
 routine sa_restart() -> CInt
-    block entry():
+    block entry()
         return(0x10000000)
 
 #target(os: "macos")
 routine sa_restart() -> CInt
-    block entry():
+    block entry()
         return(2)
 
 #[external("c"), symbol("pipe"), target(os: not "windows")]
@@ -234,20 +234,20 @@ private routine c_errno_place() -> @CInt
 
 #target(os: not "windows")
 private routine errno() -> CInt
-    block entry():
+    block entry()
         return(c_errno_place().load())
 
 /// Async-signal-safe: writes the which-code byte and returns.
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
-    block entry():
+    block entry()
         code : U8 = signo.eq(SIGTERM)
             ? 1
             : 0
         claim byte : @U8 <- code
         jump write(byte)
 
-    block write(byte: @U8):
+    block write(byte: @U8)
         write_end : @CInt = SELF_PIPE.to<@CInt>().stride(1)
         rc        : SSize = c_write(write_end.load(), byte.to<@Byte>(), 1)
         branch rc.lt(0).bitand(errno().eq(4))
@@ -257,11 +257,11 @@ routine posix_signal_handler(signo: CInt) -> Void
 /// Reads which-codes from the pipe and runs the handlers.
 #target(os: not "windows")
 routine signal_dispatch_main(raw: Addr) -> Void
-    block entry():
+    block entry()
         claim code : @U8 <- 0
         jump read(code)
 
-    block read(code: @U8):
+    block read(code: @U8)
         rc : SSize = c_read(SELF_PIPE.to<@CInt>().load(), code.to<@Byte>(), 1)
         branch rc.eq(1)
             ? got(code)
@@ -270,7 +270,7 @@ routine signal_dispatch_main(raw: Addr) -> Void
             ? read(code)
             : return()
 
-    block got(code: @U8):
+    block got(code: @U8)
         dispatch_which(code.load().to<S32>())
         jump read(code)
 
@@ -278,7 +278,7 @@ routine signal_dispatch_main(raw: Addr) -> Void
 /// registration tries again.
 #target(os: not "windows")
 routine install_signal_dispatch() -> Void
-    block entry():
+    block entry()
         fds : @CInt = SELF_PIPE.to<@CInt>()
         branch c_pipe(fds).ne(0)
             ? return()

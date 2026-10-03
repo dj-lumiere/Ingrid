@@ -40,7 +40,7 @@ record OutputBuffer
     length : USize
 
 routine stdout_interactive() -> Bool
-    block entry():
+    block entry()
         cached : CInt = STDOUT_INTERACTIVE.load()
         branch cached.ge(0)
             ? return(cached.eq(1))
@@ -53,16 +53,16 @@ routine stdout_interactive() -> Bool
             ? decide(true)
             : terminal()
 
-    block terminal():
+    block terminal()
         jump decide(Out.is_terminal())
 
-    block decide(interactive: Bool):
+    block decide(interactive: Bool)
         STDOUT_INTERACTIVE.store(interactive ? 1 : 0)
         return(interactive)
 
 /// Gives Out what the buffer holds. The lock is held.
 routine OutputBuffer.drain(self: @Self) -> Void
-    block entry():
+    block entry()
         n : USize = self.length.load()
         branch n.eq(0)
             ? return()
@@ -73,7 +73,7 @@ routine OutputBuffer.drain(self: @Self) -> Void
 
 #export("rf_console_show")
 routine rf_console_show(ptr: @Byte, count: USize) -> Void
-    block entry():
+    block entry()
         out : @OutputBuffer = STDOUT
         out.lock.lock()
         needed : USize = out.length.load().add(count)
@@ -86,30 +86,30 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
             ? direct(out)
             : keep(out)
 
-    block direct(out: @OutputBuffer):
+    block direct(out: @OutputBuffer)
         Out.write_all(ptr, count)
         jump done(out)
 
-    block keep(out: @OutputBuffer):
+    block keep(out: @OutputBuffer)
         copy<Byte>(out.bytes.to<@Byte>().stride(out.length.load()), ptr, count)
         next_length : USize = out.length.load().add(count)
         next_length.store_into(out.length)
         jump done(out)
 
-    block done(out: @OutputBuffer):
+    block done(out: @OutputBuffer)
         branch stdout_interactive()
             ? continue
             : unlock(out)
         out.drain()
         jump unlock(out)
 
-    block unlock(out: @OutputBuffer):
+    block unlock(out: @OutputBuffer)
         out.lock.unlock()
         return()
 
 #export("rf_console_flush")
 routine rf_console_flush() -> Void
-    block entry():
+    block entry()
         out : @OutputBuffer = STDOUT
         out.lock.lock()
         out.drain()
@@ -119,7 +119,7 @@ routine rf_console_flush() -> Void
 /// On stderr, in magenta. Standard output goes first, so the two read in the order they were written.
 #export("rf_console_alert")
 routine rf_console_alert(ptr: @Byte, count: USize) -> Void
-    block entry():
+    block entry()
         rf_console_flush()
         on  : Bytes = "\x1B[95m"
         off : Bytes = "\x1B[0m"
@@ -132,53 +132,53 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
 
 /// text from the malloc heap as a NUL-terminated string the caller frees, or null.
 routine terminated_text(text: Bytes) -> @Byte
-    block entry():
+    block entry()
         n   : USize = text.length()
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
-            ? lost(text)
+            ? lost()
             : continue
         terminator : @Byte = buf.to<@Byte>().stride(n)
         terminator.store(0x00)
         return(buf.to<@Byte>())
 
-    block lost(text: Bytes):
+    block lost()
         c_free(text.data)
         return(null)
 
 routine terminated_option(text: Option<Bytes>) -> @Byte
-    block entry():
-        when text:
+    block entry()
+        when text
             .Present(t) -> return(terminated_text(t))
             .Absent     -> return(null)
 
 /// The next non-empty line from stdin, without its end, or null at the end of the input.
 #export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
-    block entry():
+    block entry()
         rf_console_flush()
         claim alloc : @Allocator <- heap()
         jump next(alloc)
 
-    block next(alloc: @Allocator):
+    block next(alloc: @Allocator)
         line : Option<Bytes> = In.read_line(alloc)
-        when line:
+        when line
             .Present(t) -> got(alloc, t)
             .Absent     -> return(null)
 
-    block got(alloc: @Allocator, t: Bytes):
+    block got(alloc: @Allocator, t: Bytes)
         branch t.is_empty()
             ? skip(alloc, t)
             : return(terminated_text(t))
 
-    block skip(alloc: @Allocator, t: Bytes):
+    block skip(alloc: @Allocator, t: Bytes)
         c_free(t.data)
         jump next(alloc)
 
 /// The next word from stdin, or null at the end of the input.
 #export("rf_console_ask_word")
 routine rf_console_ask_word() -> @Byte
-    block entry():
+    block entry()
         rf_console_flush()
         claim alloc : @Allocator <- heap()
         return(terminated_option(In.read_word(alloc)))
@@ -186,7 +186,7 @@ routine rf_console_ask_word() -> @Byte
 /// Up to count bytes from stdin, NUL-terminated.
 #export("rf_console_ask_bytes")
 routine rf_console_ask_bytes(count: USize) -> @Byte
-    block entry():
+    block entry()
         rf_console_flush()
         claim alloc : @Allocator <- heap()
         return(terminated_text(In.read_count(count, alloc)))
@@ -194,7 +194,7 @@ routine rf_console_ask_bytes(count: USize) -> @Byte
 /// The rest of stdin, NUL-terminated.
 #export("rf_console_ask_all")
 routine rf_console_ask_all() -> @Byte
-    block entry():
+    block entry()
         rf_console_flush()
         claim alloc : @Allocator <- heap()
         return(terminated_text(In.read_all(alloc)))
@@ -204,7 +204,7 @@ routine rf_console_ask_all() -> @Byte
 /// Bytes on stderr as they are, with no color or newline.
 #export("rf_console_error")
 routine rf_console_error(ptr: @Byte, count: USize) -> Void
-    block entry():
+    block entry()
         branch ptr.is_null().bitor(count.eq(0))
             ? return()
             : continue
@@ -214,14 +214,14 @@ routine rf_console_error(ptr: @Byte, count: USize) -> Void
 /// Flushes stdout, so a program's output appears before the crash report that follows it.
 #export("rf_flush_output")
 routine rf_flush_output() -> Void
-    block entry():
+    block entry()
         rf_console_flush()
         return()
 
 /// Ends the program with the crash status, after the report.
 #[export("rf_crash_exit"), noreturn]
 routine rf_crash_exit() -> Void
-    block entry():
+    block entry()
         rf_console_flush()
         exit(CRASH_STATUS)
 
@@ -231,7 +231,7 @@ routine rf_crash_exit() -> Void
 /// stderr takes ANSI colors (on Windows a console needs asking).
 #export("rf_runtime_init")
 routine rf_runtime_init() -> Void
-    block entry():
+    block entry()
         rf_io_runtime_init()
         c_atexit(rf_console_flush.to<Callable>())
         Err.enable_colors()
@@ -241,15 +241,15 @@ routine rf_runtime_init() -> Void
 
 #export("rf_cstr_count")
 routine rf_cstr_count(cstr: @Byte) -> USize
-    block entry():
+    block entry()
         return(c_strlen(cstr))
 
 #export("rf_cstr_copy")
 routine rf_cstr_copy(dest: @Byte, src: @Byte) -> @Byte
-    block entry():
+    block entry()
         return(c_strcpy(dest, src))
 
 #export("rf_cstr_compare")
 routine rf_cstr_compare(a: @Byte, b: @Byte) -> S32
-    block entry():
+    block entry()
         return(c_strcmp(a, b))

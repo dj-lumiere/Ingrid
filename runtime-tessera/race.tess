@@ -16,12 +16,12 @@ record Race
 
 #export("rf_race_begin")
 routine rf_race_begin() -> @Race
-    block entry():
+    block entry()
         r : @Race = zeroed<Race>(1, "Failed to allocate race competitor set")
         return(r)
 
 routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
-    block entry():
+    block entry()
         branch self.is_null()
             ? return()
             : continue
@@ -42,7 +42,7 @@ routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
         self.cap.store(cap)
         jump put(n)
 
-    block put(n: SSize):
+    block put(n: SSize)
         handle_slot : @Addr = self.handles.load().stride(n)
         handle_slot.store(handle)
         kind_slot : @U8 = self.kinds.load().stride(n)
@@ -52,33 +52,33 @@ routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
 
 #export("rf_race_add_coro")
 routine rf_race_add_coro(r: @Race, c: @Coro) -> Void
-    block entry():
+    block entry()
         r.push(c, 0)
         return()
 
 #export("rf_race_add_task")
 routine rf_race_add_task(r: @Race, t: @Task) -> Void
-    block entry():
+    block entry()
         r.push(t, 1)
         return()
 
 routine Race.handle(self: @Self, i: SSize) -> Addr
-    block entry():
+    block entry()
         slot : @Addr = self.handles.load().stride(i)
         return(slot.load())
 
 routine Race.is_task(self: @Self, i: SSize) -> Bool
-    block entry():
+    block entry()
         slot : @U8 = self.kinds.load().stride(i)
         return(slot.load().eq(1))
 
 /// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
 /// to; each keeps a cross-thread wake promised meanwhile.
 routine Race.register(self: @Self, s: @Sched, coro: @Coro, on: Bool) -> Void
-    block entry():
+    block entry()
         jump next(0)
 
-    block next(i: SSize):
+    block next(i: SSize)
         branch i.eq(self.count.load())
             ? return()
             : continue
@@ -90,22 +90,22 @@ routine Race.register(self: @Self, s: @Sched, coro: @Coro, on: Bool) -> Void
             ? arm(i, task)
             : disarm(i, task)
 
-    block arm(i: SSize, task: @Task):
+    block arm(i: SSize, task: @Task)
         rf_task_race_register(task, s, coro)
         rf_sched_arm_cross_waker(s)
         jump next(i.add(1))
 
-    block disarm(i: SSize, task: @Task):
+    block disarm(i: SSize, task: @Task)
         rf_task_race_register(task, null, null)
         rf_sched_disarm_cross_waker(s)
         jump next(i.add(1))
 
 /// Sets the awaiter of every coroutine competitor that still has this one to awaiter (or clears it).
 routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
-    block entry():
+    block entry()
         jump next(0)
 
-    block next(i: SSize):
+    block next(i: SSize)
         branch i.eq(self.count.load())
             ? return()
             : continue
@@ -117,11 +117,11 @@ routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
             ? point(i, c)
             : clear(i, c)
 
-    block point(i: SSize, c: @Coro):
+    block point(i: SSize, c: @Coro)
         c.awaiter.store(awaiter)
         jump next(i.add(1))
 
-    block clear(i: SSize, c: @Coro):
+    block clear(i: SSize, c: @Coro)
         branch c.awaiter.load().ptr_eq(awaiter)
             ? continue
             : next(i.add(1))
@@ -130,10 +130,10 @@ routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
 
 /// The index of the first competitor to finish, or -1 while none has.
 routine Race.winner(self: @Self) -> SSize
-    block entry():
+    block entry()
         jump next(0, -1, U64.MAX)
 
-    block next(i: SSize, best: SSize, best_seq: U64):
+    block next(i: SSize, best: SSize, best_seq: U64)
         branch i.eq(self.count.load())
             ? return(best)
             : continue
@@ -141,7 +141,7 @@ routine Race.winner(self: @Self) -> SSize
             ? task(i, best, best_seq)
             : coro(i, best, best_seq)
 
-    block coro(i: SSize, best: SSize, best_seq: U64):
+    block coro(i: SSize, best: SSize, best_seq: U64)
         c : @Coro = self.handle(i).to<@Coro>()
         branch c.is_null()
             ? next(i.add(1), best, best_seq)
@@ -150,13 +150,13 @@ routine Race.winner(self: @Self) -> SSize
             ? consider(i, best, best_seq, c.completion_seq.atomic_load())
             : next(i.add(1), best, best_seq)
 
-    block task(i: SSize, best: SSize, best_seq: U64):
+    block task(i: SSize, best: SSize, best_seq: U64)
         t : @Task = self.handle(i).to<@Task>()
         branch rf_task_status_get(t).eq(TASK_COMPLETED)
             ? consider(i, best, best_seq, rf_task_completion_seq(t))
             : next(i.add(1), best, best_seq)
 
-    block consider(i: SSize, best: SSize, best_seq: U64, seq: U64):
+    block consider(i: SSize, best: SSize, best_seq: U64, seq: U64)
         better : Bool = best.lt(0).bitor(seq.lt(best_seq))
         branch better
             ? next(i.add(1), i, seq)
@@ -165,7 +165,7 @@ routine Race.winner(self: @Self) -> SSize
 /// Waits until one competitor finishes: its index in List order, or -1 for an empty set.
 #export("rf_race_wait")
 routine rf_race_wait(r: @Race) -> SSize
-    block entry():
+    block entry()
         branch r.is_null()
             ? return(-1)
             : continue
@@ -184,7 +184,7 @@ routine rf_race_wait(r: @Race) -> SSize
         r.await_coros(self, true)
         jump poll(s, self)
 
-    block poll(s: @Sched, self: @Coro):
+    block poll(s: @Sched, self: @Coro)
         winner : SSize = r.winner()
         branch winner.ge(0)
             ? over(s, self, winner)
@@ -198,21 +198,21 @@ routine rf_race_wait(r: @Race) -> SSize
         s.lock.lock()
         jump poll(s, self)
 
-    block blocking(s: @Sched, self: @Coro):
+    block blocking(s: @Sched, self: @Coro)
         s.block_cond.wait(s.lock)
         jump poll(s, self)
 
-    block over(s: @Sched, self: @Coro, winner: SSize):
+    block over(s: @Sched, self: @Coro, winner: SSize)
         branch self.is_null()
             ? continue
             : clear(s, self, winner)
         jump finish(s, self, winner)
 
-    block clear(s: @Sched, self: @Coro, winner: SSize):
+    block clear(s: @Sched, self: @Coro, winner: SSize)
         r.await_coros(self, false)
         jump finish(s, self, winner)
 
-    block finish(s: @Sched, self: @Coro, winner: SSize):
+    block finish(s: @Sched, self: @Coro, winner: SSize)
         remaining_waiters : SSize = s.waiters.load().sub(1)
         remaining_waiters.store_into(s.waiters)
         s.lock.unlock()
@@ -222,7 +222,7 @@ routine rf_race_wait(r: @Race) -> SSize
 /// Frees the set, not the competitors (their Agents still own them).
 #export("rf_race_end")
 routine rf_race_end(r: @Race) -> Void
-    block entry():
+    block entry()
         branch r.is_null()
             ? return()
             : continue

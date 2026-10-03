@@ -28,13 +28,13 @@ routine c_getenv(name: CStr) -> @Byte
 /// Whether RF_DEADLOCK_DETECT asks for the detector: set, not empty, and not "0". Read once; two threads reading it
 /// at once both find the same answer.
 routine detector_on() -> Bool
-    block entry():
+    block entry()
         state : U8 = DETECTOR.atomic_load()
         branch state.eq(0)
             ? read()
             : return(state.eq(2))
 
-    block read():
+    block read()
         value : @Byte = c_getenv("RF_DEADLOCK_DETECT")
         branch value.is_null()
             ? decided(false)
@@ -43,7 +43,7 @@ routine detector_on() -> Bool
         off   : Bool = first.eq(0x00).bitor(first.eq(b'0'))
         jump decided(off.bitnot())
 
-    block decided(on: Bool):
+    block decided(on: Bool)
         state : U8 = on
             ? 2
             : 1
@@ -52,10 +52,10 @@ routine detector_on() -> Bool
 
 /// The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
 routine slot_of(task: U64) -> USize
-    block entry():
+    block entry()
         jump look(0)
 
-    block look(i: USize):
+    block look(i: USize)
         branch i.ge(WAIT_SLOTS)
             ? return(WAIT_SLOTS)
             : continue
@@ -67,10 +67,10 @@ routine slot_of(task: U64) -> USize
 
 /// The first free slot, or WAIT_SLOTS when the table is full.
 routine free_slot() -> USize
-    block entry():
+    block entry()
         jump look(0)
 
-    block look(i: USize):
+    block look(i: USize)
         branch i.ge(WAIT_SLOTS)
             ? return(WAIT_SLOTS)
             : continue
@@ -81,7 +81,7 @@ routine free_slot() -> USize
 /// Records that `waiter` waits for `holder`, then follows the holders: a chain that leads back to `waiter` is a
 /// deadlock, and the program stops.
 routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
-    block entry():
+    block entry()
         branch detector_on()
             ? continue
             : return()
@@ -97,14 +97,14 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             ? done()
             : record(slot)
 
-    block record(slot: USize):
+    block record(slot: USize)
         entry : @DeadlockWait = WAITS.at(slot)
         waiter.store_into(entry.task)
         holder.store_into(entry.holder)
         true.store_into(entry.used)
         jump follow(holder, 0)
 
-    block follow(current: U64, steps: USize):
+    block follow(current: U64, steps: USize)
         branch steps.ge(WAIT_SLOTS)
             ? done()
             : continue
@@ -117,18 +117,18 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             ? deadlock(current)
             : follow(next, steps.add(1))
 
-    block deadlock(other: U64):
+    block deadlock(other: U64)
         WAITS_LOCK.unlock()
         Err.write("runtime error: Roamed lock deadlock: task {waiter} and task {other} took the same escaped entities in opposite order. Take shared entities in one consistent order.\n")
         c_exit(CRASH_STATUS)
 
-    block done():
+    block done()
         WAITS_LOCK.unlock()
         return()
 
 /// Clears `waiter`'s wait once it holds the lock.
 routine deadlock_wait_end(waiter: U64) -> Void
-    block entry():
+    block entry()
         branch detector_on()
             ? continue
             : return()
@@ -138,10 +138,10 @@ routine deadlock_wait_end(waiter: U64) -> Void
             ? clear(slot)
             : done()
 
-    block clear(slot: USize):
+    block clear(slot: USize)
         false.store_into(WAITS.at(slot).used)
         jump done()
 
-    block done():
+    block done()
         WAITS_LOCK.unlock()
         return()

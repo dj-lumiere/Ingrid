@@ -22,11 +22,11 @@ preset CRASH_STATUS: CInt = 0x52
 
 /// value in hex: digits digits (zeros in front), uppercase or not, on stderr.
 routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
-    block entry():
+    block entry()
         claim text : @Array<Byte, 16> <- uninit
         jump digit(text.to<@Byte>(), value, digits)
 
-    block digit(text: @Byte, v: U64, left: USize):
+    block digit(text: @Byte, v: U64, left: USize)
         branch left.eq(0)
             ? done(text)
             : continue
@@ -41,7 +41,7 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
         text.stride(left.sub(1)).store(c.bits())
         jump digit(text, v.shr(4), left.sub(1))
 
-    block done(text: @Byte):
+    block done(text: @Byte)
         Err.write_all(text, digits)
         return()
 
@@ -50,7 +50,7 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
 /// Sets the trace mode, and in a tracing mode installs the fault handlers.
 #export("__rf_set_trace_mode")
 routine rf_set_trace_mode(mode: CInt) -> Void
-    block entry():
+    block entry()
         TRACE_MODE.store(mode)
         branch mode.ne(TRACE_NONE)
             ? continue
@@ -59,25 +59,25 @@ routine rf_set_trace_mode(mode: CInt) -> Void
         return()
 
 routine print_stack_for_mode() -> Void
-    block entry():
+    block entry()
         mode : CInt = TRACE_MODE.load()
-        when:
+        when
             mode.eq(TRACE_SHADOW)   -> shadow()
             mode.eq(TRACE_PLATFORM) -> platform()
             else                    -> return()
 
-    block shadow():
+    block shadow()
         Err.write("  <stack empty>\n")
         return()
 
-    block platform():
+    block platform()
         print_platform_stack()
         return()
 
 /// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status.
 #[export("__rf_throw"), noreturn]
 routine rf_throw(error_type: CStr, message: CStr) -> Void
-    block entry():
+    block entry()
         rf_console_flush()
         kind : CStr = error_type.data.is_null()
             ? "Error"
@@ -114,7 +114,7 @@ routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol:
 
 #target(os: "windows")
 routine print_platform_stack() -> Void
-    block entry():
+    block entry()
         claim stack : @Array<Addr, 64> <- uninit
         // skip this helper's frame
         frames  : U16  = c_capture_stack_back_trace(1, 64, stack.to<@Addr>(), null)
@@ -129,7 +129,7 @@ routine print_platform_stack() -> Void
         Err.write("Stack trace:\n")
         jump frame(stack.to<@Addr>(), frames.to<U32>(), process, sym, 0)
 
-    block frame(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32):
+    block frame(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32)
         branch i.eq(frames)
             ? return()
             : continue
@@ -142,7 +142,7 @@ routine print_platform_stack() -> Void
         Err.write("\n")
         jump frame(stack, frames, process, sym, i.add(1))
 
-    block named(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32):
+    block named(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32)
         name : Bytes = CStr.from_ptr(sym.stride(SYMBOL_INFO_NAME)).to_bytes()
         Err.write("  {i}: at {name}\n")
         jump frame(stack, frames, process, sym, i.add(1))
@@ -158,14 +158,14 @@ routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
 /// Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
 #target(os: not "windows")
 routine print_platform_stack() -> Void
-    block entry():
+    block entry()
         claim stack : @Array<Addr, 64> <- uninit
         frames  : CInt   = c_backtrace(stack.to<@Addr>(), 64)
         symbols : @@Byte = c_backtrace_symbols(stack.to<@Addr>(), frames)
         Err.write("Stack trace:\n")
         jump frame(stack.to<@Addr>(), frames, symbols, 2)
 
-    block frame(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt):
+    block frame(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt)
         branch i.ge(frames)
             ? done(symbols)
             : continue
@@ -177,13 +177,13 @@ routine print_platform_stack() -> Void
         Err.write("  {n}: {line}\n")
         jump frame(stack, frames, symbols, i.add(1))
 
-    block raw(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt):
+    block raw(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt)
         n       : CInt = i.sub(2)
         address : Addr = stack.stride(i.to<USize>()).load()
         Err.write("  {n}: {address}\n")
         jump frame(stack, frames, symbols, i.add(1))
 
-    block done(symbols: @@Byte):
+    block done(symbols: @@Byte)
         c_free(symbols)
         return()
 
@@ -197,7 +197,7 @@ routine c_add_vectored_exception_handler(first: U32,
 /// (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
 #[target(os: "windows"), callconv("stdcall")]
 routine exception_handler(pointers: @Addr) -> CInt
-    block entry():
+    block entry()
         branch TRACE_MODE.load().eq(TRACE_NONE)
             ? return(0)
             : continue
@@ -213,8 +213,8 @@ routine exception_handler(pointers: @Addr) -> CInt
 
 #target(os: "windows")
 routine exception_name(code: U32) -> CStr
-    block entry():
-        when:
+    block entry()
+        when
             code.eq(0xC0000005) -> return("AccessViolation")
             code.eq(0xC0000094) -> return("DivisionByZero")
             code.eq(0xC000001D) -> return("IllegalInstruction")
@@ -223,7 +223,7 @@ routine exception_name(code: U32) -> CStr
 
 #target(os: "windows")
 routine install_fault_handlers() -> Void
-    block entry():
+    block entry()
         c_add_vectored_exception_handler(1, exception_handler.to<Callable>())
         return()
 
@@ -242,19 +242,19 @@ routine c_raise(signo: CInt) -> CInt
 
 #target(os: "linux")
 routine sigbus() -> CInt
-    block entry():
+    block entry()
         return(7)
 
 #target(os: "macos")
 routine sigbus() -> CInt
-    block entry():
+    block entry()
         return(10)
 
 /// Prints the fault's name and the stack, then restores the default and raises the signal again, so the process
 /// ends with the status the signal gives.
 #target(os: not "windows")
 routine fault_handler(signo: CInt) -> Void
-    block entry():
+    block entry()
         branch TRACE_MODE.load().eq(TRACE_NONE)
             ? reraise()
             : continue
@@ -263,15 +263,15 @@ routine fault_handler(signo: CInt) -> Void
         print_platform_stack()
         jump reraise()
 
-    block reraise():
+    block reraise()
         c_signal(signo, null)
         c_raise(signo)
         return()
 
 #target(os: not "windows")
 routine signal_name(signo: CInt) -> CStr
-    block entry():
-        when:
+    block entry()
+        when
             signo.eq(SIGSEGV)  -> return("SegmentationFault")
             signo.eq(SIGFPE)   -> return("FloatingPointException / DivisionByZero")
             signo.eq(SIGILL)   -> return("IllegalInstruction")
@@ -281,7 +281,7 @@ routine signal_name(signo: CInt) -> CStr
 
 #target(os: not "windows")
 routine install_fault_handlers() -> Void
-    block entry():
+    block entry()
         handler : Callable<(CInt,), Void> = fault_handler.to<Callable>()
         c_signal(SIGSEGV, handler)
         c_signal(SIGFPE, handler)

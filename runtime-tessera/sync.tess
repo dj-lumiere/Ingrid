@@ -33,14 +33,14 @@ routine c_getenv(name: CStr) -> @Byte
 /// Frees a block from rf_allocate_dynamic (Ingrid/tessera/memory.tess, in the program): a result box. A C heap block,
 /// so free reclaims it here too.
 routine rf_invalidate(ptr: Addr) -> Void
-    block entry():
+    block entry()
         c_free(ptr)
         return()
 
 /// count zeroed Ts, or the runtime's out-of-memory error naming what.
 routine zeroed<T>(count: USize, what: CStr) -> @T
 require T: typename
-    block entry():
+    block entry()
         p : Addr = c_calloc(count, sizeof<T>())
         branch p.is_null()
             ? rf_throw("OutOfMemoryError", what)
@@ -57,7 +57,7 @@ record Cond
     seq : U32
 
 routine Cond.wait(self: @Self, m: @Mutex) -> Void
-    block entry():
+    block entry()
         seen : U32 = self.seq.atomic_load()
         m.unlock()
         wait_on(self.seq, seen)
@@ -66,7 +66,7 @@ routine Cond.wait(self: @Self, m: @Mutex) -> Void
 
 /// wait, giving up after ns nanoseconds.
 routine Cond.wait_ns(self: @Self, m: @Mutex, ns: U64) -> Void
-    block entry():
+    block entry()
         seen : U32 = self.seq.atomic_load()
         m.unlock()
         wait_on_for(self.seq, seen, ns)
@@ -74,13 +74,13 @@ routine Cond.wait_ns(self: @Self, m: @Mutex, ns: U64) -> Void
         return()
 
 routine Cond.signal(self: @Self) -> Void
-    block entry():
+    block entry()
         self.seq.atomic_fetch_add(1)
         wake_one(self.seq)
         return()
 
 routine Cond.broadcast(self: @Self) -> Void
-    block entry():
+    block entry()
         self.seq.atomic_fetch_add(1)
         wake_all(self.seq)
         return()
@@ -90,7 +90,7 @@ routine Cond.broadcast(self: @Self) -> Void
 /// The monotonic nanosecond clock the scheduler's timers use, for the timed-await bridge.
 #export("rf_monotonic_now_ns")
 routine rf_monotonic_now_ns() -> U64
-    block entry():
+    block entry()
         return(monotonic_ns())
 
 #[external("c"), symbol("GetCurrentThreadId"), callconv("stdcall"), target(os: "windows")]
@@ -103,25 +103,25 @@ routine c_pthread_self() -> Addr
 /// detecting a re-entrant claim).
 #[export("rf_current_thread_id"), target(os: "windows")]
 routine rf_current_thread_id() -> U64
-    block entry():
+    block entry()
         return(c_get_current_thread_id().to<U64>())
 
 #[export("rf_current_thread_id"), target(os: not "windows")]
 routine rf_current_thread_id() -> U64
-    block entry():
+    block entry()
         return(ptrtoint<Addr, U64>(c_pthread_self()))
 
 /// The environment variable name as a positive integer, or 0 when it is unset, empty, not a number, or not
 /// positive.
 routine env_positive(name: CStr) -> U64
-    block entry():
+    block entry()
         text  : @Byte = c_getenv(name)
         unset : Bool  = text.is_null()
         branch unset
             ? return(0)
             : digit(text, 0, 0)
 
-    block digit(text: @Byte, i: USize, value: U64):
+    block digit(text: @Byte, i: USize, value: U64)
         digit_byte : Byte = text.stride(i).load()
         c          : U8   = digit_byte.to<U8>()
         more       : Bool = c.ge(48).bitand(c.le(57))
@@ -129,7 +129,7 @@ routine env_positive(name: CStr) -> U64
             ? add(text, i, value, c)
             : return(value)
 
-    block add(text: @Byte, i: USize, value: U64, c: U8):
+    block add(text: @Byte, i: USize, value: U64, c: U8)
         next : U64 = value.mul_clamp(10).add_clamp(c.sub(48).to<U64>())
         jump digit(text, i.add(1), next)
 
@@ -139,7 +139,7 @@ routine env_positive(name: CStr) -> U64
 /// crash report and exit status as any other.
 #[export("tessera_panic_handler"), noreturn]
 routine runtime_panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
-    block entry():
+    block entry()
         claim buffer : @Array<Byte, 1024> <- uninit
         claim out    : @SliceWriter       <- SliceWriter.construct(buffer.to<@Byte>(), 1023)
         write_str(out, code.description())
@@ -150,7 +150,7 @@ routine runtime_panic_handler(code: TrapCode, message: Bytes, place: @SourceLoca
         write(out, ": {message}")
         jump where(out, buffer)
 
-    block where(out: @SliceWriter, buffer: @Array<Byte, 1024>):
+    block where(out: @SliceWriter, buffer: @Array<Byte, 1024>)
         nowhere : Bool = place.is_null()
         branch nowhere
             ? finish(out, buffer)
@@ -158,7 +158,7 @@ routine runtime_panic_handler(code: TrapCode, message: Bytes, place: @SourceLoca
         write(out, " (at {place.file.load()}:{place.line.load()}:{place.column.load()})")
         jump finish(out, buffer)
 
-    block finish(out: @SliceWriter, buffer: @Array<Byte, 1024>):
+    block finish(out: @SliceWriter, buffer: @Array<Byte, 1024>)
         text       : Bytes = out.load().to_bytes()
         terminator : @Byte = buffer.to<@Byte>().stride(text.length)
         terminator.store(0x00)
