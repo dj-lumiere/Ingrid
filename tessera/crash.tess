@@ -3,7 +3,7 @@
 // and this definition takes the place of the standard library's weak default. It reports a Tessera crash the way
 // RazorForge's crash report does (Core's crash_report): the crash's name (the RazorForge crashable it
 // matches, such as IntegerOverflowError) and its message, where it happened, the calling thread's crash trace, then
-// exit status 82, through the same runtime calls.
+// exit status 82, through the same runtime calls. A stack overflow is reported here too (stack_overflow_report).
 
 import Standard::Format
 import Standard::Os
@@ -52,6 +52,70 @@ routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Vo
 
     block newline()
         Err.write("\n")
+        write_trace()
+        Err.write("\x1B[0m")
+        rf_crash_exit()
+
+/// A stack overflow, reported like any crash (exit status 82): how deep the routine calls went (the trace's depth,
+/// when the build keeps a trace), the size of the stack they used up and so about how much each call took, then the
+/// trace. The runtime's fault handler calls it on the faulting thread, in the stack the system keeps back for it.
+#[export("tessera_stack_overflow_report"), noreturn]
+routine stack_overflow_report(stack_size: U64) -> Void
+    block entry()
+        rf_flush_output()
+        depth : S32  = trace_depth()
+        known : Bool = depth.gt(0)
+        branch known
+            ? deep(depth)
+            : unknown()
+
+    block deep(depth: S32)
+        per : U64 = stack_size.div(depth.to<U64>())
+        Err.write("\x1B[91mStackOverflowError: the routine calls went {depth} deep and used up the stack ")
+        Err.write("({stack_size} bytes), about {per} bytes a call. Make the recursion shallower, or turn it into a loop.\n")
+        jump report()
+
+    block unknown()
+        Err.write("\x1B[91mStackOverflowError: the routine calls used up the stack ({stack_size} bytes). ")
+        Err.write("Make the recursion shallower, or turn it into a loop.\n")
+        jump report()
+
+    block report()
+        write_trace()
+        Err.write("\x1B[0m")
+        rf_crash_exit()
+
+/// Suflae's report for the same event: Suflae has no "stack" in its vocabulary (the routine calls run in memory, and
+/// running out of it is the one memory wall), so it is an OutOfMemoryError that says how deep the calls went.
+#[export("tessera_deep_calls_report"), noreturn]
+routine deep_calls_report(memory_size: U64) -> Void
+    block entry()
+        rf_flush_output()
+        depth : S32  = trace_depth()
+        known : Bool = depth.gt(0)
+        branch known
+            ? deep(depth)
+            : unknown()
+
+    block deep(depth: S32)
+        Err.write("\x1B[91mOutOfMemoryError: the routine calls went {depth} deep and used up the memory they run in ")
+        Err.write("({memory_size} bytes). Make the recursion shallower, or turn it into a loop.\n")
+        jump report()
+
+    block unknown()
+        Err.write("\x1B[91mOutOfMemoryError: the routine calls used up the memory they run in ({memory_size} bytes). ")
+        Err.write("Make the recursion shallower, or turn it into a loop.\n")
+        jump report()
+
+    block report()
+        write_trace()
+        Err.write("\x1B[0m")
+        rf_crash_exit()
+
+/// The calling thread's crash trace, most recent frame first: the last 32 frames, and how many there were in all when
+/// there were more. Nothing for a build that keeps no trace.
+routine write_trace() -> Void
+    block entry()
         depth : S32  = trace_depth()
         empty : Bool = depth.le(0)
         branch empty
@@ -90,5 +154,4 @@ routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Vo
         jump finish()
 
     block finish()
-        Err.write("\x1B[0m")
-        rf_crash_exit()
+        return()

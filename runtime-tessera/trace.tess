@@ -47,14 +47,12 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
 
 // -- the crash -----------------------------------------------------------------------
 
-/// Sets the trace mode, and in a tracing mode installs the fault handlers.
+/// Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault; a stack
+/// overflow is reported as a crash in every mode.
 #export("__rf_set_trace_mode")
 routine rf_set_trace_mode(mode: CInt) -> Void
     block entry()
         TRACE_MODE.store(mode)
-        branch mode.ne(TRACE_NONE)
-            ? continue
-            : return()
         install_fault_handlers()
         return()
 
@@ -194,22 +192,70 @@ routine print_platform_stack() -> Void
 routine c_add_vectored_exception_handler(first: U32,
     handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
 
-/// Every exception passes through here first: in a tracing mode it prints the stack, then lets the search go on
-/// (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
+#[external("c"), symbol("GetCurrentThreadStackLimits"), callconv("stdcall"), target(os: "windows")]
+routine c_get_current_thread_stack_limits(low: @USize, high: @USize) -> Void
+
+#[external("c"), symbol("SetThreadStackGuarantee"), callconv("stdcall"), target(os: "windows")]
+routine c_set_thread_stack_guarantee(size: @U32) -> CInt
+
+/// The program's report for a stack overflow (Ingrid/tessera/crash.tess, linked into the program, where the crash
+/// trace lives): set at startup through rf_set_stack_overflow_report, null until then.
+global STACK_OVERFLOW_REPORT: @Callable<(U64,), Void>
+
+/// Sets the routine that reports a stack overflow (it writes the report and exits with status 82). The program's
+/// entry calls this right after setting the trace mode.
+#export("rf_set_stack_overflow_report")
+routine rf_set_stack_overflow_report(report: Callable<(U64,), Void>) -> Void
+    block entry()
+        STACK_OVERFLOW_REPORT.store(report)
+        return()
+
+/// Keeps 64 KiB of the calling thread's stack back for its exception handler, so a stack overflow on the thread can
+/// still be reported. Each thread the runtime starts calls it first.
+#[export("rf_thread_stack_guarantee"), target(os: "windows")]
+routine rf_thread_stack_guarantee() -> Void
+    block entry()
+        claim size : @U32 <- 65536
+        c_set_thread_stack_guarantee(size)
+        return()
+
+#[export("rf_thread_stack_guarantee"), target(os: not "windows")]
+routine rf_thread_stack_guarantee() -> Void
+    block entry()
+        return()
+
+/// Every exception passes through here first. A stack overflow is reported as a crash (exit status 82), with how deep
+/// the calls went and the stack they used up. In a tracing mode any other fault prints the stack, then the search
+/// goes on (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
 #[target(os: "windows"), callconv("stdcall")]
 routine exception_handler(pointers: @Addr) -> CInt
     block entry()
+        exception : Addr = pointers.load()
+        code      : U32  = exception.to<@U32>().load()
+        branch code.eq(0xC00000FD)
+            ? overflow()
+            : continue
         branch TRACE_MODE.load().eq(TRACE_NONE)
             ? return(0)
             : continue
-        exception : Addr  = pointers.load()
-        code      : U32   = exception.to<@U32>().load()
-        name      : Bytes = exception_name(code).to<Bytes>()
+        name : Bytes = exception_name(code).to<Bytes>()
         rf_console_flush()
         Err.write("\x1B[91m\n{name} (code 0x")
         write_hex(code.to<U64>(), 8, true)
         Err.write(")\n\x1B[0m")
         print_platform_stack()
+        return(0)
+
+    block overflow()
+        report : Callable<(U64,), Void> = STACK_OVERFLOW_REPORT.load()
+        branch report.addr().is_null()
+            ? return(0)
+            : continue
+        claim low  : @USize <- 0
+        claim high : @USize <- 0
+        c_get_current_thread_stack_limits(low, high)
+        size : U64 = high.load().sub(low.load()).to<U64>()
+        report.call(size)
         return(0)
 
 #target(os: "windows")
@@ -225,6 +271,7 @@ routine exception_name(code: U32) -> CStr
 #target(os: "windows")
 routine install_fault_handlers() -> Void
     block entry()
+        rf_thread_stack_guarantee()
         c_add_vectored_exception_handler(1, exception_handler.to<Callable>())
         return()
 
