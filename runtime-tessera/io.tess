@@ -1,4 +1,5 @@
-// Blocking work without blocking the scheduler: reading or writing a whole file, and running a subprocess.
+// Blocking work without blocking the scheduler: reading or writing a whole file, running a subprocess, and calling a
+// foreign routine marked @blocking.
 //
 // IO_THREADS threads, started once at runtime init, take requests from a queue. A scheduler-driven coroutine
 // submits one and parks; the I/O thread that finishes it wakes the coroutine, whose worker goes on with other
@@ -18,6 +19,7 @@ preset IO_THREADS: USize = 4
 preset IO_READ_FILE:   U32 = 0
 preset IO_WRITE_FILE:  U32 = 1
 preset IO_RUN_PROCESS: U32 = 2
+preset IO_CALL:        U32 = 3
 
 // -- the C library -------------------------------------------------------------------
 
@@ -69,6 +71,8 @@ record IoReq
     data_len : S64
     result   : S64  // bytes read or written, negative on an error
     proc     : @ProcState
+    call     : Callable<(Addr), Void>  // IO_CALL: the routine to run, with call_arg
+    call_arg : Addr
 
 #export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
@@ -81,6 +85,7 @@ routine io_do_work(req: @IoReq) -> Void
         when
             kind.eq(IO_READ_FILE)  -> read()
             kind.eq(IO_WRITE_FILE) -> write()
+            kind.eq(IO_CALL)       -> call()
             else                   -> process()
 
     block read()
@@ -99,6 +104,11 @@ routine io_do_work(req: @IoReq) -> Void
 
     block process()
         proc_run_blocking(req.proc.load())
+        return()
+
+    block call()
+        body : Callable<(Addr), Void> = req.call.load()
+        body.call(req.call_arg.load())
         return()
 
 /// An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
@@ -592,3 +602,16 @@ routine rf_proc_run_built(b: @ProcState) -> S64
         branch b.is_null()
             ? return(-1)
             : return(proc_exec(b))
+
+/// Runs body(arg) for a call of a foreign routine marked @blocking: inside a scheduler-driven coroutine on an I/O
+/// thread while the coroutine parks, so its worker goes on with other coroutines, else here.
+#export("rf_blocking_call")
+routine rf_blocking_call(body: Callable<(Addr), Void>, arg: Addr) -> Void
+    block entry()
+        req : @IoReq = zeroed<IoReq>(1, "Failed to allocate a blocking call request")
+        req.kind.store(IO_CALL)
+        req.call.store(body)
+        req.call_arg.store(arg)
+        io_run(req)
+        c_free(req)
+        return()
