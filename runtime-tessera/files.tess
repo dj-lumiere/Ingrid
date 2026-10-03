@@ -460,13 +460,13 @@ routine rf_file_is_eof(fd: S32) -> Bool
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     block entry()
         claim alloc : @Allocator <- heap()
-        r : Result<Bytes, FsError> = File.at(CStr.from_ptr(cpath).to<Bytes>()).read_all(alloc)
+        r : Result<OwnedSpan<Byte>, FsError> = File.at(CStr.from_ptr(cpath.to<@CChar>()).to<Bytes>()).read_all(alloc)
         when r
             .Success(text) -> terminate(text)
             .Failure       -> return(-1)
 
-    block terminate(text: Bytes)
-        n   : USize = text.count()
+    block terminate(text: OwnedSpan<Byte>)
+        n   : USize = text.count
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
             ? lost(text)
@@ -476,14 +476,14 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
         data.store(buf.to<@Byte>())
         return(n.to<S64>())
 
-    block lost(text: Bytes)
+    block lost(text: OwnedSpan<Byte>)
         c_free(text.data)
         return(-1)
 
 /// len bytes of data as the NUL-terminated path's whole file: len, or -1.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     block entry()
-        r : Result<Unit, FsError> = File.at(CStr.from_ptr(cpath).to<Bytes>()).write_all(Bytes.from_ptr(
+        r : Result<Unit, FsError> = File.at(CStr.from_ptr(cpath.to<@CChar>()).to<Bytes>()).write_all(Bytes.from_ptr(
             data, len.max(0).to<USize>()))
         branch r.is_success()
             ? return(len.max(0))
@@ -888,7 +888,7 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
         claim alloc : @Allocator <- heap()
         return(file_path_result(File.at(path_of(path, len)).absolute(alloc)))
 
-/// The path with links, ".", and ".." resolved; it must exist.
+/// The path with links, ".", and ".." resolved. It must exist.
 #export("rf_fs_canonical_path")
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     block entry()

@@ -3,7 +3,7 @@
 // Out, and Err.
 //
 // What is RazorForge's here is the policy. Standard output is buffered, and flushed after every show when it is an
-// interactive terminal, so prompts and progress appear at once; on a pipe or a file it goes out a bufferful at a time
+// interactive terminal, so prompts and progress appear at once. On a pipe or a file it goes out a bufferful at a time
 // (a write per show costs a system call and a reader's round trip per print). Buffered output still arrives: at exit
 // (registered with atexit at start-up), before every ask, on rf_console_flush, and before a crash report.
 // RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
@@ -131,9 +131,9 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
 // -- standard input ------------------------------------------------------------------
 
 /// text from the malloc heap as a NUL-terminated string the caller frees, or null.
-routine terminated_text(text: Bytes) -> @Byte
+routine terminated_text(text: OwnedSpan<Byte>) -> @Byte
     block entry()
-        n   : USize = text.count()
+        n   : USize = text.count
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
             ? lost()
@@ -146,7 +146,7 @@ routine terminated_text(text: Bytes) -> @Byte
         c_free(text.data)
         return(null)
 
-routine terminated_option(text: Option<Bytes>) -> @Byte
+routine terminated_option(text: Option<OwnedSpan<Byte>>) -> @Byte
     block entry()
         when text
             .Present(t) -> return(terminated_text(t))
@@ -161,17 +161,17 @@ routine rf_console_ask_line() -> @Byte
         jump next(alloc)
 
     block next(alloc: @Allocator)
-        line : Option<Bytes> = In.read_line(alloc)
+        line : Option<OwnedSpan<Byte>> = In.read_line(alloc)
         when line
             .Present(t) -> got(alloc, t)
             .Absent     -> return(null)
 
-    block got(alloc: @Allocator, t: Bytes)
-        branch t.is_empty()
+    block got(alloc: @Allocator, t: OwnedSpan<Byte>)
+        branch t.count.eq(0)
             ? skip(alloc, t)
             : return(terminated_text(t))
 
-    block skip(alloc: @Allocator, t: Bytes)
+    block skip(alloc: @Allocator, t: OwnedSpan<Byte>)
         c_free(t.data)
         jump next(alloc)
 
