@@ -1,55 +1,105 @@
 // The panic handler for every RazorForge and Suflae program. Ingrid's Tessera code reaches it when a check fails
 // (an overflow, an index out of bounds, a failed allocation): Standard::Core's panic calls tessera_panic_handler,
-// and Ingrid is built without the standard library's own default, so this one is it. It reports like the default
-// (one line on stderr and the place), then exits with status 82, the status every RazorForge and Suflae crash
-// exits with.
+// and this definition takes the place of the standard library's weak default. It reports a panic the way a
+// RazorForge crash reports (Core's crash_report): the error type and the message, where it happened, the calling
+// thread's crash trace, then exit status 82, through the same runtime calls.
 
 import Standard::Format
 import Standard::Os
 
-/// The exit status of a crash, the same for a builder-reported crash and a panic in Ingrid's code.
-preset CRASH_STATUS: CInt = 82
+/// One frame of the crash trace, laid out as the builder keeps it: the routine's name and the source file as C
+/// strings, and the line and column the routine has reached.
+private record TraceFrame
+    routine_name : Addr
+    file         : Addr
+    line         : S32
+    column       : S32
+
+/// Flushes standard output, so what the program printed comes before the report.
+#[external("c"), symbol("rf_flush_output")]
+private routine rf_flush_output() -> Void
+
+/// Exits with the crash status.
+#[external("c"), symbol("rf_crash_exit"), noreturn]
+private routine rf_crash_exit() -> Void
+
+/// The RazorForge error type a trap code reports as (IntegerOverflowError, ...), from the runtime.
+#[external("c"), symbol("rf_trap_type_name")]
+private routine rf_trap_type_name(code: TrapCode) -> CStr
+
+/// How many frames the calling thread's crash trace has pushed (0 for a build that keeps no trace).
+#[external("c"), symbol("_rf_trace_get_depth_shared")]
+private routine trace_depth() -> S32
+
+/// The calling thread's 32 trace frames, a ring: the most recent is at (depth - 1) mod 32.
+#[external("c"), symbol("_rf_trace_get_frames_shared")]
+private routine trace_frames() -> @TraceFrame
 
 #[export("tessera_panic_handler"), noreturn]
 routine panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
     block entry()
+        rf_flush_output()
+        kind : CStr  = rf_trap_type_name(code)
+        name : Bytes = kind.to_bytes()
         text : Bytes = code.description()
-        Err.write("runtime error: {text}")
-        raw   : U8   = bitcast<TrapCode, U8>(code)
-        known : Bool = raw.lt(64)
-        branch known
-            ? message()
-            : code(raw)
-
-    // A program's own codes (64 and up) have no description, so the number is written too.
-    block code(raw: U8)
-        Err.write(" {raw}")
-        jump message()
-
-    block message()
+        Err.write("\x1B[91m{name}: {text}")
         none : Bool = message.length.eq(0)
         branch none
-            ? finish()
-            : detail()
-
-    block detail()
+            ? where()
+            : continue
         Err.write(": {message}")
+        jump where()
+
+    block where()
+        nowhere : Bool = place.is_null()
+        branch nowhere
+            ? newline()
+            : continue
+        file   : Bytes = place.file.load()
+        line   : U32   = place.line.load()
+        column : U32   = place.column.load()
+        Err.write("\nat {file}:{line}:{column}")
+        jump newline()
+
+    block newline()
+        Err.write("\n")
+        depth : S32  = trace_depth()
+        empty : Bool = depth.le(0)
+        branch empty
+            ? finish()
+            : continue
+        Err.write("Stack trace:\n")
+        shown : S32 = depth.min(32)
+        jump frame(depth, shown, 0)
+
+    // The frames, most recent first.
+    block frame(depth: S32, shown: S32, i: S32)
+        done : Bool = i.ge(shown)
+        branch done
+            ? total(depth)
+            : continue
+        back         : S32         = depth.sub_wrap(1).sub_wrap(i)
+        slot         : USize       = back.bitand(31).to<USize>()
+        frames       : @TraceFrame = trace_frames()
+        at           : @TraceFrame = frames.stride(slot)
+        routine_ptr  : Addr        = at.routine_name.load()
+        file_ptr     : Addr        = at.file.load()
+        routine_name : Bytes       = CStr.from_ptr(routine_ptr.to<@Byte>()).to_bytes()
+        file         : Bytes       = CStr.from_ptr(file_ptr.to<@Byte>()).to_bytes()
+        line         : S32         = at.line.load()
+        column       : S32         = at.column.load()
+        Err.write("  {i}: at {routine_name} ({file}:{line}:{column})\n")
+        jump frame(depth, shown, i.add(1))
+
+    // A trace keeps 32 frames, and says how many there were in all when there were more.
+    block total(depth: S32)
+        more : Bool = depth.gt(32)
+        branch more
+            ? continue
+            : finish()
+        Err.write("  ... ({depth} frames total)\n")
         jump finish()
 
     block finish()
-        file : Bytes = place.file.load()
-        line : U32   = place.line.load()
-        Err.write("\n  at {file}:{line}")
-        column : U32  = place.column.load()
-        whole  : Bool = column.eq(0)
-        branch whole
-            ? done()
-            : column(column)
-
-    block column(column: U32)
-        Err.write(":{column}")
-        jump done()
-
-    block done()
-        Err.write("\n")
-        c_exit(CRASH_STATUS)
+        Err.write("\x1B[0m")
+        rf_crash_exit()
