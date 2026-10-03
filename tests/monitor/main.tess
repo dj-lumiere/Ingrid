@@ -146,13 +146,17 @@ routine sleep_until(deadline: U64) -> Void
 
 /// The coroutines on the SignalCaster's wait list.
 routine count_waiters(sig: @Monitor) -> USize
-    block entry()
-        jump next(sig.waiters.load(), 0)
+    shared found : @USize <- 0
 
-    block next(w: @ChannelWaiter, found: USize)
+    block entry()
+        jump next(sig.waiters.load())
+
+    block next(w: @ChannelWaiter)
         branch w.is_null()
-            ? return(found)
-            : next(w.next.load(), found.add(1))
+            ? return(found.load())
+            : continue
+        found.load().add(1).store_into(found)
+        jump next(w.next.load())
 
 /// Waits on `sig` from a plain thread until `timeout_ns` has passed, again after every wait that returns 1 (a wait
 /// may return without a cast).
@@ -273,14 +277,16 @@ routine await_passed(gate: @Gate, count: USize) -> Void
 /// Gives the waiting gate threads one token at a time, each with one cast_one, and waits for one to go through.
 /// :returns: Whether each token let exactly one through.
 routine hand_tokens(gate: @Gate) -> Bool
+    shared exact : @Bool <- true
+
     block entry()
         rf_signal_lock(gate.sig.load())
         await_arrived(gate, GATE_THREADS)
-        jump give(1, true)
+        jump give(1)
 
-    block give(round: USize, exact: Bool)
+    block give(round: USize)
         branch round.gt(GATE_THREADS)
-            ? done(exact)
+            ? done()
             : continue
         gate.tokens.store(1)
         rf_signal_unlock(gate.sig.load())
@@ -289,11 +295,12 @@ routine hand_tokens(gate: @Gate) -> Bool
         await_passed(gate, round)
         through : USize = gate.passed.load()
         one     : Bool  = through.eq(round).bitand(gate.tokens.load().eq(0))
-        jump give(round.add(1), exact.bitand(one))
+        exact.load().bitand(one).store_into(exact)
+        jump give(round.add(1))
 
-    block done(exact: Bool)
+    block done()
         rf_signal_unlock(gate.sig.load())
-        return(exact)
+        return(exact.load())
 
 /// Opens the gate once every gate thread waits at it, with one cast_all, and waits for them all to go through.
 routine open_gate(gate: @Gate) -> Void
