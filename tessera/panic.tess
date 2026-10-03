@@ -1,8 +1,9 @@
 // The panic handler for every RazorForge and Suflae program. Ingrid's Tessera code reaches it when a check fails
 // (an overflow, an index out of bounds, a failed allocation): Standard::Core's panic calls tessera_panic_handler,
 // and this definition takes the place of the standard library's weak default. It reports a panic the way a
-// RazorForge crash reports (Core's crash_report): the error type and the message, where it happened, the calling
-// thread's crash trace, then exit status 82, through the same runtime calls.
+// RazorForge crash reports (Core's crash_report): the panic's name (the RazorForge crashable it
+// matches, such as IntegerOverflowError) and its message, where it happened, the calling thread's crash trace, then
+// exit status 82, through the same runtime calls.
 
 import Standard::Format
 import Standard::Os
@@ -23,10 +24,6 @@ private routine rf_flush_output() -> Void
 #[external("c"), symbol("rf_crash_exit"), noreturn]
 private routine rf_crash_exit() -> Void
 
-/// The RazorForge error type a trap code reports as (IntegerOverflowError, ...), from the runtime.
-#[external("c"), symbol("rf_trap_type_name")]
-private routine rf_trap_type_name(code: TrapCode) -> CStr
-
 /// How many frames the calling thread's crash trace has pushed (0 for a build that keeps no trace).
 #[external("c"), symbol("_rf_trace_get_depth_shared")]
 private routine trace_depth() -> S32
@@ -36,18 +33,10 @@ private routine trace_depth() -> S32
 private routine trace_frames() -> @TraceFrame
 
 #[export("tessera_panic_handler"), noreturn]
-routine panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
+routine panic_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Void
     block entry()
         rf_flush_output()
-        kind : CStr  = rf_trap_type_name(code)
-        name : Bytes = kind.to_bytes()
-        text : Bytes = code.description()
-        Err.write("\x1B[91m{name}: {text}")
-        none : Bool = message.length.eq(0)
-        branch none
-            ? where()
-            : continue
-        Err.write(": {message}")
+        Err.write("\x1B[91m{name}: {message}")
         jump where()
 
     block where()

@@ -135,47 +135,30 @@ routine env_positive(name: CStr) -> U64
 
 // -- the panic handler of this library's Tessera code --------------------------------
 
-/// The RazorForge error type a Tessera panic reports as: the one RazorForge code crashes with for the same failure
-/// (an overflow is an IntegerOverflowError wherever it happens), else TesseraPanic for a broken library contract.
-/// Ingrid's own panic handler, in every program, asks for it too.
-/// :param code: The panic's trap code.
-/// :returns: The error type's name.
-#export("rf_trap_type_name")
-routine trap_type_name(code: TrapCode) -> CStr
-    block entry()
-        when code
-            TrapCode.Overflow        -> return("IntegerOverflowError")
-            TrapCode.DivByZero       -> return("DivisionByZeroError")
-            TrapCode.Bounds          -> return("IndexOutOfBoundsError")
-            TrapCode.AllocFailed     -> return("MemoryError")
-            TrapCode.InvalidArgument -> return("InvalidValueError")
-            else                     -> return("TesseraPanic")
-
 /// A panic in this library's Tessera code (a broken stdlib contract) is a RazorForge runtime error, with the same
-/// crash report and exit status as any other.
+/// crash report and exit status as any other: the panic's name is the error type.
 #[export("tessera_panic_handler"), noreturn]
-routine runtime_panic_handler(code: TrapCode, message: Bytes, place: @SourceLocation) -> Void
+routine runtime_panic_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Void
     block entry()
+        claim kind     : @Array<Byte, 128> <- uninit
+        claim kind_out : @SliceWriter      <- SliceWriter.construct(kind.to<@Byte>(), 127)
+        write_str(kind_out, name)
+        kind_text : Bytes = kind_out.load().to_bytes()
+        kind_ptr  : @Byte = kind.to<@Byte>()
+        kind_ptr.stride(kind_text.length).store(0x00)
         claim buffer : @Array<Byte, 1024> <- uninit
         claim out    : @SliceWriter       <- SliceWriter.construct(buffer.to<@Byte>(), 1023)
-        write_str(out, code.description())
-        none : Bool = message.length.eq(0)
-        branch none
-            ? where(out, buffer)
-            : continue
-        out.write(": {message}")
-        jump where(out, buffer)
-
-    block where(out: @SliceWriter, buffer: @Array<Byte, 1024>)
+        write_str(out, message)
         nowhere : Bool = place.is_null()
         branch nowhere
-            ? finish(out, buffer)
+            ? finish(kind_ptr, out, buffer)
             : continue
         out.write(" (at {place.file.load()}:{place.line.load()}:{place.column.load()})")
-        jump finish(out, buffer)
+        jump finish(kind_ptr, out, buffer)
 
-    block finish(out: @SliceWriter, buffer: @Array<Byte, 1024>)
-        text       : Bytes = out.load().to_bytes()
-        terminator : @Byte = buffer.to<@Byte>().stride(text.length)
-        terminator.store(0x00)
-        rf_throw(trap_type_name(code), CStr.from_ptr(buffer.to<@Byte>()))
+    // The name and the text both end in a NUL for rf_throw.
+    block finish(kind_ptr: @Byte, out: @SliceWriter, buffer: @Array<Byte, 1024>)
+        text     : Bytes = out.load().to_bytes()
+        text_ptr : @Byte = buffer.to<@Byte>()
+        text_ptr.stride(text.length).store(0x00)
+        rf_throw(CStr.from_ptr(kind_ptr), CStr.from_ptr(text_ptr))
