@@ -20,7 +20,7 @@ on their own:
 - time, random numbers, and process signals
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
-Roamed entity runtime and its cycle collector, and the panic handler. Math, hashing, cryptography, and algorithms
+Roamed entity runtime and its cycle collector, and the crash handler. Math, hashing, cryptography, and algorithms
 move here next, written once so that both languages build on one implementation.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.

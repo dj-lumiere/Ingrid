@@ -32,7 +32,7 @@ file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/
 set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
 set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
 # The standard library's exports come along: the F16 and BF16 conversions LLVM calls on Windows, which the
-# JIT resolves from this library. Its default panic handler gives way to the runtime's own.
+# JIT resolves from this library. Its default crash handler gives way to the runtime's own.
 add_custom_command(
     OUTPUT "${INGRID_RUNTIME_LL}"
     COMMAND dotnet "${TESSERA_DLL}" build --emit-llvm --mode release

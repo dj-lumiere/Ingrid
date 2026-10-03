@@ -25,7 +25,7 @@ native/
 ├── build.bat
 └── build.sh
 ../runtime-tessera/
-├── sync.tess  // what the rest shares: C calls, a condition variable, the clock, the panic handler
+├── sync.tess  // what the rest shares: C calls, a condition variable, the clock, the crash handler
 ├── trace.tess  // the crash: __rf_throw, stack traces, fault handlers, the standard streams
 ├── console.tess  // show / alert / ask, crash output and exit, runtime init, C-string helpers
 ├── files.tess  // the rf_* files and filesystem calls over Tessera's Standard::Os: handles, mappings, listings
@@ -48,7 +48,7 @@ native/
 ├── roam.tess  // the Roamed entity runtime: counts, promotion, the task-keyed lock
 ├── cycle.tess  // the cycle collector for Roamed entities
 ├── deadlock.tess  // the opt-in deadlock detector for the Roamed lock
-└── panic.tess  // the panic handler of every program
+└── crash.tess  // the crash handler of every program
 ```
 
 Platform differences are per-routine `#target(os: ...)` declarations, not separate builds: one source set type-checks
