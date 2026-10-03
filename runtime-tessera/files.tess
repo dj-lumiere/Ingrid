@@ -93,7 +93,7 @@ routine file_path_result(r: Result<File, FsError>) -> @Byte
 /// The malloc heap as an Allocator, so what Standard::Os hands back is freed by rf_invalidate.
 routine heap() -> Allocator
     block entry()
-        return(make_heap_allocator())
+        return(make_c_heap_allocator())
 
 /// A counted path as Bytes.
 routine path_of(path: @Byte, len: S32) -> Bytes
@@ -208,9 +208,9 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     block entry()
         p : Bytes = path_of(path, path_len)
         when mode
-            0    -> opened(File.at(p).open_read(), false)
-            1    -> opened(File.at(p).open_write(), true)
-            2    -> opened(File.at(p).open_append(), true)
+            0    -> opened(File.at(p).open_read_result(), false)
+            1    -> opened(File.at(p).open_write_result(), true)
+            2    -> opened(File.at(p).open_append_result(), true)
             else -> return(-1)
 
     block opened(r: Result<FileHandle, FsError>, writer: Bool)
@@ -250,14 +250,14 @@ routine OpenFile.drain(self: @Self) -> Bool
             ? continue
             : return(true)
         self.end.store(0)
-        wrote : Result<Unit, FsError> = self.file.write_all(self.buffer.load(), n)
+        wrote : Result<Unit, FsError> = self.file.write_all_result(self.buffer.load(), n)
         return(wrote.is_success())
 
 /// Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
 /// end).
 routine OpenFile.refill(self: @Self) -> Bool
     block entry()
-        got : Result<USize, FsError> = self.file.read_bytes(self.buffer.load(), FILE_BUFFER)
+        got : Result<USize, FsError> = self.file.read_bytes_result(self.buffer.load(), FILE_BUFFER)
         when got
             .Success(n) -> filled(n)
             .Failure    -> filled(0)
@@ -315,7 +315,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
             ? continue
             : return(out.fail())
         at  : @Byte                  = out.buf.load().stride(out.len.load())
-        got : Result<USize, FsError> = of.file.read_bytes(at, FILE_BUFFER)
+        got : Result<USize, FsError> = of.file.read_bytes_result(at, FILE_BUFFER)
         when got
             .Success(n) -> read(of, out, n)
             .Failure    -> read(of, out, 0)
@@ -423,7 +423,7 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
             : keep(of)
 
     block direct(of: @OpenFile)
-        wrote : Result<Unit, FsError> = of.file.write_all(ptr, len)
+        wrote : Result<Unit, FsError> = of.file.write_all_result(ptr, len)
         branch wrote.is_success()
             ? return(len)
             : return(0)
@@ -460,12 +460,12 @@ routine rf_file_is_eof(fd: S32) -> Bool
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     block entry()
         claim alloc : @Allocator <- heap()
-        r : Result<OwnedSpan<Byte>, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).read_all(alloc)
+        r : Result<Bytes, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).read_all_result(alloc)
         when r
             .Success(text) -> terminate(text)
             .Failure       -> return(-1)
 
-    block terminate(text: OwnedSpan<Byte>)
+    block terminate(text: Bytes)
         n   : USize = text.count
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
@@ -476,14 +476,14 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
         data.store(buf.to<@Byte>())
         return(n.to<S64>())
 
-    block lost(text: OwnedSpan<Byte>)
+    block lost(text: Bytes)
         c_free(text.data)
         return(-1)
 
 /// len bytes of data as the NUL-terminated path's whole file: len, or -1.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     block entry()
-        r : Result<Unit, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).write_all(Bytes.from_ptr(
+        r : Result<Unit, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).write_all_result(Bytes.from_ptr(
             data, len.max(0).to<USize>()))
         branch r.is_success()
             ? return(len.max(0))
@@ -579,48 +579,48 @@ routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
 #export("rf_fs_set_readonly")
 routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
     block entry()
-        return(status(File.at(path_of(path, len)).set_readonly(readonly)))
+        return(status(File.at(path_of(path, len)).set_readonly_result(readonly)))
 
 // -- directories, copy, move, remove ---------------------------------------------------
 
 #export("rf_fs_create_dir")
 routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
     block entry()
-        return(status(Directory.at(path_of(path, len)).create()))
+        return(status(Directory.at(path_of(path, len)).create_result()))
 
 /// Like mkdir -p: it already existing is fine.
 #export("rf_fs_create_dir_all")
 routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
     block entry()
-        return(status(Directory.at(path_of(path, len)).create_all()))
+        return(status(Directory.at(path_of(path, len)).create_all_result()))
 
 /// A file, or an empty directory.
 #export("rf_fs_remove")
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
     block entry()
         p : Bytes                     = path_of(path, len)
-        m : Result<Metadata, FsError> = File.at(p).link_metadata()
+        m : Result<Metadata, FsError> = File.at(p).link_metadata_result()
         when m
             .Success(info) -> kind(p, info.kind)
             .Failure       -> return(-1)
 
     block kind(p: Bytes, k: FileKind)
         branch k.eq(FileKind.Directory)
-            ? return(status(Directory.at(p).delete()))
-            : return(status(File.at(p).delete()))
+            ? return(status(Directory.at(p).delete_result()))
+            : return(status(File.at(p).delete_result()))
 
 /// A directory and everything in it (a link is removed, not followed), or a file.
 #export("rf_fs_remove_all")
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
     block entry()
         claim alloc : @Allocator <- heap()
-        return(status(Directory.at(path_of(path, len)).delete_all(alloc)))
+        return(status(Directory.at(path_of(path, len)).delete_all_result(alloc)))
 
 #export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry()
         copied : Result<U64, FsError> = File.at(path_of(src,
-            src_len)).copy_to(File.at(path_of(dst, dst_len)))
+            src_len)).copy_to_result(File.at(path_of(dst, dst_len)))
         branch copied.is_success()
             ? return(0)
             : return(-1)
@@ -628,9 +628,9 @@ routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 /// A rename between filesystems, as a copy and a removal.
 routine move_across(a: Bytes, b: Bytes) -> S32
     block entry()
-        copied : Result<U64, FsError> = File.at(a).copy_to(File.at(b))
+        copied : Result<U64, FsError> = File.at(a).copy_to_result(File.at(b))
         branch copied.is_success()
-            ? return(status(File.at(a).delete()))
+            ? return(status(File.at(a).delete_result()))
             : return(-1)
 
 /// Renames, replacing what is there. Between filesystems it is a copy and a removal.
@@ -639,7 +639,7 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry()
         a : Bytes                 = path_of(src, src_len)
         b : Bytes                 = path_of(dst, dst_len)
-        r : Result<Unit, FsError> = File.at(a).move_to(File.at(b))
+        r : Result<Unit, FsError> = File.at(a).move_to_result(File.at(b))
         when r
             .Success        -> return(0)
             .Failure(error) -> failed(a, b, error)
@@ -655,7 +655,7 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
     block entry()
         a : Bytes                 = path_of(src, src_len)
         b : Bytes                 = path_of(dst, dst_len)
-        r : Result<Unit, FsError> = File.at(a).move_to_if_absent(File.at(b))
+        r : Result<Unit, FsError> = File.at(a).move_to_if_absent_result(File.at(b))
         when r
             .Success        -> return(0)
             .Failure(error) -> failed(a, b, error)
@@ -745,7 +745,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
             ? continue
             : return(out.fail())
         claim iter : @DirIter <- uninit
-        opened : Result<Unit, FsError> = iter.open(Directory.at(path_of(path, len)))
+        opened : Result<Unit, FsError> = iter.open_result(Directory.at(path_of(path, len)))
         branch opened.is_success()
             ? next(out, iter)
             : return(out.fail())
@@ -760,7 +760,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
         branch typed
             ? continue
             : add(out, iter, d, false, 0)
-        m : Result<Metadata, FsError> = iter.entry_metadata()
+        m : Result<Metadata, FsError> = iter.entry_metadata_result()
         when m
             .Success(info) -> add(out, iter, d, info.kind.eq(FileKind.Directory),
                 seconds(info.modified_ns))
@@ -828,7 +828,7 @@ routine rf_fs_meta_readonly() -> Bool
 #export("rf_fs_metadata")
 routine rf_fs_metadata(path: @Byte, len: S32) -> S32
     block entry()
-        m : Result<Metadata, FsError> = File.at(path_of(path, len)).metadata()
+        m : Result<Metadata, FsError> = File.at(path_of(path, len)).metadata_result()
         when m
             .Success(info) -> cache(info)
             .Failure       -> return(-1)
@@ -844,7 +844,7 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
 #export("rf_fs_file_size")
 routine rf_fs_file_size(path: @Byte, len: S32) -> S64
     block entry()
-        m : Result<Metadata, FsError> = File.at(path_of(path, len)).metadata()
+        m : Result<Metadata, FsError> = File.at(path_of(path, len)).metadata_result()
         when m
             .Success(info) -> return(info.size.to_wrap<S64>())
             .Failure       -> return(-1)
@@ -855,52 +855,52 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 routine rf_fs_current_dir() -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
-        return(path_result(Directory.current(alloc)))
+        return(path_result(Directory.current_result(alloc)))
 
 #export("rf_fs_set_current_dir")
 routine rf_fs_set_current_dir(path: @Byte, len: S32) -> S32
     block entry()
-        return(status(Directory.at(path_of(path, len)).set_current()))
+        return(status(Directory.at(path_of(path, len)).set_current_result()))
 
 #export("rf_fs_temp_dir")
 routine rf_fs_temp_dir() -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
-        return(path_result(Directory.temp(alloc)))
+        return(path_result(Directory.temp_result(alloc)))
 
 /// The user's home directory, or null when it can't be told.
 #export("rf_fs_home_dir")
 routine rf_fs_home_dir() -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
-        return(path_result(Directory.home(alloc)))
+        return(path_result(Directory.home_result(alloc)))
 
 /// Makes the file if it is missing, and sets its modification time to now.
 #export("rf_fs_touch")
 routine rf_fs_touch(path: @Byte, len: S32) -> S32
     block entry()
-        return(status(File.at(path_of(path, len)).touch()))
+        return(status(File.at(path_of(path, len)).touch_result()))
 
 /// The absolute path by the text alone (links kept).
 #export("rf_fs_absolute_path")
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
-        return(file_path_result(File.at(path_of(path, len)).absolute(alloc)))
+        return(file_path_result(File.at(path_of(path, len)).absolute_result(alloc)))
 
 /// The path with links, ".", and ".." resolved. It must exist.
 #export("rf_fs_canonical_path")
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
-        return(file_path_result(File.at(path_of(path, len)).canonical(alloc)))
+        return(file_path_result(File.at(path_of(path, len)).canonical_result(alloc)))
 
 /// Makes the file exactly size bytes, creating, extending (zeros) or truncating it: 0, or -1.
 #export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
     block entry()
         p : Bytes                       = path_of(path, path_len)
-        r : Result<FileHandle, FsError> = File.at(p).open_read_write()
+        r : Result<FileHandle, FsError> = File.at(p).open_read_write_result()
         when r
             .Success(f)     -> sized(f)
             .Failure(error) -> missing(p, error)
@@ -909,14 +909,14 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
         branch error.eq(FsError.NotFound)
             ? continue
             : return(-1)
-        made : Result<FileHandle, FsError> = File.at(p).create_new()
+        made : Result<FileHandle, FsError> = File.at(p).create_new_result()
         when made
             .Success(f) -> sized(f)
             .Failure    -> return(-1)
 
     block sized(opened: FileHandle)
         claim f : @FileHandle <- opened
-        set : Result<Unit, FsError> = f.set_size(size.to<U64>())
+        set : Result<Unit, FsError> = f.set_size_result(size.to<U64>())
         f.close()
         return(status(set))
 
@@ -938,7 +938,7 @@ routine advise(m: Mapping) -> Void
 routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.store(0)
-        r : Result<Mapping, FsError> = File.at(path_of(path, len)).map(write, 0, USize.MAX)
+        r : Result<Mapping, FsError> = File.at(path_of(path, len)).map_result(write, 0, USize.MAX)
         when r
             .Success(m) -> mapped(m)
             .Failure    -> return(no_result())
@@ -967,7 +967,7 @@ routine map_window(path: @Byte, len: S32, offset: USize, count: USize, write: Bo
     block entry()
         MAP_DELTA.store(0)
         r : Result<Mapping, FsError> = File.at(path_of(path,
-            len)).map(write, offset.to<U64>(), count)
+            len)).map_result(write, offset.to<U64>(), count)
         when r
             .Success(m) -> mapped(m)
             .Failure    -> return(no_result())
@@ -1030,5 +1030,5 @@ routine rf_file_map_flush(ptr: @Byte, len: USize) -> Void
             ? return()
             : continue
         m : Mapping = Mapping { base: ptr, delta: 0, count: len }
-        m.flush()
+        m.flush_result()
         return()

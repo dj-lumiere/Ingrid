@@ -67,7 +67,7 @@ routine OutputBuffer.drain(self: @Self) -> Void
         branch n.eq(0)
             ? return()
             : continue
-        Out.write_all(self.bytes.to<@Byte>(), n)
+        Out.write_all_result(self.bytes.to<@Byte>(), n)
         self.count.store(0)
         return()
 
@@ -87,7 +87,7 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
             : keep(out)
 
     block direct(out: @OutputBuffer)
-        Out.write_all(ptr, count)
+        Out.write_all_result(ptr, count)
         jump done(out)
 
     block keep(out: @OutputBuffer)
@@ -123,15 +123,15 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
         rf_console_flush()
         on  : Bytes = "\x1B[95m"
         off : Bytes = "\x1B[0m"
-        Err.write_all(on.data, on.count())
-        Err.write_all(ptr, count)
-        Err.write_all(off.data, off.count())
+        Err.write_all_result(on.data, on.count())
+        Err.write_all_result(ptr, count)
+        Err.write_all_result(off.data, off.count())
         return()
 
 // -- standard input ------------------------------------------------------------------
 
 /// text from the malloc heap as a NUL-terminated string the caller frees, or null.
-routine terminated_text(text: OwnedSpan<Byte>) -> @Byte
+routine terminated_text(text: Bytes) -> @Byte
     block entry()
         n   : USize = text.count
         buf : Addr  = c_realloc(text.data, n.add(1))
@@ -146,7 +146,7 @@ routine terminated_text(text: OwnedSpan<Byte>) -> @Byte
         c_free(text.data)
         return(null)
 
-routine terminated_option(text: Option<OwnedSpan<Byte>>) -> @Byte
+routine terminated_option(text: Option<Bytes>) -> @Byte
     block entry()
         when text
             .Present(t) -> return(terminated_text(t))
@@ -161,17 +161,17 @@ routine rf_console_ask_line() -> @Byte
         jump next(alloc)
 
     block next(alloc: @Allocator)
-        line : Option<OwnedSpan<Byte>> = In.read_line(alloc)
+        line : Option<Bytes> = In.read_line_checked(alloc)
         when line
             .Present(t) -> got(alloc, t)
             .Absent     -> return(null)
 
-    block got(alloc: @Allocator, t: OwnedSpan<Byte>)
+    block got(alloc: @Allocator, t: Bytes)
         branch t.count.eq(0)
             ? skip(alloc, t)
             : return(terminated_text(t))
 
-    block skip(alloc: @Allocator, t: OwnedSpan<Byte>)
+    block skip(alloc: @Allocator, t: Bytes)
         c_free(t.data)
         jump next(alloc)
 
@@ -181,7 +181,7 @@ routine rf_console_ask_word() -> @Byte
     block entry()
         rf_console_flush()
         claim alloc : @Allocator <- heap()
-        return(terminated_option(In.read_word(alloc)))
+        return(terminated_option(In.read_word_checked(alloc)))
 
 /// Up to count bytes from stdin, NUL-terminated.
 #export("rf_console_ask_bytes")
@@ -208,7 +208,7 @@ routine rf_console_error(ptr: @Byte, count: USize) -> Void
         branch ptr.is_null().bitor(count.eq(0))
             ? return()
             : continue
-        Err.write_all(ptr, count)
+        Err.write_all_result(ptr, count)
         return()
 
 /// Flushes stdout, so a program's output appears before the crash report that follows it.
