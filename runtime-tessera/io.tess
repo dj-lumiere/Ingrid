@@ -244,24 +244,25 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
 /// the caller's buffer needn't outlive the call.
 #export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
+    shared req : @IoReq = io_req_new(IO_WRITE_FILE, path, path_len)
+    shared len : S64    = data_len.max(0)
+
     block entry()
-        req : @IoReq = io_req_new(IO_WRITE_FILE, path, path_len)
-        len : S64    = data_len.max(0)
         req.data_len.store(len)
         branch len.gt(0)
-            ? copy(req, len)
-            : run(req)
+            ? copy()
+            : run()
 
-    block copy(req: @IoReq, len: S64)
+    block copy()
         buf : Addr = c_malloc(len.to<USize>())
         branch buf.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O write buffer")
             : continue
         c_memcpy(buf, data, len.to<USize>())
         req.data.store(buf.to<@Byte>())
-        jump run(req)
+        jump run()
 
-    block run(req: @IoReq)
+    block run()
         io_run(req)
         result : S64 = req.result.load()
         c_free(req.data.load())
@@ -457,14 +458,15 @@ routine terminated(b: Bytes) -> @Byte
 
 /// Runs the prepared subprocess, on whatever thread calls it, filling in how it went.
 routine proc_run_blocking(st: @ProcState) -> Void
+    shared alloc : @Allocator <- make_c_heap_allocator()
+
     block entry()
-        claim alloc : @Allocator <- make_c_heap_allocator()
         dir : Bytes = st.directory.load()
         branch dir.is_empty()
-            ? run(alloc, Option<Bytes>.Absent)
-            : run(alloc, Option<Bytes>.Present(dir))
+            ? run(Option<Bytes>.Absent)
+            : run(Option<Bytes>.Present(dir))
 
-    block run(alloc: @Allocator, directory: Option<Bytes>)
+    block run(directory: Option<Bytes>)
         options : ProcessOptions = ProcessOptions { directory: directory, env: st.env.load(),
             env_count: st.env_count.load(), stdin: InputMode.Null, stdout: OutputMode.Capture,
             stderr: OutputMode.Capture }

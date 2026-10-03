@@ -67,10 +67,10 @@ routine roam_hold(header: @RoamHeader) -> Void
         world_enter()
         escaped : Bool = header.escaped.atomic_load().eq(1)
         branch escaped
-            ? shared()
+            ? atomic()
             : local()
 
-    block shared()
+    block atomic()
         previous : U64 = header.count.atomic_fetch_add(1)
         jump done()
 
@@ -92,10 +92,10 @@ routine roam_unhold(header: @RoamHeader) -> Void
         world_enter()
         escaped : Bool = header.escaped.atomic_load().eq(1)
         branch escaped
-            ? shared()
+            ? atomic()
             : local()
 
-    block shared()
+    block atomic()
         previous : U64  = header.count.atomic_fetch_sub(1)
         last     : Bool = previous.eq(1)
         branch last
@@ -187,10 +187,10 @@ routine roam_observe(header: @RoamHeader) -> Void
         world_enter()
         escaped : Bool = header.escaped.atomic_load().eq(1)
         branch escaped
-            ? shared()
+            ? atomic()
             : local()
 
-    block shared()
+    block atomic()
         previous : U64 = header.weak.atomic_fetch_add(1)
         jump done()
 
@@ -210,10 +210,10 @@ routine roam_unobserve(header: @RoamHeader) -> Void
         world_enter()
         escaped : Bool = header.escaped.atomic_load().eq(1)
         branch escaped
-            ? shared()
+            ? atomic()
             : local()
 
-    block shared()
+    block atomic()
         previous : U64 = header.weak.atomic_fetch_sub(1)
         jump check(previous.eq(1))
 
@@ -274,38 +274,41 @@ routine roam_is_escaped(header: @RoamHeader) -> Bool
 /// worklist (a deep graph would overflow the stack), and already-escaped headers end the walk, so cycles terminate.
 #[export("ingrid_roam_promote")]
 routine roam_promote(header: @RoamHeader) -> Void
+    shared work : @List<Addr> <- uninit
+    shared kids : @List<Addr> <- uninit
+
     block entry()
         branch header.escaped.atomic_load().eq(1)
             ? return()
             : continue
-        claim alloc : @Allocator  <- make_c_heap_allocator()
-        claim work  : @List<Addr> <- .construct(alloc)
-        claim kids  : @List<Addr> <- .construct(alloc)
+        claim alloc : @Allocator <- make_c_heap_allocator()
+        work.store(.construct(alloc))
+        kids.store(.construct(alloc))
         work.push(header)
-        jump next(work, kids)
+        jump next()
 
-    block next(work: @List<Addr>, kids: @List<Addr>)
+    block next()
         branch work.load().is_empty()
-            ? finish(work, kids)
+            ? finish()
             : continue
         node : @RoamHeader = work.pop().to<@RoamHeader>()
         branch node.escaped.atomic_load().eq(1)
-            ? next(work, kids)
+            ? next()
             : continue
         node.holder_task.atomic_store(0)
         0.store_into(node.depth)
         node.escaped.atomic_store(1)
         children(node, kids)
-        jump push(work, kids, 0, kids.load().count())
+        jump push(0, kids.load().count())
 
-    block push(work: @List<Addr>, kids: @List<Addr>, i: USize, n: USize)
+    block push(i: USize, n: USize)
         branch i.ge(n)
-            ? next(work, kids)
+            ? next()
             : continue
         work.push(kids.load().getitem(i))
-        jump push(work, kids, i.add(1), n)
+        jump push(i.add(1), n)
 
-    block finish(work: @List<Addr>, kids: @List<Addr>)
+    block finish()
         work.destruct()
         kids.destruct()
         return()
@@ -384,26 +387,27 @@ routine roam_lock_exit(header: @RoamHeader) -> Void
 /// RazorForge's `RoamController[T]`, or 0xFFFFFFFFFFFFFFFF past the last field.
 #[export("ingrid_roam_field_offset")]
 routine roam_field_offset(i: U64) -> U64
+    shared header : @RoamHeader <- uninit
+
     block entry()
-        claim header : @RoamHeader <- uninit
         when i
-            0    -> at(header, header.count)
-            1    -> at(header, header.weak)
-            2    -> at(header, header.dead)
-            3    -> at(header, header.escaped)
-            4    -> at(header, header.data)
-            5    -> at(header, header.locked)
-            6    -> at(header, header.holder_task)
-            7    -> at(header, header.depth)
-            8    -> at(header, header.state)
-            9    -> at(header, header.buffered)
-            10   -> at(header, header.trace_hook)
-            11   -> at(header, header.free_hook)
-            12   -> at(header, header.drop_hook)
-            13   -> at(header, header.shape_users)
+            0    -> at(header.count)
+            1    -> at(header.weak)
+            2    -> at(header.dead)
+            3    -> at(header.escaped)
+            4    -> at(header.data)
+            5    -> at(header.locked)
+            6    -> at(header.holder_task)
+            7    -> at(header.depth)
+            8    -> at(header.state)
+            9    -> at(header.buffered)
+            10   -> at(header.trace_hook)
+            11   -> at(header.free_hook)
+            12   -> at(header.drop_hook)
+            13   -> at(header.shape_users)
             else -> return(U64.MAX)
 
-    block at(header: @RoamHeader, field: Addr)
+    block at(field: Addr)
         base  : U64 = ptrtoint<Addr, U64>(header)
         place : U64 = ptrtoint<Addr, U64>(field)
         return(place.sub(base))

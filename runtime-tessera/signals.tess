@@ -95,11 +95,12 @@ routine dispatch_which(which: S32) -> Void
         return()
 
 routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
+    shared n : USize = self.count.load()
+
     block entry()
-        n : USize = self.count.load()
         branch n.eq(self.cap.load())
             ? continue
-            : put(n)
+            : put()
         cap  : USize = self.cap.load()
         ncap : USize = cap.eq(0)
             ? 4
@@ -111,9 +112,9 @@ routine HandlerList.append(self: @Self, entry: HandlerEntry) -> Void
             : continue
         self.items.store(grown.to<@HandlerEntry>())
         self.cap.store(ncap)
-        jump put(n)
+        jump put()
 
-    block put(n: USize)
+    block put()
         slot : @HandlerEntry = self.items.load().stride(n)
         slot.store(entry)
         self.count.store(n.add(1))
@@ -240,40 +241,42 @@ private routine errno() -> CInt
 /// Async-signal-safe: writes the which-code byte and returns.
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
-    block entry()
-        code : U8 = signo.eq(SIGTERM)
-            ? 1
-            : 0
-        claim byte : @U8 <- code
-        jump write(byte)
+    shared code : U8 = signo.eq(SIGTERM)
+        ? 1
+        : 0
+    shared byte : @U8 <- code
 
-    block write(byte: @U8)
+    block entry()
+        jump write()
+
+    block write()
         write_end : @CInt = SELF_PIPE.to<@CInt>().stride(1)
         rc        : SSize = c_write(write_end.load(), byte.to<@Byte>(), 1)
         branch rc.lt(0).bitand(errno().eq(4))
-            ? write(byte)
+            ? write()
             : return()
 
 /// Reads which-codes from the pipe and runs the handlers.
 #target(os: not "windows")
 routine signal_dispatch_main(raw: Addr) -> Void
+    shared code : @U8 <- 0
+
     block entry()
         rf_thread_stack_guarantee()
-        claim code : @U8 <- 0
-        jump read(code)
+        jump read()
 
-    block read(code: @U8)
+    block read()
         rc : SSize = c_read(SELF_PIPE.to<@CInt>().load(), code.to<@Byte>(), 1)
         branch rc.eq(1)
-            ? got(code)
+            ? got()
             : continue
         branch rc.lt(0).bitand(errno().eq(4))
-            ? read(code)
+            ? read()
             : return()
 
-    block got(code: @U8)
+    block got()
         dispatch_which(code.load().to<S32>())
-        jump read(code)
+        jump read()
 
 /// Called with the lock held. If the pipe or the thread can't be made, nothing is installed and a later
 /// registration tries again.

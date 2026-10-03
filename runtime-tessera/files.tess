@@ -289,146 +289,150 @@ routine rf_file_close(fd: S32) -> Void
 /// The rest of the file from where the reader is.
 #export("rf_file_read_all")
 routine rf_file_read_all(fd: S32) -> @Byte
+    shared of  : @OpenFile     = open_file(fd)
+    shared out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
+
     block entry()
-        of : @OpenFile = open_file(fd)
         branch of.is_null()
             ? return(no_result())
             : continue
-        claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
         branch out.start(FILE_BUFFER)
             ? continue
             : return(out.fail())
-        jump drain(of, out)
+        jump drain()
 
     // What the reader holds, then the rest straight into the result.
-    block drain(of: @OpenFile, out: @ResultBuffer)
+    block drain()
         held : USize = of.end.load().sub(of.start.load())
         branch out.room(held)
             ? continue
             : return(out.fail())
         out.put(of.buffer.load().stride(of.start.load()), held)
         of.start.store(of.end.load())
-        jump more(of, out)
+        jump more()
 
-    block more(of: @OpenFile, out: @ResultBuffer)
+    block more()
         branch out.room(FILE_BUFFER)
             ? continue
             : return(out.fail())
         at  : @Byte                  = out.buf.load().stride(out.len.load())
         got : Result<USize, FsError> = of.file.read_bytes_result(at, FILE_BUFFER)
         when got
-            .Success(n) -> read(of, out, n)
-            .Failure    -> read(of, out, 0)
+            .Success(n) -> read(n)
+            .Failure    -> read(0)
 
-    block read(of: @OpenFile, out: @ResultBuffer, n: USize)
+    block read(n: USize)
         branch n.eq(0)
-            ? done(of, out)
+            ? done()
             : continue
         next_len : USize = out.len.load().add(n)
         next_len.store_into(out.len)
-        jump more(of, out)
+        jump more()
 
-    block done(of: @OpenFile, out: @ResultBuffer)
+    block done()
         of.eof.store(true)
         return(out.finish())
 
 /// One line, without its '\n' (and any '\r').
 #export("rf_file_read_line")
 routine rf_file_read_line(fd: S32) -> @Byte
+    shared of  : @OpenFile     = open_file(fd)
+    shared out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
+
     block entry()
-        of : @OpenFile = open_file(fd)
         branch of.is_null()
             ? return(no_result())
             : continue
-        claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
         branch out.start(256)
-            ? next(of, out)
+            ? next()
             : return(out.fail())
 
-    block next(of: @OpenFile, out: @ResultBuffer)
+    block next()
         branch of.start.load().lt(of.end.load())
-            ? byte(of, out)
+            ? byte()
             : continue
         branch of.refill()
-            ? byte(of, out)
+            ? byte()
             : return(out.finish())
 
-    block byte(of: @OpenFile, out: @ResultBuffer)
+    block byte()
         at     : USize = of.start.load()
         cursor : @Byte = of.buffer.load().stride(at)
         c      : Byte  = cursor.load()
         of.start.store(at.add(1))
         when
             c.eq(b'\n') -> return(out.finish())
-            c.eq(b'\r') -> next(of, out)
-            else        -> keep(of, out, c)
+            c.eq(b'\r') -> next()
+            else        -> keep(c)
 
-    block keep(of: @OpenFile, out: @ResultBuffer, c: Byte)
+    block keep(c: Byte)
         branch out.room(1)
             ? continue
             : return(out.fail())
         out.byte(c)
-        jump next(of, out)
+        jump next()
 
 /// Up to count bytes: fewer only at the end of the file.
 #export("rf_file_read_bytes")
 routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
+    shared of  : @OpenFile     = open_file(fd)
+    shared out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
+
     block entry()
-        of : @OpenFile = open_file(fd)
         branch of.is_null()
             ? return(no_result())
             : continue
-        claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
         branch out.start(count.add(1))
-            ? next(of, out)
+            ? next()
             : return(out.fail())
 
-    block next(of: @OpenFile, out: @ResultBuffer)
+    block next()
         wanted : USize = count.sub(out.len.load())
         branch wanted.eq(0)
             ? return(out.finish())
             : continue
         branch of.start.load().lt(of.end.load())
-            ? take(of, out, wanted)
+            ? take(wanted)
             : continue
         branch of.refill()
-            ? take(of, out, wanted)
+            ? take(wanted)
             : return(out.finish())
 
-    block take(of: @OpenFile, out: @ResultBuffer, wanted: USize)
+    block take(wanted: USize)
         buffered : USize = of.end.load().sub(of.start.load())
         n        : USize = buffered.min(wanted)
         out.put(of.buffer.load().stride(of.start.load()), n)
         next_start : USize = of.start.load().add(n)
         next_start.store_into(of.start)
-        jump next(of, out)
+        jump next()
 
 /// The bytes written (all of them, or 0 on a failure).
 #export("rf_file_write")
 routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
+    shared of : @OpenFile = open_file(fd)
+
     block entry()
-        of : @OpenFile = open_file(fd)
         branch of.is_null()
             ? return(0)
             : continue
         needed : USize = of.end.load().add(len)
         branch needed.gt(FILE_BUFFER)
             ? continue
-            : keep(of)
+            : keep()
         branch of.drain()
             ? continue
             : return(0)
         branch len.ge(FILE_BUFFER)
-            ? direct(of)
-            : keep(of)
+            ? direct()
+            : keep()
 
-    block direct(of: @OpenFile)
+    block direct()
         wrote : Result<Unit, FsError> = of.file.write_all_result(ptr, len)
         branch wrote.is_success()
             ? return(len)
             : return(0)
 
-    block keep(of: @OpenFile)
+    block keep()
         c_memcpy(of.buffer.load().stride(of.end.load()), ptr, len)
         next_end : USize = of.end.load().add(len)
         next_end.store_into(of.end)
@@ -494,25 +498,26 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 /// a + "/" + b (no separator added after one already there): RazorForge joins with '/' on every OS.
 #export("rf_fs_join_path")
 routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
+    shared first  : Bytes         = path_of(a, a_len)
+    shared second : Bytes         = path_of(b, b_len)
+    shared out    : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
+
     block entry()
-        first  : Bytes = path_of(a, a_len)
-        second : Bytes = path_of(b, b_len)
-        claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
         joined_count : USize = first.count().add(second.count())
         branch out.start(joined_count.add(2))
             ? continue
             : return(out.fail())
         out.put(first.data, first.count())
         branch first.is_empty()
-            ? tail(out, second)
+            ? tail()
             : continue
         branch is_separator(first.byte_at(first.count().sub(1)).bits())
-            ? tail(out, second)
+            ? tail()
             : continue
         out.byte(b'/')
-        jump tail(out, second)
+        jump tail()
 
-    block tail(out: @ResultBuffer, second: Bytes)
+    block tail()
         out.put(second.data, second.count())
         return(out.finish())
 
@@ -597,14 +602,15 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 /// A file, or an empty directory.
 #export("rf_fs_remove")
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
+    shared p : Bytes = path_of(path, len)
+
     block entry()
-        p : Bytes                     = path_of(path, len)
         m : Result<Metadata, FsError> = File.at(p).link_metadata_result()
         when m
-            .Success(info) -> kind(p, info.kind)
+            .Success(info) -> kind(info.kind)
             .Failure       -> return(-1)
 
-    block kind(p: Bytes, k: FileKind)
+    block kind(k: FileKind)
         branch k.eq(FileKind.Directory)
             ? return(status(Directory.at(p).delete_result()))
             : return(status(File.at(p).delete_result()))
@@ -636,15 +642,16 @@ routine move_across(a: Bytes, b: Bytes) -> S32
 /// Renames, replacing what is there. Between filesystems it is a copy and a removal.
 #export("rf_fs_move")
 routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+    shared a : Bytes = path_of(src, src_len)
+    shared b : Bytes = path_of(dst, dst_len)
+
     block entry()
-        a : Bytes                 = path_of(src, src_len)
-        b : Bytes                 = path_of(dst, dst_len)
         r : Result<Unit, FsError> = File.at(a).move_to_result(File.at(b))
         when r
             .Success        -> return(0)
-            .Failure(error) -> failed(a, b, error)
+            .Failure(error) -> failed(error)
 
-    block failed(a: Bytes, b: Bytes, error: FsError)
+    block failed(error: FsError)
         branch error.eq(FsError.CrossDevice)
             ? return(move_across(a, b))
             : return(-1)
@@ -652,21 +659,22 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 /// 0 moved, 1 the destination exists (nothing moved), -1 an error.
 #export("rf_fs_move_no_replace")
 routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+    shared a : Bytes = path_of(src, src_len)
+    shared b : Bytes = path_of(dst, dst_len)
+
     block entry()
-        a : Bytes                 = path_of(src, src_len)
-        b : Bytes                 = path_of(dst, dst_len)
         r : Result<Unit, FsError> = File.at(a).move_to_if_absent_result(File.at(b))
         when r
             .Success        -> return(0)
-            .Failure(error) -> failed(a, b, error)
+            .Failure(error) -> failed(error)
 
-    block failed(a: Bytes, b: Bytes, error: FsError)
+    block failed(error: FsError)
         when
             error.eq(FsError.AlreadyExists) -> return(1)
-            error.eq(FsError.CrossDevice)   -> across(a, b)
+            error.eq(FsError.CrossDevice)   -> across()
             else                            -> return(-1)
 
-    block across(a: Bytes, b: Bytes)
+    block across()
         branch File.at(b).exists()
             ? return(1)
             : return(move_across(a, b))
@@ -739,43 +747,43 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
 
 /// The entries, with each one's kind and modification time when typed (a link followed where the OS tells).
 routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
+    shared out  : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
+    shared iter : @DirIter      <- uninit
+
     block entry()
-        claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
         branch out.start(256)
             ? continue
             : return(out.fail())
-        claim iter : @DirIter <- uninit
         opened : Result<Unit, FsError> = iter.open_result(Directory.at(path_of(path, len)))
         branch opened.is_success()
-            ? next(out, iter)
+            ? next()
             : return(out.fail())
 
-    block next(out: @ResultBuffer, iter: @DirIter)
+    block next()
         e : Option<DirEntry> = iter.next()
         when e
-            .Present(d) -> one(out, iter, d)
-            .Absent     -> finish(out, iter)
+            .Present(d) -> one(d)
+            .Absent     -> finish()
 
-    block one(out: @ResultBuffer, iter: @DirIter, d: DirEntry)
+    block one(d: DirEntry)
         branch typed
             ? continue
-            : add(out, iter, d, false, 0)
+            : add(d, false, 0)
         m : Result<Metadata, FsError> = iter.entry_metadata_result()
         when m
-            .Success(info) -> add(out, iter, d, info.kind.eq(FileKind.Directory),
-                seconds(info.modified_ns))
-            .Failure       -> add(out, iter, d, d.kind.eq(FileKind.Directory), 0)
+            .Success(info) -> add(d, info.kind.eq(FileKind.Directory), seconds(info.modified_ns))
+            .Failure       -> add(d, d.kind.eq(FileKind.Directory), 0)
 
-    block add(out: @ResultBuffer, iter: @DirIter, d: DirEntry, is_dir: Bool, mtime: S64)
+    block add(d: DirEntry, is_dir: Bool, mtime: S64)
         branch out.entry(d.name, typed, is_dir, mtime)
-            ? next(out, iter)
-            : broke(out, iter)
+            ? next()
+            : broke()
 
-    block finish(out: @ResultBuffer, iter: @DirIter)
+    block finish()
         iter.close()
         return(out.finish())
 
-    block broke(out: @ResultBuffer, iter: @DirIter)
+    block broke()
         iter.close()
         return(out.fail())
 
@@ -898,14 +906,15 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
 /// Makes the file exactly size bytes, creating, extending (zeros) or truncating it: 0, or -1.
 #export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
+    shared p : Bytes = path_of(path, path_len)
+
     block entry()
-        p : Bytes                       = path_of(path, path_len)
         r : Result<FileHandle, FsError> = File.at(p).open_read_write_result()
         when r
             .Success(f)     -> sized(f)
-            .Failure(error) -> missing(p, error)
+            .Failure(error) -> missing(error)
 
-    block missing(p: Bytes, error: FsError)
+    block missing(error: FsError)
         branch error.eq(FsError.NotFound)
             ? continue
             : return(-1)

@@ -112,39 +112,40 @@ routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol:
 
 #target(os: "windows")
 routine print_platform_stack() -> Void
+    // SYMBOL_INFO and room for its name, 8-aligned
+    shared buffer : @Array<U64, 262> <- uninit
+    shared sym    : @Byte            = buffer.to<@Byte>()
+
     block entry()
         claim stack : @Array<Addr, 64> <- uninit
         // skip this helper's frame
         frames  : U16  = c_capture_stack_back_trace(1, 64, stack.to<@Addr>(), null)
         process : Addr = c_get_current_process()
         c_sym_initialize(process, null, 1)
-        // SYMBOL_INFO and room for its name, 8-aligned
-        claim buffer : @Array<U64, 262> <- uninit
-        sym : @Byte = buffer.to<@Byte>()
         sym.to<@U32>().store(SYMBOL_INFO_SIZE)
         max_name_field : @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to<@U32>()
         max_name_field.store(MAX_SYM_NAME)
         Err.write("Stack trace:\n")
-        jump frame(stack.to<@Addr>(), frames.to<U32>(), process, sym, 0)
+        jump frame(stack.to<@Addr>(), frames.to<U32>(), process, 0)
 
-    block frame(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32)
+    block frame(stack: @Addr, frames: U32, process: Addr, i: U32)
         branch i.eq(frames)
             ? return()
             : continue
         address : U64 = ptrtoint<Addr, U64>(stack.stride(i.to<USize>()).load())
         branch c_sym_from_addr(process, address, null, sym).ne(0)
-            ? named(stack, frames, process, sym, i)
+            ? named(stack, frames, process, i)
             : continue
         Err.write("  {i}: at 0x")
         write_hex(address, 16, false)
         Err.write("\n")
-        jump frame(stack, frames, process, sym, i.add(1))
+        jump frame(stack, frames, process, i.add(1))
 
-    block named(stack: @Addr, frames: U32, process: Addr, sym: @Byte, i: U32)
+    block named(stack: @Addr, frames: U32, process: Addr, i: U32)
         symbol_name : @Byte = sym.stride(SYMBOL_INFO_NAME)
         name        : Bytes = symbol_name.to<CStr>().to<Bytes>()
         Err.write("  {i}: at {name}\n")
-        jump frame(stack, frames, process, sym, i.add(1))
+        jump frame(stack, frames, process, i.add(1))
 
 // -- the platform stack: POSIX -------------------------------------------------------
 
@@ -189,6 +190,10 @@ routine print_platform_stack() -> Void
 
 // -- fault handlers: Windows ---------------------------------------------------------
 
+/// The program's report for a stack overflow (Ingrid/tessera/crash.tess, linked into the program, where the crash
+/// trace lives): set at startup through rf_set_stack_overflow_report, null until then.
+global STACK_OVERFLOW_REPORT: @Callable<(U64,), Void>
+
 #[external("c"), symbol("AddVectoredExceptionHandler"), callconv("stdcall"), target(os: "windows")]
 routine c_add_vectored_exception_handler(first: U32,
     handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
@@ -198,10 +203,6 @@ routine c_get_current_thread_stack_limits(low: @USize, high: @USize) -> Void
 
 #[external("c"), symbol("SetThreadStackGuarantee"), callconv("stdcall"), target(os: "windows")]
 routine c_set_thread_stack_guarantee(size: @U32) -> CInt
-
-/// The program's report for a stack overflow (Ingrid/tessera/crash.tess, linked into the program, where the crash
-/// trace lives): set at startup through rf_set_stack_overflow_report, null until then.
-global STACK_OVERFLOW_REPORT: @Callable<(U64,), Void>
 
 /// Sets the routine that reports a stack overflow (it writes the report and exits with status 82). The program's
 /// entry calls this right after setting the trace mode.
@@ -255,7 +256,8 @@ routine exception_handler(pointers: @Addr) -> CInt
         claim low  : @USize <- 0
         claim high : @USize <- 0
         c_get_current_thread_stack_limits(low, high)
-        size : U64 = high.load().sub(low.load()).to<U64>()
+        span : USize = high.load().sub(low.load())
+        size : U64   = span.to<U64>()
         report.call(size)
         return(0)
 

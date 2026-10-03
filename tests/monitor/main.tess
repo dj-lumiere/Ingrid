@@ -130,18 +130,19 @@ routine rf_sched_park_deadline(delay_ns: U64) -> Void
 
 /// Sleeps the thread until `deadline`, in monotonic_ns.
 routine sleep_until(deadline: U64) -> Void
-    block entry()
-        claim never : @U32 <- 0
-        jump look(never)
+    shared never : @U32 <- 0
 
-    block look(never: @U32)
+    block entry()
+        jump look()
+
+    block look()
         now  : U64  = monotonic_ns()
         done : Bool = now.ge(deadline)
         branch done
             ? return()
             : continue
         wait_on_for(never, 0, deadline.sub(now))
-        jump look(never)
+        jump look()
 
 /// The coroutines on the SignalCaster's wait list.
 routine count_waiters(sig: @Monitor) -> USize
@@ -157,15 +158,16 @@ routine count_waiters(sig: @Monitor) -> USize
 /// may return without a cast).
 /// :returns: The last wait's result, 0 once the time is up.
 routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
-    block entry()
-        deadline : U64 = monotonic_ns().add(timeout_ns)
-        jump again(deadline)
+    shared deadline : U64 = monotonic_ns().add(timeout_ns)
 
-    block again(deadline: U64)
+    block entry()
+        jump again()
+
+    block again()
         left   : U64 = deadline.sub_clamp(monotonic_ns())
         result : U32 = rf_signal_wait_deadline(sig, left)
         branch result.eq(1)
-            ? again(deadline)
+            ? again()
             : return(result)
 
 // -- the gate ------------------------------------------------------------------------
@@ -192,46 +194,48 @@ routine pass(gate: @Gate) -> Void
 
 /// A gate thread that waits for a token and takes it.
 routine take_token(raw: Addr) -> Void
+    shared gate : @Gate = raw.to<@Gate>()
+
     block entry()
-        gate : @Gate = raw.to<@Gate>()
         rf_signal_lock(gate.sig.load())
         arrive(gate)
-        jump look(gate)
+        jump look()
 
-    block look(gate: @Gate)
+    block look()
         left : USize = gate.tokens.load()
         branch left.gt(0)
-            ? take(gate, left)
-            : wait(gate)
+            ? take(left)
+            : wait()
 
-    block wait(gate: @Gate)
+    block wait()
         rf_signal_wait(gate.sig.load())
-        jump look(gate)
+        jump look()
 
-    block take(gate: @Gate, left: USize)
+    block take(left: USize)
         gate.tokens.store(left.sub(1))
         pass(gate)
         return()
 
 /// A gate thread that waits for the gate to open.
 routine pass_open(raw: Addr) -> Void
+    shared gate : @Gate = raw.to<@Gate>()
+
     block entry()
-        gate : @Gate = raw.to<@Gate>()
         rf_signal_lock(gate.sig.load())
         arrive(gate)
-        jump look(gate)
+        jump look()
 
-    block look(gate: @Gate)
+    block look()
         open : Bool = gate.open.load()
         branch open
-            ? through(gate)
-            : wait(gate)
+            ? through()
+            : wait()
 
-    block wait(gate: @Gate)
+    block wait()
         rf_signal_wait(gate.sig.load())
-        jump look(gate)
+        jump look()
 
-    block through(gate: @Gate)
+    block through()
         pass(gate)
         return()
 

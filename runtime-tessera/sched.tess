@@ -244,38 +244,40 @@ routine Sched.push_injector(self: @Self, c: @Coro) -> Void
 
 /// The injector's head, now RUNNING, or null.
 routine Sched.pop_injector(self: @Self) -> @Coro
+    shared c : @Coro = self.injector_head.load()
+
     block entry()
-        c : @Coro = self.injector_head.load()
         branch c.is_null()
             ? return(null)
             : continue
         next : @Coro = c.sched_next.load()
         self.injector_head.store(next)
         branch next.is_null()
-            ? emptied(c)
-            : taken(c)
+            ? emptied()
+            : taken()
 
-    block emptied(c: @Coro)
+    block emptied()
         self.injector_tail.store(null)
-        jump taken(c)
+        jump taken()
 
-    block taken(c: @Coro)
+    block taken()
         c.sched_next.store(null)
         c.sched_state.atomic_store(SCHED_RUNNING)
         return(c)
 
 /// A runnable coroutine goes, QUEUED, to this worker's deque if a pool worker made it ready, else to the injector.
 routine Sched.enqueue_ready(self: @Self, c: @Coro) -> Void
+    shared id     : SSize  = worker_id()
+    shared deques : @Deque = self.deques.load()
+
     block entry()
-        id     : SSize  = worker_id()
-        deques : @Deque = self.deques.load()
         branch id.ge(0).bitand(deques.is_not_null())
-            ? local(id, deques)
+            ? local()
             : continue
         self.push_injector(c)
         return()
 
-    block local(id: SSize, deques: @Deque)
+    block local()
         c.sched_state.atomic_store(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return()
@@ -320,22 +322,23 @@ routine Sched.timer_sift_up(self: @Self, i: SSize) -> Void
         return()
 
 routine Sched.timer_sift_down(self: @Self, i: SSize) -> Void
-    block entry()
-        n : SSize = self.timer_count.load()
-        l : SSize = i.mul(2).add(1)
-        r : SSize = l.add(1)
-        jump left(n, l, r, i)
+    shared n : SSize = self.timer_count.load()
+    shared l : SSize = i.mul(2).add(1)
+    shared r : SSize = l.add(1)
 
-    block left(n: SSize, l: SSize, r: SSize, m: SSize)
+    block entry()
+        jump left(i)
+
+    block left(m: SSize)
         branch l.lt(n)
             ? continue
-            : right(n, r, m)
+            : right(m)
         left_wake : U64 = self.timer_at(l).wake_ns.load()
         branch left_wake.lt(self.timer_at(m).wake_ns.load())
-            ? right(n, r, l)
-            : right(n, r, m)
+            ? right(l)
+            : right(m)
 
-    block right(n: SSize, r: SSize, m: SSize)
+    block right(m: SSize)
         branch r.lt(n)
             ? continue
             : pick(m)
@@ -633,28 +636,29 @@ routine steal_rand() -> U32
 
 /// A coroutine stolen from another worker's deque (now RUNNING), or null.
 routine Sched.try_steal(self: @Self) -> @Coro
+    shared n : SSize = self.workers_total.load()
+
     block entry()
-        n         : SSize = self.workers_total.load()
-        no_deques : Bool  = self.deques.load().is_null()
+        no_deques : Bool = self.deques.load().is_null()
         branch no_deques.bitor(n.le(1))
             ? return(null)
             : continue
         r : U32 = steal_rand()
-        jump look(n, r, 0)
+        jump look(r, 0)
 
-    block look(n: SSize, r: U32, i: SSize)
+    block look(r: U32, i: SSize)
         branch i.eq(n)
             ? return(null)
             : continue
         offset : U64   = r.to<U64>().add(i.to<U64>())
         v      : SSize = offset.mod(n.to<U64>()).to<SSize>()
         branch v.eq(worker_id())
-            ? look(n, r, i.add(1))
+            ? look(r, i.add(1))
             : continue
         victim : @Deque = self.deques.load().stride(v)
         c      : @Coro  = victim.steal_top()
         branch c.is_null()
-            ? look(n, r, i.add(1))
+            ? look(r, i.add(1))
             : continue
         c.sched_state.atomic_store(SCHED_RUNNING)
         return(c)
@@ -1001,23 +1005,24 @@ routine pool_worker_count() -> SSize
             : return(env.min(WORKERS_MAX).to<SSize>())
 
 routine pool_start() -> @Sched
+    shared s : @Sched = rf_sched_create()
+    shared n : SSize  = pool_worker_count()
+
     block entry()
-        s : @Sched = rf_sched_create()
-        n : SSize  = pool_worker_count()
         s.workers_total.store(n)
         deques : @Deque = zeroed<Deque>(n.to<USize>(), "Failed to allocate worker run deques")
         s.deques.store(deques)
-        jump init(s, n, deques, 0)
+        jump init(deques, 0)
 
-    block init(s: @Sched, n: SSize, deques: @Deque, i: SSize)
+    block init(deques: @Deque, i: SSize)
         branch i.eq(n)
-            ? spawn(s, n, 0)
+            ? spawn(0)
             : continue
         deques.stride(i).init()
-        jump init(s, n, deques, i.add(1))
+        jump init(deques, i.add(1))
 
     // Daemon threads: never joined, and the OS reaps them at exit.
-    block spawn(s: @Sched, n: SSize, i: SSize)
+    block spawn(i: SSize)
         branch i.eq(n)
             ? return(s)
             : continue
@@ -1025,7 +1030,7 @@ routine pool_start() -> @Sched
             "Failed to allocate pool worker startup argument")
         start.store(WorkerStart { sched: s, index: i })
         Thread.spawn(worker_main.to<Callable>(), start, POOL_ALLOC).detach()
-        jump spawn(s, n, i.add(1))
+        jump spawn(i.add(1))
 
 /// The process pool, made (and its workers started) on first use, once even when several threads ask at once.
 #export("rf_sched_thread_default")

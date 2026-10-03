@@ -73,37 +73,38 @@ routine OutputBuffer.drain(self: @Self) -> Void
 
 #export("rf_console_show")
 routine rf_console_show(ptr: @Byte, count: USize) -> Void
+    shared out : @OutputBuffer = STDOUT
+
     block entry()
-        out : @OutputBuffer = STDOUT
         out.lock.lock()
         needed : USize = out.count.load().add(count)
         branch needed.gt(OUTPUT_BUFFER)
             ? continue
-            : keep(out)
+            : keep()
         out.drain()
         // What doesn't fit an empty buffer goes straight out.
         branch count.ge(OUTPUT_BUFFER)
-            ? direct(out)
-            : keep(out)
+            ? direct()
+            : keep()
 
-    block direct(out: @OutputBuffer)
+    block direct()
         Out.write_all_result(ptr, count)
-        jump done(out)
+        jump done()
 
-    block keep(out: @OutputBuffer)
+    block keep()
         copy<Byte>(out.bytes.to<@Byte>().stride(out.count.load()), ptr, count)
         next_count : USize = out.count.load().add(count)
         next_count.store_into(out.count)
-        jump done(out)
+        jump done()
 
-    block done(out: @OutputBuffer)
+    block done()
         branch stdout_interactive()
             ? continue
-            : unlock(out)
+            : unlock()
         out.drain()
-        jump unlock(out)
+        jump unlock()
 
-    block unlock(out: @OutputBuffer)
+    block unlock()
         out.lock.unlock()
         return()
 
@@ -155,25 +156,27 @@ routine terminated_option(text: Option<Bytes>) -> @Byte
 /// The next non-empty line from stdin, without its end, or null at the end of the input.
 #export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
+    shared alloc : @Allocator <- uninit
+
     block entry()
         rf_console_flush()
-        claim alloc : @Allocator <- heap()
-        jump next(alloc)
+        alloc.store(heap())
+        jump next()
 
-    block next(alloc: @Allocator)
+    block next()
         line : Option<Bytes> = In.read_line_checked(alloc)
         when line
-            .Present(t) -> got(alloc, t)
+            .Present(t) -> got(t)
             .Absent     -> return(null)
 
-    block got(alloc: @Allocator, t: Bytes)
+    block got(t: Bytes)
         branch t.count.eq(0)
-            ? skip(alloc, t)
+            ? skip(t)
             : return(terminated_text(t))
 
-    block skip(alloc: @Allocator, t: Bytes)
+    block skip(t: Bytes)
         c_free(t.data)
-        jump next(alloc)
+        jump next()
 
 /// The next word from stdin, or null at the end of the input.
 #export("rf_console_ask_word")
