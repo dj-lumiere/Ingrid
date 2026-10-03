@@ -56,11 +56,12 @@ next to each executable. The full workspace setup is in the
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
 the reference test vectors, splitmix64, the word division on its edge cases, the Roamed counts and lock, the cycle
-collector, the deadlock detector, the heap calls, and the crash report. Each test is a directory with a `config.toml`
-that lists the `tessera/` files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit`
-(exit status) next to it. The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the
-trace, the current task, ...) are defined in the test itself, so a test needs nothing but the builder. With Tessera
-checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
+collector, the deadlock detector, the heap calls, and the crash report, and from `runtime-tessera/` the SignalCaster
+(`monitor.tess`). Each test is a directory with a `config.toml` that lists the files it builds with (`sources`), and
+`<name>.expected` (standard output) and `<name>.exit` (exit status) next to it. The routines a test reaches in the
+RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the scheduler's park and wake, ...) are
+defined in the test itself, so a test needs nothing but the builder. With Tessera checked out next to Ingrid and
+built (`dotnet build`), from Ingrid's directory:
 
 ```bash
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll test tests

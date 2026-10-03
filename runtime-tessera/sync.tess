@@ -1,6 +1,6 @@
-// What the rest of Ingrid's runtime code shares: the C library and runtime routines it calls, a condition variable
-// over Standard::Os's Mutex, the clock, the identity of the calling thread, and the crash handler of the Tessera
-// code in this library.
+// What the rest of Ingrid's runtime code shares: the C library and runtime routines it calls, the clock, the
+// identity of the calling thread, and the crash handler of the Tessera code in this library. Threads wait on
+// Standard::Os's Mutex and Condition.
 //
 // The runtime library is shared (razorforge_runtime.dll / .so / .dylib), and this code is compiled into it, so a
 // routine RazorForge calls is exported under its C name (#export), and calls into the rest of the library (the crash
@@ -45,45 +45,6 @@ require T: typename
         branch p.is_null()
             ? rf_throw("OutOfMemoryError", what)
             : return(p.to<@T>())
-
-// -- a condition variable ------------------------------------------------------------
-//
-// A waiter reads seq while it holds the mutex, unlocks, and sleeps while seq still holds what it read. A signal
-// changes seq first, so a waiter that read it before the signal doesn't sleep through it. Callers signal with the
-// mutex held, as everywhere in this runtime. A wait may return without a signal; callers check their condition
-// again.
-
-record Cond
-    seq : U32
-
-routine Cond.wait(self: @Self, m: @Mutex) -> Void
-    block entry()
-        seen : U32 = self.seq.atomic_load()
-        m.unlock()
-        wait_on(self.seq, seen)
-        m.lock()
-        return()
-
-/// wait, giving up after ns nanoseconds.
-routine Cond.wait_ns(self: @Self, m: @Mutex, ns: U64) -> Void
-    block entry()
-        seen : U32 = self.seq.atomic_load()
-        m.unlock()
-        wait_on_for(self.seq, seen, ns)
-        m.lock()
-        return()
-
-routine Cond.signal(self: @Self) -> Void
-    block entry()
-        self.seq.atomic_fetch_add(1)
-        wake_one(self.seq)
-        return()
-
-routine Cond.broadcast(self: @Self) -> Void
-    block entry()
-        self.seq.atomic_fetch_add(1)
-        wake_all(self.seq)
-        return()
 
 // -- the clock and the calling thread ------------------------------------------------
 

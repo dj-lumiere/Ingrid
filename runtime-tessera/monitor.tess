@@ -1,7 +1,8 @@
 // RazorForge's SignalCaster: a monitor (a lock and a wait set). A waiter takes the lock, checks its condition, and
-// waits while it doesn't hold; wait releases the lock, suspends, and takes it again when woken. A coroutine parks
-// (a cast on any thread wakes it), a plain thread waits on the condition variable. Refcounted, so the agents that
-// synchronize through it share one.
+// waits while it doesn't hold; wait releases the lock, suspends, and takes it again when woken. The lock and the
+// waiting of plain threads are Standard::Os's Mutex and Condition; what is RazorForge's own is here: the handle count
+// the agents sharing one SignalCaster hold, and the coroutines a wait parks on the RazorForge scheduler (a cast on any
+// thread wakes them, before any thread).
 
 module Ingrid::Runtime
 
@@ -10,7 +11,7 @@ import Standard::Os
 /// rf_signal.
 record Monitor
     lock     : Mutex  // the monitor lock, which guards the caller's condition
-    cond     : Cond  // threads wait here
+    cond     : Condition  // plain threads wait here
     waiters  : @ChannelWaiter  // parked coroutines
     refcount : U32
 
@@ -121,8 +122,8 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
         jump result(deadline)
 
     block thread(deadline: U64)
-        sig.cond.wait_ns(sig.lock, timeout_ns)
-        jump result(deadline)
+        in_time : Bool = sig.cond.wait_until(sig.lock, deadline)
+        return(in_time.to<U32>())
 
     block result(deadline: U64)
         branch monotonic_ns().ge(deadline)
@@ -146,7 +147,7 @@ routine rf_signal_cast_one(sig: @Monitor) -> Void
         return()
 
     block thread()
-        sig.cond.signal()
+        sig.cond.wake_one()
         sig.lock.unlock()
         return()
 
@@ -167,6 +168,6 @@ routine rf_signal_cast_all(sig: @Monitor) -> Void
         jump next(w.next.load())
 
     block done()
-        sig.cond.broadcast()
+        sig.cond.wake_all()
         sig.lock.unlock()
         return()

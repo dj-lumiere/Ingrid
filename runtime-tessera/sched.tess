@@ -77,8 +77,8 @@ record Sched
     deadlock_confirm : U64
     deques           : @Deque  // one per pool worker, or null for a scheduler driven directly
     lock             : Mutex
-    cond             : Cond  // idle workers wait here
-    block_cond       : Cond  // top-level retrieve!/race! callers wait here
+    cond             : Condition  // idle workers wait here
+    block_cond       : Condition  // top-level retrieve!/race! callers wait here
 
 #noinline
 routine current_sched() -> @Sched
@@ -493,7 +493,7 @@ routine rf_sched_spawn(s: @Sched, c: @Coro) -> Void
         s.enqueue_ready(c)
         next_live : SSize = s.live.load().add(1)
         next_live.store_into(s.live)
-        s.cond.signal()
+        s.cond.wake_one()
         s.lock.unlock()
         return()
 
@@ -567,7 +567,7 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
         branch before.eq(SCHED_IDLE)
             ? continue
             : done()
-        s.cond.signal()
+        s.cond.wake_one()
         jump done()
 
     block done()
@@ -690,8 +690,8 @@ routine Sched.run_coro(self: @Self, c: @Coro) -> Void
 
     block signal()
         free_now : Bool = c.owner_released.load().bitor(c.detached.load())
-        self.cond.signal()
-        self.block_cond.broadcast()
+        self.cond.wake_one()
+        self.block_cond.wake_all()
         self.lock.unlock()
         branch free_now
             ? continue
@@ -824,7 +824,7 @@ routine Sched.step(self: @Self) -> Bool
             : fire()
         more_idle : SSize = self.workers_idle.load().add(1)
         more_idle.store_into(self.workers_idle)
-        self.cond.wait_ns(self.lock, deadline.sub(now))
+        self.cond.wait_until(self.lock, deadline)
         fewer_idle : SSize = self.workers_idle.load().sub(1)
         fewer_idle.store_into(self.workers_idle)
         jump fire()
@@ -865,7 +865,7 @@ routine Sched.step(self: @Self) -> Bool
             : continue
         more_idle : SSize = self.workers_idle.load().add(1)
         more_idle.store_into(self.workers_idle)
-        self.cond.wait_ns(self.lock, DEADLOCK_GRACE_NS)
+        self.cond.wait_for(self.lock, DEADLOCK_GRACE_NS)
         fewer_idle : SSize = self.workers_idle.load().sub(1)
         fewer_idle.store_into(self.workers_idle)
         self.lock.unlock()
@@ -948,8 +948,8 @@ routine rf_sched_signal(s: @Sched) -> Void
             ? return()
             : continue
         s.lock.lock()
-        s.block_cond.broadcast()
-        s.cond.signal()
+        s.block_cond.wake_all()
+        s.cond.wake_one()
         s.lock.unlock()
         return()
 
