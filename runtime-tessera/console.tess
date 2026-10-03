@@ -35,9 +35,9 @@ preset OUTPUT_BUFFER: USize = 8192
 
 /// What show has written and Out hasn't been given yet, behind a lock (shows come from every thread).
 record OutputBuffer
-    lock   : Mutex
-    bytes  : Array<Byte, OUTPUT_BUFFER>
-    length : USize
+    lock  : Mutex
+    bytes : Array<Byte, OUTPUT_BUFFER>
+    count : USize
 
 routine stdout_interactive() -> Bool
     block entry()
@@ -63,12 +63,12 @@ routine stdout_interactive() -> Bool
 /// Gives Out what the buffer holds. The lock is held.
 routine OutputBuffer.drain(self: @Self) -> Void
     block entry()
-        n : USize = self.length.load()
+        n : USize = self.count.load()
         branch n.eq(0)
             ? return()
             : continue
         Out.write_all(self.bytes.to<@Byte>(), n)
-        self.length.store(0)
+        self.count.store(0)
         return()
 
 #export("rf_console_show")
@@ -76,7 +76,7 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
     block entry()
         out : @OutputBuffer = STDOUT
         out.lock.lock()
-        needed : USize = out.length.load().add(count)
+        needed : USize = out.count.load().add(count)
         branch needed.gt(OUTPUT_BUFFER)
             ? continue
             : keep(out)
@@ -91,9 +91,9 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
         jump done(out)
 
     block keep(out: @OutputBuffer)
-        copy<Byte>(out.bytes.to<@Byte>().stride(out.length.load()), ptr, count)
-        next_length : USize = out.length.load().add(count)
-        next_length.store_into(out.length)
+        copy<Byte>(out.bytes.to<@Byte>().stride(out.count.load()), ptr, count)
+        next_count : USize = out.count.load().add(count)
+        next_count.store_into(out.count)
         jump done(out)
 
     block done(out: @OutputBuffer)
@@ -123,9 +123,9 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
         rf_console_flush()
         on  : Bytes = "\x1B[95m"
         off : Bytes = "\x1B[0m"
-        Err.write_all(on.data, on.length())
+        Err.write_all(on.data, on.count())
         Err.write_all(ptr, count)
-        Err.write_all(off.data, off.length())
+        Err.write_all(off.data, off.count())
         return()
 
 // -- standard input ------------------------------------------------------------------
@@ -133,7 +133,7 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
 /// text from the malloc heap as a NUL-terminated string the caller frees, or null.
 routine terminated_text(text: Bytes) -> @Byte
     block entry()
-        n   : USize = text.length()
+        n   : USize = text.count()
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
             ? lost()

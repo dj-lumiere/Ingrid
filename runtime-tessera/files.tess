@@ -63,7 +63,7 @@ routine owned_result(r: Result<Bytes, FsError>) -> @Byte
             .Failure       -> return(no_result())
 
     block terminate(text: Bytes)
-        n   : USize = text.length()
+        n   : USize = text.count()
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
             ? lost(text)
@@ -466,7 +466,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
             .Failure       -> return(-1)
 
     block terminate(text: Bytes)
-        n   : USize = text.length()
+        n   : USize = text.count()
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
             ? lost(text)
@@ -498,22 +498,22 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
         first  : Bytes = path_of(a, a_len)
         second : Bytes = path_of(b, b_len)
         claim out : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
-        joined_length : USize = first.length().add(second.length())
-        branch out.start(joined_length.add(2))
+        joined_count : USize = first.count().add(second.count())
+        branch out.start(joined_count.add(2))
             ? continue
             : return(out.fail())
-        out.put(first.data, first.length())
+        out.put(first.data, first.count())
         branch first.is_empty()
             ? tail(out, second)
             : continue
-        branch is_separator(first.byte_at(first.length().sub(1)).bits())
+        branch is_separator(first.byte_at(first.count().sub(1)).bits())
             ? tail(out, second)
             : continue
         out.byte(b'/')
         jump tail(out, second)
 
     block tail(out: @ResultBuffer, second: Bytes)
-        out.put(second.data, second.length())
+        out.put(second.data, second.count())
         return(out.finish())
 
 /// The parent directory: "/a/b/c" gives "/a/b", "a/b" gives "a", "file.txt" gives "", and "/" stays the root.
@@ -521,28 +521,28 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
 routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
     block entry()
         p : Bytes = parent_path(path_of(path, len))
-        return(bytes_result(p.data, p.length()))
+        return(bytes_result(p.data, p.count()))
 
 /// The last component: "/a/b/file.txt" gives "file.txt".
 #export("rf_fs_file_name")
 routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
     block entry()
         n : Bytes = file_name(path_of(path, len))
-        return(bytes_result(n.data, n.length()))
+        return(bytes_result(n.data, n.count()))
 
 /// The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
 #export("rf_fs_file_stem")
 routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
     block entry()
         s : Bytes = file_stem(path_of(path, len))
-        return(bytes_result(s.data, s.length()))
+        return(bytes_result(s.data, s.count()))
 
 /// The extension without its dot: "file.txt" gives "txt", "file" gives "".
 #export("rf_fs_extension")
 routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
     block entry()
         e : Bytes = file_extension(path_of(path, len))
-        return(bytes_result(e.data, e.length()))
+        return(bytes_result(e.data, e.count()))
 
 // -- existence, kind, permissions ------------------------------------------------------
 
@@ -713,7 +713,7 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
         kind : USize = typed
             ? dl.add(2)
             : 0
-        branch self.room(sep.add(kind).add(name.length()))
+        branch self.room(sep.add(kind).add(name.count()))
             ? continue
             : return(false)
         branch sep.eq(1)
@@ -734,7 +734,7 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
         jump named()
 
     block named()
-        self.put(name.data, name.length())
+        self.put(name.data, name.count())
         return(true)
 
 /// The entries; typed, with each one's kind and modification time (a link followed where the OS tells).
@@ -927,7 +927,7 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
 routine advise(m: Mapping) -> Void
     block entry()
         m.advise_sequential()
-        mapped : U64 = m.length().to<U64>()
+        mapped : U64 = m.count().to<U64>()
         branch mapped.le(physical_memory().div(2))
             ? continue
             : return()
@@ -944,17 +944,17 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
             .Failure    -> return(no_result())
 
     block mapped(m: Mapping)
-        branch m.length().eq(0)
+        branch m.count().eq(0)
             ? empty()
             : continue
         branch write
             ? continue
             : hint(m)
-        return(result(m.data(), m.length()))
+        return(result(m.data(), m.count()))
 
     block hint(m: Mapping)
         advise(m)
-        return(result(m.data(), m.length()))
+        return(result(m.data(), m.count()))
 
     block empty()
         RESULT_LEN.store(0)
@@ -963,29 +963,29 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 /// A window [offset, offset + length) of a file, clamped to its end and aligned down for the OS: the base
 /// (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker for an empty window, or
 /// null.
-routine map_window(path: @Byte, len: S32, offset: USize, length: USize, write: Bool) -> @Byte
+routine map_window(path: @Byte, len: S32, offset: USize, count: USize, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.store(0)
         r : Result<Mapping, FsError> = File.at(path_of(path,
-            len)).map(write, offset.to<U64>(), length)
+            len)).map(write, offset.to<U64>(), count)
         when r
             .Success(m) -> mapped(m)
             .Failure    -> return(no_result())
 
     block mapped(m: Mapping)
-        branch m.length().eq(0)
+        branch m.count().eq(0)
             ? empty()
             : continue
         branch write
             ? continue
             : hint(m)
         MAP_DELTA.store(m.delta)
-        return(result(m.base.to<@Byte>(), m.length()))
+        return(result(m.base.to<@Byte>(), m.count()))
 
     block hint(m: Mapping)
         m.advise_sequential()
         MAP_DELTA.store(m.delta)
-        return(result(m.base.to<@Byte>(), m.length()))
+        return(result(m.base.to<@Byte>(), m.count()))
 
     block empty()
         RESULT_LEN.store(0)
@@ -1002,14 +1002,14 @@ routine rf_file_map_path_rw(path: @Byte, path_len: S32) -> @Byte
         return(map_whole(path, path_len, true))
 
 #export("rf_file_map_path_range")
-routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, length: USize) -> @Byte
+routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
-        return(map_window(path, path_len, offset, length, false))
+        return(map_window(path, path_len, offset, count, false))
 
 #export("rf_file_map_path_range_rw")
-routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, length: USize) -> @Byte
+routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
-        return(map_window(path, path_len, offset, length, true))
+        return(map_window(path, path_len, offset, count, true))
 
 /// Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
 /// (the empty marker) does nothing.
@@ -1019,7 +1019,7 @@ routine rf_file_unmap(ptr: @Byte, len: USize) -> Void
         branch ptr.is_null().bitor(len.eq(0))
             ? return()
             : continue
-        m : Mapping = Mapping { base: ptr, delta: 0, length: len }
+        m : Mapping = Mapping { base: ptr, delta: 0, count: len }
         m.unmap()
         return()
 
@@ -1029,6 +1029,6 @@ routine rf_file_map_flush(ptr: @Byte, len: USize) -> Void
         branch ptr.is_null().bitor(len.eq(0))
             ? return()
             : continue
-        m : Mapping = Mapping { base: ptr, delta: 0, length: len }
+        m : Mapping = Mapping { base: ptr, delta: 0, count: len }
         m.flush()
         return()
