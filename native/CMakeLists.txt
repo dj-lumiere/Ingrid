@@ -46,9 +46,20 @@ if(WIN32)
 else()
     set(INGRID_RUNTIME_PIC "-fPIC")
 endif()
+# Only clang reads LLVM IR: GCC takes the .ll for a linker input and makes no object. The C compiler is used when it
+# is clang, else the clang on PATH.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    set(INGRID_CLANG "${CMAKE_C_COMPILER}")
+else()
+    find_program(INGRID_CLANG clang)
+    if(NOT INGRID_CLANG)
+        message(FATAL_ERROR "Compiling Ingrid's runtime needs clang (it compiles LLVM IR), and the C compiler is "
+                            "${CMAKE_C_COMPILER_ID}: put clang on PATH, or configure with CC=clang.")
+    endif()
+endif()
 add_custom_command(
     OUTPUT "${INGRID_RUNTIME_OBJ}"
-    COMMAND "${CMAKE_C_COMPILER}" -c -O2 ${INGRID_RUNTIME_PIC} -Wno-override-module "${INGRID_RUNTIME_LL}"
+    COMMAND "${INGRID_CLANG}" -c -O2 ${INGRID_RUNTIME_PIC} -Wno-override-module "${INGRID_RUNTIME_LL}"
             -o "${INGRID_RUNTIME_OBJ}"
     DEPENDS "${INGRID_RUNTIME_LL}"
     COMMENT "Compiling ingrid_runtime_tessera.ll"
@@ -84,5 +95,5 @@ install(TARGETS razorforge_runtime
 message(STATUS "")
 message(STATUS "RazorForge native runtime: Tessera (../runtime-tessera), no C")
 message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
-message(STATUS "  Compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+message(STATUS "  Compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}, LLVM IR compiled by ${INGRID_CLANG}")
 message(STATUS "")
