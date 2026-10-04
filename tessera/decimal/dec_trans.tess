@@ -1,16 +1,16 @@
 // The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
 //
 // D32 and D64 first try a binary float, F64 and F128 with a proven bound on the error (dec_trans_fast.tess), which
-// settles nearly every argument. Otherwise, and for D128, a function is evaluated in binary multiprecision
-// (dec_mp.tess) with a proven bound on its error, starting at 128 bits for D32 and D64 and 192 bits for D128. When
-// every value within the bound rounds to the same decimal of the target width, that decimal is the correctly
-// rounded result; otherwise the value sits too close to a rounding midpoint and the evaluation is repeated with
-// twice the bits (Ziv's strategy), up to 1024. A function value of a
-// decimal argument is transcendental, and so never exactly a midpoint, except where it is rational (2^n, 10^n,
-// x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to even. The special
-// values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come first, the way
-// RazorForge's engines gave them. Every result is reduced: the trailing zeros of the rounded coefficient are
-// stripped, as RazorForge's engines did for every function value.
+// settles nearly every argument. Next, and first for D128, the function is evaluated once at 192 bits on a float of
+// five words (dec_trans_wide.tess), and only then in binary multiprecision (dec_mp.tess), from 256 bits for D32 and
+// D64 and 384 for D128. Each evaluation comes with a proven bound on its error. When every value within the bound
+// rounds to the same decimal of the target width, that decimal is the correctly rounded result; otherwise the value
+// sits too close to a rounding midpoint and the evaluation is repeated with twice the bits (Ziv's strategy), up to
+// 1024. A function value of a decimal argument is transcendental, and so never exactly a midpoint, except where it
+// is rational (2^n, 10^n, x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to
+// even. The special values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come
+// first, the way RazorForge's engines gave them. Every result is reduced: the trailing zeros of the rounded
+// coefficient are stripped, as RazorForge's engines did for every function value.
 
 import Standard::Format
 
@@ -503,13 +503,20 @@ routine dec_ziv(fn: U32, x: Dec, y: Dec, f: DecFormat) -> Dec
         fast : DecTry = dec_fast(fn, x, y, f)
         branch fast.ok
             ? return(fast.d)
+            : wide()
+
+    // 192 bits on the W engine (dec_trans_wide.tess), then the multiprecision loop from the next precision up
+    block wide()
+        w : DecTry = dec_wide(fn, x, y, f)
+        branch w.ok
+            ? return(w.d)
             : multiprecision()
 
     block multiprecision()
         narrow : Bool  = f.digits.le(16)
         start  : USize = narrow
-            ? 2
-            : 3
+            ? 4
+            : 6
         jump attempt(start)
 
     block attempt(n: USize)

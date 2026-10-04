@@ -1,0 +1,766 @@
+// A 192-bit binary float with a bound on its error (W, We), for the decimal transcendentals' fast multiprecision
+// attempt (dec_trans_wide.tess): the arithmetic of dec_mp.tess at three limbs, written out limb by limb so that a
+// value is five words instead of an array of twenty. Every operation truncates exactly as Mp's does at n = 3 (a
+// product or sum taken exactly, or with what drops below one guard limb, then cut to 192 bits), so the error bounds
+// of dec_mp.tess (in units of 2^-192 of the value) carry over unchanged.
+
+/// The exponent of zero, far below every other.
+preset W_ZERO_EXP: S64 = -1125899906842624
+
+/// A binary float of 192 bits: (-1)^neg × (h 2^128 + m 2^64 + l) × 2^(exp - 192), the top bit of h set, so
+/// 2^(exp - 1) <= |x| < 2^exp; zero has every limb 0 and the exponent W_ZERO_EXP.
+record W
+    neg : Bool
+    exp : S64
+    h   : U64
+    m   : U64
+    l   : U64
+
+/// A W and a bound on its error: the value it stands for is within err × 2^-192 × |v| of v.
+record We
+    v   : W
+    err : F64
+
+/// Five limbs of an exact intermediate sum or product, least significant last.
+record WLimbs
+    l4 : U64
+    l3 : U64
+    l2 : U64
+    l1 : U64
+    l0 : U64
+
+// ── making one ────────────────────────────────────────────────────────────────────────────────────
+
+/// Zero.
+/// :returns: The zero W.
+#inline
+routine w_zero() -> W
+    block entry()
+        return({ neg: false, exp: W_ZERO_EXP, h: 0, m: 0, l: 0 })
+
+/// Whether the value is zero.
+/// :returns: Whether the value is zero.
+#inline
+routine W.is_zero(self: Self) -> Bool
+    block entry()
+        return(self.h.eq(0))
+
+/// The value with its sign flipped.
+/// :returns: -self.
+#inline
+routine W.negate(self: Self) -> Self
+    block entry()
+        return({ neg: self.neg.bitnot(), exp: self.exp, h: self.h, m: self.m, l: self.l })
+
+/// The value without its sign.
+/// :returns: |self|.
+#inline
+routine W.magnitude(self: Self) -> Self
+    block entry()
+        return({ neg: false, exp: self.exp, h: self.h, m: self.m, l: self.l })
+
+/// The value with a given sign.
+/// :param neg: Whether it is negative.
+/// :returns: The signed value.
+#inline
+routine W.with_sign(self: Self, neg: Bool) -> Self
+    block entry()
+        return({ neg: neg, exp: self.exp, h: self.h, m: self.m, l: self.l })
+
+/// self × 2^k (exact).
+/// :param k: The power of two.
+/// :returns: self × 2^k.
+#inline
+routine W.ldexp(self: Self, k: S64) -> Self
+    block entry()
+        branch self.is_zero()
+            ? return(self)
+            : return({ neg: self.neg, exp: self.exp.add(k), h: self.h, m: self.m, l: self.l })
+
+/// v × 2^scale exactly.
+/// :param v: The integer.
+/// :param scale: The power of two it is scaled by.
+/// :returns: v × 2^scale.
+routine w_of_u128(v: U128, scale: S64) -> W
+    block entry()
+        branch v.eq(0)
+            ? return(w_zero())
+            : shift()
+
+    block shift()
+        lz  : U128 = v.leading_zeros()
+        top : U128 = v.shl(lz)
+        e   : S64  = scale.add(128).sub(lz.to<S64>())
+        return({ neg: false, exp: e, h: top.shr(64).to_wrap<U64>(), m: top.to_wrap<U64>(), l: 0 })
+
+/// An F64 exactly (finite).
+/// :param x: The float.
+/// :returns: x as a W.
+routine w_of_f64(x: F64) -> W
+    shared bits   : U64 = x.bits()
+    shared biased : S64 = bits.shr(52).bitand(0x7FF).to<S64>()
+
+    block entry()
+        frac   : U64 = bits.bitand(0xFFFFFFFFFFFFF)
+        hidden : U64 = biased.ne(0)
+            ? 0x10000000000000
+            : 0
+        e : S64 = biased.max(1).sub(1075)
+        w : W   = w_of_u128(frac.bitor(hidden).to<U128>(), e)
+        return(w.with_sign(bits.shr(63).eq(1)))
+
+/// An F128 exactly (finite).
+/// :param x: The float.
+/// :returns: x as a W.
+routine w_of_f128(x: F128) -> W
+    shared bits   : U128 = x.bits()
+    shared biased : S64  = bits.shr(112).bitand(0x7FFF).to_wrap<S64>()
+
+    block entry()
+        frac   : U128 = bits.bitand(U128.shl(1, 112).sub(1))
+        hidden : U128 = biased.ne(0)
+            ? U128.shl(1, 112)
+            : 0
+        e : S64 = biased.max(1).sub(16495)
+        w : W   = w_of_u128(frac.bitor(hidden), e)
+        return(w.with_sign(bits.shr(127).eq(1)))
+
+/// The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero), signed: the top 53 bits.
+/// :returns: The scaled top bits.
+routine W.top_f64(self: Self) -> F64
+    block entry()
+        frac : F64 = self.h.shr(11).to<F64>().mul(f64_pow2(-53))
+        branch self.neg
+            ? return(frac.neg())
+            : return(frac)
+
+/// The value as an F64 (0 or an infinity outside F64's range).
+/// :returns: The value as an F64.
+routine W.to_f64(self: Self) -> F64
+    block entry()
+        when
+            self.is_zero()     -> return(0.0)
+            self.exp.gt(1023)  -> huge()
+            self.exp.lt(-1000) -> return(0.0)
+            else               -> return(self.top_f64().mul(f64_pow2(self.exp)))
+
+    block huge()
+        branch self.neg
+            ? return(F64.from_bits(0xFFF0000000000000))
+            : return(F64.from_bits(0x7FF0000000000000))
+
+/// The value rounded toward zero to an F128 (exponent within F128's normal range).
+/// :returns: The value as an F128.
+routine W.to_f128(self: Self) -> F128
+    block entry()
+        branch self.is_zero()
+            ? return(F64.to<F128>(0.0))
+            : pack()
+
+    // the top 113 bits: h's 64 and m's top 49
+    block pack()
+        mant   : U128 = self.h.to<U128>().shl(49).bitor(self.m.shr(15).to<U128>())
+        frac   : U128 = mant.bitand(U128.shl(1, 112).sub(1))
+        biased : U128 = self.exp.add(16382).to<U128>()
+        sign   : U128 = self.neg.to<U128>().shl(127)
+        return(F128.from_bits(sign.bitor(biased.shl(112)).bitor(frac)))
+
+// ── comparing ─────────────────────────────────────────────────────────────────────────────────────
+
+/// -1, 0, or 1 as |a| is below, equal to, or above |b|.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :returns: -1, 0, or 1.
+routine w_compare_magnitude(a: W, b: W) -> S32
+    block entry()
+        za : Bool = a.is_zero()
+        zb : Bool = b.is_zero()
+        when
+            za.bitand(zb)   -> return(0)
+            za              -> return(-1)
+            zb              -> return(1)
+            a.exp.lt(b.exp) -> return(-1)
+            a.exp.gt(b.exp) -> return(1)
+            a.h.ne(b.h)     -> return(w_order(a.h.lt(b.h)))
+            a.m.ne(b.m)     -> return(w_order(a.m.lt(b.m)))
+            a.l.ne(b.l)     -> return(w_order(a.l.lt(b.l)))
+            else            -> return(0)
+
+/// The order of two limbs that differ: -1 when the first is below the second, else 1.
+/// :param less: Whether the first is below the second.
+/// :returns: -1 or 1.
+#inline
+routine w_order(less: Bool) -> S32
+    block entry()
+        branch less
+            ? return(-1)
+            : return(1)
+
+// ── packing ───────────────────────────────────────────────────────────────────────────────────────
+
+/// Limb i (0 the lowest) of a five-limb number, 0 outside it.
+/// :param i: The index.
+/// :returns: The limb.
+#inline
+routine WLimbs.limb(self: Self, i: S64) -> U64
+    block entry()
+        when i
+            0    -> return(self.l0)
+            1    -> return(self.l1)
+            2    -> return(self.l2)
+            3    -> return(self.l3)
+            4    -> return(self.l4)
+            else -> return(0)
+
+/// The 64 bits of a five-limb number starting at bit `at` (bits outside it read as 0).
+/// :param at: The lowest bit read.
+/// :returns: The 64 bits.
+#inline
+routine WLimbs.bits(self: Self, at: S64) -> U64
+    block entry()
+        limb : S64 = at.shr(6)
+        off  : U64 = at.bitand(63).to<U64>()
+        low  : U64 = self.limb(limb)
+        high : U64 = self.limb(limb.add(1))
+        return(low.shr(off).bitor(high.shl(U64.sub(64, off))))
+
+/// The five-limb number r × 2^scale as a W, its sign neg, truncated toward zero (what mp_pack gives).
+/// :param neg: The sign.
+/// :param r: The limbs.
+/// :param scale: The power of two the limbs are scaled by.
+/// :returns: The W.
+routine w_pack(neg: Bool, r: WLimbs, scale: S64) -> W
+    block entry()
+        when
+            r.l4.ne(0) -> found(4, r.l4)
+            r.l3.ne(0) -> found(3, r.l3)
+            r.l2.ne(0) -> found(2, r.l2)
+            r.l1.ne(0) -> found(1, r.l1)
+            r.l0.ne(0) -> found(0, r.l0)
+            else       -> return(w_zero())
+
+    block found(t: S64, limb: U64)
+        bitlen : S64 = t.mul(64).add(64).sub(limb.leading_zeros().to<S64>())
+        low    : S64 = bitlen.sub(192)
+        h      : U64 = r.bits(low.add(128))
+        m      : U64 = r.bits(low.add(64))
+        l      : U64 = r.bits(low)
+        return({ neg: neg, exp: scale.add(bitlen), h: h, m: m, l: l })
+
+// ── arithmetic ────────────────────────────────────────────────────────────────────────────────────
+
+/// x y + p + q, below 2^128 for limbs x, y, p, q.
+/// :param x: A factor.
+/// :param y: A factor.
+/// :param p: An addend.
+/// :param q: An addend.
+/// :returns: The sum.
+#inline
+routine w_fma(x: U64, y: U64, p: U64, q: U64) -> U128
+    block entry()
+        t : U128 = x.mul_wide(y).add_wrap(p.to<U128>())
+        return(t.add_wrap(q.to<U128>()))
+
+/// a × b truncated to 192 bits: the six-limb product exactly, then its top three limbs after normalizing (both
+/// mantissas have their top bit set, so the product's top limb has bit 63 or bit 62 set).
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :returns: a × b.
+routine w_mul(a: W, b: W) -> W
+    block entry()
+        zero : Bool = a.is_zero().bitor(b.is_zero())
+        branch zero
+            ? return(w_zero())
+            : product()
+
+    // row by row: r_i accumulates column i
+    block product()
+        x0  : U128 = a.l.mul_wide(b.l)
+        x1  : U128 = w_fma(a.l, b.m, x0.shr(64).to_wrap<U64>(), 0)
+        x2  : U128 = w_fma(a.l, b.h, x1.shr(64).to_wrap<U64>(), 0)
+        y1  : U128 = w_fma(a.m, b.l, x1.to_wrap<U64>(), 0)
+        y2  : U128 = w_fma(a.m, b.m, x2.to_wrap<U64>(), y1.shr(64).to_wrap<U64>())
+        y3  : U128 = w_fma(a.m, b.h, x2.shr(64).to_wrap<U64>(), y2.shr(64).to_wrap<U64>())
+        z2  : U128 = w_fma(a.h, b.l, y2.to_wrap<U64>(), 0)
+        z3  : U128 = w_fma(a.h, b.m, y3.to_wrap<U64>(), z2.shr(64).to_wrap<U64>())
+        z4  : U128 = w_fma(a.h, b.h, y3.shr(64).to_wrap<U64>(), z3.shr(64).to_wrap<U64>())
+        r5  : U64  = z4.shr(64).to_wrap<U64>()
+        r4  : U64  = z4.to_wrap<U64>()
+        r3  : U64  = z3.to_wrap<U64>()
+        r2  : U64  = z2.to_wrap<U64>()
+        e   : S64  = a.exp.add(b.exp)
+        neg : Bool = a.neg.bitxor(b.neg)
+        branch r5.shr(63).eq(1)
+            ? return({ neg: neg, exp: e, h: r5, m: r4, l: r3 })
+            : halved(neg, e, r5, r4, r3, r2)
+
+    block halved(neg: Bool, e: S64, r5: U64, r4: U64, r3: U64, r2: U64)
+        h : U64 = r5.shl(1).bitor(r4.shr(63))
+        m : U64 = r4.shl(1).bitor(r3.shr(63))
+        l : U64 = r3.shl(1).bitor(r2.shr(63))
+        return({ neg: neg, exp: e.sub(1), h: h, m: m, l: l })
+
+/// a × k for a nonzero k: four limbs exactly, then packed.
+/// :param a: The operand.
+/// :param k: The multiplier.
+/// :returns: a × k.
+routine w_mul_u64(a: W, k: U64) -> W
+    block entry()
+        branch a.is_zero()
+            ? return(a)
+            : product()
+
+    block product()
+        x0 : U128   = a.l.mul_wide(k)
+        x1 : U128   = w_fma(a.m, k, x0.shr(64).to_wrap<U64>(), 0)
+        x2 : U128   = w_fma(a.h, k, x1.shr(64).to_wrap<U64>(), 0)
+        r  : WLimbs = { l4: 0, l3: x2.shr(64).to_wrap<U64>(), l2: x2.to_wrap<U64>(),
+            l1: x1.to_wrap<U64>(), l0: x0.to_wrap<U64>() }
+        return(w_pack(a.neg, r, a.exp.sub(192)))
+
+/// a / k for a nonzero k: the quotient of a's mantissa × 2^64 by k (four limbs), packed. The dividend is shifted with
+/// the divisor until the divisor's top bit is set, so each limb is one 2-by-1 division.
+/// :param a: The operand.
+/// :param k: The divisor.
+/// :returns: a / k.
+routine w_div_u64(a: W, k: U64) -> W
+    shared shift : U64 = k.leading_zeros().to<U64>()
+    shared back  : U64 = U64.sub(64, shift)
+    shared d     : U64 = k.shl(shift)
+    shared v     : U64 = div_2by1_prepare(d)
+
+    block entry()
+        branch a.is_zero()
+            ? return(a)
+            : divide()
+
+    // the shifted dividend's limbs, top first: h >> (64 - shift), then each limb's low part with the next one's top
+    block divide()
+        u3 : U64     = a.h.shl(shift).bitor(a.m.shr(back))
+        u2 : U64     = a.m.shl(shift).bitor(a.l.shr(back))
+        u1 : U64     = a.l.shl(shift)
+        q3 : Div2By1 = div_2by1(a.h.shr(back), u3, d, v)
+        q2 : Div2By1 = div_2by1(q3.remainder, u2, d, v)
+        q1 : Div2By1 = div_2by1(q2.remainder, u1, d, v)
+        q0 : Div2By1 = div_2by1(q1.remainder, 0, d, v)
+        r  : WLimbs  = { l4: 0, l3: q3.quotient, l2: q2.quotient, l1: q1.quotient, l0: q0.quotient }
+        return(w_pack(a.neg, r, a.exp.sub(256)))
+
+/// The magnitude of x aligned d bits below a guard limb: x's mantissa × 2^64 shifted right by d, as four limbs
+/// (bits below them dropped).
+/// :param x: The operand.
+/// :param d: The shift (0 or more).
+/// :returns: The limbs, the lowest in l0 (l4 is 0).
+routine w_align(x: W, d: S64) -> WLimbs
+    block entry()
+        src : WLimbs = { l4: 0, l3: x.h, l2: x.m, l1: x.l, l0: 0 }
+        a3  : U64    = src.bits(d.add(192))
+        a2  : U64    = src.bits(d.add(128))
+        a1  : U64    = src.bits(d.add(64))
+        a0  : U64    = src.bits(d)
+        return({ l4: 0, l3: a3, l2: a2, l1: a1, l0: a0 })
+
+/// a + b (signed), truncated: aligned under one guard limb, so what drops off the smaller one lies below the guard
+/// (mp_add at three limbs).
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :returns: a + b.
+routine w_add(a: W, b: W) -> W
+    block entry()
+        when
+            a.is_zero() -> return(b)
+            b.is_zero() -> return(a)
+            else        -> order()
+
+    block order()
+        a_big : Bool = w_compare_magnitude(a, b).ge(0)
+        big   : W    = a_big
+            ? a
+            : b
+        small : W = a_big
+            ? b
+            : a
+        s : WLimbs = w_align(small, big.exp.sub(small.exp))
+        branch big.neg.eq(small.neg)
+            ? add(big, s)
+            : subtract(big, s)
+
+    block add(big: W, s: WLimbs)
+        x1 : U128   = big.l.to<U128>().add_wrap(s.l1.to<U128>())
+        x2 : U128   = w_fma(big.m, 1, s.l2, x1.shr(64).to_wrap<U64>())
+        x3 : U128   = w_fma(big.h, 1, s.l3, x2.shr(64).to_wrap<U64>())
+        r  : WLimbs = { l4: x3.shr(64).to_wrap<U64>(), l3: x3.to_wrap<U64>(), l2: x2.to_wrap<U64>(),
+            l1: x1.to_wrap<U64>(), l0: s.l0 }
+        return(w_pack(big.neg, r, big.exp.sub(256)))
+
+    // big's guard limb is 0, so limb 0 of the difference is -s0 with a borrow when s0 is not 0
+    block subtract(big: W, s: WLimbs)
+        d0 : U64    = U64.sub_wrap(0, s.l0)
+        b0 : U64    = s.l0.ne(0).to<U64>()
+        d1 : U64    = big.l.sub_wrap(s.l1).sub_wrap(b0)
+        b1 : U64    = w_borrow(big.l, s.l1, b0)
+        d2 : U64    = big.m.sub_wrap(s.l2).sub_wrap(b1)
+        b2 : U64    = w_borrow(big.m, s.l2, b1)
+        d3 : U64    = big.h.sub_wrap(s.l3).sub_wrap(b2)
+        r  : WLimbs = { l4: 0, l3: d3, l2: d2, l1: d1, l0: d0 }
+        return(w_pack(big.neg, r, big.exp.sub(256)))
+
+/// Whether x - y - borrow needs a borrow from the next limb.
+/// :param x: The minuend limb.
+/// :param y: The subtrahend limb.
+/// :param borrow: The incoming borrow (0 or 1).
+/// :returns: 1 when it borrows.
+#inline
+routine w_borrow(x: U64, y: U64, borrow: U64) -> U64
+    block entry()
+        under : Bool = x.lt(y).bitor(x.eq(y).bitand(borrow.eq(1)))
+        return(under.to<U64>())
+
+/// a - b.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :returns: a - b.
+#inline
+routine w_sub(a: W, b: W) -> W
+    block entry()
+        return(w_add(a, b.negate()))
+
+// ── values with error bounds ──────────────────────────────────────────────────────────────────────
+
+/// An exact value (its bound 0).
+/// :param v: The value.
+/// :returns: The value with a zero bound.
+#inline
+routine we_exact(v: W) -> We
+    block entry()
+        return({ v: v, err: 0.0 })
+
+/// The value with its sign flipped (the bound unchanged).
+/// :returns: -self.
+#inline
+routine We.negate(self: Self) -> Self
+    block entry()
+        return({ v: self.v.negate(), err: self.err })
+
+/// The value without its sign (the bound unchanged).
+/// :returns: |self|.
+#inline
+routine We.magnitude(self: Self) -> Self
+    block entry()
+        return({ v: self.v.with_sign(false), err: self.err })
+
+/// The magnitude with a given sign (the bound unchanged).
+/// :param neg: Whether it is negative.
+/// :returns: The signed value.
+#inline
+routine We.with_sign(self: Self, neg: Bool) -> Self
+    block entry()
+        return({ v: self.v.with_sign(neg), err: self.err })
+
+/// self × 2^k (exact, the bound unchanged).
+/// :param k: The power of two.
+/// :returns: The scaled value.
+#inline
+routine We.ldexp(self: Self, k: S64) -> Self
+    block entry()
+        return({ v: self.v.ldexp(k), err: self.err })
+
+/// The bound widened by more units.
+/// :param more: The units to add.
+/// :returns: The bound widened by more units.
+#inline
+routine We.widen(self: Self, more: F64) -> Self
+    block entry()
+        return({ v: self.v, err: self.err.add(more).mul(MP_UP) })
+
+/// The relative error as an F64 (not in units): err × 2^-192, applied in two halves.
+/// :returns: The relative error.
+routine We.relative(self: Self) -> F64
+    block entry()
+        unit : F64 = f64_pow2(-96)
+        return(self.err.mul(unit).mul(unit))
+
+/// a × b: the relative errors add (with their product) and the truncation adds 2.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :returns: a × b.
+routine we_mul(a: We, b: We) -> We
+    block entry()
+        v     : W   = w_mul(a.v, b.v)
+        unit  : F64 = f64_pow2(-192)
+        cross : F64 = a.err.mul(b.err).mul(unit)
+        err   : F64 = a.err.add(b.err).add(cross).add(2.0)
+        return({ v: v, err: err.mul(MP_UP) })
+
+/// a × k for a small exact k.
+/// :param a: The first operand.
+/// :param k: The multiplier (nonzero).
+/// :returns: a × k.
+routine we_mul_u64(a: We, k: U64) -> We
+    block entry()
+        return({ v: w_mul_u64(a.v, k), err: a.err.add(2.0).mul(MP_UP) })
+
+/// a / k for a small exact k.
+/// :param a: The first operand.
+/// :param k: The divisor (nonzero).
+/// :returns: a / k.
+routine we_div_u64(a: We, k: U64) -> We
+    block entry()
+        return({ v: w_div_u64(a.v, k), err: a.err.add(2.0).mul(MP_UP) })
+
+/// a + b: each operand's absolute error over the result's magnitude, what the alignment drops below the guard limb,
+/// and the truncation (me_add at three limbs).
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :returns: a + b.
+routine we_add(a: We, b: We) -> We
+    block entry()
+        v     : W    = w_add(a.v, b.v)
+        za    : Bool = a.v.is_zero()
+        zb    : Bool = b.v.is_zero()
+        zr    : Bool = v.is_zero()
+        exact : Bool = a.err.eq(0.0).bitand(b.err.eq(0.0)).bitand(a.v.exp.eq(b.v.exp))
+        when
+            za               -> return(b)
+            zb               -> return(a)
+            zr.bitand(exact) -> return({ v: v, err: 0.0 })
+            zr               -> return({ v: v, err: F64.from_bits(0x7FF0000000000000) })
+            else             -> bound(v)
+
+    // each operand's error scaled by |operand| / |result|, bounded from the top 53 bits: |x| <= (t_x + 2^-53) 2^e_x
+    // and |r| >= t_r 2^e_r, with t the top bits as an F64 in [1/2, 1)
+    block bound(v: W)
+        er      : S64 = v.exp
+        big     : S64 = a.v.exp.max(b.v.exp)
+        rt      : F64 = v.top_f64().abs()
+        from_a  : F64 = a.err.mul(we_ratio(a.v, rt, er))
+        from_b  : F64 = b.err.mul(we_ratio(b.v, rt, er))
+        dropped : F64 = f64_pow2(big.sub(er).sub(63))
+        err     : F64 = from_a.add(from_b).add(dropped).add(2.0)
+        return({ v: v, err: err.mul(MP_UP) })
+
+/// An upper bound of |x| / |r| for a nonzero r whose top bits are rt (in [1/2, 1)) and exponent er.
+/// :param x: The operand.
+/// :param rt: |r|'s top 53 bits as an F64.
+/// :param er: r's exponent.
+/// :returns: The bound.
+routine we_ratio(x: W, rt: F64, er: S64) -> F64
+    block entry()
+        xt : F64 = x.top_f64().abs().add(f64_pow2(-53))
+        return(xt.div(rt).mul(f64_pow2(x.exp.sub(er))).mul(MP_UP))
+
+/// a - b.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :returns: The difference with its bound.
+#inline
+routine we_sub(a: We, b: We) -> We
+    block entry()
+        return(we_add(a, b.negate()))
+
+/// 1 / b for a nonzero b, by two Newton steps y + y (1 - b y) from an F64 start (50 bits, doubled twice past 200):
+/// within 16 units, plus b's own error (me_recip at three limbs).
+/// :param b: The divisor.
+/// :returns: 1 / b.
+routine we_recip(b: We) -> We
+    shared one  : W   = w_of_u128(1, 0)
+    shared seed : F64 = 1.0.div(b.v.top_f64())
+
+    block entry()
+        y0 : W = w_of_f64(seed).ldexp(b.v.exp.neg())
+        jump step(y0, 0)
+
+    block step(y: W, k: S64)
+        done : Bool = k.ge(2)
+        branch done
+            ? return({ v: y, err: b.err.mul(1.001).add(16.0).mul(MP_UP) })
+            : refine(y, k)
+
+    block refine(y: W, k: S64)
+        t : W = w_sub(one, w_mul(b.v, y))
+        jump step(w_add(y, w_mul(y, t)), k.add(1))
+
+/// a / b.
+/// :param a: The dividend.
+/// :param b: The divisor.
+/// :returns: a / b.
+routine we_div(a: We, b: We) -> We
+    block entry()
+        return(we_mul(a, we_recip(b)))
+
+/// sqrt(a) for a >= 0: z = 1/sqrt(a) by two Newton steps z + z (1 - a z^2) / 2 from an F64 start, then a z; a's
+/// error enters halved (me_sqrt at three limbs).
+/// :param a: The operand.
+/// :returns: sqrt(a).
+routine we_sqrt(a: We) -> We
+    shared one  : W   = w_of_u128(1, 0)
+    shared half : S64 = a.v.exp.shr(1)
+
+    block entry()
+        branch a.v.is_zero()
+            ? return(a)
+            : start()
+
+    block start()
+        t    : F64 = a.v.top_f64().mul(f64_pow2(a.v.exp.sub(half.mul(2))))
+        seed : F64 = 1.0.div(t.sqrt())
+        jump step(w_of_f64(seed).ldexp(half.neg()), 0)
+
+    block step(z: W, k: S64)
+        done : Bool = k.ge(2)
+        branch done
+            ? root(z)
+            : refine(z, k)
+
+    block refine(z: W, k: S64)
+        t  : W = w_sub(one, w_mul(a.v, w_mul(z, z)))
+        dz : W = w_mul(z, t).ldexp(-1)
+        jump step(w_add(z, dz), k.add(1))
+
+    block root(z: W)
+        return({ v: w_mul(a.v, z), err: a.err.mul(0.5001).add(24.0).mul(MP_UP) })
+
+/// An exact integer.
+/// :param v: The integer.
+/// :returns: It as a We.
+routine we_of_u128(v: U128) -> We
+    block entry()
+        return(we_exact(w_of_u128(v, 0)))
+
+/// An exact small integer, signed.
+/// :param k: The integer.
+/// :returns: It as a We.
+routine we_int(k: S64) -> We
+    block entry()
+        m : We = we_of_u128(k.abs_diff(0).to<U128>())
+        return(m.with_sign(k.lt(0)))
+
+/// Entry i of DEC_CONSTANTS at three limbs: its top limbs, within 3 units.
+/// :param i: Its index in DEC_CONSTANTS.
+/// :returns: The constant.
+routine we_const(i: USize) -> We
+    shared at : USize = i.mul(20).add(17)
+
+    block entry()
+        l : U64 = DEC_CONSTANTS.getitem(at)
+        m : U64 = DEC_CONSTANTS.getitem(at.add(1))
+        h : U64 = DEC_CONSTANTS.getitem(at.add(2))
+        e : S64 = DEC_CONSTANT_EXP.getitem(i)
+        return({ v: { neg: false, exp: e, h: h, m: m, l: l }, err: 3.0 })
+
+/// 10^k for k >= 0, by squaring (me_pow10 at three limbs).
+/// :param k: The power.
+/// :returns: 10^k.
+routine we_pow10(k: S64) -> We
+    shared ten : We = we_of_u128(10)
+
+    block entry()
+        small : Bool = k.le(38)
+        branch small
+            ? return(we_of_u128(dec_p10_128(k)))
+            : square(we_of_u128(1), ten, k)
+
+    block square(result: We, base: We, left: S64)
+        done : Bool = left.eq(0)
+        odd  : Bool = left.bitand(1).eq(1)
+        when
+            done -> return(result)
+            odd  -> square(we_mul(result, base), we_mul(base, base), left.shr(1))
+            else -> square(result, we_mul(base, base), left.shr(1))
+
+/// x × 10^k: within 380 places by 10^19 at a time, past that by the power of ten itself (me_scale10 at three limbs).
+/// :param x: The operand.
+/// :param k: The power of ten.
+/// :returns: x × 10^k.
+routine we_scale10(x: We, k: S64) -> We
+    block entry()
+        near : Bool = k.abs().le(380)
+        when
+            k.eq(0)              -> return(x)
+            near.bitand(k.gt(0)) -> up(x, k)
+            near                 -> down(x, k.neg())
+            k.gt(0)              -> return(we_mul(x, we_pow10(k)))
+            else                 -> return(we_div(x, we_pow10(k.neg())))
+
+    block up(v: We, left: S64)
+        step : S64  = left.min(19)
+        done : Bool = left.eq(0)
+        branch done
+            ? return(v)
+            : up(we_mul_u64(v, dec_p10_64(step)), left.sub(step))
+
+    block down(v: We, left: S64)
+        step : S64  = left.min(19)
+        done : Bool = left.eq(0)
+        branch done
+            ? return(v)
+            : down(we_div_u64(v, dec_p10_64(step)), left.sub(step))
+
+/// The decimal x (finite) as a We.
+/// :param x: The operand.
+/// :returns: x.
+routine we_of_dec(x: Dec) -> We
+    block entry()
+        branch x.coeff.eq(0)
+            ? return(we_exact(w_zero()))
+            : scaled()
+
+    block scaled()
+        r : We = we_scale10(we_of_u128(x.coeff), x.exp)
+        return(r.with_sign(x.neg))
+
+/// An Me of three limbs as a We (the same value and bound).
+/// :param x: The value.
+/// :returns: It as a We.
+routine we_of_me(x: Me) -> We
+    shared s : @Mp <- x.v
+
+    block entry()
+        branch x.v.is_zero(3)
+            ? return({ v: w_zero(), err: x.err })
+            : copy()
+
+    block copy()
+        l : U64 = s.m.getitem(0)
+        m : U64 = s.m.getitem(1)
+        h : U64 = s.m.getitem(2)
+        return({ v: { neg: x.v.neg, exp: x.v.exp, h: h, m: m, l: l }, err: x.err })
+
+/// A We as an Me of three limbs (the same value and bound).
+/// :param x: The value.
+/// :returns: It as an Me.
+routine me_of_we(x: We) -> Me
+    shared r : @Mp <- Mp.zero()
+
+    block entry()
+        branch x.v.is_zero()
+            ? return({ v: r.load(), err: x.err })
+            : copy()
+
+    block copy()
+        r.m.setitem(0, x.v.l)
+        r.m.setitem(1, x.v.m)
+        r.m.setitem(2, x.v.h)
+        x.v.neg.store_into(r.neg)
+        x.v.exp.store_into(r.exp)
+        return({ v: r.load(), err: x.err })
+
+/// The bound of s widened by an absolute error below 2^e (me_plus_abs at three limbs).
+/// :param s: The sum.
+/// :param e: The power of two that bounds the added error.
+/// :returns: s with the wider bound.
+routine we_plus_abs(s: We, e: S64) -> We
+    block entry()
+        units : F64 = f64_pow2(e.sub(s.v.exp).add(1).add(192))
+        branch s.v.is_zero()
+            ? return({ v: s.v, err: F64.from_bits(0x7FF0000000000000) })
+            : return(s.widen(units))
+
+/// Whether a series term no longer matters: below 2^-200 of the sum (me_is_negligible at three limbs).
+/// :param term: The term.
+/// :param sum: The sum so far.
+/// :returns: Whether it is negligible.
+routine we_is_negligible(term: We, sum: We) -> Bool
+    block entry()
+        tiny : Bool = term.v.exp.lt(sum.v.exp.sub(200))
+        return(term.v.is_zero().bitor(tiny))

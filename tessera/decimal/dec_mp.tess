@@ -685,8 +685,8 @@ routine me_div_u64(a: Me, k: U64, n: USize) -> Me
     block entry()
         return({ v: mp_div_u64(a.v, k, n), err: a.err.add(2.0).mul(MP_UP) })
 
-/// a + b: each operand's absolute error over the result's magnitude (|a| < 2^ea, |r| >= 2^(er - 1)), what the
-/// alignment drops below the guard limb (under 2^(e_big - 64n - 64)), and the truncation.
+/// a + b: each operand's absolute error over the result's magnitude (bounded from their top bits, me_ratio), what
+/// the alignment drops below the guard limb (under 2^(e_big - 64n - 64)), and the truncation.
 /// :param a: The first operand.
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
@@ -708,11 +708,24 @@ routine me_add(a: Me, b: Me, n: USize) -> Me
     block bound(v: Mp)
         er      : S64 = v.exp
         big     : S64 = a.v.exp.max(b.v.exp)
-        from_a  : F64 = a.err.mul(f64_pow2(a.v.exp.sub(er).add(1)))
-        from_b  : F64 = b.err.mul(f64_pow2(b.v.exp.sub(er).add(1)))
+        rt      : F64 = v.top_f64(n).abs()
+        from_a  : F64 = a.err.mul(me_ratio(a.v, rt, er, n))
+        from_b  : F64 = b.err.mul(me_ratio(b.v, rt, er, n))
         dropped : F64 = f64_pow2(big.sub(er).sub(63))
         err     : F64 = from_a.add(from_b).add(dropped).add(2.0)
         return({ v: v, err: err.mul(MP_UP) })
+
+/// An upper bound of |x| / |r| for a nonzero r: |x| <= (t_x + 2^-53) 2^e_x and |r| >= t_r 2^e_r, with t the top 53
+/// bits as an F64 in [1/2, 1).
+/// :param x: The operand.
+/// :param rt: |r|'s top bits as an F64.
+/// :param er: r's exponent.
+/// :param n: The precision in limbs.
+/// :returns: The bound.
+routine me_ratio(x: Mp, rt: F64, er: S64, n: USize) -> F64
+    block entry()
+        xt : F64 = x.top_f64(n).abs().add(f64_pow2(-53))
+        return(xt.div(rt).mul(f64_pow2(x.exp.sub(er))).mul(MP_UP))
 
 /// a - b.
 /// :param a: The minuend.
