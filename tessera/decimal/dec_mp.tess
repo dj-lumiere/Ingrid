@@ -95,29 +95,37 @@ routine Mp.ldexp(self: Self, k: S64, n: USize) -> Self
 /// :param len: How many limbs of buf are in use.
 /// :param at: The lowest bit read.
 /// :returns: The 64 bits of the number in buf[0 .. len) starting at bit `at` (bits outside it read as 0).
+#inline
 routine mp_bits_at(buf: @Array<U64, 41>, len: USize, at: S64) -> U64
-    shared limb : S64 = at.shr(6)
-    shared off  : U64 = at.bitand(63).to<U64>()
-
     block entry()
-        low  : U64  = mp_limb_or_zero(buf, len, limb)
-        high : U64  = mp_limb_or_zero(buf, len, limb.add(1))
-        flat : Bool = off.eq(0)
-        branch flat
-            ? return(low)
-            : return(low.shr(off).bitor(high.shl(64.sub(off))))
+        return(mp_bits(buf.to<@U64>(), len, at))
 
-/// Limb i of buf[0 .. len), 0 outside it.
-/// :param buf: The limbs, least significant first.
+/// The 64 bits of the number in src[0 .. len) starting at bit `at` (bits outside it read as 0). A shift by 64 gives
+/// 0, so a whole-limb offset needs no branch.
+/// :param src: The limbs, least significant first.
+/// :param len: How many limbs are in use.
+/// :param at: The lowest bit read.
+/// :returns: The 64 bits.
+#inline
+routine mp_bits(src: @U64, len: USize, at: S64) -> U64
+    block entry()
+        limb : S64 = at.shr(6)
+        off  : U64 = at.bitand(63).to<U64>()
+        low  : U64 = mp_word(src, len, limb)
+        high : U64 = mp_word(src, len, limb.add(1))
+        return(low.shr(off).bitor(high.shl(U64.sub(64, off))))
+
+/// Limb i of src[0 .. len), 0 outside it.
+/// :param src: The limbs, least significant first.
 /// :param len: How many limbs are in use.
 /// :param i: The limb index (any).
 /// :returns: The limb or 0.
 #inline
-routine mp_limb_or_zero(buf: @Array<U64, 41>, len: USize, i: S64) -> U64
+routine mp_word(src: @U64, len: USize, i: S64) -> U64
     block entry()
         inside : Bool = i.ge(0).bitand(i.lt(len.to<S64>()))
         branch inside
-            ? return(buf.getitem(i.to<USize>()))
+            ? return(src.stride(i.to<USize>()).load())
             : return(0)
 
 /// The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
@@ -128,7 +136,9 @@ routine mp_limb_or_zero(buf: @Array<U64, 41>, len: USize, i: S64) -> U64
 /// :param n: The precision in limbs.
 /// :returns: The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
 routine mp_pack(neg: Bool, buf: @Array<U64, 41>, len: USize, scale: S64, n: USize) -> Mp
-    shared r : @Mp <- uninit
+    shared r   : @Mp  <- uninit
+    shared src : @U64 = buf.to<@U64>()
+    shared dst : @U64 = r.m.to<@U64>()
 
     block entry()
         jump find(len)
@@ -141,7 +151,7 @@ routine mp_pack(neg: Bool, buf: @Array<U64, 41>, len: USize, scale: S64, n: USiz
             : look(i.sub(1))
 
     block look(t: USize)
-        limb : U64 = buf.getitem(t)
+        limb : U64 = src.stride(t).load()
         branch limb.eq(0)
             ? find(t)
             : found(t, limb)
@@ -150,23 +160,20 @@ routine mp_pack(neg: Bool, buf: @Array<U64, 41>, len: USize, scale: S64, n: USiz
         top    : S64 = t.to<S64>().mul(64).add(64)
         bitlen : S64 = top.sub(limb.leading_zeros().to<S64>())
         low    : S64 = bitlen.sub(n.to<S64>().mul(64))
-        jump copy(0, low, bitlen)
-
-    block copy(k: USize, low: S64, bitlen: S64)
-        done : Bool = k.ge(n)
-        branch done
-            ? seal(bitlen)
-            : one(k, low, bitlen)
-
-    block one(k: USize, low: S64, bitlen: S64)
-        word : U64 = mp_bits_at(buf, len, k.to<S64>().mul(64).add(low))
-        r.m.setitem(k, word)
-        jump copy(k.add(1), low, bitlen)
-
-    block seal(bitlen: S64)
         neg.store_into(r.neg)
         scale.add(bitlen).store_into(r.exp)
-        return(r.load())
+        jump copy(0, low)
+
+    // word k holds the bits from 64 k + low up
+    block copy(k: USize, at: S64)
+        done : Bool = k.ge(n)
+        branch done
+            ? return(r.load())
+            : one(k, at)
+
+    block one(k: USize, at: S64)
+        mp_bits(src, len, at).store_into(dst.stride(k))
+        jump copy(k.add(1), at.add(64))
 
 /// v × 2^scale exactly, for n >= 2.
 /// :param v: The integer.
@@ -231,6 +238,7 @@ routine mp_const(table: @U64, at: USize, exp: S64, n: USize) -> Mp
 /// 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
 /// :param k: The power.
 /// :returns: 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
+#inline
 routine f64_pow2(k: S64) -> F64
     block entry()
         when
@@ -279,15 +287,29 @@ routine mp_compare_magnitude(a: Mp, b: Mp, n: USize) -> S32
     shared sb : @Mp <- b
 
     block entry()
-        za : Bool = a.is_zero(n)
-        zb : Bool = b.is_zero(n)
+        return(mp_compare_slots(sa, sb, n))
+
+/// -1, 0, or 1 as the magnitude in slot a is below, equal to, or above the one in slot b.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: -1, 0, or 1 as |a| is below, equal to, or above |b|.
+routine mp_compare_slots(a: @Mp, b: @Mp, n: USize) -> S32
+    shared ea : S64  = a.exp.load()
+    shared eb : S64  = b.exp.load()
+    shared pa : @U64 = a.m.to<@U64>()
+    shared pb : @U64 = b.m.to<@U64>()
+
+    block entry()
+        za : Bool = ea.eq(MP_ZERO_EXP)
+        zb : Bool = eb.eq(MP_ZERO_EXP)
         when
-            za.bitand(zb)   -> return(0)
-            za              -> return(-1)
-            zb              -> return(1)
-            a.exp.lt(b.exp) -> return(-1)
-            a.exp.gt(b.exp) -> return(1)
-            else            -> limbs(n)
+            za.bitand(zb) -> return(0)
+            za            -> return(-1)
+            zb            -> return(1)
+            ea.lt(eb)     -> return(-1)
+            ea.gt(eb)     -> return(1)
+            else          -> limbs(n)
 
     // top limb first
     block limbs(left: USize)
@@ -297,8 +319,8 @@ routine mp_compare_magnitude(a: Mp, b: Mp, n: USize) -> S32
             : limb(left.sub(1))
 
     block limb(i: USize)
-        x : U64 = sa.m.getitem(i)
-        y : U64 = sb.m.getitem(i)
+        x : U64 = pa.stride(i).load()
+        y : U64 = pb.stride(i).load()
         when
             x.lt(y) -> return(-1)
             x.gt(y) -> return(1)
@@ -315,6 +337,11 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
     shared prod : @Array<U64, 41> <- uninit
     shared sa   : @Mp             <- a
     shared sb   : @Mp             <- b
+    shared r    : @Mp             <- uninit
+    shared pa   : @U64            = sa.m.to<@U64>()
+    shared pb   : @U64            = sb.m.to<@U64>()
+    shared pp   : @U64            = prod.to<@U64>()
+    shared pr   : @U64            = r.m.to<@U64>()
 
     block entry()
         zero : Bool = a.is_zero(n).bitor(b.is_zero(n))
@@ -330,36 +357,73 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
 
     // row i writes limb i + n itself, so only the low n limbs need zeros
     block clear_one(i: USize)
-        prod.setitem(i, 0)
+        0.store_into(pp.stride(i))
         jump clear(i.add(1))
 
     block row(i: USize)
         done : Bool = i.ge(n)
         branch done
             ? pack()
-            : column(i, 0, 0)
+            : column(i, pa.stride(i).load(), 0, 0)
 
-    block column(i: USize, j: USize, carry: U64)
+    block column(i: USize, ai: U64, j: USize, carry: U64)
         done : Bool = j.ge(n)
         branch done
             ? end_row(i, carry)
-            : term(i, j, carry)
+            : term(i, ai, j, carry)
 
     // a[i] b[j] + prod[i + j] + carry stays below 2^128
-    block term(i: USize, j: USize, carry: U64)
-        at  : USize = i.add(j)
-        x   : U128  = sa.m.getitem(i).mul_wide(sb.m.getitem(j))
-        sum : U128  = x.add(prod.getitem(at).to<U128>()).add(carry.to<U128>())
-        prod.setitem(at, sum.to_wrap<U64>())
-        jump column(i, j.add(1), sum.shr(64).to_wrap<U64>())
+    block term(i: USize, ai: U64, j: USize, carry: U64)
+        at  : @U64 = pp.stride(i.add(j))
+        x   : U128 = ai.mul_wide(pb.stride(j).load())
+        sum : U128 = x.add_wrap(at.load().to<U128>()).add_wrap(carry.to<U128>())
+        sum.to_wrap<U64>().store_into(at)
+        jump column(i, ai, j.add(1), sum.shr(64).to_wrap<U64>())
 
     block end_row(i: USize, carry: U64)
-        prod.setitem(i.add(n), carry)
+        carry.store_into(pp.stride(i.add(n)))
         jump row(i.add(1))
 
+    // both mantissas have their top bit set, so the product's top limb has bit 63 or bit 62 set: the top n limbs
+    // as they are, or shifted up one bit (what mp_pack would give, without its search)
     block pack()
-        size  : USize = n.mul(2)
-        scale : S64   = a.exp.add(b.exp).sub(size.to<S64>().mul(64))
+        size : USize = n.mul(2)
+        top  : U64   = pp.stride(size.sub(1)).load()
+        e    : S64   = a.exp.add(b.exp)
+        a.neg.bitxor(b.neg).store_into(r.neg)
+        when
+            top.shr(63).eq(1) -> whole(e, 0)
+            top.shr(62).eq(1) -> halved(e.sub(1), 0)
+            else              -> general(size)
+
+    block whole(e: S64, k: USize)
+        done : Bool = k.ge(n)
+        branch done
+            ? seal(e)
+            : whole_one(e, k)
+
+    block whole_one(e: S64, k: USize)
+        pp.stride(k.add(n)).load().store_into(pr.stride(k))
+        jump whole(e, k.add(1))
+
+    block halved(e: S64, k: USize)
+        done : Bool = k.ge(n)
+        branch done
+            ? seal(e)
+            : halved_one(e, k)
+
+    block halved_one(e: S64, k: USize)
+        high : U64 = pp.stride(k.add(n)).load()
+        low  : U64 = pp.stride(k.add(n).sub(1)).load()
+        high.shl(1).bitor(low.shr(63)).store_into(pr.stride(k))
+        jump halved(e, k.add(1))
+
+    block seal(e: S64)
+        e.store_into(r.exp)
+        return(r.load())
+
+    block general(size: USize)
+        scale : S64 = a.exp.add(b.exp).sub(size.to<S64>().mul(64))
         return(mp_pack(a.neg.bitxor(b.neg), prod, size, scale, n))
 
 /// a × k for a small k > 0, truncated.
@@ -370,6 +434,8 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
 routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
     shared buf : @Array<U64, 41> <- uninit
     shared sa  : @Mp             <- a
+    shared pa  : @U64            = sa.m.to<@U64>()
+    shared pb  : @U64            = buf.to<@U64>()
 
     block entry()
         jump loop(0, 0)
@@ -380,149 +446,131 @@ routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
             ? pack(carry)
             : step(i, carry)
 
+    // a[i] k + carry stays below 2^128
     block step(i: USize, carry: U64)
-        x : U128 = sa.m.getitem(i).mul_wide(k).add(carry.to<U128>())
-        buf.setitem(i, x.to_wrap<U64>())
+        ai : U64  = pa.stride(i).load()
+        x  : U128 = ai.mul_wide(k).add_wrap(carry.to<U128>())
+        x.to_wrap<U64>().store_into(pb.stride(i))
         jump loop(i.add(1), x.shr(64).to_wrap<U64>())
 
     block pack(carry: U64)
-        buf.setitem(n, carry)
+        carry.store_into(pb.stride(n))
         scale : S64 = a.exp.sub(n.to<S64>().mul(64))
         return(mp_pack(a.neg, buf, n.add(1), scale, n))
 
-/// a / k for a small k > 0, truncated: one limb more of quotient than kept.
+/// a / k for a small k > 0, truncated: one limb more of quotient than kept. The dividend is a's mantissa × 2^64,
+/// shifted up with the divisor until the divisor's top bit is set, so each quotient limb is one 2-by-1 division.
 /// :param a: The first operand.
 /// :param k: The divisor (nonzero).
 /// :param n: The precision in limbs.
 /// :returns: a / k for a small k > 0, truncated.
 routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
-    shared buf     : @Array<U64, 41> <- uninit
-    shared divisor : U128            = k.to<U128>()
-    shared sa      : @Mp             <- a
+    shared buf   : @Array<U64, 41> <- uninit
+    shared sa    : @Mp             <- a
+    shared pa    : @U64            = sa.m.to<@U64>()
+    shared pb    : @U64            = buf.to<@U64>()
+    shared shift : U64             = k.leading_zeros().to<U64>()
+    shared d     : U64             = k.shl(shift)
+    shared v     : U64             = div_2by1_prepare(d)
+    shared back  : S64             = shift.to<S64>()
 
+    // limb i of the shifted dividend is the bits of a's mantissa from 64 (i - 1) - shift: limb n + 1 starts the
+    // remainder (below d, as it holds at most shift bits)
     block entry()
-        jump loop(n, 0)
+        top : S64 = n.to<S64>().mul(64).sub(back)
+        jump loop(n.add(1), mp_bits(pa, n, top))
 
-    // the dividend's limbs top first, then one zero limb below them
-    block loop(left: USize, rem: U128)
+    block loop(left: USize, rem: U64)
         done : Bool = left.eq(0)
         branch done
-            ? last(rem)
+            ? pack()
             : step(left.sub(1), rem)
 
-    block step(i: USize, rem: U128)
-        cur : U128 = rem.shl(64).bitor(sa.m.getitem(i).to<U128>())
-        buf.setitem(i.add(1), cur.div(divisor).to_wrap<U64>())
-        jump loop(i, cur.mod(divisor))
+    block step(i: USize, rem: U64)
+        below : S64     = i.to<S64>().sub(1)
+        at    : S64     = below.mul(64).sub(back)
+        q     : Div2By1 = div_2by1(rem, mp_bits(pa, n, at), d, v)
+        q.quotient.store_into(pb.stride(i))
+        jump loop(i, q.remainder)
 
-    block last(rem: U128)
-        cur : U128 = rem.shl(64)
-        buf.setitem(0, cur.div(divisor).to_wrap<U64>())
+    block pack()
         scale : S64 = a.exp.sub(n.to<S64>().mul(64)).sub(64)
         return(mp_pack(a.neg, buf, n.add(1), scale, n))
 
 /// a + b (signed), truncated: aligned under one guard limb, so what drops off the smaller one lies below the guard.
+/// Limb i of the aligned larger operand is its limb i - 1 (limb 0 the guard), and limb i of the aligned smaller one
+/// the bits of its mantissa from 64 i - 64 + d (d the exponent difference).
 /// :param a: The first operand.
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
 /// :returns: a + b (signed), truncated.
 routine mp_add(a: Mp, b: Mp, n: USize) -> Mp
-    shared buf : @Array<U64, 41> <- uninit
-    shared low : @Array<U64, 41> <- uninit
-    shared sa  : @Mp             <- a
-    shared sb  : @Mp             <- b
+    shared buf   : @Array<U64, 41> <- uninit
+    shared sa    : @Mp             <- a
+    shared sb    : @Mp             <- b
+    shared pbuf  : @U64            = buf.to<@U64>()
+    shared a_big : Bool            = mp_compare_slots(sa, sb, n).ge(0)
+    shared big   : @Mp             = a_big
+        ? sa
+        : sb
+    shared small : @Mp = a_big
+        ? sb
+        : sa
+    shared pbig   : @U64 = big.m.to<@U64>()
+    shared psmall : @U64 = small.m.to<@U64>()
 
     block entry()
         when
             a.is_zero(n) -> return(b)
             b.is_zero(n) -> return(a)
-            else         -> order()
+            else         -> combine()
 
-    block order()
-        a_big : Bool = mp_compare_magnitude(a, b, n).ge(0)
-        big   : @Mp  = a_big
-            ? sa
-            : sb
-        small : @Mp = a_big
-            ? sb
-            : sa
-        buf.setitem(0, 0)
-        jump place(big, small, 0)
-
-    // big's limbs one place up, small's shifted right by the exponent difference
-    block place(big: @Mp, small: @Mp, i: USize)
-        done : Bool = i.ge(n)
-        branch done
-            ? align(big, small)
-            : put(big, small, i)
-
-    block put(big: @Mp, small: @Mp, i: USize)
-        buf.setitem(i.add(1), big.m.getitem(i))
-        low.setitem(i, small.m.getitem(i))
-        jump place(big, small, i.add(1))
-
-    block align(big: @Mp, small: @Mp)
-        d : S64 = big.exp.load().sub(small.exp.load())
-        jump shifted(big, small, d, 0)
-
-    block shifted(big: @Mp, small: @Mp, d: S64, j: USize)
-        done : Bool = j.gt(n)
-        branch done
-            ? combine(big, small)
-            : shift_one(big, small, d, j)
-
-    // limb j of small × 2^(64 - d): bits from 64 j - 64 + d of small's mantissa
-    block shift_one(big: @Mp, small: @Mp, d: S64, j: USize)
-        base : S64 = j.to<S64>().mul(64)
-        at   : S64 = base.sub(64).add(d)
-        word : U64 = mp_bits_at(low, n, at)
-        jump store_one(big, small, d, j, word)
-
-    block store_one(big: @Mp, small: @Mp, d: S64, j: USize, word: U64)
-        buf.setitem(j.add(n).add(2), word)
-        jump shifted(big, small, d, j.add(1))
-
-    // the shifted small sits at buf[n + 2 ..] so the sum can go to buf[0 .. n + 2)
-    block combine(big: @Mp, small: @Mp)
+    block combine()
+        d    : S64  = big.exp.load().sub(small.exp.load())
         same : Bool = big.neg.load().eq(small.neg.load())
         branch same
-            ? add(big.load(), 0, 0)
-            : subtract(big.load(), 0, 0)
+            ? add(d, 0, 0)
+            : subtract(d, 0, 0)
 
-    block add(big: Mp, i: USize, carry: U64)
+    block add(d: S64, i: USize, carry: U64)
         done : Bool = i.gt(n)
         branch done
-            ? carried(big, carry)
-            : add_one(big, i, carry)
+            ? carried(carry)
+            : add_one(d, i, carry)
 
-    block add_one(big: Mp, i: USize, carry: U64)
-        x : U128 = buf.getitem(i).to<U128>().add(buf.getitem(i.add(n).add(2)).to<U128>())
-        y : U128 = x.add(carry.to<U128>())
-        buf.setitem(i, y.to_wrap<U64>())
-        jump add(big, i.add(1), y.shr(64).to_wrap<U64>())
+    block add_one(d: S64, i: USize, carry: U64)
+        base : S64  = i.to<S64>().mul(64)
+        at   : S64  = base.sub(64).add(d)
+        x    : U64  = mp_word(pbig, n, i.to<S64>().sub(1))
+        y    : U64  = mp_bits(psmall, n, at)
+        s    : U128 = x.to<U128>().add_wrap(y.to<U128>()).add_wrap(carry.to<U128>())
+        s.to_wrap<U64>().store_into(pbuf.stride(i))
+        jump add(d, i.add(1), s.shr(64).to_wrap<U64>())
 
-    block carried(big: Mp, carry: U64)
-        buf.setitem(n.add(1), carry)
-        jump pack(big, n.add(2))
+    block carried(carry: U64)
+        carry.store_into(pbuf.stride(n.add(1)))
+        jump pack(n.add(2))
 
-    block subtract(big: Mp, i: USize, borrow: U64)
+    block subtract(d: S64, i: USize, borrow: U64)
         done : Bool = i.gt(n)
         branch done
-            ? pack(big, n.add(1))
-            : sub_one(big, i, borrow)
+            ? pack(n.add(1))
+            : sub_one(d, i, borrow)
 
-    block sub_one(big: Mp, i: USize, borrow: U64)
-        x     : U64  = buf.getitem(i)
-        y     : U64  = buf.getitem(i.add(n).add(2))
+    block sub_one(d: S64, i: USize, borrow: U64)
+        base  : S64  = i.to<S64>().mul(64)
+        at    : S64  = base.sub(64).add(d)
+        x     : U64  = mp_word(pbig, n, i.to<S64>().sub(1))
+        y     : U64  = mp_bits(psmall, n, at)
         diff  : U64  = x.sub_wrap(y).sub_wrap(borrow)
         under : Bool = x.lt(y).bitor(x.eq(y).bitand(borrow.eq(1)))
-        buf.setitem(i, diff)
-        jump subtract(big, i.add(1), under.to<U64>())
+        diff.store_into(pbuf.stride(i))
+        jump subtract(d, i.add(1), under.to<U64>())
 
     // the sum is buf[0 .. len): mp_pack reads nothing above it
-    block pack(big: Mp, len: USize)
-        scale : S64 = big.exp.sub(n.to<S64>().mul(64)).sub(64)
-        return(mp_pack(big.neg, buf, len, scale, n))
+    block pack(len: USize)
+        scale : S64 = big.exp.load().sub(n.to<S64>().mul(64)).sub(64)
+        return(mp_pack(big.neg.load(), buf, len, scale, n))
 
 /// a - b, truncated.
 /// :param a: The minuend.
