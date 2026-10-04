@@ -1,9 +1,11 @@
 // The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
 //
-// A function is evaluated in binary multiprecision (dec_mp.tess) with a proven bound on its error, starting at 128
-// bits for D32 and D64 and 192 bits for D128. When every value within the bound rounds to the same decimal of the
-// target width, that decimal is the correctly rounded result; otherwise the value sits too close to a rounding
-// midpoint and the evaluation is repeated with twice the bits (Ziv's strategy), up to 1024. A function value of a
+// D32 and D64 first try a binary float, F64 and F128 with a proven bound on the error (dec_trans_fast.tess), which
+// settles nearly every argument. Otherwise, and for D128, a function is evaluated in binary multiprecision
+// (dec_mp.tess) with a proven bound on its error, starting at 128 bits for D32 and D64 and 192 bits for D128. When
+// every value within the bound rounds to the same decimal of the target width, that decimal is the correctly
+// rounded result; otherwise the value sits too close to a rounding midpoint and the evaluation is repeated with
+// twice the bits (Ziv's strategy), up to 1024. A function value of a
 // decimal argument is transcendental, and so never exactly a midpoint, except where it is rational (2^n, 10^n,
 // x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to even. The special
 // values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come first, the way
@@ -498,6 +500,12 @@ routine mp_floor_u128(x: Mp, n: USize) -> U128
 /// :returns: fn(x, y) correctly rounded to f.
 routine dec_ziv(fn: U32, x: Dec, y: Dec, f: DecFormat) -> Dec
     block entry()
+        fast : DecTry = dec_fast(fn, x, y, f)
+        branch fast.ok
+            ? return(fast.d)
+            : multiprecision()
+
+    block multiprecision()
         narrow : Bool  = f.digits.le(16)
         start  : USize = narrow
             ? 2
@@ -1490,14 +1498,48 @@ routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
 
     // e^z with z = y ln|x|: far past the range the result is an infinity or a zero
     block general()
-        lnx  : F64  = dec_eval_ln(dec_num(false, x.coeff, x.exp), 2).v.to_f64(2)
-        yf   : F64  = me_of_dec(y, 2).v.to_f64(2)
-        z    : F64  = yf.mul(lnx)
+        z    : F64  = dec_pow_size(x, y)
         rneg : Bool = x.neg.bitand(yodd)
         when
             z.gt(16000.0)  -> return(dec_inf(rneg))
             z.lt(-16000.0) -> return(dec_num(rneg, 0, f.qmin))
             else           -> return(dec_ziv(DEC_POW, x, y, f))
+
+/// y ln|x| in F64, for dec_pow's test against ±16000 (e^15000 is past every format's range both ways, so an error
+/// of far less than 1000 there is harmless): ln|x| within 1/2 of 1 is ln_1p of x - 1, exact in decimal (a relative
+/// error near 2^-52 however close x is to 1), elsewhere ln of the coefficient plus the exponent times ln 10 (|ln|x||
+/// at least 0.4, the error near 2^-40 at worst); y is its coefficient times a power of ten, infinite past F64's range,
+/// where the product is then an infinity of the right sign.
+/// :param x: The base (finite, nonzero, not ±1).
+/// :param y: The exponent (finite, nonzero).
+/// :returns: y ln|x| in F64.
+routine dec_pow_size(x: Dec, y: Dec) -> F64
+    shared ax : Dec = dec_num(false, x.coeff, x.exp)
+
+    block entry()
+        near : Bool = dec_compare_abs(x, 5, -1).gt(0).bitand(dec_compare_abs(x, 15, -1).lt(0))
+        branch near
+            ? close()
+            : far()
+
+    block close()
+        t  : Dec = dec_plus_int(ax, -1)
+        tf : F64 = t.coeff.to<F64>().mul(t.exp.to<F64>().exp10())
+        st : F64 = t.neg
+            ? tf.neg()
+            : tf
+        jump scaled(st.ln_1p())
+
+    block far()
+        lc : F64 = ax.coeff.to<F64>().ln()
+        jump scaled(lc.add(x.exp.to<F64>().mul(2.302585092994046)))
+
+    block scaled(l: F64)
+        yf : F64 = y.coeff.to<F64>().mul(y.exp.to<F64>().exp10())
+        sy : F64 = y.neg
+            ? yf.neg()
+            : yf
+        return(sy.mul(l))
 
 /// atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
 /// :param y: The ordinate.
