@@ -107,6 +107,10 @@ routine world_restart() -> Void
 
 // ── Buffers ────────────────────────────────────────────────────────────────
 
+/// Appends `item` to `buffer`, growing it (to 16 items, then twice its capacity) from the C heap when it is full.
+/// :param buffer: The buffer to append to.
+/// :param item: The header address to append.
+/// :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
 routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
     shared count    : U64 = buffer.count.load()
     shared capacity : U64 = buffer.capacity.load()
@@ -136,11 +140,17 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
         count.add(1).store_into(buffer.count)
         return()
 
+/// Empties `buffer`, keeping its memory for the next items.
+/// :param buffer: The buffer to empty.
 routine buffer_clear(buffer: @HeaderBuffer) -> Void
     block entry()
         0.store_into(buffer.count)
         return()
 
+/// The header at index `i` of `buffer`, unchecked.
+/// :param buffer: The buffer to read.
+/// :param i: The index, below the buffer's count.
+/// :returns: The header stored there.
 routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
     block entry()
         slot : @Addr = buffer.items.load().stride(i.to<USize>())
@@ -149,6 +159,8 @@ routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
 
 /// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
 /// only from its own thread, with no mutator running).
+/// :param header: The entity's header.
+/// :throws: Crashes with `MemoryAllocationError` when growing the roots buffer fails.
 routine add_candidate(header: @RoamHeader) -> Void
     block entry()
         branch IN_COLLECTOR.load()
@@ -167,6 +179,7 @@ routine add_candidate(header: @RoamHeader) -> Void
 
 /// Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
 /// the last root into its place (the order of roots doesn't matter).
+/// :param header: The header about to be freed.
 routine remove_candidate(header: @RoamHeader) -> Void
     block entry()
         branch IN_COLLECTOR.load()
@@ -191,6 +204,8 @@ routine remove_candidate(header: @RoamHeader) -> Void
         return()
 
 /// Removes `header` from `buffer` if it is there, moving the last item into its place.
+/// :param buffer: The buffer to remove from.
+/// :param header: The header to remove.
 routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
     block entry()
         jump scan(0, buffer.count.load())
@@ -214,6 +229,8 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
         return()
 
 /// Called by a type's trace routine for each of the entity's Roamed fields: records that field's header as a child.
+/// :param child: The field's header.
+/// :throws: Crashes with `MemoryAllocationError` when growing the children buffer fails.
 #[export("ingrid_cyclic_visit_child")]
 routine visit_child(child: Addr) -> Void
     block entry()
@@ -222,6 +239,9 @@ routine visit_child(child: Addr) -> Void
 
 /// Puts the children of `node` (the headers its Roamed fields hold) into `kids`, replacing what was there. A type
 /// with no trace routine has no Roamed fields and so no children.
+/// :param node: The entity whose children to list.
+/// :param kids: The list that receives the children's headers.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine children(node: @RoamHeader, kids: @List<Addr>) -> Void
     block entry()
         kids.clear()
@@ -244,6 +264,9 @@ routine children(node: @RoamHeader, kids: @List<Addr>) -> Void
 
 /// Paints `root` and everything it reaches SCANNING, subtracting each internal edge from its target's count. What
 /// is left of a count afterwards is the references from outside the scanned graph.
+/// :param root: The possible cycle root to start from.
+/// :param alloc: The allocator for the walk's work lists.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
     shared work : @List<Addr> <- .construct(alloc)
     shared kids : @List<Addr> <- .construct(alloc)
@@ -286,6 +309,9 @@ routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
 
 /// Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
 /// is garbage for now, and its children are decided the same way.
+/// :param root: The root whose graph to decide.
+/// :param alloc: The allocator for the walk's work lists.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
     shared work : @List<Addr> <- .construct(alloc)
     shared kids : @List<Addr> <- .construct(alloc)
@@ -326,6 +352,9 @@ routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
         return()
 
 /// Undoes the scan below a node that turned out live: paints its graph LIVE again and gives back each edge's count.
+/// :param root: The node found live.
+/// :param alloc: The allocator for the walk's work lists.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
     shared work : @List<Addr> <- .construct(alloc)
     shared kids : @List<Addr> <- .construct(alloc)
@@ -365,6 +394,9 @@ routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
 
 /// Gathers the garbage reachable from `root` into REAP, painting it LIVE so no node is gathered twice. A node still
 /// in the roots buffer is left for a later pass.
+/// :param root: The root whose garbage to gather.
+/// :param alloc: The allocator for the walk's work lists.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
     shared work : @List<Addr> <- .construct(alloc)
     shared kids : @List<Addr> <- .construct(alloc)
@@ -400,7 +432,9 @@ routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
         kids.destruct()
         return()
 
-/// Runs one pass over the possible roots and frees the cyclic garbage it finds: how many entities it freed.
+/// Runs one pass over the possible roots and frees the cyclic garbage it finds, with the world stopped.
+/// :returns: How many entities it freed.
+/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 #[export("ingrid_cyclic_collect")]
 routine collect() -> U64
     shared alloc : @Allocator  <- uninit
@@ -473,6 +507,8 @@ routine collect() -> U64
         return(freed)
 
 /// Removes the first n items of `buffer`, keeping any added after them.
+/// :param buffer: The buffer to shorten.
+/// :param n: How many items to remove from the front (all of them when `n` is at least the count).
 routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
     block entry()
         count : U64 = buffer.count.load()

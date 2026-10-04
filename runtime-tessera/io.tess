@@ -23,20 +23,34 @@ preset IO_CALL:        U32 = 3
 
 // -- the C library -------------------------------------------------------------------
 
+/// C's `memcpy`: copies `n` bytes from `src` to `dst`, which must not overlap.
+/// :param dst: Where the bytes go.
+/// :param src: The bytes to copy.
+/// :param n: The number of bytes.
+/// :returns: `dst`.
 #[external("c"), symbol("memcpy")]
 routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
 
+/// C's `strlen`: the length of a NUL-terminated string.
+/// :param s: The string.
+/// :returns: The number of bytes before the NUL.
 #[external("c"), symbol("strlen")]
 routine c_strlen(s: @Byte) -> USize
 
-/// n, or for n < 0 the length of s before its NUL.
+/// `n`, or for `n < 0` the length of `s` before its NUL.
+/// :param s: The string.
+/// :param n: The length, or negative for a NUL-terminated `s`.
+/// :returns: The length in bytes.
 routine length_of(s: @Byte, n: S32) -> USize
     block entry()
         branch n.lt(0)
             ? return(c_strlen(s))
             : return(n.to<USize>())
 
-/// A NUL-terminated copy of n bytes of s (all of it before its NUL for n < 0), or null.
+/// A NUL-terminated malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or null.
+/// :param s: The string.
+/// :param n: The length, or negative for a NUL-terminated `s`.
+/// :returns: The copy the caller frees, or null when the allocation fails.
 routine strdupn(s: @Byte, n: S32) -> @Byte
     block entry()
         len : USize = length_of(s, n)
@@ -74,11 +88,16 @@ record IoReq
     call     : Callable<(Addr), Void>  // IO_CALL: the routine to run, with call_arg
     call_arg : Addr
 
+/// The length of this thread's last {rf_io_read_file_all}.
+/// :returns: The bytes read, 0 after an error.
 #export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
     block entry()
         return(IO_LAST_LEN.load())
 
+/// Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
+/// and stores the results in `req`.
+/// :param req: The request.
 routine io_do_work(req: @IoReq) -> Void
     block entry()
         kind : U32 = req.kind.load()
@@ -143,7 +162,8 @@ routine io_thread_main(lock: @Mutex) -> Void
         jump entry()
 
 /// Starts the I/O threads at process startup (rf_runtime_init, on the main thread), so a later coroutine call is
-/// only a submit and a park.
+/// only a submit and a park. A second call does nothing.
+/// :throws: Crashes with `TaskSpawnError` when an I/O thread can't be started.
 #export("rf_io_runtime_init")
 routine rf_io_runtime_init() -> Void
     block entry()
@@ -163,6 +183,8 @@ routine rf_io_runtime_init() -> Void
         Thread.spawn(io_thread_main.to<Callable>(), IO_LOCK, runtime_heap()).detach()
         jump start(i.add(1))
 
+/// Appends a request to the I/O queue and wakes one I/O thread.
+/// :param req: The request.
 routine io_submit(req: @IoReq) -> Void
     block entry()
         IO_LOCK.lock()
@@ -186,6 +208,7 @@ routine io_submit(req: @IoReq) -> Void
 
 /// Runs a request to completion: inside a scheduler-driven coroutine on an I/O thread while the coroutine is
 /// parked, else here. The one park pairs with the I/O thread's one wake, which may come first.
+/// :param req: The request.
 routine io_run(req: @IoReq) -> Void
     block entry()
         branch IO_OK.load().eq(1)
@@ -208,6 +231,12 @@ routine io_run(req: @IoReq) -> Void
         io_do_work(req)
         return()
 
+/// A new request of `kind` on a copy of `path`, its result -1 until the work runs.
+/// :param kind: An `IO_` request kind.
+/// :param path: The file's path.
+/// :param path_len: The path's length, or negative for a NUL-terminated `path`.
+/// :returns: The request, freed by the caller.
+/// :throws: Crashes with `OutOfMemoryError` when the request or the path copy can't be allocated.
 routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     block entry()
         req : @IoReq = zeroed<IoReq>(1, "Failed to allocate async I/O request")
@@ -222,6 +251,10 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
 
 /// Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
 /// rf_io_get_result_len, or null (length 0) on an error.
+/// :param path: The file's path.
+/// :param path_len: The path's length, or negative for a NUL-terminated `path`.
+/// :returns: The contents, or null.
+/// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 #export("rf_io_read_file_all")
 routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     block entry()
@@ -242,7 +275,13 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
         return(null)
 
 /// Writes data_len bytes of data to the file (truncating it): the bytes written, or -1. The payload is copied, so
-/// the caller's buffer needn't outlive the call.
+/// the caller's buffer needn't outlive the call. A negative `data_len` writes nothing.
+/// :param path: The file's path.
+/// :param path_len: The path's length, or negative for a NUL-terminated `path`.
+/// :param data: The bytes to write.
+/// :param data_len: The number of bytes.
+/// :returns: The bytes written, or -1 on an error.
+/// :throws: Crashes with `OutOfMemoryError` when the request or the copy of the payload can't be allocated.
 #export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
     shared req : @IoReq = io_req_new(IO_WRITE_FILE, path, path_len)
@@ -276,27 +315,39 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
 record AsyncRuntime
     should_stop : Bool
 
+/// The name of the old async API's backend.
+/// :returns: `"threads"`.
 #export("rf_async_backend_name")
 routine rf_async_backend_name() -> CStr
     block entry()
         return("threads")
 
+/// Whether the old async API's backend is available.
+/// :returns: Always 1 (available).
 #export("rf_async_backend_state")
 routine rf_async_backend_state() -> CInt
     block entry()
         return(1)
 
+/// Creates the placeholder runtime object of the old async API.
+/// :returns: A zeroed `AsyncRuntime`.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 #export("rf_async_runtime_create")
 routine rf_async_runtime_create() -> @AsyncRuntime
     block entry()
         return(zeroed<AsyncRuntime>(1, "Failed to allocate async runtime"))
 
+/// Frees a runtime object from {rf_async_runtime_create}.
+/// :param runtime: The runtime object to free.
 #export("rf_async_runtime_destroy")
 routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> Void
     block entry()
         c_free(runtime)
         return()
 
+/// Runs nothing: reports whether the runtime would go on.
+/// :param runtime: The runtime object, or null.
+/// :returns: 0 when `runtime` is null or stopped, else 1.
 #export("rf_async_runtime_run_once")
 routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
     block entry()
@@ -307,6 +358,9 @@ routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
             ? return(0)
             : return(1)
 
+/// Runs nothing: reports whether there is a runtime.
+/// :param runtime: The runtime object, or null.
+/// :returns: 0 when `runtime` is null, else 1.
 #export("rf_async_runtime_run_default")
 routine rf_async_runtime_run_default(runtime: @AsyncRuntime) -> CInt
     block entry()
@@ -314,6 +368,8 @@ routine rf_async_runtime_run_default(runtime: @AsyncRuntime) -> CInt
             ? return(0)
             : return(1)
 
+/// Marks the runtime stopped. A null `runtime` does nothing.
+/// :param runtime: The runtime object.
 #export("rf_async_runtime_stop")
 routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
     block entry()
@@ -358,32 +414,45 @@ record ProcState
     output       : Bytes
     errors       : Bytes
 
+/// The signal that stopped this thread's last subprocess.
+/// :returns: The signal, or 0 when it exited normally.
 #export("rf_proc_term_signal")
 routine rf_proc_term_signal() -> S32
     block entry()
         return(PROC_SIGNAL.load())
 
+/// The captured stdout of this thread's last subprocess.
+/// :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
 #export("rf_proc_output")
 routine rf_proc_output() -> @Byte
     block entry()
         return(PROC_OUT.load())
 
+/// The length of the captured stdout of this thread's last subprocess.
+/// :returns: The output's length in bytes.
 #export("rf_proc_output_len")
 routine rf_proc_output_len() -> U64
     block entry()
         return(PROC_OUT_LEN.load())
 
+/// The captured stderr of this thread's last subprocess.
+/// :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
 #export("rf_proc_errors")
 routine rf_proc_errors() -> @Byte
     block entry()
         return(PROC_ERR.load())
 
+/// The length of the captured stderr of this thread's last subprocess.
+/// :returns: The errors' length in bytes.
 #export("rf_proc_errors_len")
 routine rf_proc_errors_len() -> U64
     block entry()
         return(PROC_ERR_LEN.load())
 
-/// A malloc'd copy of n bytes of s (all of it before its NUL for n < 0), or empty when that can't be had.
+/// A malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or empty when that can't be had.
+/// :param s: The string.
+/// :param n: The length, or negative for a NUL-terminated `s`.
+/// :returns: The copy, or empty when the allocation fails.
 routine owned_copy(s: @Byte, n: S32) -> Bytes
     block entry()
         len : USize = length_of(s, n)
@@ -394,11 +463,18 @@ routine owned_copy(s: @Byte, n: S32) -> Bytes
         c_memcpy(d, s, len)
         return(Bytes.from_ptr(d.to<@Byte>(), len))
 
+/// Frees the malloc'd memory of `b`.
+/// :param b: The bytes to free.
 routine free_bytes(b: Bytes) -> Void
     block entry()
         c_free(b.data)
         return()
 
+/// A new subprocess state with no arguments, directory, or environment overrides, its exit status -1.
+/// :param shell: True when `program` is a command line for the platform shell.
+/// :param program: The program or command line, taken over.
+/// :returns: The new state.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
     block entry()
         st : @ProcState = zeroed<ProcState>(1, "Failed to allocate subprocess state")
@@ -407,7 +483,8 @@ routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
         st.exit_status.store(-1)
         return(st)
 
-/// The strings, not the captured streams: those go to the caller.
+/// Frees a subprocess state and its strings, not the captured streams: those go to the caller.
+/// :param st: The state to free.
 routine proc_state_free(st: @ProcState) -> Void
     block entry()
         free_bytes(st.program.load())
@@ -439,6 +516,8 @@ routine proc_state_free(st: @ProcState) -> Void
         return()
 
 /// A captured stream as the caller takes it: malloc'd and NUL-terminated, or null when nothing came.
+/// :param b: The captured stream, taken over.
+/// :returns: The NUL-terminated stream, or null when it has no memory or the reallocation fails.
 routine terminated(b: Bytes) -> @Byte
     block entry()
         branch b.data.is_null()
@@ -457,7 +536,9 @@ routine terminated(b: Bytes) -> @Byte
         c_free(b.data)
         return(null)
 
-/// Runs the prepared subprocess, on whatever thread calls it, filling in how it went.
+/// Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the
+/// exit status, the signal that stopped it, or that it couldn't start.
+/// :param st: The prepared state.
 routine proc_run_blocking(st: @ProcState) -> Void
     shared alloc : @Allocator <- make_c_heap_allocator()
 
@@ -501,6 +582,9 @@ routine proc_run_blocking(st: @ProcState) -> Void
 
 /// Runs a prepared state, parking a scheduler-driven coroutine meanwhile, publishes the captured streams and the
 /// status, frees the state, and returns the exit code (-1 if the child couldn't start).
+/// :param st: The prepared state, freed here.
+/// :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start.
+/// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 routine proc_exec(st: @ProcState) -> S64
     block entry()
         req : @IoReq = zeroed<IoReq>(1, "Failed to allocate subprocess request")
@@ -523,17 +607,30 @@ routine proc_exec(st: @ProcState) -> S64
             : return(code)
 
 /// Runs command through the platform shell (cmd /c, sh -c): pipes and globs, at the cost of shell quoting.
+/// :param command: The command line.
+/// :param command_len: Its length, or negative for a NUL-terminated `command`.
+/// :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start.
+/// :throws: Crashes with `OutOfMemoryError` when the state or the request can't be allocated.
 #export("rf_proc_run")
 routine rf_proc_run(command: @Byte, command_len: S32) -> S64
     block entry()
         return(proc_exec(proc_state_new(true, owned_copy(command, command_len))))
 
-/// An executable and its arguments, run with no shell.
+/// Starts building a subprocess: an executable and its arguments, run with no shell.
+/// :param file: The executable, looked up on PATH.
+/// :param file_len: Its length, or negative for a NUL-terminated `file`.
+/// :returns: The state to add to and run with {rf_proc_run_built}.
+/// :throws: Crashes with `OutOfMemoryError` when the state can't be allocated.
 #export("rf_proc_begin")
 routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
     block entry()
         return(proc_state_new(false, owned_copy(file, file_len)))
 
+/// Appends an argument to a subprocess being built. A null `b` does nothing, and when the argument list can't grow
+/// the argument is dropped.
+/// :param b: The subprocess state.
+/// :param arg: The argument.
+/// :param arg_len: Its length, or negative for a NUL-terminated `arg`.
 #export("rf_proc_add_arg")
 routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
     block entry()
@@ -560,7 +657,11 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         b.arg_count.store(n.add(1))
         return()
 
-/// An empty directory inherits the parent's.
+/// Sets the working directory of a subprocess being built. An empty directory inherits the parent's. A null `b` does
+/// nothing.
+/// :param b: The subprocess state.
+/// :param cwd: The directory.
+/// :param cwd_len: Its length, or negative for a NUL-terminated `cwd`.
 #export("rf_proc_set_cwd")
 routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
     block entry()
@@ -571,7 +672,13 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
         b.directory.store(owned_copy(cwd, cwd_len))
         return()
 
-/// An environment override, merged into the parent's environment at launch (PATH and the rest stay).
+/// An environment override, merged into the parent's environment at launch (PATH and the rest stay). A null `b` does
+/// nothing, and when the list can't grow the override is dropped.
+/// :param b: The subprocess state.
+/// :param key: The variable's name.
+/// :param key_len: Its length, or negative for a NUL-terminated `key`.
+/// :param val: The variable's value.
+/// :param val_len: Its length, or negative for a NUL-terminated `val`.
 #export("rf_proc_add_env")
 routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> Void
     block entry()
@@ -598,6 +705,10 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         b.env_count.store(n.add(1))
         return()
 
+/// Runs a subprocess built with {rf_proc_begin}, and frees its state.
+/// :param b: The subprocess state, or null.
+/// :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start or `b` is null.
+/// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 #export("rf_proc_run_built")
 routine rf_proc_run_built(b: @ProcState) -> S64
     block entry()
@@ -607,6 +718,9 @@ routine rf_proc_run_built(b: @ProcState) -> S64
 
 /// Runs body(arg) for a call of a foreign routine marked @blocking: inside a scheduler-driven coroutine on an I/O
 /// thread while the coroutine parks, so its worker goes on with other coroutines, else here.
+/// :param body: The routine to run.
+/// :param arg: Its argument.
+/// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 #export("rf_blocking_call")
 routine rf_blocking_call(body: Callable<(Addr), Void>, arg: Addr) -> Void
     block entry()

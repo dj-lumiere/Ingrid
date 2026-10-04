@@ -73,6 +73,8 @@ record ThreadedStart
     entry    : Callable<(@Task, Addr), Void>
     userdata : Addr
 
+/// The heap allocator the runtime's threads start with, made on first use.
+/// :returns: The C heap allocator, in a global that lives as long as the process.
 routine runtime_heap() -> @Allocator
     block entry()
         branch RUNTIME_HEAP_READY.atomic_load().eq(1)
@@ -82,12 +84,16 @@ routine runtime_heap() -> @Allocator
         RUNTIME_HEAP_READY.atomic_store(1)
         return(RUNTIME_HEAP)
 
+/// The threaded task running on this thread.
+/// :returns: The task, or null outside a threaded task's thread.
 #noinline
 routine current_task() -> @Task
     block entry()
         t : @Task = CURRENT_TASK.load()
         return(t)
 
+/// Whether the task has completed: its status is `TASK_COMPLETED` and its completion is in.
+/// :returns: True once completed.
 routine Task.is_completed(self: @Self) -> Bool
     block entry()
         done : Bool = self.status.atomic_load().eq(TASK_COMPLETED)
@@ -147,7 +153,10 @@ routine Task.signal_completion(self: @Self) -> Void
         return()
 
 /// Registers (s not null) or clears the scheduler of a race! over a set that has this task, and its coroutine
-/// (null for a thread racer).
+/// (null for a thread racer). A null `task` does nothing.
+/// :param task: The task.
+/// :param s: The race's scheduler, or null to clear.
+/// :param coro: The race's coroutine, or null.
 #export("rf_task_race_register")
 routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> Void
     block entry()
@@ -163,6 +172,8 @@ routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> Void
 /// The running coroutine waits for task: 1 if it is complete already (read it, don't park), 0 if registered (park
 /// with rf_sched_park_external, and the completion wakes it). Outside a scheduler-driven coroutine 1, so the caller
 /// waits blocking.
+/// :param task: The task, or null.
+/// :returns: 1 when it is complete (or `task` is null, or outside a coroutine), 0 when registered.
 #export("rf_task_await_coro")
 routine rf_task_await_coro(task: @Task) -> U32
     block entry()
@@ -179,6 +190,9 @@ routine rf_task_await_coro(task: @Task) -> U32
 /// rf_task_await_coro bounded by timeout_ns: 1 completed, 0 timed out, 2 not in a scheduler-driven coroutine (the
 /// caller waits blocking with the deadline). On a timeout the registration is taken back, so a later completion
 /// doesn't wake a coroutine that has moved on.
+/// :param task: The task, or null.
+/// :param timeout_ns: The longest wait, in nanoseconds.
+/// :returns: 1 completed (or `task` is null), 0 timed out, 2 not in a scheduler-driven coroutine.
 #export("rf_task_await_coro_deadline")
 routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
     block entry()
@@ -207,6 +221,9 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 /// Registers waiter to be woken when the task completes, under the task's lock: 1 if it is complete already (read
 /// it, don't park), 0 once registered. The first registration promises a wake from another thread
 /// (signal_completion keeps it), armed after the lock is given back.
+/// :param sched: The waiter's scheduler.
+/// :param waiter: The coroutine to wake.
+/// :returns: 1 when complete already, 0 once registered.
 routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
     block entry()
         self.coro_lock.lock()
@@ -228,6 +245,9 @@ routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
 
 /// The deadline passed: 1 for a value that just came in, else 0 with waiter's registration taken back (and its
 /// promised wake withdrawn after the lock is given back).
+/// :param sched: The waiter's scheduler.
+/// :param waiter: The coroutine that gives up.
+/// :returns: 1 when the task completed meanwhile, else 0.
 routine Task.withdraw_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
     block entry()
         self.coro_lock.lock()
@@ -251,6 +271,9 @@ routine Task.withdraw_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
         rf_sched_disarm_cross_waker(sched)
         return(complete)
 
+/// The name of a task kind.
+/// :param kind: A `TASK_SUSPENDED` / `TASK_THREADED` value.
+/// :returns: `suspended`, `threaded`, or `unknown`.
 #export("rf_task_kind_name")
 routine rf_task_kind_name(kind: U32) -> CStr
     block entry()
@@ -259,6 +282,9 @@ routine rf_task_kind_name(kind: U32) -> CStr
             kind.eq(TASK_THREADED)  -> return("threaded")
             else                    -> return("unknown")
 
+/// The name of a task status.
+/// :param status: A `TASK_` status value.
+/// :returns: `new`, `ready`, `running`, `parked`, `completed`, or `unknown`.
 #export("rf_task_status_name")
 routine rf_task_status_name(status: U32) -> CStr
     block entry()
@@ -270,6 +296,9 @@ routine rf_task_status_name(status: U32) -> CStr
             status.eq(TASK_COMPLETED) -> return("completed")
             else                      -> return("unknown")
 
+/// The name of a completion kind.
+/// :param kind: A `COMPLETION_` value.
+/// :returns: `pending`, `value`, `error`, `cancelled`, `timeout`, or `unknown`.
 #export("rf_task_completion_name")
 routine rf_task_completion_name(kind: U32) -> CStr
     block entry()
@@ -281,6 +310,10 @@ routine rf_task_completion_name(kind: U32) -> CStr
             kind.eq(COMPLETION_TIMEOUT)   -> return("timeout")
             else                          -> return("unknown")
 
+/// Creates a new task with the next task id.
+/// :param kind: `TASK_SUSPENDED` (a coroutine) or `TASK_THREADED`.
+/// :returns: The task, `TASK_NEW` and pending.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 #export("rf_task_create")
 routine rf_task_create(kind: U32) -> @Task
     block entry()
@@ -290,7 +323,8 @@ routine rf_task_create(kind: U32) -> @Task
         task.task_id.store(NEXT_TASK_ID.atomic_fetch_add(1))
         return(task)
 
-/// Frees the task: a result nobody took (a deadline give-up, a race! loser), and the dependents list.
+/// Frees the task with a result nobody took (a deadline give-up, a race! loser) and the dependents list. The error
+/// payload is not freed.
 routine Task.free(self: @Self) -> Void
     block entry()
         payload : Addr = self.value_payload.load()
@@ -313,6 +347,8 @@ routine Task.free(self: @Self) -> Void
         c_free(self)
         return()
 
+/// Frees a task at once, with its untaken result and dependents list. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_destroy")
 routine rf_task_destroy(task: @Task) -> Void
     block entry()
@@ -323,7 +359,8 @@ routine rf_task_destroy(task: @Task) -> Void
         return()
 
 /// The consuming retrieve! is done with the task (called once): it is freed now if its thread has exited, else by
-/// its thread. A coroutine task has no thread and is freed at once.
+/// its thread. A coroutine task has no thread and is freed at once. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_release")
 routine rf_task_release(task: @Task) -> Void
     block entry()
@@ -352,6 +389,9 @@ routine rf_task_release(task: @Task) -> Void
         task.free()
         return()
 
+/// A task's id.
+/// :param task: The task, or null.
+/// :returns: The id, 0 for a null `task`.
 #export("rf_task_id")
 routine rf_task_id(task: @Task) -> U64
     block entry()
@@ -359,6 +399,9 @@ routine rf_task_id(task: @Task) -> U64
             ? return(0)
             : return(task.task_id.load())
 
+/// A task's kind.
+/// :param task: The task, or null.
+/// :returns: `TASK_SUSPENDED` or `TASK_THREADED`, `TASK_SUSPENDED` for a null `task`.
 #export("rf_task_kind_get")
 routine rf_task_kind_get(task: @Task) -> U32
     block entry()
@@ -366,6 +409,9 @@ routine rf_task_kind_get(task: @Task) -> U32
             ? return(TASK_SUSPENDED)
             : return(task.kind.load())
 
+/// A task's status.
+/// :param task: The task, or null.
+/// :returns: A `TASK_` status, `TASK_COMPLETED` for a null `task`.
 #export("rf_task_status_get")
 routine rf_task_status_get(task: @Task) -> U32
     block entry()
@@ -373,6 +419,9 @@ routine rf_task_status_get(task: @Task) -> U32
             ? return(TASK_COMPLETED)
             : return(task.status.atomic_load())
 
+/// A task's completion stamp.
+/// :param task: The task, or null.
+/// :returns: The stamp, or `U64.MAX` before it completes or for a null `task`.
 #export("rf_task_completion_seq")
 routine rf_task_completion_seq(task: @Task) -> U64
     block entry()
@@ -380,6 +429,9 @@ routine rf_task_completion_seq(task: @Task) -> U64
             ? return(U64.MAX)
             : return(task.completion_seq.atomic_load())
 
+/// How a task completed.
+/// :param task: The task, or null.
+/// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
 #export("rf_task_completion_kind_get")
 routine rf_task_completion_kind_get(task: @Task) -> U32
     block entry()
@@ -388,6 +440,8 @@ routine rf_task_completion_kind_get(task: @Task) -> U32
             : return(task.completion.load())
 
 /// Hands the boxed result to the caller, who frees it: the task no longer owns it.
+/// :param task: The task, or null.
+/// :returns: The result box, or null.
 #export("rf_task_result_payload")
 routine rf_task_result_payload(task: @Task) -> Addr
     block entry()
@@ -398,6 +452,9 @@ routine rf_task_result_payload(task: @Task) -> Addr
         task.value_payload.store(null)
         return(payload)
 
+/// A task's error payload, still the task's.
+/// :param task: The task, or null.
+/// :returns: The error payload, or null.
 #export("rf_task_error_payload")
 routine rf_task_error_payload(task: @Task) -> Addr
     block entry()
@@ -405,7 +462,9 @@ routine rf_task_error_payload(task: @Task) -> Addr
             ? return(null)
             : return(task.error_payload.load())
 
-/// Waits (blocking the thread) until a threaded task completes: how it completed.
+/// Waits (blocking the thread) until a threaded task completes: how it completed. A coroutine task isn't waited for.
+/// :param task: The task, or null.
+/// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
 #export("rf_task_wait")
 routine rf_task_wait(task: @Task) -> U32
     block entry()
@@ -427,6 +486,10 @@ routine rf_task_wait(task: @Task) -> U32
         return(task.completion.load())
 
 /// rf_task_wait for at most timeout_seconds and timeout_nanoseconds: COMPLETION_TIMEOUT if it didn't complete.
+/// :param task: The task, or null.
+/// :param timeout_seconds: The whole seconds to wait, a negative value counting as 0.
+/// :param timeout_nanoseconds: The extra nanoseconds to wait.
+/// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
 #export("rf_task_wait_within")
 routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanoseconds: U32) -> U32
     block entry()
@@ -455,6 +518,9 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
     block report()
         return(task.completion.load())
 
+/// A threaded task's thread: frees its start data, runs the routine as the current task, then, as its final act,
+/// frees the task when the consumer is done with it or it is detached (with a detached task's result box).
+/// :param start: The task, its routine, and the routine's argument.
 routine threaded_task_main(start: @ThreadedStart) -> Void
     block entry()
         rf_thread_stack_guarantee()
@@ -507,6 +573,12 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
 
 /// Starts a threaded task's routine on a thread of its own: 1, or 0 for a task that can't. A task already started
 /// isn't started again (the first verb that runs it starts it).
+/// :param task: The threaded task.
+/// :param entry: The routine to run, given the task and `userdata`.
+/// :param userdata: The routine's argument.
+/// :returns: 1 when started (or already started without an error), 0 for a null, non-threaded, or failed task.
+/// :throws: Crashes with `OutOfMemoryError` when the start data can't be allocated, and with `TaskSpawnError` when
+///     the thread can't be started.
 #export("rf_task_spawn_threaded")
 routine rf_task_spawn_threaded(task: @Task, entry: Callable<(@Task, Addr), Void>,
     userdata: Addr) -> CInt
@@ -531,6 +603,8 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable<(@Task, Addr), Void>
             ? return(0)
             : return(1)
 
+/// Marks a task `TASK_READY`. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_mark_ready")
 routine rf_task_mark_ready(task: @Task) -> Void
     block entry()
@@ -540,6 +614,8 @@ routine rf_task_mark_ready(task: @Task) -> Void
         task.status.atomic_store(TASK_READY)
         return()
 
+/// Marks a task `TASK_RUNNING`. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_mark_running")
 routine rf_task_mark_running(task: @Task) -> Void
     block entry()
@@ -549,6 +625,8 @@ routine rf_task_mark_running(task: @Task) -> Void
         task.status.atomic_store(TASK_RUNNING)
         return()
 
+/// Marks a task `TASK_PARKED`. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_mark_parked")
 routine rf_task_mark_parked(task: @Task) -> Void
     block entry()
@@ -559,6 +637,9 @@ routine rf_task_mark_parked(task: @Task) -> Void
         return()
 
 /// Completes the task with how and the payloads, stamped first, then wakes its waiters.
+/// :param how: A `COMPLETION_` value.
+/// :param value: The result box, or null.
+/// :param error: The error payload, or null.
 routine Task.complete(self: @Self, how: U32, value: Addr, error: Addr) -> Void
     block entry()
         self.stamp()
@@ -570,7 +651,10 @@ routine Task.complete(self: @Self, how: U32, value: Addr, error: Addr) -> Void
         return()
 
 /// A detached coroutine task (execute()) has no consumer: its result box and the task are freed here. A detached
-/// threaded task is freed by its thread instead, which still touches it after this.
+/// threaded task is freed by its thread instead, which still touches it after this. Otherwise the task completes
+/// with the value. A null `task` does nothing.
+/// :param task: The task.
+/// :param result_payload: The result box, or null.
 #export("rf_task_complete_value")
 routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
     block entry()
@@ -597,7 +681,8 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
         return()
 
 /// execute(): the task frees itself when it completes. A threaded task's thread is already running, so this agrees
-/// with its final act under the lock: if it already exited, the task is freed here.
+/// with its final act under the lock: if it already exited, the task is freed here. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_set_detached")
 routine rf_task_set_detached(task: @Task) -> Void
     block entry()
@@ -630,6 +715,9 @@ routine rf_task_set_detached(task: @Task) -> Void
         task.free()
         return()
 
+/// Whether a task is detached.
+/// :param task: The task, or null.
+/// :returns: 1 when detached, else 0 (0 for a null `task`).
 #export("rf_task_is_detached")
 routine rf_task_is_detached(task: @Task) -> U8
     block entry()
@@ -640,6 +728,9 @@ routine rf_task_is_detached(task: @Task) -> U8
             ? return(1)
             : return(0)
 
+/// Completes a task with an error and wakes its waiters. A null `task` does nothing.
+/// :param task: The task.
+/// :param error_payload: The error payload.
 #export("rf_task_complete_error")
 routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
     block entry()
@@ -649,6 +740,8 @@ routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
         task.complete(COMPLETION_ERROR, null, error_payload)
         return()
 
+/// Completes a task as cancelled and wakes its waiters. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_complete_cancelled")
 routine rf_task_complete_cancelled(task: @Task) -> Void
     block entry()
@@ -658,6 +751,8 @@ routine rf_task_complete_cancelled(task: @Task) -> Void
         task.complete(COMPLETION_CANCELLED, null, null)
         return()
 
+/// Completes a task as timed out and wakes its waiters. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_complete_timeout")
 routine rf_task_complete_timeout(task: @Task) -> Void
     block entry()
@@ -667,6 +762,8 @@ routine rf_task_complete_timeout(task: @Task) -> Void
         task.complete(COMPLETION_TIMEOUT, null, null)
         return()
 
+/// Asks a task to stop: a flag its routine reads with rf_cancel_requested. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_request_cancel")
 routine rf_task_request_cancel(task: @Task) -> Void
     block entry()
@@ -676,6 +773,9 @@ routine rf_task_request_cancel(task: @Task) -> Void
         task.cancel_requested.atomic_store(1)
         return()
 
+/// Whether a task was asked to stop.
+/// :param task: The task, or null.
+/// :returns: True when cancellation was requested, false for a null `task`.
 #export("rf_task_is_cancel_requested")
 routine rf_task_is_cancel_requested(task: @Task) -> Bool
     block entry()
@@ -684,6 +784,7 @@ routine rf_task_is_cancel_requested(task: @Task) -> Bool
             : return(task.cancel_requested.atomic_load().eq(1))
 
 /// Whether the agent running on this thread (a coroutine, or a threaded task's thread) has been asked to stop.
+/// :returns: 1 when asked, else 0 (0 on a plain thread).
 #export("rf_cancel_requested")
 routine rf_cancel_requested() -> U32
     block entry()
@@ -698,6 +799,8 @@ routine rf_cancel_requested() -> U32
             ? return(0)
             : return(task.cancel_requested.atomic_load())
 
+/// Records that a task's result was taken. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_mark_result_consumed")
 routine rf_task_mark_result_consumed(task: @Task) -> Void
     block entry()
@@ -707,6 +810,9 @@ routine rf_task_mark_result_consumed(task: @Task) -> Void
         task.result_consumed.store(true)
         return()
 
+/// Whether a task's result was taken.
+/// :param task: The task, or null.
+/// :returns: True when taken, false for a null `task`.
 #export("rf_task_is_result_consumed")
 routine rf_task_is_result_consumed(task: @Task) -> Bool
     block entry()
@@ -714,6 +820,9 @@ routine rf_task_is_result_consumed(task: @Task) -> Bool
             ? return(false)
             : return(task.result_consumed.load())
 
+/// Stores an execution backend pointer on a task. A null `task` does nothing.
+/// :param task: The task.
+/// :param backend: The backend pointer.
 #export("rf_task_attach_execution_backend")
 routine rf_task_attach_execution_backend(task: @Task, backend: Addr) -> Void
     block entry()
@@ -723,6 +832,9 @@ routine rf_task_attach_execution_backend(task: @Task, backend: Addr) -> Void
         task.execution_backend.store(backend)
         return()
 
+/// A task's execution backend pointer.
+/// :param task: The task, or null.
+/// :returns: The pointer, or null.
 #export("rf_task_execution_backend")
 routine rf_task_execution_backend(task: @Task) -> Addr
     block entry()
@@ -730,6 +842,9 @@ routine rf_task_execution_backend(task: @Task) -> Addr
             ? return(null)
             : return(task.execution_backend.load())
 
+/// Stores a wait backend pointer on a task. A null `task` does nothing.
+/// :param task: The task.
+/// :param backend: The backend pointer.
 #export("rf_task_attach_wait_backend")
 routine rf_task_attach_wait_backend(task: @Task, backend: Addr) -> Void
     block entry()
@@ -739,6 +854,9 @@ routine rf_task_attach_wait_backend(task: @Task, backend: Addr) -> Void
         task.wait_backend.store(backend)
         return()
 
+/// A task's wait backend pointer.
+/// :param task: The task, or null.
+/// :returns: The pointer, or null.
 #export("rf_task_wait_backend")
 routine rf_task_wait_backend(task: @Task) -> Addr
     block entry()
@@ -746,6 +864,8 @@ routine rf_task_wait_backend(task: @Task) -> Addr
             ? return(null)
             : return(task.wait_backend.load())
 
+/// Adds one prerequisite to a task's count and to those remaining. A null `task` does nothing.
+/// :param task: The task.
 #export("rf_task_add_prerequisite")
 routine rf_task_add_prerequisite(task: @Task) -> Void
     block entry()
@@ -758,6 +878,10 @@ routine rf_task_add_prerequisite(task: @Task) -> Void
         next_prerequisites_remaining.store_into(task.prerequisites_remaining)
         return()
 
+/// Appends `dependent` to the task's dependents list. A null `task` or `dependent` does nothing.
+/// :param task: The task.
+/// :param dependent: The task that waits for it.
+/// :throws: Crashes with `OutOfMemoryError` when the list node can't be allocated.
 #export("rf_task_add_dependent")
 routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
     block entry()
@@ -779,6 +903,9 @@ routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
         task.dependents_tail.store(node)
         return()
 
+/// A task's prerequisite count.
+/// :param task: The task, or null.
+/// :returns: The count, 0 for a null `task`.
 #export("rf_task_prerequisite_count")
 routine rf_task_prerequisite_count(task: @Task) -> U32
     block entry()
@@ -786,6 +913,9 @@ routine rf_task_prerequisite_count(task: @Task) -> U32
             ? return(0)
             : return(task.prerequisite_count.load())
 
+/// A task's prerequisites not finished yet.
+/// :param task: The task, or null.
+/// :returns: The count, 0 for a null `task`.
 #export("rf_task_prerequisites_remaining")
 routine rf_task_prerequisites_remaining(task: @Task) -> U32
     block entry()
@@ -793,7 +923,11 @@ routine rf_task_prerequisites_remaining(task: @Task) -> U32
             ? return(0)
             : return(task.prerequisites_remaining.load())
 
-/// One prerequisite finished: true once none remain (the task is ready). A failed one cancels the task.
+/// One prerequisite finished: true once none remain (the task is ready, and a `TASK_NEW` one is marked
+/// `TASK_READY`). A failed one cancels the task.
+/// :param task: The task, or null.
+/// :param success: Whether the prerequisite succeeded.
+/// :returns: True once none remain, false otherwise, after a failure, or for a null `task`.
 #export("rf_task_prerequisite_complete")
 routine rf_task_prerequisite_complete(task: @Task, success: Bool) -> Bool
     block entry()

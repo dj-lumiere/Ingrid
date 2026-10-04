@@ -14,12 +14,19 @@ record Race
     count   : SSize
     cap     : SSize
 
+/// Starts an empty set of race competitors.
+/// :returns: The new set, freed with {rf_race_end}.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 #export("rf_race_begin")
 routine rf_race_begin() -> @Race
     block entry()
         r : @Race = zeroed<Race>(1, "Failed to allocate race competitor set")
         return(r)
 
+/// Appends a competitor, doubling the storage (from 4) when it is full. A null `self` does nothing.
+/// :param handle: The competitor's coroutine or task.
+/// :param kind: 0 for a coroutine, 1 for a threaded task.
+/// :throws: Crashes with `OutOfMemoryError` when the storage can't grow.
 routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
     block entry()
         branch self.is_null()
@@ -50,23 +57,37 @@ routine Race.push(self: @Self, handle: Addr, kind: U8) -> Void
         self.count.store(n.add(1))
         return()
 
+/// Adds a coroutine competitor to the race.
+/// :param r: The race.
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` when the set can't grow.
 #export("rf_race_add_coro")
 routine rf_race_add_coro(r: @Race, c: @Coro) -> Void
     block entry()
         r.push(c, 0)
         return()
 
+/// Adds a threaded-task competitor to the race.
+/// :param r: The race.
+/// :param t: The task.
+/// :throws: Crashes with `OutOfMemoryError` when the set can't grow.
 #export("rf_race_add_task")
 routine rf_race_add_task(r: @Race, t: @Task) -> Void
     block entry()
         r.push(t, 1)
         return()
 
+/// The handle of competitor `i`, unchecked.
+/// :param i: The competitor's index.
+/// :returns: Its coroutine or task.
 routine Race.handle(self: @Self, i: SSize) -> Addr
     block entry()
         slot : @Addr = self.handles.load().stride(i)
         return(slot.load())
 
+/// Whether competitor `i` is a threaded task, unchecked.
+/// :param i: The competitor's index.
+/// :returns: True for a task, false for a coroutine.
 routine Race.is_task(self: @Self, i: SSize) -> Bool
     block entry()
         slot : @U8 = self.kinds.load().stride(i)
@@ -74,6 +95,9 @@ routine Race.is_task(self: @Self, i: SSize) -> Bool
 
 /// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
 /// to. Each keeps a cross-thread wake promised meanwhile.
+/// :param s: The scheduler to wake.
+/// :param coro: The racing coroutine, or null for a plain thread.
+/// :param on: True to register (and arm a cross-thread wake), false to unregister (and disarm it).
 routine Race.register(self: @Self, s: @Sched, coro: @Coro, on: Bool) -> Void
     block entry()
         jump next(0)
@@ -100,7 +124,10 @@ routine Race.register(self: @Self, s: @Sched, coro: @Coro, on: Bool) -> Void
         rf_sched_disarm_cross_waker(s)
         jump next(i.add(1))
 
-/// Sets the awaiter of every coroutine competitor that still has this one to awaiter (or clears it).
+/// Sets the awaiter of every coroutine competitor to `awaiter`, or clears it on those whose awaiter is still
+/// `awaiter`.
+/// :param awaiter: The racing coroutine.
+/// :param set: True to set, false to clear.
 routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
     block entry()
         jump next(0)
@@ -128,7 +155,9 @@ routine Race.await_coros(self: @Self, awaiter: @Coro, set: Bool) -> Void
         c.awaiter.store(null)
         jump next(i.add(1))
 
-/// The index of the first competitor to finish, or -1 while none has.
+/// The index of the first competitor to finish (the smallest completion stamp among the finished ones), or -1 while
+/// none has.
+/// :returns: The winner's index, or -1.
 routine Race.winner(self: @Self) -> SSize
     block entry()
         jump next(0, -1, U64.MAX)
@@ -163,6 +192,8 @@ routine Race.winner(self: @Self) -> SSize
             : next(i.add(1), best, best_seq)
 
 /// Waits until one competitor finishes: its index in List order, or -1 for an empty set.
+/// :param r: The race, or null.
+/// :returns: The winner's index, or -1 when `r` is null or empty.
 #export("rf_race_wait")
 routine rf_race_wait(r: @Race) -> SSize
     block entry()
@@ -176,6 +207,8 @@ routine rf_race_wait(r: @Race) -> SSize
 
 /// rf_race_wait on a set with competitors: registers as their waiter under the scheduler's lock, waits for a
 /// winner, and gives the lock and the registration back in finish.
+/// :param r: The race, with at least one competitor.
+/// :returns: The winner's index.
 private routine wait_for_winner(r: @Race) -> SSize
     block entry()
         s    : @Sched = rf_sched_thread_default()
@@ -225,7 +258,8 @@ private routine wait_for_winner(r: @Race) -> SSize
         r.register(s, null, false)
         return(winner)
 
-/// Frees the set, not the competitors (their Agents still own them).
+/// Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.
+/// :param r: The race to free.
 #export("rf_race_end")
 routine rf_race_end(r: @Race) -> Void
     block entry()

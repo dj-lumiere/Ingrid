@@ -22,6 +22,9 @@ record DeadlockWait
     holder : U64
     used   : Bool
 
+/// C's getenv: the value of the environment variable `name`.
+/// :param name: The variable's name.
+/// :returns: The value as a C string, or null when the variable is not set.
 #[external("c"), symbol("getenv")]
 routine c_getenv(name: CStr) -> @Byte
 
@@ -31,6 +34,7 @@ private routine rf_crash_exit() -> Void
 
 /// Whether RF_DEADLOCK_DETECT asks for the detector: set, not empty, and not "0". Read once. Two threads reading it
 /// at once both find the same answer.
+/// :returns: True when the detector is on.
 routine is_detector_on() -> Bool
     block entry()
         state : U8 = DETECTOR.atomic_load()
@@ -55,6 +59,8 @@ routine is_detector_on() -> Bool
         return(on)
 
 /// The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
+/// :param task: The waiting task's id.
+/// :returns: The slot's index, or WAIT_SLOTS.
 routine slot_of(task: U64) -> USize
     block entry()
         jump look(0)
@@ -70,6 +76,7 @@ routine slot_of(task: U64) -> USize
             : look(i.add(1))
 
 /// The first free slot, or WAIT_SLOTS when the table is full.
+/// :returns: The slot's index, or WAIT_SLOTS.
 routine free_slot() -> USize
     block entry()
         jump look(0)
@@ -83,7 +90,11 @@ routine free_slot() -> USize
             : return(i)
 
 /// Records that `waiter` waits for `holder`, then follows the holders: a chain that leads back to `waiter` is a
-/// deadlock, and the program stops.
+/// deadlock, and the program stops. Does nothing when the detector is off, when `holder` is 0 or `waiter` itself, or
+/// when the table is full.
+/// :param waiter: The id of the task that found the lock taken.
+/// :param holder: The id of the task holding the lock.
+/// :note: A deadlock writes both task ids to standard error and exits with the crash status.
 routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
     block entry()
         branch is_detector_on()
@@ -130,7 +141,8 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
         WAITS_LOCK.unlock()
         return()
 
-/// Clears `waiter`'s wait once it holds the lock.
+/// Clears `waiter`'s wait once it holds the lock. Does nothing when the detector is off.
+/// :param waiter: The id of the task that now holds the lock.
 routine deadlock_wait_end(waiter: U64) -> Void
     block entry()
         branch is_detector_on()

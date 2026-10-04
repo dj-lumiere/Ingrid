@@ -80,12 +80,16 @@ record Sched
     cond             : Condition  // idle workers wait here
     block_cond       : Condition  // top-level retrieve!/race! callers wait here
 
+/// The scheduler driving this thread.
+/// :returns: The scheduler, or null.
 #noinline
 routine current_sched() -> @Sched
     block entry()
         s : @Sched = CURRENT_SCHED.load()
         return(s)
 
+/// This thread's pool worker index.
+/// :returns: The index, or -1 off the pool.
 #noinline
 routine worker_id() -> SSize
     block entry()
@@ -94,6 +98,8 @@ routine worker_id() -> SSize
 
 // -- deques --------------------------------------------------------------------------
 
+/// Makes an empty deque with room for 64 coroutines.
+/// :throws: Crashes with `OutOfMemoryError` when the ring can't be allocated.
 routine Deque.init(self: @Self) -> Void
     block entry()
         self.cap.store(64)
@@ -103,12 +109,17 @@ routine Deque.init(self: @Self) -> Void
         self.lock.store(Mutex.construct())
         return()
 
+/// The ring slot for position `i`, wrapped by the capacity.
+/// :param i: The position.
+/// :returns: The slot.
 routine Deque.slot(self: @Self, i: USize) -> @@Coro
     block entry()
         mask : USize = self.cap.load().sub(1)
         return(self.buf.load().stride(i.bitand(mask)))
 
-/// The owner's end. Grows the ring (twice the capacity) when it is full.
+/// Pushes `c` at the owner's end. Grows the ring (twice the capacity) when it is full.
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` when the ring can't grow.
 routine Deque.push_bottom(self: @Self, c: @Coro) -> Void
     block entry()
         self.lock.lock()
@@ -146,7 +157,8 @@ routine Deque.push_bottom(self: @Self, c: @Coro) -> Void
         self.lock.unlock()
         return()
 
-/// The owner's end: the coroutine pushed last, or null.
+/// Pops at the owner's end: the coroutine pushed last, or null.
+/// :returns: The coroutine, or null when the deque is empty.
 routine Deque.pop_bottom(self: @Self) -> @Coro
     block entry()
         self.lock.lock()
@@ -165,7 +177,8 @@ routine Deque.pop_bottom(self: @Self) -> @Coro
         self.lock.unlock()
         return(taken)
 
-/// The thieves' end: the oldest coroutine, or null.
+/// Takes from the thieves' end: the oldest coroutine, or null.
+/// :returns: The coroutine, or null when the deque is empty.
 routine Deque.steal_top(self: @Self) -> @Coro
     block entry()
         self.lock.lock()
@@ -185,6 +198,8 @@ routine Deque.steal_top(self: @Self) -> @Coro
         return(taken)
 
 /// Takes c out if it is there, closing the gap: whether it was.
+/// :param c: The coroutine.
+/// :returns: True when it was in the deque.
 routine Deque.remove(self: @Self, c: @Coro) -> Bool
     block entry()
         self.lock.lock()
@@ -222,6 +237,8 @@ routine Deque.remove(self: @Self, c: @Coro) -> Bool
 
 // -- the injector and the ready routing (callers hold the scheduler lock) ------------
 
+/// Appends `c`, now QUEUED, to the injector. The caller holds the scheduler lock.
+/// :param c: The coroutine.
 routine Sched.push_injector(self: @Self, c: @Coro) -> Void
     block entry()
         c.sched_next.store(null)
@@ -239,7 +256,8 @@ routine Sched.push_injector(self: @Self, c: @Coro) -> Void
         self.injector_tail.store(c)
         return()
 
-/// The injector's head, now RUNNING, or null.
+/// The injector's head, now RUNNING, or null. The caller holds the scheduler lock.
+/// :returns: The coroutine, or null when the injector is empty.
 routine Sched.pop_injector(self: @Self) -> @Coro
     shared c : @Coro = self.injector_head.load()
 
@@ -263,6 +281,8 @@ routine Sched.pop_injector(self: @Self) -> @Coro
         return(c)
 
 /// A runnable coroutine goes, QUEUED, to this worker's deque if a pool worker made it ready, else to the injector.
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
 routine Sched.enqueue_ready(self: @Self, c: @Coro) -> Void
     shared id     : SSize  = worker_id()
     shared deques : @Deque = self.deques.load()
@@ -281,11 +301,17 @@ routine Sched.enqueue_ready(self: @Self, c: @Coro) -> Void
 
 // -- the timer heap (callers hold the scheduler lock) --------------------------------
 
+/// The coroutine at position `i` of the timer heap.
+/// :param i: The position.
+/// :returns: The coroutine.
 routine Sched.timer_at(self: @Self, i: SSize) -> @Coro
     block entry()
         slot : @@Coro = self.timer_heap.load().stride(i)
         return(slot.load())
 
+/// Puts `c` at position `i` of the timer heap and records the position in it.
+/// :param i: The position.
+/// :param c: The coroutine.
 routine Sched.timer_put(self: @Self, i: SSize, c: @Coro) -> Void
     block entry()
         slot : @@Coro = self.timer_heap.load().stride(i)
@@ -293,6 +319,9 @@ routine Sched.timer_put(self: @Self, i: SSize, c: @Coro) -> Void
         c.timer_idx.store(i)
         return()
 
+/// Swaps two positions of the timer heap.
+/// :param i: The first position.
+/// :param j: The second position.
 routine Sched.timer_swap(self: @Self, i: SSize, j: SSize) -> Void
     block entry()
         a : @Coro = self.timer_at(i)
@@ -301,6 +330,8 @@ routine Sched.timer_swap(self: @Self, i: SSize, j: SSize) -> Void
         self.timer_put(j, a)
         return()
 
+/// Moves the coroutine at `i` up the timer heap while it wakes earlier than its parent.
+/// :param i: The position.
 routine Sched.timer_sift_up(self: @Self, i: SSize) -> Void
     block entry()
         branch i.le(0)
@@ -318,6 +349,8 @@ routine Sched.timer_sift_up(self: @Self, i: SSize) -> Void
         self.timer_sift_up(node)
         return()
 
+/// Moves the coroutine at `i` down the timer heap while a child wakes earlier.
+/// :param i: The position.
 routine Sched.timer_sift_down(self: @Self, i: SSize) -> Void
     shared n : SSize = self.timer_count.load()
     shared l : SSize = i.mul(2).add(1)
@@ -352,6 +385,9 @@ routine Sched.timer_sift_down(self: @Self, i: SSize) -> Void
         self.timer_sift_down(m)
         return()
 
+/// Adds `c` to the timer heap by its `wake_ns`, doubling the heap (from 16) when it is full.
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` when the heap can't grow.
 routine Sched.insert_timer(self: @Self, c: @Coro) -> Void
     block entry()
         full : Bool = self.timer_count.load().eq(self.timer_cap.load())
@@ -380,6 +416,7 @@ routine Sched.insert_timer(self: @Self, c: @Coro) -> Void
         return()
 
 /// The earliest coroutine, taken off the heap, or null.
+/// :returns: The coroutine, or null when no timer is pending.
 routine Sched.timer_pop_min(self: @Self) -> @Coro
     block entry()
         branch self.timer_count.load().eq(0)
@@ -403,6 +440,7 @@ routine Sched.timer_pop_min(self: @Self) -> @Coro
         return(top)
 
 /// Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
+/// :param c: The coroutine.
 routine Sched.unlink_timer(self: @Self, c: @Coro) -> Void
     block entry()
         i : SSize = c.timer_idx.load()
@@ -437,7 +475,9 @@ routine Sched.unlink_timer(self: @Self, c: @Coro) -> Void
 // -- making a coroutine ready ---------------------------------------------------------
 
 /// Every wake goes through here, under the scheduler lock: IDLE is queued (off the timers first), RUNNING becomes
-/// NOTIFIED, and QUEUED, NOTIFIED and DONE stay as they are.
+/// NOTIFIED, and QUEUED, NOTIFIED and DONE stay as they are. A null `self` or `c` does nothing.
+/// :param c: The coroutine to wake.
+/// :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
 routine Sched.make_ready(self: @Self, c: @Coro) -> Void
     block entry()
         branch self.is_null().bitor(c.is_null())
@@ -460,6 +500,9 @@ routine Sched.make_ready(self: @Self, c: @Coro) -> Void
         self.deadlock_confirm.store(0)
         return()
 
+/// Creates a scheduler driven directly (no pool deques), with one worker.
+/// :returns: The new scheduler.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 #export("rf_sched_create")
 routine rf_sched_create() -> @Sched
     block entry()
@@ -467,6 +510,8 @@ routine rf_sched_create() -> @Sched
         s.workers_total.store(1)
         return(s)
 
+/// Frees a scheduler and its timer heap. A null `s` does nothing.
+/// :param s: The scheduler.
 #export("rf_sched_destroy")
 routine rf_sched_destroy(s: @Sched) -> Void
     block entry()
@@ -478,7 +523,9 @@ routine rf_sched_destroy(s: @Sched) -> Void
         return()
 
 /// Queues a new coroutine. A second spawn of the same one does nothing (a set race!/gather launched may be
-/// retrieved after).
+/// retrieved after). A null `s` or `c` does nothing.
+/// :param s: The scheduler.
+/// :param c: The coroutine.
 #export("rf_sched_spawn")
 routine rf_sched_spawn(s: @Sched, c: @Coro) -> Void
     block entry()
@@ -489,6 +536,7 @@ routine rf_sched_spawn(s: @Sched, c: @Coro) -> Void
         return()
 
 /// rf_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
+/// :param c: The coroutine.
 routine Sched.spawn(self: @Self, c: @Coro) -> Void
     block entry()
         self.lock.lock()
@@ -508,6 +556,7 @@ routine Sched.spawn(self: @Self, c: @Coro) -> Void
 
 /// Parks the running coroutine until delay_ns from now. The worker puts it on the timer heap once it is off its
 /// stack. Outside a scheduler-driven coroutine it does nothing.
+/// :param delay_ns: How long to park, in nanoseconds.
 #export("rf_sched_park_timer")
 routine rf_sched_park_timer(delay_ns: U64) -> Void
     block entry()
@@ -522,6 +571,7 @@ routine rf_sched_park_timer(delay_ns: U64) -> Void
         return()
 
 /// rf_sched_park_timer that a wake can also end first: a wake on an IDLE coroutine takes it off the timer heap.
+/// :param delay_ns: The longest park, in nanoseconds.
 #export("rf_sched_park_deadline")
 routine rf_sched_park_deadline(delay_ns: U64) -> Void
     block entry()
@@ -559,7 +609,10 @@ routine rf_coro_yield() -> Void
         coro_switch_out()
         return()
 
-/// Makes a parked coroutine runnable, from any thread.
+/// Makes a parked coroutine runnable, from any thread, and wakes an idle worker when it was parked. A null `s` or `c`
+/// does nothing.
+/// :param s: The coroutine's scheduler.
+/// :param c: The coroutine.
 #export("rf_sched_wake")
 routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
     block entry()
@@ -580,7 +633,8 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
         return()
 
 /// A wake another thread has promised (a threaded task, an I/O call, a cast, a race! competitor): while one is
-/// outstanding, all-parked isn't a deadlock.
+/// outstanding, all-parked isn't a deadlock. A null `s` does nothing.
+/// :param s: The scheduler.
 #export("rf_sched_arm_cross_waker")
 routine rf_sched_arm_cross_waker(s: @Sched) -> Void
     block entry()
@@ -593,6 +647,8 @@ routine rf_sched_arm_cross_waker(s: @Sched) -> Void
         s.lock.unlock()
         return()
 
+/// Withdraws one wake another thread had promised, never below 0. A null `s` does nothing.
+/// :param s: The scheduler.
 #export("rf_sched_disarm_cross_waker")
 routine rf_sched_disarm_cross_waker(s: @Sched) -> Void
     block entry()
@@ -613,6 +669,8 @@ routine rf_sched_disarm_cross_waker(s: @Sched) -> Void
 
 // -- the workers ---------------------------------------------------------------------
 
+/// The next number of this worker's xorshift generator, seeded from its index on first use.
+/// :returns: A nonzero pseudo-random number.
 #noinline
 routine steal_rand() -> U32
     block entry()
@@ -636,7 +694,9 @@ routine steal_rand() -> U32
         STEAL_RNG.store(c)
         return(c)
 
-/// A coroutine stolen from another worker's deque (now RUNNING), or null.
+/// A coroutine stolen from another worker's deque (now RUNNING), or null. The victims are tried in turn from a
+/// random one.
+/// :returns: The coroutine, or null when there is nothing to steal.
 routine Sched.try_steal(self: @Self) -> @Coro
     shared n : SSize = self.workers_total.load()
 
@@ -666,6 +726,8 @@ routine Sched.try_steal(self: @Self) -> @Coro
         return(c)
 
 /// Runs a coroutine this worker took (RUNNING), with no lock held, then applies how it stopped.
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
 routine Sched.run_coro(self: @Self, c: @Coro) -> Void
     block entry()
         st : U32 = rf_coro_resume(c)
@@ -750,6 +812,7 @@ routine Sched.run_coro(self: @Self, c: @Coro) -> Void
         return()
 
 /// One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
+/// :returns: The coroutine, or null.
 routine Sched.claim_work(self: @Self) -> @Coro
     block entry()
         id     : SSize  = worker_id()
@@ -772,7 +835,11 @@ routine Sched.claim_work(self: @Self) -> @Coro
             ? return(self.try_steal())
             : return(c)
 
-/// Runs one ready coroutine (true), or waits until something may be ready (false). Called with no lock held.
+/// Runs one ready coroutine (true), or waits until something may be ready (false). Called with no lock held. Due
+/// timers are moved to the injector while waiting.
+/// :returns: True when a coroutine ran.
+/// :throws: Crashes with `DeadlockError` when every worker is idle, coroutines are awaited, and no wake can come,
+///     confirmed `DEADLOCK_CONFIRMS` times in a row.
 routine Sched.step(self: @Self) -> Bool
     block entry()
         c : @Coro = self.claim_work()
@@ -893,7 +960,9 @@ routine Sched.step(self: @Self) -> Bool
         self.lock.unlock()
         return(false)
 
-/// Drives every spawned coroutine to completion on this thread.
+/// Drives every spawned coroutine to completion on this thread. A null `s` does nothing.
+/// :param s: The scheduler.
+/// :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 #export("rf_sched_run")
 routine rf_sched_run(s: @Sched) -> Void
     block entry()
@@ -918,12 +987,19 @@ routine rf_sched_run(s: @Sched) -> Void
         CURRENT_SCHED.store(prev)
         return()
 
+/// Whether a coroutine has completed or been cancelled.
+/// :param c: The coroutine.
+/// :returns: True when it is over.
 routine is_finished(c: @Coro) -> Bool
     block entry()
         st : U32 = c.status.atomic_load()
         return(st.eq(CORO_COMPLETED).bitor(st.eq(CORO_CANCELLED)))
 
-/// Drives the scheduler on this thread until target finishes, leaving the others parked.
+/// Drives the scheduler on this thread until target finishes, leaving the others parked. A null `s` or `target`
+/// does nothing.
+/// :param s: The scheduler.
+/// :param target: The coroutine to wait for.
+/// :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 #export("rf_sched_run_until")
 routine rf_sched_run_until(s: @Sched, target: @Coro) -> Void
     block entry()
@@ -945,7 +1021,9 @@ routine rf_sched_run_until(s: @Sched, target: @Coro) -> Void
         CURRENT_SCHED.store(prev)
         return()
 
-/// Wakes a scheduler's waiters with no coroutine in particular: a top-level race! re-polls. From any thread.
+/// Wakes a scheduler's waiters with no coroutine in particular: a top-level race! re-polls. From any thread. A null
+/// `s` does nothing.
+/// :param s: The scheduler.
 #export("rf_sched_signal")
 routine rf_sched_signal(s: @Sched) -> Void
     block entry()
@@ -959,6 +1037,7 @@ routine rf_sched_signal(s: @Sched) -> Void
         return()
 
 /// Whether the caller runs in a scheduler-driven coroutine, where a park suspends.
+/// :returns: 1 inside one, else 0.
 #export("rf_in_coroutine")
 routine rf_in_coroutine() -> U32
     block entry()
@@ -968,6 +1047,8 @@ routine rf_in_coroutine() -> U32
             ? return(1)
             : return(0)
 
+/// The scheduler driving this thread.
+/// :returns: The scheduler, or null.
 #export("rf_sched_current")
 routine rf_sched_current() -> @Sched
     block entry()
@@ -983,6 +1064,9 @@ record WorkerStart
     sched : @Sched
     index : SSize
 
+/// A pool worker's thread: takes its index and scheduler, frees its start, and steps the scheduler forever.
+/// :param start: The worker's scheduler and index.
+/// :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 routine worker_main(start: @WorkerStart) -> Void
     block entry()
         rf_thread_stack_guarantee()
@@ -997,6 +1081,7 @@ routine worker_main(start: @WorkerStart) -> Void
         jump loop(s)
 
 /// RF_WORKERS if it is a positive integer (at most WORKERS_MAX), else one per processor.
+/// :returns: The number of pool workers.
 routine pool_worker_count() -> SSize
     block entry()
         env : U64 = env_positive("RF_WORKERS")
@@ -1004,6 +1089,10 @@ routine pool_worker_count() -> SSize
             ? return(cpu_count().to<SSize>())
             : return(env.min(WORKERS_MAX).to<SSize>())
 
+/// Makes the process pool's scheduler with a deque per worker, and starts the workers.
+/// :returns: The pool's scheduler.
+/// :throws: Crashes with `OutOfMemoryError` when an allocation fails, and with `TaskSpawnError` when a worker can't
+///     be started.
 routine pool_start() -> @Sched
     shared s : @Sched = rf_sched_create()
     shared n : SSize  = pool_worker_count()
@@ -1033,6 +1122,8 @@ routine pool_start() -> @Sched
         jump spawn(i.add(1))
 
 /// The process pool, made (and its workers started) on first use, once even when several threads ask at once.
+/// :returns: The pool's scheduler.
+/// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_thread_default")
 routine rf_sched_thread_default() -> @Sched
     block entry()
@@ -1060,6 +1151,8 @@ routine rf_sched_thread_default() -> @Sched
         jump wait()
 
 /// Spawns a new coroutine onto the process pool (at a suspended routine's call site).
+/// :param c: The coroutine.
+/// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_spawn_default")
 routine rf_sched_spawn_default(c: @Coro) -> Void
     block entry()
@@ -1067,7 +1160,9 @@ routine rf_sched_spawn_default(c: @Coro) -> Void
         return()
 
 /// retrieve!: waits for target to finish. Inside a coroutine it parks (the workers drive target and wake it).
-/// On a plain thread it blocks on block_cond.
+/// On a plain thread it blocks on block_cond. A null `target` returns at once.
+/// :param target: The coroutine to wait for.
+/// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_run_until_default")
 routine rf_sched_run_until_default(target: @Coro) -> Void
     block entry()
@@ -1112,6 +1207,8 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
 
 /// Takes c out of the injector, the timers, or a deque, and off the live count: whether it was in one. The caller
 /// holds the lock.
+/// :param c: The coroutine.
+/// :returns: True when it was queued or on a timer.
 routine Sched.remove_locked(self: @Self, c: @Coro) -> Bool
     block entry()
         jump scan(null, self.injector_head.load())
@@ -1182,6 +1279,8 @@ routine Sched.remove_locked(self: @Self, c: @Coro) -> Bool
         return(true)
 
 /// Takes c off the process pool before rf_coro_abandon frees a coroutine spawned and never retrieved.
+/// :param c: The coroutine.
+/// :returns: 1 when it was queued or on a timer, 0 otherwise or with no pool.
 #export("rf_sched_unschedule_default")
 routine rf_sched_unschedule_default(c: @Coro) -> U32
     block entry()
@@ -1198,6 +1297,8 @@ routine rf_sched_unschedule_default(c: @Coro) -> U32
 
 /// An Agent's destroy: 1 if the caller frees c now, 0 if a worker holds it (RUNNING, or QUEUED and mid-pop) and
 /// frees it itself when it completes. Decided under the lock together with the removal.
+/// :param c: The coroutine.
+/// :returns: 1 when the caller frees it (always with no pool), 0 when a worker does (or for a null `c`).
 #export("rf_sched_dispose_default")
 routine rf_sched_dispose_default(c: @Coro) -> U32
     block entry()
@@ -1212,6 +1313,8 @@ routine rf_sched_dispose_default(c: @Coro) -> U32
 
 /// rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
 /// holds it.
+/// :param c: The coroutine.
+/// :returns: 1 when the caller frees it, 0 when the worker does.
 routine Sched.dispose(self: @Self, c: @Coro) -> U32
     block entry()
         self.lock.lock()
@@ -1231,6 +1334,8 @@ routine Sched.dispose(self: @Self, c: @Coro) -> U32
         return(caller_frees)
 
 /// The number of pool workers (making the pool): coroutines can move between threads only when it is more than 1.
+/// :returns: The worker count.
+/// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_worker_count")
 routine rf_sched_worker_count() -> U64
     block entry()

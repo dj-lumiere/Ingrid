@@ -36,6 +36,7 @@ record Channel
 
 /// Wakes every coroutine on list and every waiting thread. Each checks again and unlinks itself. The caller holds
 /// the lock.
+/// :param list: The first parked coroutine to wake, or null.
 routine Channel.wake_all(self: @Self, list: @ChannelWaiter) -> Void
     block entry()
         jump next(list)
@@ -51,6 +52,10 @@ routine Channel.wake_all(self: @Self, list: @ChannelWaiter) -> Void
         self.cond.wake_all()
         return()
 
+/// Creates a channel with one producer handle and one consumer handle.
+/// :param capacity: The items it buffers, 0 for a rendezvous.
+/// :returns: The new channel.
+/// :throws: Crashes with `OutOfMemoryError` when the buffer is too large to allocate or an allocation fails.
 #export("rf_channel_create")
 routine rf_channel_create(capacity: U64) -> @Channel
     block entry()
@@ -68,7 +73,7 @@ routine rf_channel_create(capacity: U64) -> @Channel
         chan.consumer_refs.store(1)
         return(chan)
 
-/// Frees the channel once both counts are 0. The caller doesn't hold the lock.
+/// Frees the channel once both counts are 0, reading them without the lock. The caller doesn't hold the lock.
 routine Channel.maybe_free(self: @Self) -> Void
     block entry()
         no_producers : Bool = self.producer_refs.load().eq(0)
@@ -79,6 +84,8 @@ routine Channel.maybe_free(self: @Self) -> Void
         c_free(self)
         return()
 
+/// Adds a producer handle, under the lock. A null `chan` does nothing.
+/// :param chan: The channel.
 #export("rf_channel_add_feeder")
 routine rf_channel_add_feeder(chan: @Channel) -> Void
     block entry()
@@ -91,6 +98,8 @@ routine rf_channel_add_feeder(chan: @Channel) -> Void
         chan.lock.unlock()
         return()
 
+/// Adds a consumer handle, under the lock. A null `chan` does nothing.
+/// :param chan: The channel.
 #export("rf_channel_add_consumer")
 routine rf_channel_add_consumer(chan: @Channel) -> Void
     block entry()
@@ -103,7 +112,9 @@ routine rf_channel_add_consumer(chan: @Channel) -> Void
         chan.lock.unlock()
         return()
 
-/// The last producer dropping closes the channel: consumers drain what is left, then see it closed.
+/// Drops a producer handle. The last producer dropping closes the channel: consumers drain what is left, then see it
+/// closed. The channel is freed when no handle is left. A null `chan` does nothing.
+/// :param chan: The channel.
 #export("rf_channel_drop_feeder")
 routine rf_channel_drop_feeder(chan: @Channel) -> Void
     block entry()
@@ -126,7 +137,9 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
         chan.maybe_free()
         return()
 
-/// With no consumer left, producers waiting for room wake and fail instead of waiting forever.
+/// Drops a consumer handle. With no consumer left, producers waiting for room wake and fail instead of waiting
+/// forever. The channel is freed when no handle is left. A null `chan` does nothing.
+/// :param chan: The channel.
 #export("rf_channel_drop_consumer")
 routine rf_channel_drop_consumer(chan: @Channel) -> Void
     block entry()
@@ -148,6 +161,8 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
         chan.maybe_free()
         return()
 
+/// Closes the channel and wakes every waiting producer and consumer. Closing twice, or a null `chan`, does nothing.
+/// :param chan: The channel.
 #export("rf_channel_close")
 routine rf_channel_close(chan: @Channel) -> Void
     block entry()
@@ -169,6 +184,7 @@ routine rf_channel_close(chan: @Channel) -> Void
 
 /// Waits once: a coroutine parks with a node on list, a thread waits on the condition variable. The caller holds
 /// the lock before and after, and checks its condition again.
+/// :param list: The list of parked coroutines to join.
 routine Channel.wait(self: @Self, list: @@ChannelWaiter) -> Void
     block entry()
         sched : @Sched = rf_sched_current()
@@ -188,6 +204,9 @@ routine Channel.wait(self: @Self, list: @@ChannelWaiter) -> Void
         self.cond.wait(self.lock)
         return()
 
+/// Removes `node` from a list of parked coroutines, if it is there.
+/// :param list: The list's head.
+/// :param node: The node to remove.
 routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
     block entry()
         jump look(list)
@@ -206,6 +225,10 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
 
 /// Sends one payload: 1, or 0 when the channel is closed or has no consumer. Waits while it is full, and for a
 /// rendezvous until a consumer took the item. A cancelled agent stops waiting.
+/// :param chan: The channel, or null.
+/// :param payload: The item to send.
+/// :returns: 1 when sent, 0 when `chan` is null, closed, has no consumer, or the agent was cancelled while waiting
+///     for room.
 #export("rf_channel_feed")
 routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
     block entry()
@@ -215,6 +238,8 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         return(chan.feed(payload))
 
 /// rf_channel_feed on a channel that is there: everything under the lock, which finish gives back.
+/// :param payload: The item to send.
+/// :returns: 1 when sent, 0 when not.
 routine Channel.feed(self: @Self, payload: Addr) -> U32
     block entry()
         self.lock.lock()
@@ -269,6 +294,8 @@ routine Channel.feed(self: @Self, payload: Addr) -> U32
 
 /// Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
 /// was cancelled.
+/// :param chan: The channel, or null.
+/// :returns: The payload, or null.
 #export("rf_channel_next")
 routine rf_channel_next(chan: @Channel) -> Addr
     block entry()
@@ -278,6 +305,7 @@ routine rf_channel_next(chan: @Channel) -> Addr
         return(chan.next())
 
 /// rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
+/// :returns: The payload, or null when the channel is closed and drained or the agent was cancelled.
 routine Channel.next(self: @Self) -> Addr
     block entry()
         self.lock.lock()
@@ -312,6 +340,9 @@ routine Channel.next(self: @Self) -> Addr
         self.lock.unlock()
         return(payload)
 
+/// The number of items waiting in the channel.
+/// :param chan: The channel, or null.
+/// :returns: The buffered item count, 0 for a null `chan`.
 #export("rf_channel_count")
 routine rf_channel_count(chan: @Channel) -> U64
     block entry()
@@ -323,6 +354,9 @@ routine rf_channel_count(chan: @Channel) -> U64
         chan.lock.unlock()
         return(n)
 
+/// Whether the channel is closed.
+/// :param chan: The channel, or null.
+/// :returns: 1 when closed or null, 0 when open.
 #export("rf_channel_is_closed")
 routine rf_channel_is_closed(chan: @Channel) -> U32
     block entry()
@@ -336,6 +370,9 @@ routine rf_channel_is_closed(chan: @Channel) -> U32
             ? return(1)
             : return(0)
 
+/// The channel's capacity.
+/// :param chan: The channel, or null.
+/// :returns: The items it buffers (0 for a rendezvous or a null `chan`).
 #export("rf_channel_capacity")
 routine rf_channel_capacity(chan: @Channel) -> U64
     block entry()

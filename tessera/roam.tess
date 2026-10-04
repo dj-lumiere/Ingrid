@@ -44,13 +44,17 @@ record RoamHeader
 
 // ── The task scheduler (native) ──────────────────────────────────────────
 
+/// The id of the task running now, from the native task scheduler.
+/// :returns: The current task's id.
 #[external("c"), symbol("rf_current_task_id")]
 private routine current_task_id() -> U64
 
+/// Yields the running task to the native scheduler, so another task can run on this worker.
 #[external("c"), symbol("rf_coro_yield")]
 private routine coro_yield() -> Void
 
 /// Frees a header's memory. Controllers are allocated from the C heap (calloc), which the heap allocator frees.
+/// :param header: The header to free.
 routine free_header_memory(header: @RoamHeader) -> Void
     block entry()
         claim alloc : @Allocator <- make_c_heap_allocator()
@@ -61,6 +65,7 @@ routine free_header_memory(header: @RoamHeader) -> Void
 
 /// Adds a strong handle. The count changes inside the collector's shared lock, so a collection pass (which
 /// adjusts counts while it traces) never races it.
+/// :param header: The entity's header.
 #[export("ingrid_roam_hold"), inline]
 routine roam_hold(header: @RoamHeader) -> Void
     block entry()
@@ -86,6 +91,8 @@ routine roam_hold(header: @RoamHeader) -> Void
 /// Drops a strong handle. The last one destroys the entity (deterministic teardown) and frees the header unless a
 /// weak observer still holds it. Any other release reports the entity to the cycle collector as a possible root.
 /// All of it runs inside the collector's shared lock, so a pass never frees a header it is tracing.
+/// :param header: The entity's header.
+/// :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity's count is already 0.
 #[export("ingrid_roam_unhold"), inline]
 routine roam_unhold(header: @RoamHeader) -> Void
     block entry()
@@ -144,6 +151,7 @@ routine roam_unhold(header: @RoamHeader) -> Void
 
 /// Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
 /// trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
+/// :param header: The entity's header.
 private routine mark_candidate(header: @RoamHeader) -> Void
     block entry()
         hook    : @Byte = header.trace_hook.load().to<@Byte>()
@@ -161,6 +169,8 @@ private routine mark_candidate(header: @RoamHeader) -> Void
 
 /// Calls an entity type's hook (destroy, trace or free) on the entity. An `Addr` is not callable, so the code
 /// address goes through a slot read back as the Callable.
+/// :param hook: The hook's code address, a routine taking the entity's `Addr`.
+/// :param entity: The entity to pass it.
 routine run_hook(hook: Addr, entity: Addr) -> Void
     block entry()
         claim slot : @Addr <- hook
@@ -169,6 +179,8 @@ routine run_hook(hook: Addr, entity: Addr) -> Void
         return()
 
 /// The number of strong handles, a snapshot.
+/// :param header: The entity's header.
+/// :returns: The strong handle count.
 #[export("ingrid_roam_strong_count"), inline]
 routine roam_strong_count(header: @RoamHeader) -> U64
     block entry()
@@ -181,6 +193,7 @@ routine roam_strong_count(header: @RoamHeader) -> U64
 // ── Weak observers ─────────────────────────────────────────────────────────
 
 /// Adds a weak observer. Only ever called through a handle already held, so the header is alive.
+/// :param header: The entity's header.
 #[export("ingrid_roam_observe")]
 routine roam_observe(header: @RoamHeader) -> Void
     block entry()
@@ -204,6 +217,8 @@ routine roam_observe(header: @RoamHeader) -> Void
         return()
 
 /// Drops a weak observer. The last one leaving a dead entity frees the header.
+/// :param header: The entity's header.
+/// :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity has no weak observer.
 #[export("ingrid_roam_unobserve")]
 routine roam_unobserve(header: @RoamHeader) -> Void
     block entry()
@@ -237,6 +252,8 @@ routine roam_unobserve(header: @RoamHeader) -> Void
         return()
 
 /// Whether the entity's data has been freed. Safe on a tombstone: it reads only the `dead` flag.
+/// :param header: The entity's header.
+/// :returns: True when the `dead` flag is set.
 #[export("ingrid_roam_is_destroyed"), inline]
 routine roam_is_destroyed(header: @RoamHeader) -> Bool
     block entry()
@@ -244,6 +261,7 @@ routine roam_is_destroyed(header: @RoamHeader) -> Bool
 
 /// The collector's finalizer, after the free hook has torn the entity down: marks it dead and frees the header
 /// unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
+/// :param header: The entity's header.
 #[export("ingrid_roam_cyclic_finalize")]
 routine roam_cyclic_finalize(header: @RoamHeader) -> Void
     block entry()
@@ -263,6 +281,8 @@ routine roam_cyclic_finalize(header: @RoamHeader) -> Void
 // ── Escape ─────────────────────────────────────────────────────────────────
 
 /// Whether the entity has reached another task.
+/// :param header: The entity's header.
+/// :returns: True when the `escaped` flag is set.
 #[export("ingrid_roam_is_escaped"), inline]
 routine roam_is_escaped(header: @RoamHeader) -> Bool
     block entry()
@@ -272,6 +292,8 @@ routine roam_is_escaped(header: @RoamHeader) -> Bool
 /// the lock from now on. Runs on the owner before the handle is published, so nothing races the flip. Escape is a
 /// property of the graph, since whatever the entity reaches the other task reaches too. Iterative over an explicit
 /// worklist (a deep graph would overflow the stack), and already-escaped headers end the walk, so cycles terminate.
+/// :param header: The entity's header.
+/// :throws: Crashes with `MemoryAllocationError` when the worklist cannot grow.
 #[export("ingrid_roam_promote")]
 routine roam_promote(header: @RoamHeader) -> Void
     shared alloc : @Allocator  <- make_c_heap_allocator()
@@ -317,6 +339,7 @@ routine roam_promote(header: @RoamHeader) -> Void
 /// only deepens the hold, so a member routine calling itself never deadlocks. A contended entry registers the wait
 /// with the deadlock detector and yields to the scheduler instead of spinning, so a holder parked on this worker
 /// can run.
+/// :param header: The entity's header.
 #[export("ingrid_roam_lock_enter"), inline]
 routine roam_lock_enter(header: @RoamHeader) -> Void
     block entry()
@@ -360,6 +383,8 @@ routine roam_lock_enter(header: @RoamHeader) -> Void
 
 /// Leaves one level of the lock. The outermost exit frees it, clearing the holder before the flag so a waiter never
 /// sees the old holder.
+/// :param header: The entity's header.
+/// :throws: Crashes with `IntegerOverflowError` when an escaped entity's lock depth is already 0.
 #[export("ingrid_roam_lock_exit"), inline]
 routine roam_lock_exit(header: @RoamHeader) -> Void
     block entry()
@@ -383,6 +408,8 @@ routine roam_lock_exit(header: @RoamHeader) -> Void
 
 /// The byte offset of RoamHeader's field `i` (in declaration order), for the test that compares this layout with
 /// RazorForge's `RoamController[T]`, or 0xFFFFFFFFFFFFFFFF past the last field.
+/// :param i: The field's position, from 0.
+/// :returns: The field's byte offset from the start of the header, or `U64.MAX` when `i` is past the last field.
 #[export("ingrid_roam_field_offset")]
 routine roam_field_offset(i: U64) -> U64
     shared header : @RoamHeader <- uninit

@@ -8,29 +8,57 @@
 import Standard::Format
 import Standard::Os
 
+/// C's calloc: `count` zeroed values of `size` bytes each.
+/// :param count: How many values.
+/// :param size: The size of one value, in bytes.
+/// :returns: The memory, or null when the allocation fails.
 #[external("c"), symbol("calloc")]
 private routine c_calloc(count: USize, size: USize) -> Addr
 
+/// C's malloc: `size` bytes, not initialized.
+/// :param size: How many bytes.
+/// :returns: The memory, or null when the allocation fails.
 #[external("c"), symbol("malloc")]
 private routine c_malloc(size: USize) -> Addr
 
+/// C's realloc: resizes the block at `ptr` to `size` bytes, keeping its contents up to the smaller size.
+/// :param ptr: The block, or null to allocate a new one.
+/// :param size: The new size, in bytes.
+/// :returns: The block, maybe moved, or null when the allocation fails. It may be null when `size` is 0.
 #[external("c"), symbol("realloc")]
 private routine c_realloc(ptr: Addr, size: USize) -> Addr
 
+/// C's free: gives the block at `ptr` back to the heap.
+/// :param ptr: The block, or null to do nothing.
 #[external("c"), symbol("free")]
 private routine c_free(ptr: Addr) -> Void
 
+/// C's memmove: copies `n` bytes from `src` to `dst`. The regions may overlap.
+/// :param dst: Where the bytes go.
+/// :param src: Where the bytes come from.
+/// :param n: How many bytes.
+/// :returns: `dst`.
 #[external("c"), symbol("memmove")]
 private routine c_memmove(dst: Addr, src: Addr, n: USize) -> Addr
 
+/// C's memset: fills `n` bytes at `dst` with the low byte of `value`.
+/// :param dst: Where to fill.
+/// :param value: The byte to fill with.
+/// :param n: How many bytes.
+/// :returns: `dst`.
 #[external("c"), symbol("memset")]
 private routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
 
 /// A runtime error with the crash report and exit status (the runtime library).
+/// :param error_type: The error's name, such as `OutOfMemoryError`.
+/// :param message: What went wrong.
 #[external("c"), symbol("__rf_throw"), noreturn]
 private routine rf_throw(error_type: CStr, message: CStr) -> Void
 
 /// "Failed to <what> <bytes> bytes", as an OutOfMemoryError.
+/// :param what: What failed, such as "allocate".
+/// :param bytes: How many bytes were asked for.
+/// :throws: Always crashes with `OutOfMemoryError`.
 #noreturn
 private routine out_of_memory(what: Bytes, bytes: U64) -> Void
     block entry()
@@ -42,7 +70,11 @@ private routine out_of_memory(what: Bytes, bytes: U64) -> Void
         terminator.store(0x00)
         rf_throw("OutOfMemoryError", buffer.to<@CChar>().to<CStr>())
 
-/// bytes zeroed bytes.
+/// Allocates `bytes` zeroed bytes from the C heap.
+/// :param bytes: How many bytes.
+/// :returns: The memory.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
+///     does not fit in USize (on a 32-bit target).
 #export("rf_allocate_dynamic")
 routine rf_allocate_dynamic(bytes: U64) -> Addr
     block entry()
@@ -51,7 +83,11 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
             ? out_of_memory("allocate", bytes)
             : return(p)
 
-/// bytes bytes the caller writes before reading.
+/// Allocates `bytes` bytes from the C heap, not zeroed: the caller writes them before reading.
+/// :param bytes: How many bytes.
+/// :returns: The memory.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
+///     does not fit in USize (on a 32-bit target).
 #export("rf_allocate_dynamic_uninit")
 routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
     block entry()
@@ -61,13 +97,20 @@ routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
             : return(p)
 
 /// Frees a block. Null is fine.
+/// :param ptr: The block to free, or null.
 #export("rf_invalidate")
 routine rf_invalidate(ptr: Addr) -> Void
     block entry()
         c_free(ptr)
         return()
 
-/// Reallocating to 0 bytes may give null: that is a free, not a failure.
+/// Resizes the block at `ptr` to `bytes` bytes, keeping its contents up to the smaller size. Reallocating to 0 bytes
+/// may give null: that is a free, not a failure.
+/// :param ptr: The block, or null to allocate a new one.
+/// :param bytes: The new size, in bytes.
+/// :returns: The block, maybe moved.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
+///     does not fit in USize (on a 32-bit target).
 #export("rf_reallocate_dynamic")
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
     block entry()
@@ -76,7 +119,11 @@ routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
             ? out_of_memory("reallocate to", bytes)
             : return(p)
 
-/// Copies bytes bytes, the regions may overlap. A null address or no bytes does nothing.
+/// Copies `bytes` bytes from `src_address` to `dst_address`. The regions may overlap. A null address or no bytes
+/// does nothing.
+/// :param dst_address: Where the bytes go.
+/// :param src_address: Where the bytes come from.
+/// :param bytes: How many bytes.
 #export("rf_copy_bytes_at")
 routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -> Void
     block entry()
@@ -87,7 +134,11 @@ routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -
         c_memmove(inttoptr<USize, Addr>(dst_address), inttoptr<USize, Addr>(src_address), bytes)
         return()
 
-/// Fills bytes bytes with value. A null address or no bytes does nothing.
+/// Fills `bytes` bytes at `dest_address` with `value`. A null address or no bytes does nothing.
+/// :param dest_address: Where to fill.
+/// :param value: The byte to fill with.
+/// :param bytes: How many bytes.
+/// :throws: Crashes with `IntegerOverflowError` when `bytes` does not fit in USize (on a 32-bit target).
 #export("rf_set_bytes_at")
 routine rf_set_bytes_at(dest_address: USize, value: U8, bytes: U64) -> Void
     block entry()
@@ -111,12 +162,17 @@ record RegionBlock
     prev : @RegionBlock
 
 /// The current top: release to it to free everything allocated after.
+/// :returns: The mark, the address of this thread's top block (0 when the region is empty).
 #export("rf_region_mark")
 routine rf_region_mark() -> U64
     block entry()
         return(ptrtoint<@RegionBlock, U64>(REGION_TOP.load()))
 
-/// bytes zeroed bytes in this thread's region.
+/// Allocates `bytes` zeroed bytes in this thread's region, freed by the release to a mark taken before.
+/// :param bytes: How many bytes.
+/// :returns: The memory.
+/// :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
+///     plus the block header does not fit in USize.
 #export("rf_region_alloc")
 routine rf_region_alloc(bytes: U64) -> Addr
     block entry()
@@ -129,7 +185,8 @@ routine rf_region_alloc(bytes: U64) -> Addr
         REGION_TOP.store(node)
         return(node.stride(1))
 
-/// Frees every block allocated since mark.
+/// Frees every block allocated since `mark`, in this thread's region.
+/// :param mark: A mark from rf_region_mark.
 #export("rf_region_release")
 routine rf_region_release(mark: U64) -> Void
     shared stop : @RegionBlock = inttoptr<U64, @RegionBlock>(mark)

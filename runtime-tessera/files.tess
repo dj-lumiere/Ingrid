@@ -17,33 +17,45 @@ global RESULT_LEN: @USize
 global MAP_DELTA: @USize
 
 /// The length of the last buffer a routine here returned.
+/// :returns: The length in bytes, 0 after a failure.
 #export("rf_get_result_len")
 routine rf_get_result_len() -> U64
     block entry()
         return(RESULT_LEN.load().to<U64>())
 
+/// The offset from the last sub-range mapping's base to the byte asked for, 0 for a whole-file mapping.
+/// :returns: The delta in bytes.
 #export("rf_file_map_delta")
 routine rf_file_map_delta() -> U64
     block entry()
         return(MAP_DELTA.load().to<U64>())
 
 /// A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
+/// :returns: The address 1.
 routine empty_map() -> @Byte
     block entry()
         return(inttoptr<USize, @Byte>(1))
 
 /// A failure: no buffer, length 0.
+/// :returns: Null.
 routine no_result() -> @Byte
     block entry()
         RESULT_LEN.store(0)
         return(null)
 
+/// Records `len` as the result's length and hands `buf` back.
+/// :param buf: The result buffer.
+/// :param len: Its length.
+/// :returns: `buf`.
 routine result(buf: @Byte, len: USize) -> @Byte
     block entry()
         RESULT_LEN.store(len)
         return(buf)
 
-/// len bytes at s, copied into a malloc'd, NUL-terminated buffer, as the result.
+/// `len` bytes at `s`, copied into a malloc'd, NUL-terminated buffer, as the result.
+/// :param s: The bytes.
+/// :param len: The number of bytes.
+/// :returns: The buffer, or null (length 0) when the allocation fails.
 routine bytes_result(s: @Byte, len: USize) -> @Byte
     block entry()
         buf : Addr = c_malloc(len.add(1))
@@ -56,6 +68,8 @@ routine bytes_result(s: @Byte, len: USize) -> @Byte
         return(result(buf.to<@Byte>(), len))
 
 /// Text from the malloc heap (read_all and the like with heap()) made NUL-terminated in place, as the result.
+/// :param r: The text, or the failure.
+/// :returns: The buffer, or null (length 0) on a failure or when the reallocation fails.
 routine owned_result(r: Result<Bytes, FsError>) -> @Byte
     block entry()
         when r
@@ -75,6 +89,8 @@ routine owned_result(r: Result<Bytes, FsError>) -> @Byte
         return(no_result())
 
 /// A Directory's path from the malloc heap (Directory.current and the like with heap()), as the result.
+/// :param r: The directory, or the failure.
+/// :returns: The path, or null (length 0) on a failure.
 routine path_result(r: Result<Directory, FsError>) -> @Byte
     block entry()
         when r
@@ -82,6 +98,8 @@ routine path_result(r: Result<Directory, FsError>) -> @Byte
             .Failure(error) -> return(owned_result(.Failure(error)))
 
 /// A File's path from the malloc heap (absolute, canonical with heap()), as the result.
+/// :param r: The file, or the failure.
+/// :returns: The path, or null (length 0) on a failure.
 routine file_path_result(r: Result<File, FsError>) -> @Byte
     block entry()
         when r
@@ -89,23 +107,31 @@ routine file_path_result(r: Result<File, FsError>) -> @Byte
             .Failure(error) -> return(owned_result(.Failure(error)))
 
 /// The malloc heap as an Allocator, so what Standard::Os hands back is freed by rf_invalidate.
+/// :returns: The C heap allocator.
 routine heap() -> Allocator
     block entry()
         return(make_c_heap_allocator())
 
-/// A counted path as Bytes.
+/// A counted path as Bytes, borrowed. A negative `len` gives an empty path.
+/// :param path: The path's bytes.
+/// :param len: The path's length.
+/// :returns: The path.
 routine path_of(path: @Byte, len: S32) -> Bytes
     block entry()
         return(Bytes.from_ptr(path, len.max(0).to<USize>()))
 
 /// 0 for a success, -1 for a failure.
+/// :param r: The outcome.
+/// :returns: 0 or -1.
 routine status(r: Result<Unit, FsError>) -> S32
     block entry()
         branch r.is_success()
             ? return(0)
             : return(-1)
 
-/// Whole seconds from nanoseconds since 1970.
+/// Whole seconds from nanoseconds since 1970, rounded toward zero.
+/// :param ns: The nanoseconds.
+/// :returns: The seconds.
 routine seconds(ns: S64) -> S64
     block entry()
         return(ns.div(1000000000))
@@ -117,6 +143,9 @@ record ResultBuffer
     len : USize
     cap : USize
 
+/// Starts an empty buffer with room for `cap` bytes (at least 16).
+/// :param cap: The starting capacity.
+/// :returns: False when the allocation fails.
 routine ResultBuffer.start(self: @Self, cap: USize) -> Bool
     block entry()
         buf : Addr = c_malloc(cap.max(16))
@@ -125,7 +154,9 @@ routine ResultBuffer.start(self: @Self, cap: USize) -> Bool
         self.cap.store(cap.max(16))
         return(buf.is_not_null())
 
-/// Room for n more bytes and the NUL: false if the buffer can't grow.
+/// Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
+/// :param n: The bytes about to be added.
+/// :returns: True when there is room.
 routine ResultBuffer.room(self: @Self, n: USize) -> Bool
     block entry()
         filled      : USize = self.len.load().add(n)
@@ -144,6 +175,9 @@ routine ResultBuffer.room(self: @Self, n: USize) -> Bool
         self.cap.store(cap)
         return(true)
 
+/// Appends `n` bytes, for which {ResultBuffer.room} made room.
+/// :param data: The bytes.
+/// :param n: The number of bytes.
 routine ResultBuffer.put(self: @Self, data: @Byte, n: USize) -> Void
     block entry()
         c_memcpy(self.buf.load().stride(self.len.load()), data, n)
@@ -151,6 +185,8 @@ routine ResultBuffer.put(self: @Self, data: @Byte, n: USize) -> Void
         next_len.store_into(self.len)
         return()
 
+/// Appends one byte, for which {ResultBuffer.room} made room.
+/// :param b: The byte.
 routine ResultBuffer.byte(self: @Self, b: Byte) -> Void
     block entry()
         slot : @Byte = self.buf.load().stride(self.len.load())
@@ -159,6 +195,8 @@ routine ResultBuffer.byte(self: @Self, b: Byte) -> Void
         next_len.store_into(self.len)
         return()
 
+/// NUL-terminates the buffer and hands it over as the result.
+/// :returns: The buffer, its length recorded as the result's.
 routine ResultBuffer.finish(self: @Self) -> @Byte
     block entry()
         n          : USize = self.len.load()
@@ -166,6 +204,8 @@ routine ResultBuffer.finish(self: @Self) -> @Byte
         terminator.store(0x00)
         return(result(self.buf.load(), n))
 
+/// Frees the buffer and records a failure.
+/// :returns: Null.
 routine ResultBuffer.fail(self: @Self) -> @Byte
     block entry()
         c_free(self.buf.load())
@@ -190,6 +230,8 @@ record OpenFile
     end    : USize
 
 /// The open file for a handle, or null.
+/// :param fd: The handle.
+/// :returns: The open file, or null when `fd` is out of range or not open.
 routine open_file(fd: S32) -> @OpenFile
     block entry()
         branch fd.lt(0).bitor(fd.ge(256))
@@ -200,7 +242,11 @@ routine open_file(fd: S32) -> @OpenFile
             ? return(of)
             : return(null)
 
-/// mode: 0 read, 1 write, 2 append. A handle, or -1.
+/// Opens a file. mode: 0 read, 1 write, 2 append. A handle, or -1.
+/// :param path: The file's path.
+/// :param path_len: The path's length.
+/// :param mode: 0 read, 1 write, 2 append.
+/// :returns: The handle, or -1 for a bad mode, a failure to open, no buffer, or no free slot (256 at once).
 #export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     block entry()
@@ -238,7 +284,8 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
         f.close()
         return(-1)
 
-/// Writes a writer's pending bytes: whether they all went.
+/// Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
+/// :returns: True when nothing was pending or everything was written.
 routine OpenFile.drain(self: @Self) -> Bool
     block entry()
         n : USize = self.end.load()
@@ -251,6 +298,7 @@ routine OpenFile.drain(self: @Self) -> Bool
 
 /// Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
 /// end).
+/// :returns: True when bytes were read.
 routine OpenFile.refill(self: @Self) -> Bool
     block entry()
         got : Result<USize, FsError> = self.file.read_bytes_result(self.buffer.load(), FILE_BUFFER)
@@ -269,6 +317,8 @@ routine OpenFile.refill(self: @Self) -> Bool
         self.eof.store(true)
         return(false)
 
+/// Writes the pending bytes, closes the file, and frees its handle. A handle not open does nothing.
+/// :param fd: The handle.
 #export("rf_file_close")
 routine rf_file_close(fd: S32) -> Void
     block entry()
@@ -283,6 +333,8 @@ routine rf_file_close(fd: S32) -> Void
         return()
 
 /// The rest of the file from where the reader is.
+/// :param fd: The handle.
+/// :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't grow.
 #export("rf_file_read_all")
 routine rf_file_read_all(fd: S32) -> @Byte
     shared of  : @OpenFile     = open_file(fd)
@@ -329,7 +381,9 @@ routine rf_file_read_all(fd: S32) -> @Byte
         of.eof.store(true)
         return(out.finish())
 
-/// One line, without its '\n' (and any '\r').
+/// One line, without its '\n' (and any '\r'). At the end of the file the line is empty.
+/// :param fd: The handle.
+/// :returns: The line, or null (length 0) for a handle not open or when the buffer can't grow.
 #export("rf_file_read_line")
 routine rf_file_read_line(fd: S32) -> @Byte
     shared of  : @OpenFile     = open_file(fd)
@@ -369,6 +423,9 @@ routine rf_file_read_line(fd: S32) -> @Byte
         jump next()
 
 /// Up to count bytes: fewer only at the end of the file.
+/// :param fd: The handle.
+/// :param count: The most bytes to read.
+/// :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
 #export("rf_file_read_bytes")
 routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
     shared of  : @OpenFile     = open_file(fd)
@@ -402,7 +459,11 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
         next_start.store_into(of.start)
         jump next()
 
-/// The bytes written (all of them, or 0 on a failure).
+/// Writes through the handle's buffer: bytes that fill a whole buffer go straight out.
+/// :param fd: The handle.
+/// :param ptr: The bytes.
+/// :param len: The number of bytes.
+/// :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
 #export("rf_file_write")
 routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
     shared of : @OpenFile = open_file(fd)
@@ -434,6 +495,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
         next_end.store_into(of.end)
         return(len)
 
+/// Writes a writer's pending bytes. A handle not open does nothing.
+/// :param fd: The handle.
 #export("rf_file_flush")
 routine rf_file_flush(fd: S32) -> Void
     block entry()
@@ -445,6 +508,8 @@ routine rf_file_flush(fd: S32) -> Void
         return()
 
 /// Whether a read has reached the end of the file and nothing it read is left.
+/// :param fd: The handle.
+/// :returns: True at the end, or for a handle not open.
 #export("rf_file_is_eof")
 routine rf_file_is_eof(fd: S32) -> Bool
     block entry()
@@ -457,6 +522,9 @@ routine rf_file_is_eof(fd: S32) -> Bool
 
 /// The NUL-terminated path's whole file, malloc'd and NUL-terminated, into data: its length, or -1. (The I/O threads
 /// call it at once, so the length comes back here, not through RESULT_LEN.)
+/// :param cpath: The NUL-terminated path.
+/// :param data: Where the buffer goes.
+/// :returns: The length, or -1 on a failure.
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     block entry()
         claim alloc : @Allocator <- heap()
@@ -478,7 +546,11 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
         c_free(text.data)
         return(-1)
 
-/// len bytes of data as the NUL-terminated path's whole file: len, or -1.
+/// `len` bytes of `data` as the NUL-terminated path's whole file: `len`, or -1.
+/// :param cpath: The NUL-terminated path.
+/// :param data: The bytes.
+/// :param len: The number of bytes, negative for none.
+/// :returns: The bytes written, or -1 on a failure.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     block entry()
         r : Result<Unit, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).write_all_result(Bytes.from_ptr(
@@ -489,7 +561,13 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 
 // -- paths (no OS calls) -------------------------------------------------------------
 
-/// a + "/" + b (no separator added after one already there): RazorForge joins with '/' on every OS.
+/// a + "/" + b (no separator added after one already there, or after an empty a): RazorForge joins with '/' on
+/// every OS.
+/// :param a: The first path.
+/// :param a_len: Its length.
+/// :param b: The second path.
+/// :param b_len: Its length.
+/// :returns: The joined path, or null (length 0) when the allocation fails.
 #export("rf_fs_join_path")
 routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
     shared first  : Bytes         = path_of(a, a_len)
@@ -516,6 +594,9 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
         return(out.finish())
 
 /// The parent directory: "/a/b/c" gives "/a/b", "a/b" gives "a", "file.txt" gives "", and "/" stays the root.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The parent, or null (length 0) when the allocation fails.
 #export("rf_fs_parent_path")
 routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -523,6 +604,9 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
         return(bytes_result(p.data, p.count()))
 
 /// The last component: "/a/b/file.txt" gives "file.txt".
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The name, or null (length 0) when the allocation fails.
 #export("rf_fs_file_name")
 routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -530,6 +614,9 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
         return(bytes_result(n.data, n.count()))
 
 /// The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The stem, or null (length 0) when the allocation fails.
 #export("rf_fs_file_stem")
 routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -537,6 +624,9 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
         return(bytes_result(s.data, s.count()))
 
 /// The extension without its dot: "file.txt" gives "txt", "file" gives "".
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The extension, or null (length 0) when the allocation fails.
 #export("rf_fs_extension")
 routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -545,36 +635,65 @@ routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
 
 // -- existence, kind, permissions ------------------------------------------------------
 
+/// Whether something is at the path.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True when it exists.
 #export("rf_fs_exists")
 routine rf_fs_exists(path: @Byte, len: S32) -> Bool
     block entry()
         return(File.at(path_of(path, len)).is_present())
 
+/// Whether the path is a file.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True for a file.
 #export("rf_fs_is_file")
 routine rf_fs_is_file(path: @Byte, len: S32) -> Bool
     block entry()
         return(File.at(path_of(path, len)).is_file())
 
+/// Whether the path is a directory.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True for a directory.
 #export("rf_fs_is_directory")
 routine rf_fs_is_directory(path: @Byte, len: S32) -> Bool
     block entry()
         return(Directory.at(path_of(path, len)).is_present())
 
+/// Whether the path can be read.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True when it is readable.
 #export("rf_fs_can_read")
 routine rf_fs_can_read(path: @Byte, len: S32) -> Bool
     block entry()
         return(File.at(path_of(path, len)).is_accessible(Access.Read))
 
+/// Whether the path can be written.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True when it is writable.
 #export("rf_fs_can_write")
 routine rf_fs_can_write(path: @Byte, len: S32) -> Bool
     block entry()
         return(File.at(path_of(path, len)).is_accessible(Access.Write))
 
+/// Whether the path can be executed.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: True when it is executable.
 #export("rf_fs_can_execute")
 routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
     block entry()
         return(File.at(path_of(path, len)).is_accessible(Access.Execute))
 
+/// Sets or clears the read-only permission of the path.
+/// :param path: The path.
+/// :param len: Its length.
+/// :param readonly: True to make it read-only.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_set_readonly")
 routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
     block entry()
@@ -582,18 +701,28 @@ routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
 
 // -- directories, copy, move, remove ---------------------------------------------------
 
+/// Creates a directory, whose parent must exist.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_create_dir")
 routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
     block entry()
         return(status(Directory.at(path_of(path, len)).create_result()))
 
-/// Like mkdir -p: it already existing is fine.
+/// Creates a directory and its missing parents, like mkdir -p: it already existing is fine.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_create_dir_all")
 routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
     block entry()
         return(status(Directory.at(path_of(path, len)).create_all_result()))
 
-/// A file, or an empty directory.
+/// Removes a file, or an empty directory (a link is removed, not followed).
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_remove")
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
     shared p : Bytes = path_of(path, len)
@@ -609,13 +738,22 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
             ? return(status(Directory.at(p).delete_result()))
             : return(status(File.at(p).delete_result()))
 
-/// A directory and everything in it (a link is removed, not followed), or a file.
+/// Removes a directory and everything in it (a link is removed, not followed), or a file.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_remove_all")
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
     block entry()
         claim alloc : @Allocator <- heap()
         return(status(Directory.at(path_of(path, len)).delete_all_result(alloc)))
 
+/// Copies a file.
+/// :param src: The source path.
+/// :param src_len: Its length.
+/// :param dst: The destination path.
+/// :param dst_len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry()
@@ -626,6 +764,9 @@ routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
             : return(-1)
 
 /// A rename between filesystems, as a copy and a removal.
+/// :param a: The source path.
+/// :param b: The destination path.
+/// :returns: 0, or -1 when the copy or the removal fails.
 routine move_across(a: Bytes, b: Bytes) -> S32
     block entry()
         copied : Result<U64, FsError> = File.at(a).copy_to_result(File.at(b))
@@ -634,6 +775,11 @@ routine move_across(a: Bytes, b: Bytes) -> S32
             : return(-1)
 
 /// Renames, replacing what is there. Between filesystems it is a copy and a removal.
+/// :param src: The source path.
+/// :param src_len: Its length.
+/// :param dst: The destination path.
+/// :param dst_len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_move")
 routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     shared a : Bytes = path_of(src, src_len)
@@ -648,7 +794,12 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
             ? return(move_across(a, b))
             : return(-1)
 
-/// 0 moved, 1 the destination exists (nothing moved), -1 an error.
+/// Renames unless the destination exists. Between filesystems it is a copy and a removal.
+/// :param src: The source path.
+/// :param src_len: Its length.
+/// :param dst: The destination path.
+/// :param dst_len: Its length.
+/// :returns: 0 moved, 1 the destination exists (nothing moved), -1 an error.
 #export("rf_fs_move_no_replace")
 routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     shared a : Bytes = path_of(src, src_len)
@@ -671,7 +822,10 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 
 // -- listings --------------------------------------------------------------------------
 
-/// v in decimal into out: the digit count.
+/// Writes `v` in decimal into `out`.
+/// :param v: The value.
+/// :param out: Where the digits go, room for 20.
+/// :returns: The digit count.
 routine decimal(v: U64, out: @Byte) -> USize
     block entry()
         claim rev : @Array<Byte, 24> <- uninit
@@ -694,6 +848,11 @@ routine decimal(v: U64, out: @Byte) -> USize
 
 /// One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0), with
 /// '\n' before every entry but the first.
+/// :param name: The entry's name.
+/// :param typed: True for the typed form.
+/// :param is_dir: True for a directory (typed only).
+/// :param mtime: The modification time in Unix seconds (typed only).
+/// :returns: False when the buffer can't grow.
 routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, mtime: S64) -> Bool
     block entry()
         claim digits : @Array<Byte, 24> <- uninit
@@ -736,6 +895,10 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
         return(true)
 
 /// The entries, with each one's kind and modification time when typed (a link followed where the OS tells).
+/// :param path: The directory's path.
+/// :param len: Its length.
+/// :param typed: True for `<d|f><mtime> <name>` entries, false for names only.
+/// :returns: The listing, or null (length 0) when the directory can't be opened or the buffer can't grow.
 routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     shared out  : @ResultBuffer <- ResultBuffer { buf: null, len: 0, cap: 0 }
     shared iter : @DirIter      <- uninit
@@ -776,12 +939,18 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
             : return(out.fail())
 
 /// The entries' names, '\n' between them ("." and ".." left out).
+/// :param path: The directory's path.
+/// :param len: Its length.
+/// :returns: The listing, or null (length 0) on a failure.
 #export("rf_fs_list_dir")
 routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte
     block entry()
         return(list_directory(path, len, false))
 
-/// `<d|f><mtime> <name>` per entry.
+/// `<d|f><mtime> <name>` per entry, '\n' between them.
+/// :param path: The directory's path.
+/// :param len: Its length.
+/// :returns: The listing, or null (length 0) on a failure.
 #export("rf_fs_list_dir_typed")
 routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -795,32 +964,46 @@ global META_CREATED: @S64
 global META_IS_DIRECTORY: @Bool
 global META_READONLY: @Bool
 
+/// The size from the last {rf_fs_metadata}.
+/// :returns: The size in bytes.
 #export("rf_fs_meta_size")
 routine rf_fs_meta_size() -> S64
     block entry()
         return(META_SIZE.load())
 
+/// The modification time from the last {rf_fs_metadata}.
+/// :returns: Unix seconds.
 #export("rf_fs_meta_modified")
 routine rf_fs_meta_modified() -> S64
     block entry()
         return(META_MODIFIED.load())
 
+/// The creation time from the last {rf_fs_metadata}.
+/// :returns: Unix seconds.
 #export("rf_fs_meta_created")
 routine rf_fs_meta_created() -> S64
     block entry()
         return(META_CREATED.load())
 
+/// Whether the last {rf_fs_metadata} was of a directory.
+/// :returns: True for a directory.
 #export("rf_fs_meta_is_directory")
 routine rf_fs_meta_is_directory() -> Bool
     block entry()
         return(META_IS_DIRECTORY.load())
 
+/// Whether the last {rf_fs_metadata} was of a read-only path.
+/// :returns: True when read-only.
 #export("rf_fs_meta_readonly")
 routine rf_fs_meta_readonly() -> Bool
     block entry()
         return(META_READONLY.load())
 
-/// Where the filesystem doesn't record a creation time, the modification time stands in.
+/// Reads the path's metadata for the `rf_fs_meta_` accessors. Where the filesystem doesn't record a creation time,
+/// the modification time stands in.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure (the cached values stay as they were).
 #export("rf_fs_metadata")
 routine rf_fs_metadata(path: @Byte, len: S32) -> S32
     block entry()
@@ -835,6 +1018,10 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
         META_READONLY.store(info.readonly)
         return(0)
 
+/// The size of the file at the path.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The size in bytes, or -1 on a failure.
 #export("rf_fs_file_size")
 routine rf_fs_file_size(path: @Byte, len: S32) -> S64
     block entry()
@@ -845,17 +1032,25 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 
 // -- the working directory and well-known directories -------------------------------------
 
+/// The working directory.
+/// :returns: The path, or null (length 0) on a failure.
 #export("rf_fs_current_dir")
 routine rf_fs_current_dir() -> @Byte
     block entry()
         claim alloc : @Allocator <- heap()
         return(path_result(Directory.current_result(alloc)))
 
+/// Changes the working directory.
+/// :param path: The directory's path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_set_current_dir")
 routine rf_fs_set_current_dir(path: @Byte, len: S32) -> S32
     block entry()
         return(status(Directory.at(path_of(path, len)).set_current_result()))
 
+/// The directory for temporary files.
+/// :returns: The path, or null (length 0) on a failure.
 #export("rf_fs_temp_dir")
 routine rf_fs_temp_dir() -> @Byte
     block entry()
@@ -863,6 +1058,7 @@ routine rf_fs_temp_dir() -> @Byte
         return(path_result(Directory.temp_result(alloc)))
 
 /// The user's home directory, or null when it can't be told.
+/// :returns: The path, or null (length 0).
 #export("rf_fs_home_dir")
 routine rf_fs_home_dir() -> @Byte
     block entry()
@@ -870,12 +1066,18 @@ routine rf_fs_home_dir() -> @Byte
         return(path_result(Directory.home_result(alloc)))
 
 /// Makes the file if it is missing, and sets its modification time to now.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_touch")
 routine rf_fs_touch(path: @Byte, len: S32) -> S32
     block entry()
         return(status(File.at(path_of(path, len)).touch_result()))
 
 /// The absolute path by the text alone (links kept).
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The absolute path, or null (length 0) on a failure.
 #export("rf_fs_absolute_path")
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -883,6 +1085,9 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
         return(file_path_result(File.at(path_of(path, len)).absolute_result(alloc)))
 
 /// The path with links, ".", and ".." resolved. It must exist.
+/// :param path: The path.
+/// :param len: Its length.
+/// :returns: The canonical path, or null (length 0) on a failure.
 #export("rf_fs_canonical_path")
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     block entry()
@@ -890,6 +1095,10 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
         return(file_path_result(File.at(path_of(path, len)).canonical_result(alloc)))
 
 /// Makes the file exactly size bytes, creating, extending (zeros) or truncating it: 0, or -1.
+/// :param path: The path.
+/// :param path_len: Its length.
+/// :param size: The new size in bytes.
+/// :returns: 0, or -1 on a failure.
 #export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
     shared p : Bytes = path_of(path, path_len)
@@ -917,6 +1126,7 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
 
 /// A read-only view is read front to back, and within half the physical memory is read in at once: a bigger one
 /// would evict the pages it just read, so it pages in on demand.
+/// :param m: The mapping.
 routine advise(m: Mapping) -> Void
     block entry()
         m.advise_sequential()
@@ -928,6 +1138,10 @@ routine advise(m: Mapping) -> Void
         return()
 
 /// A whole file mapped: the view (its length as the result), the empty-map marker for an empty file, or null.
+/// :param path: The path.
+/// :param len: Its length.
+/// :param write: True for a writable view, false for a read-only one.
+/// :returns: The view, the empty-map marker, or null on a failure.
 routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.store(0)
@@ -954,6 +1168,12 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 /// A window [offset, offset + length) of a file, clamped to its end and aligned down for the OS: the base
 /// (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker for an empty window, or
 /// null.
+/// :param path: The path.
+/// :param len: Its length.
+/// :param offset: The window's first byte in the file.
+/// :param count: The window's length.
+/// :param write: True for a writable view, false for a read-only one.
+/// :returns: The base, the empty-map marker, or null on a failure.
 routine map_window(path: @Byte, len: S32, offset: USize, count: USize, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.store(0)
@@ -980,21 +1200,41 @@ routine map_window(path: @Byte, len: S32, offset: USize, count: USize, write: Bo
         RESULT_LEN.store(0)
         return(empty_map())
 
+/// Maps a whole file read-only.
+/// :param path: The path.
+/// :param path_len: Its length.
+/// :returns: The view, the empty-map marker for an empty file, or null on a failure.
 #export("rf_file_map_path")
 routine rf_file_map_path(path: @Byte, path_len: S32) -> @Byte
     block entry()
         return(map_whole(path, path_len, false))
 
+/// Maps a whole file for reading and writing.
+/// :param path: The path.
+/// :param path_len: Its length.
+/// :returns: The view, the empty-map marker for an empty file, or null on a failure.
 #export("rf_file_map_path_rw")
 routine rf_file_map_path_rw(path: @Byte, path_len: S32) -> @Byte
     block entry()
         return(map_whole(path, path_len, true))
 
+/// Maps a window of a file read-only, its offset from the base in {rf_file_map_delta}.
+/// :param path: The path.
+/// :param path_len: Its length.
+/// :param offset: The window's first byte in the file.
+/// :param count: The window's length.
+/// :returns: The base, the empty-map marker for an empty window, or null on a failure.
 #export("rf_file_map_path_range")
 routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
         return(map_window(path, path_len, offset, count, false))
 
+/// Maps a window of a file for reading and writing, its offset from the base in {rf_file_map_delta}.
+/// :param path: The path.
+/// :param path_len: Its length.
+/// :param offset: The window's first byte in the file.
+/// :param count: The window's length.
+/// :returns: The base, the empty-map marker for an empty window, or null on a failure.
 #export("rf_file_map_path_range_rw")
 routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
@@ -1002,6 +1242,8 @@ routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, cou
 
 /// Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
 /// (the empty marker) does nothing.
+/// :param ptr: The mapping's base.
+/// :param len: The delta plus the length.
 #export("rf_file_unmap")
 routine rf_file_unmap(ptr: @Byte, len: USize) -> Void
     block entry()
@@ -1012,6 +1254,9 @@ routine rf_file_unmap(ptr: @Byte, len: USize) -> Void
         m.unmap()
         return()
 
+/// Writes a mapping's dirty pages back to the file, ignoring a failure. A null view or length 0 does nothing.
+/// :param ptr: The mapping's base.
+/// :param len: The delta plus the length.
 #export("rf_file_map_flush")
 routine rf_file_map_flush(ptr: @Byte, len: USize) -> Void
     block entry()

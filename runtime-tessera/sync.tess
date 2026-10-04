@@ -13,18 +13,34 @@ import Standard::Os
 
 // -- the C library -------------------------------------------------------------------
 
+/// C's `calloc`: allocates `count` zeroed objects of `size` bytes each.
+/// :param count: The number of objects.
+/// :param size: The size of one object in bytes.
+/// :returns: The zeroed block, or null when the allocation fails.
 #[external("c"), symbol("calloc")]
 routine c_calloc(count: USize, size: USize) -> Addr
 
+/// C's `realloc`: resizes the block at `ptr` to `size` bytes, keeping its contents up to the smaller size.
+/// :param ptr: The block to resize, or null to allocate a new one.
+/// :param size: The new size in bytes.
+/// :returns: The resized block (possibly moved), or null when the allocation fails.
 #[external("c"), symbol("realloc")]
 routine c_realloc(ptr: Addr, size: USize) -> Addr
 
+/// C's `malloc`: allocates `size` uninitialized bytes.
+/// :param size: The size in bytes.
+/// :returns: The block, or null when the allocation fails.
 #[external("c"), symbol("malloc")]
 routine c_malloc(size: USize) -> Addr
 
+/// C's `free`: gives back a block from the C heap.
+/// :param ptr: The block to free, or null to do nothing.
 #[external("c"), symbol("free")]
 routine c_free(ptr: Addr) -> Void
 
+/// C's `getenv`: the value of an environment variable.
+/// :param name: The variable's name.
+/// :returns: The NUL-terminated value, or null when the variable is unset.
 #[external("c"), symbol("getenv")]
 routine c_getenv(name: CStr) -> @Byte
 
@@ -32,12 +48,18 @@ routine c_getenv(name: CStr) -> @Byte
 
 /// Frees a block from rf_allocate_dynamic (Ingrid/tessera/memory.tess, in the program): a result box. A C heap block,
 /// so free reclaims it here too.
+/// :param ptr: The block to free.
 routine rf_invalidate(ptr: Addr) -> Void
     block entry()
         c_free(ptr)
         return()
 
-/// count zeroed Ts, or the runtime's out-of-memory error naming what.
+/// Allocates `count` zeroed `T`s from the C heap.
+/// :typeparam T: The element type.
+/// :param count: The number of elements.
+/// :param what: The message of the error raised when the allocation fails.
+/// :returns: The first of the zeroed elements.
+/// :throws: Crashes with `OutOfMemoryError` (message `what`) when `calloc` fails.
 routine zeroed<T>(count: USize, what: CStr) -> @T
 require T: typename
     block entry()
@@ -49,31 +71,42 @@ require T: typename
 // -- the clock and the calling thread ------------------------------------------------
 
 /// The monotonic nanosecond clock the scheduler's timers use, for the timed-await bridge.
+/// :returns: The current monotonic time in nanoseconds.
 #export("rf_monotonic_now_ns")
 routine rf_monotonic_now_ns() -> U64
     block entry()
         return(monotonic_ns())
 
+/// Win32's `GetCurrentThreadId`: the calling thread's identifier.
+/// :returns: The thread identifier.
 #[external("c"), symbol("GetCurrentThreadId"), callconv("stdcall"), target(os: "windows")]
 routine c_get_current_thread_id() -> U32
 
+/// POSIX `pthread_self`: the calling thread's handle.
+/// :returns: The thread handle.
 #[external("c"), symbol("pthread_self"), target(os: not "windows")]
 routine c_pthread_self() -> Addr
 
 /// A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
 /// detecting a re-entrant claim).
+/// :returns: The Win32 thread identifier, widened to U64.
 #[export("rf_current_thread_id"), target(os: "windows")]
 routine rf_current_thread_id() -> U64
     block entry()
         return(c_get_current_thread_id().to<U64>())
 
+/// A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
+/// detecting a re-entrant claim).
+/// :returns: The `pthread_self` handle as a U64.
 #[export("rf_current_thread_id"), target(os: not "windows")]
 routine rf_current_thread_id() -> U64
     block entry()
         return(ptrtoint<Addr, U64>(c_pthread_self()))
 
 /// The environment variable name as a positive integer, or 0 when it is unset, empty, not a number, or not
-/// positive.
+/// positive. Only the leading decimal digits count, and a value too large saturates at U64's maximum.
+/// :param name: The variable's name.
+/// :returns: The parsed value, or 0.
 routine env_positive(name: CStr) -> U64
     shared text  : @Byte = c_getenv(name)
     shared value : @U64  <- 0
@@ -100,7 +133,11 @@ routine env_positive(name: CStr) -> U64
 // -- the crash handler of this library's Tessera code --------------------------------
 
 /// A crash in this library's Tessera code (a broken stdlib contract) is a RazorForge runtime error, with the same
-/// crash report and exit status as any other: the crash's name is the error type.
+/// crash report and exit status as any other: the crash's name is the error type. The name is cut to 127 bytes and
+/// the message (with its place) to 1023.
+/// :param name: The kind of failure, which becomes the error type.
+/// :param message: What happened.
+/// :param place: Where the crash was raised, or null for no place.
 #[export("tessera_crash_handler"), noreturn]
 routine runtime_crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Void
     shared kind     : @Array<Byte, 128>  <- uninit

@@ -60,13 +60,16 @@ record Coro
     sp               : Addr  // its stack pointer while it isn't running
     resumer_sp       : Addr  // the resumer's stack pointer while it runs: where a yield goes back to
 
-/// Read again at every call: after a switch the thread may be another one.
+/// The coroutine running on this thread. Read again at every call: after a switch the thread may be another one.
+/// :returns: The running coroutine, or null on a plain thread.
 #noinline
 routine current_coro() -> @Coro
     block entry()
         c : @Coro = CURRENT_CORO.load()
         return(c)
 
+/// Takes the next completion stamp, shared by coroutines and threaded tasks.
+/// :returns: The stamp, starting at 1.
 routine next_completion_seq() -> U64
     block entry()
         seq : U64 = COMPLETION_SEQ.atomic_fetch_add(1)
@@ -85,6 +88,9 @@ routine coro_trampoline() -> Void
         switch_stack(self.sp, self.resumer_sp.load())
         unreachable
 
+/// Reserves a coroutine stack from Standard::Fiber's stack allocator.
+/// :param size: The stack's reserve in bytes.
+/// :returns: The stack's bottom, or null when it can't be reserved.
 routine stack_alloc(size: USize) -> Addr
     block entry()
         stacks : Allocator                     = make_stack_allocator()
@@ -92,6 +98,8 @@ routine stack_alloc(size: USize) -> Addr
         stack  : Addr                          = alloc.call(stacks.state, size)
         return(stack)
 
+/// Gives a coroutine stack back to Standard::Fiber's stack allocator.
+/// :param stack: The stack's bottom, from {stack_alloc}.
 routine stack_free(stack: Addr) -> Void
     block entry()
         stacks : Allocator                    = make_stack_allocator()
@@ -101,6 +109,11 @@ routine stack_free(stack: Addr) -> Void
 
 /// A coroutine whose body is entry(userdata), on a stack of stack_size bytes (0: DEFAULT_STACK). It starts when it
 /// is first resumed. Null for a null entry.
+/// :param entry: The coroutine's body.
+/// :param userdata: The argument passed to `entry`.
+/// :param stack_size: The stack's reserve in bytes, or 0 for `DEFAULT_STACK`.
+/// :returns: The new coroutine, or null when `entry` is null.
+/// :throws: Crashes with `OutOfMemoryError` when the control block or the stack can't be allocated.
 #export("rf_coro_create")
 routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_size: USize) -> @Coro
     block entry()
@@ -128,7 +141,9 @@ routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_siz
         rf_throw("OutOfMemoryError",
             "Failed to reserve coroutine stack (out of address space or commit limit)")
 
-/// Switches into coro until it parks or finishes: its status then (CORO_PARKED or CORO_COMPLETED).
+/// Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
+/// :param coro: The coroutine to run.
+/// :returns: Its status then (`CORO_PARKED` or `CORO_COMPLETED`), `CORO_COMPLETED` for a null `coro`.
 #export("rf_coro_resume")
 routine rf_coro_resume(coro: @Coro) -> U32
     block entry()
@@ -156,6 +171,9 @@ routine coro_switch_out() -> Void
         switch_stack(self.sp, self.resumer_sp.load())
         return()
 
+/// A coroutine's status, a `CORO_` value.
+/// :param coro: The coroutine, or null.
+/// :returns: Its status, `CORO_COMPLETED` for a null `coro`.
 #export("rf_coro_status_get")
 routine rf_coro_status_get(coro: @Coro) -> U32
     block entry()
@@ -164,6 +182,7 @@ routine rf_coro_status_get(coro: @Coro) -> U32
             : return(coro.status.atomic_load())
 
 /// The coroutine running on this thread, or null.
+/// :returns: The running coroutine, or null on a plain thread.
 #export("rf_coro_current")
 routine rf_coro_current() -> @Coro
     block entry()
@@ -171,6 +190,7 @@ routine rf_coro_current() -> @Coro
 
 /// The current logical task, for Roamed's task-keyed lock: the coroutine (the same across worker migration) or,
 /// outside one, the OS thread. Only equality matters.
+/// :returns: The coroutine's address, or the OS thread's identifier outside a coroutine.
 #export("rf_current_task_id")
 routine rf_current_task_id() -> U64
     block entry()
@@ -179,7 +199,9 @@ routine rf_current_task_id() -> U64
             ? return(rf_current_thread_id())
             : return(ptrtoint<Addr, U64>(self))
 
-/// Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed.
+/// Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
+/// null `coro` does nothing.
+/// :param coro: The coroutine.
 #export("rf_coro_request_cancel")
 routine rf_coro_request_cancel(coro: @Coro) -> Void
     block entry()
@@ -189,6 +211,9 @@ routine rf_coro_request_cancel(coro: @Coro) -> Void
         coro.cancel_requested.atomic_store(1)
         return()
 
+/// Whether a coroutine was asked to stop.
+/// :param coro: The coroutine, or null.
+/// :returns: 1 when cancellation was requested, else 0 (0 for a null `coro`).
 #export("rf_coro_is_cancel_requested")
 routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
     block entry()
@@ -196,7 +221,9 @@ routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
             ? return(0)
             : return(coro.cancel_requested.atomic_load())
 
-/// Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon).
+/// Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon). A null
+/// `coro` does nothing.
+/// :param coro: The coroutine to free.
 #export("rf_coro_delete")
 routine rf_coro_delete(coro: @Coro) -> Void
     block entry()
@@ -215,7 +242,8 @@ routine rf_coro_delete(coro: @Coro) -> Void
         return()
 
 /// execute(): the worker that completes the coroutine frees it. Set before it is spawned, so before any worker
-/// can reach its completion.
+/// can reach its completion. A null `coro` does nothing.
+/// :param coro: The coroutine.
 #export("rf_coro_set_detached")
 routine rf_coro_set_detached(coro: @Coro) -> Void
     block entry()
@@ -227,6 +255,9 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
 
 /// An owned value was constructed: frame (a node in the owning scope) becomes the running coroutine's top. Outside a
 /// coroutine nothing is tracked.
+/// :param frame: The node, in the scope owning the value.
+/// :param value_ptr: The value.
+/// :param destroy_fn: What destroys the value if the coroutine is abandoned.
 #export("rf_coro_cf_push")
 routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
     destroy_fn: Callable<(Addr,), Void>) -> Void
@@ -242,7 +273,8 @@ routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
         return()
 
 /// The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
-/// it is.
+/// it is. Outside a coroutine nothing happens.
+/// :param frame: The node pushed for the value.
 #export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
     block entry()
@@ -257,7 +289,9 @@ routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
         return()
 
 /// A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
-/// construction order), then the coroutine and its stack are freed. A completed one is just freed.
+/// construction order), then the coroutine and its stack are freed. A completed one is just freed. An abandoned one
+/// is marked `CORO_CANCELLED` and given a completion stamp if it had none. A null `coro` does nothing.
+/// :param coro: The coroutine to abandon.
 #export("rf_coro_abandon")
 routine rf_coro_abandon(coro: @Coro) -> Void
     block entry()

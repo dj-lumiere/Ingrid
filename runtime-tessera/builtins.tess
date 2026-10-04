@@ -32,20 +32,42 @@ record EmutlsArray
     size : USize
     data : @Addr
 
+/// The C runtime's `_aligned_malloc` on Windows: `size` bytes aligned to `align`.
+/// :param size: The size in bytes.
+/// :param align: The alignment, a power of two.
+/// :returns: The block, or null when the allocation fails.
 #[external("c"), symbol("_aligned_malloc"), target(os: "windows")]
 routine c_aligned_malloc(size: USize, align: USize) -> Addr
 
+/// POSIX `posix_memalign`: allocates `size` bytes aligned to `align` and stores the block in `out`.
+/// :param out: Where the block's address goes.
+/// :param align: The alignment, a power of two and a multiple of the pointer size.
+/// :param size: The size in bytes.
+/// :returns: 0 on success, an error number otherwise.
 #[external("c"), symbol("posix_memalign"), target(os: not "windows")]
 routine c_posix_memalign(out: @Addr, align: USize, size: USize) -> CInt
 
+/// C's `memset`: fills `n` bytes at `dst` with the low byte of `value`.
+/// :param dst: The memory to fill.
+/// :param value: The byte value to fill with.
+/// :param n: The number of bytes.
+/// :returns: `dst`.
 #[external("c"), symbol("memset")]
 routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
 
+/// Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `_aligned_malloc`.
+/// :param size: The size in bytes.
+/// :param align: The wanted alignment.
+/// :returns: The block, or null when the allocation fails.
 #target(os: "windows")
 routine aligned_alloc(size: USize, align: USize) -> Addr
     block entry()
         return(c_aligned_malloc(size, align.max(sizeof<Addr>())))
 
+/// Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `posix_memalign`.
+/// :param size: The size in bytes.
+/// :param align: The wanted alignment.
+/// :returns: The block, or null when the allocation fails.
 #target(os: not "windows")
 routine aligned_alloc(size: USize, align: USize) -> Addr
     block entry()
@@ -54,7 +76,11 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
             ? return(p.load())
             : return(null)
 
-/// This thread's object for control, made (from its initial value, or zeroed) on the thread's first use.
+/// This thread's object for `control`, made (from its initial value, or zeroed) on the thread's first use. The
+/// first use of `control` on any thread gives it the next free slot.
+/// :param control: The thread-local variable's control block.
+/// :returns: The calling thread's copy of the variable.
+/// :throws: Crashes with `OutOfMemoryError` when the thread's slot table can't be allocated.
 #export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
     block entry()

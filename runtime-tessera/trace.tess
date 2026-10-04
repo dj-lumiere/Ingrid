@@ -20,7 +20,10 @@ preset TRACE_SHADOW:   CInt = 2
 /// The exit status of every runtime crash: 0x52, 'R' for Runtime error.
 preset CRASH_STATUS: CInt = 0x52
 
-/// value in hex: digits digits (zeros in front), uppercase or not, on stderr.
+/// Writes `value` in hex on stderr: `digits` digits (zeros in front, higher digits dropped), uppercase or not.
+/// :param value: The value to write.
+/// :param digits: The number of digits, at most 16.
+/// :param upper: True for `A`-`F`, false for `a`-`f`.
 routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
     block entry()
         claim text : @Array<Byte, 16> <- uninit
@@ -47,8 +50,9 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
 
 // -- the crash -----------------------------------------------------------------------
 
-/// Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault; a stack
-/// overflow is reported as a crash in every mode.
+/// Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault. On
+/// Windows a stack overflow is reported as a crash in every mode.
+/// :param mode: `TRACE_NONE`, `TRACE_PLATFORM`, or `TRACE_SHADOW`.
 #export("__rf_set_trace_mode")
 routine rf_set_trace_mode(mode: CInt) -> Void
     block entry()
@@ -56,6 +60,7 @@ routine rf_set_trace_mode(mode: CInt) -> Void
         install_fault_handlers()
         return()
 
+/// Writes the stack trace the trace mode asks for on stderr: the native stack, an empty shadow stack, or nothing.
 routine print_stack_for_mode() -> Void
     block entry()
         mode : CInt = TRACE_MODE.load()
@@ -72,7 +77,10 @@ routine print_stack_for_mode() -> Void
         print_platform_stack()
         return()
 
-/// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status.
+/// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status. Standard
+/// output is flushed first.
+/// :param error_type: The error's type name, or null for `Error`.
+/// :param message: What happened, or null for none.
 #[export("__rf_throw"), noreturn]
 routine rf_throw(error_type: CStr, message: CStr) -> Void
     block entry()
@@ -98,18 +106,39 @@ preset SYMBOL_INFO_MAX_NAME: USize = 80
 preset SYMBOL_INFO_NAME:     USize = 84
 preset MAX_SYM_NAME:         U32   = 2000
 
+/// Win32's `RtlCaptureStackBackTrace`: the return addresses of the calling thread's frames.
+/// :param skip: The frames to skip from the top.
+/// :param count: The most frames to capture.
+/// :param frames: Where the addresses go.
+/// :param hash: Where a hash of the trace goes, or null.
+/// :returns: The number of frames captured.
 #[external("c"), symbol("RtlCaptureStackBackTrace"), callconv("stdcall"), target(os: "windows")]
 routine c_capture_stack_back_trace(skip: U32, count: U32, frames: @Addr, hash: Addr) -> U16
 
+/// Win32's `GetCurrentProcess`: the pseudo-handle of the current process.
+/// :returns: The handle.
 #[external("c"), symbol("GetCurrentProcess"), callconv("stdcall"), target(os: "windows")]
 routine c_get_current_process() -> Addr
 
+/// DbgHelp's `SymInitialize`: loads the symbol handler for a process.
+/// :param process: The process.
+/// :param search_path: The symbol search path, or null for the default.
+/// :param invade: Nonzero to load the symbols of every loaded module.
+/// :returns: Nonzero on success.
 #[external("c"), symbol("SymInitialize"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
 
+/// DbgHelp's `SymFromAddr`: the symbol at an address.
+/// :param process: The process.
+/// :param address: The address to look up.
+/// :param displacement: Where the offset into the symbol goes, or null.
+/// :param symbol: The SYMBOL_INFO the symbol is written into.
+/// :returns: Nonzero when a symbol was found.
 #[external("c"), symbol("SymFromAddr"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
 
+/// Writes the calling thread's native stack on stderr (up to 64 frames), each frame by its symbol name or else its
+/// address.
 #target(os: "windows")
 routine print_platform_stack() -> Void
     // SYMBOL_INFO and room for its name, 8-aligned
@@ -149,12 +178,21 @@ routine print_platform_stack() -> Void
 
 // -- the platform stack: POSIX -------------------------------------------------------
 
+/// `backtrace`: the return addresses of the calling thread's frames.
+/// :param frames: Where the addresses go.
+/// :param size: The most frames to capture.
+/// :returns: The number of frames captured.
 #[external("c"), symbol("backtrace"), target(os: not "windows")]
 routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 
+/// `backtrace_symbols`: a text for each address, in one malloc block the caller frees.
+/// :param frames: The addresses.
+/// :param size: The number of addresses.
+/// :returns: The texts, or null when the allocation fails.
 #[external("c"), symbol("backtrace_symbols"), target(os: not "windows")]
 routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
 
+/// Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
 /// Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
 #target(os: not "windows")
 routine print_platform_stack() -> Void
@@ -194,18 +232,29 @@ routine print_platform_stack() -> Void
 /// trace lives): set at startup through rf_set_stack_overflow_report, null until then.
 global STACK_OVERFLOW_REPORT: @Callable<(U64,), Void>
 
+/// Win32's `AddVectoredExceptionHandler`: registers a handler every exception passes through.
+/// :param first: Nonzero to call it before the handlers already registered.
+/// :param handler: The handler.
+/// :returns: The handler's registration, or null on failure.
 #[external("c"), symbol("AddVectoredExceptionHandler"), callconv("stdcall"), target(os: "windows")]
 routine c_add_vectored_exception_handler(first: U32,
     handler: Callable<#callconv("stdcall"), (@Addr,), CInt>) -> Addr
 
+/// Win32's `GetCurrentThreadStackLimits`: the bounds of the calling thread's stack.
+/// :param low: Where the lowest address goes.
+/// :param high: Where the highest address goes.
 #[external("c"), symbol("GetCurrentThreadStackLimits"), callconv("stdcall"), target(os: "windows")]
 routine c_get_current_thread_stack_limits(low: @USize, high: @USize) -> Void
 
+/// Win32's `SetThreadStackGuarantee`: the stack kept back for the calling thread's stack-overflow handling.
+/// :param size: The size in bytes to set, and where the previous size goes.
+/// :returns: Nonzero on success.
 #[external("c"), symbol("SetThreadStackGuarantee"), callconv("stdcall"), target(os: "windows")]
 routine c_set_thread_stack_guarantee(size: @U32) -> CInt
 
 /// Sets the routine that reports a stack overflow (it writes the report and exits with status 82). The program's
 /// entry calls this right after setting the trace mode.
+/// :param report: The report, called with the thread's stack size in bytes.
 #export("rf_set_stack_overflow_report")
 routine rf_set_stack_overflow_report(report: Callable<(U64,), Void>) -> Void
     block entry()
@@ -221,6 +270,7 @@ routine rf_thread_stack_guarantee() -> Void
         c_set_thread_stack_guarantee(size)
         return()
 
+/// Does nothing: only Windows keeps stack back for the exception handler.
 #[export("rf_thread_stack_guarantee"), target(os: not "windows")]
 routine rf_thread_stack_guarantee() -> Void
     block entry()
@@ -229,6 +279,8 @@ routine rf_thread_stack_guarantee() -> Void
 /// Every exception passes through here first. A stack overflow is reported as a crash (exit status 82), with how deep
 /// the calls went and the stack they used up. In a tracing mode any other fault prints the stack, then the search
 /// goes on (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
+/// :param pointers: The EXCEPTION_POINTERS, whose first word is the exception record.
+/// :returns: 0 (EXCEPTION_CONTINUE_SEARCH).
 #[target(os: "windows"), callconv("stdcall")]
 routine exception_handler(pointers: @Addr) -> CInt
     block entry()
@@ -261,6 +313,9 @@ routine exception_handler(pointers: @Addr) -> CInt
         report.call(size)
         return(0)
 
+/// The name of a Windows exception code.
+/// :param code: The exception code.
+/// :returns: The name, or `Exception` for a code not listed.
 #target(os: "windows")
 routine exception_name(code: U32) -> CStr
     block entry()
@@ -271,6 +326,7 @@ routine exception_name(code: U32) -> CStr
             code.eq(0xC00000FD) -> return("StackOverflow")
             else                -> return("Exception")
 
+/// Keeps stack back for the main thread's exception handler and registers {exception_handler} first in line.
 #target(os: "windows")
 routine install_fault_handlers() -> Void
     block entry()
@@ -285,24 +341,36 @@ preset SIGABRT: CInt = 6
 preset SIGFPE:  CInt = 8
 preset SIGSEGV: CInt = 11
 
+/// C's `signal`: sets the handler of a signal.
+/// :param signo: The signal.
+/// :param handler: The handler, or null for the default.
+/// :returns: The previous handler.
 #[external("c"), symbol("signal"), target(os: not "windows")]
 routine c_signal(signo: CInt, handler: Callable<(CInt,), Void>) -> Addr
 
+/// C's `raise`: sends a signal to the calling thread.
+/// :param signo: The signal.
+/// :returns: 0 on success.
 #[external("c"), symbol("raise"), target(os: not "windows")]
 routine c_raise(signo: CInt) -> CInt
 
+/// Linux's `SIGBUS`.
+/// :returns: 7.
 #target(os: "linux")
 routine sigbus() -> CInt
     block entry()
         return(7)
 
+/// macOS's `SIGBUS`.
+/// :returns: 10.
 #target(os: "macos")
 routine sigbus() -> CInt
     block entry()
         return(10)
 
 /// Prints the fault's name and the stack, then restores the default and raises the signal again, so the process
-/// ends with the status the signal gives.
+/// ends with the status the signal gives. With tracing off, it only re-raises.
+/// :param signo: The signal that came.
 #target(os: not "windows")
 routine fault_handler(signo: CInt) -> Void
     block entry()
@@ -319,6 +387,9 @@ routine fault_handler(signo: CInt) -> Void
         c_raise(signo)
         return()
 
+/// The name of a fault signal.
+/// :param signo: The signal.
+/// :returns: The name, or `Signal` for a signal not listed.
 #target(os: not "windows")
 routine signal_name(signo: CInt) -> CStr
     block entry()
@@ -330,6 +401,7 @@ routine signal_name(signo: CInt) -> CStr
             signo.eq(SIGABRT)  -> return("Abort")
             else               -> return("Signal")
 
+/// Sets {fault_handler} for SIGSEGV, SIGFPE, SIGILL, SIGBUS, and SIGABRT.
 #target(os: not "windows")
 routine install_fault_handlers() -> Void
     block entry()
