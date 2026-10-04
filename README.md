@@ -23,7 +23,8 @@ on their own:
 Roamed entity runtime and its cycle collector, the crash handler, SipHash, the xoshiro256** generator with its
 splitmix64 seeding, JSON string escaping, the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
 numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
-arithmetic, rounding, conversions, and DPD encoding, one engine for the three widths). More
+arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
+widths). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
@@ -70,7 +71,8 @@ text, the binary-float exports against correctly rounded results from mpmath,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
 before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
-D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the word division on its edge cases, the Roamed counts and lock, the cycle
+D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal
+transcendentals against mpmath, the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.tess`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the

@@ -1,0 +1,1604 @@
+// The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
+//
+// A function is evaluated in binary multiprecision (dec_mp.tess) with a proven bound on its error, starting at 128
+// bits for D32 and D64 and 192 bits for D128. When every value within the bound rounds to the same decimal of the
+// target width, that decimal is the correctly rounded result; otherwise the value sits too close to a rounding
+// midpoint and the evaluation is repeated with twice the bits (Ziv's strategy), up to 1024. A function value of a
+// decimal argument is transcendental, and so never exactly a midpoint, except where it is rational (2^n, 10^n,
+// x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to even. The special
+// values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come first, the way
+// RazorForge's engines gave them. Every result is reduced: the trailing zeros of the rounded coefficient are
+// stripped, as RazorForge's engines did for every function value.
+
+import Standard::Format
+
+/// The precision a computation goes up to: 1024 bits (dec_mp.tess allows a few limbs more inside a function).
+preset DEC_ZIV_TOP: USize = 16
+
+/// Which function dec_ziv evaluates.
+preset DEC_EXP: U32 = 0
+preset DEC_EXPM1: U32 = 1
+preset DEC_EXP2: U32 = 2
+preset DEC_EXP10: U32 = 3
+preset DEC_LOG: U32 = 4
+preset DEC_LOG1P: U32 = 5
+preset DEC_LOG2: U32 = 6
+preset DEC_LOG10: U32 = 7
+preset DEC_ASIN: U32 = 8
+preset DEC_ACOS: U32 = 9
+preset DEC_ATAN: U32 = 10
+preset DEC_SINH: U32 = 11
+preset DEC_COSH: U32 = 12
+preset DEC_TANH: U32 = 13
+preset DEC_ASINH: U32 = 14
+preset DEC_ACOSH: U32 = 15
+preset DEC_ATANH: U32 = 16
+preset DEC_ERF: U32 = 17
+preset DEC_ERFC: U32 = 18
+preset DEC_TGAMMA: U32 = 19
+preset DEC_LGAMMA: U32 = 20
+preset DEC_SIN: U32 = 21
+preset DEC_COS: U32 = 22
+preset DEC_TAN: U32 = 23
+preset DEC_CBRT: U32 = 24
+preset DEC_POW: U32 = 25
+preset DEC_ATAN2: U32 = 26
+
+// ── constants, series ─────────────────────────────────────────────────────────────────────────────
+
+/// Entry i of DEC_CONSTANTS at n limbs: truncated (2 units) from a 1280-bit value that is itself within 2^-1280.
+/// :param i: Its index in DEC_CONSTANTS.
+/// :param n: The precision in limbs.
+/// :returns: Entry i of DEC_CONSTANTS at n limbs.
+routine me_const(i: USize, n: USize) -> Me
+    block entry()
+        table : @U64 = DEC_CONSTANTS.to<@U64>()
+        exp   : S64  = DEC_CONSTANT_EXP.getitem(i)
+        v     : Mp   = mp_const(table, i.mul(20), exp, n)
+        return(me_of(v, 3.0))
+
+/// The bound of s widened by an absolute error below 2^e.
+/// :param s: The sum.
+/// :param e: The power of two that bounds the added error.
+/// :param n: The precision in limbs.
+/// :returns: The bound of s widened by an absolute error below 2^e.
+routine me_plus_abs(s: Me, e: S64, n: USize) -> Me
+    block entry()
+        bits  : S64 = n.to<S64>().mul(64)
+        units : F64 = f64_pow2(e.sub(s.v.exp).add(1).add(bits))
+        branch s.v.is_zero(n)
+            ? return({ v: s.v, err: F64.from_bits(0x7FF0000000000000) })
+            : return(s.widen(units))
+
+/// Whether a series term no longer matters: below 2^-(64n + 8) of the sum.
+/// :param term: The term.
+/// :param sum: The sum so far.
+/// :param n: The precision in limbs.
+/// :returns: Whether a series term no longer matters.
+routine me_is_negligible(term: Me, sum: Me, n: USize) -> Bool
+    block entry()
+        bits : S64  = n.to<S64>().mul(64).add(8)
+        tiny : Bool = term.v.exp.lt(sum.v.exp.sub(bits))
+        return(term.v.is_zero(n).bitor(tiny))
+
+/// An exact small integer.
+/// :param k: The integer.
+/// :param n: The precision in limbs.
+/// :returns: An exact small integer.
+routine me_int(k: S64, n: USize) -> Me
+    block entry()
+        m : Me = me_of_u128(k.abs_diff(0).to<U128>(), n)
+        return(m.with_sign(k.lt(0)))
+
+/// x at fewer limbs: the top `to` limbs of the `from`-limb value, the bound rescaled plus a truncation.
+/// :param x: The value.
+/// :param from: The limbs it has.
+/// :param to: The limbs it keeps.
+/// :returns: x at fewer limbs.
+routine me_narrow(x: Me, from: USize, to: USize) -> Me
+    shared src  : @Mp   <- x.v
+    shared dst  : @Mp   <- Mp.zero()
+    shared skip : USize = from.sub(to)
+
+    block entry()
+        jump copy(0)
+
+    block copy(k: USize)
+        done : Bool = k.ge(to)
+        branch done
+            ? seal()
+            : one(k)
+
+    block one(k: USize)
+        word : U64 = src.m.getitem(k.add(skip))
+        dst.m.setitem(k, word)
+        jump copy(k.add(1))
+
+    block seal()
+        x.v.neg.store_into(dst.neg)
+        x.v.exp.store_into(dst.exp)
+        scale : F64 = f64_pow2(skip.to<S64>().mul(-64))
+        err   : F64 = x.err.mul(scale).add(2.0).mul(MP_UP)
+        return({ v: dst.load(), err: err })
+
+// ── exp, ln ───────────────────────────────────────────────────────────────────────────────────────
+
+/// e^x for |x| < 2^16: x = k ln 2 + r, then e^(r / 2^s) by its Taylor series and s squarings (each doubling the
+/// relative error, which the bounds follow), times 2^k.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: e^x for |x| < 2^16.
+routine me_exp(x: Me, n: USize) -> Me
+    shared kf    : F64 = x.v.to_f64(n).mul(1.4426950408889634)
+    shared k     : S64 = kf.round().to<S64>()
+    shared s     : S64 = n.to<S64>().mul(2).add(4)
+    shared ln2k  : Me  = me_mul_u64(me_const(DEC_LN2, n), k.abs_diff(0), n).with_sign(k.lt(0))
+    shared small : Me  = me_sub(x, ln2k, n).ldexp(s.neg(), n)
+    shared one   : Me  = me_int(1, n)
+
+    block entry()
+        jump series(small, me_add(one, small, n), 2)
+
+    block series(term: Me, sum: Me, i: U64)
+        next : Me   = me_div_u64(me_mul(term, small, n), i, n)
+        done : Bool = me_is_negligible(next, sum, n)
+        branch done
+            ? square(me_plus_abs(sum, next.v.exp.add(1), n), 0)
+            : series(next, me_add(sum, next, n), i.add(1))
+
+    block square(e: Me, j: S64)
+        done : Bool = j.ge(s)
+        branch done
+            ? return(e.ldexp(k, n))
+            : square(me_mul(e, e, n), j.add(1))
+
+/// e^x - 1: below 1/16 its own series x + x^2/2 + ..., which keeps the relative accuracy near 0, else e^x - 1.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: e^x - 1.
+routine me_expm1(x: Me, n: USize) -> Me
+    block entry()
+        small : Bool = x.v.exp.le(-4)
+        branch small
+            ? series(x, x, 2)
+            : return(me_sub(me_exp(x, n), me_int(1, n), n))
+
+    block series(term: Me, sum: Me, i: U64)
+        next : Me   = me_div_u64(me_mul(term, x, n), i, n)
+        done : Bool = me_is_negligible(next, sum, n)
+        branch done
+            ? return(me_plus_abs(sum, next.v.exp.add(1), n))
+            : series(next, me_add(sum, next, n), i.add(1))
+
+/// ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+/// :param t: The argument, below 1/32 in magnitude.
+/// :param n: The precision in limbs.
+/// :returns: ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+routine me_ln1p_series(t: Me, n: USize) -> Me
+    block entry()
+        jump series(t, t, 2)
+
+    // power = t^(i - 1)
+    block series(power: Me, sum: Me, i: U64)
+        next_power : Me   = me_mul(power, t, n)
+        term       : Me   = me_div_u64(next_power, i, n)
+        odd        : Bool = i.bitand(1).eq(1)
+        signed     : Me   = odd
+            ? term
+            : term.negate()
+        done : Bool = me_is_negligible(term, sum, n)
+        branch done
+            ? return(me_plus_abs(sum, term.v.exp.add(1), n))
+            : series(next_power, me_add(sum, signed, n), i.add(1))
+
+/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the F64 logarithm of m, and ln m = y0 + ln(1 + t) with
+/// t = m e^-y0 - 1, which is below 2^-50, so its series ends after a few terms.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: ln x for x > 0.
+routine me_ln(x: Me, n: USize) -> Me
+    shared top : F64  = x.v.magnitude().top_f64(n)
+    shared low : Bool = top.lt(0.75)
+    shared e   : S64  = x.v.exp.sub(low.to<S64>())
+    shared m   : Me   = x.ldexp(e.neg(), n)
+    shared y0  : F64  = m.v.to_f64(n).ln()
+    shared y0m : Me   = me_exact(mp_of_f64(y0, n))
+    shared one : Me   = me_int(1, n)
+
+    block entry()
+        scaled : Me = me_mul(m, me_exp(y0m.negate(), n), n)
+        t      : Me = me_sub(scaled, one, n)
+        lnm    : Me = me_add(y0m, me_ln1p_series(t, n), n)
+        branch e.eq(0)
+            ? return(lnm)
+            : with_exponent(lnm)
+
+    block with_exponent(lnm: Me)
+        part : Me = me_mul(me_const(DEC_LN2, n), me_int(e, n), n)
+        return(me_add(part, lnm, n))
+
+/// ln(1 + t): its series below 1/32, else ln of the sum.
+/// :param t: The argument.
+/// :param n: The precision in limbs.
+/// :returns: ln(1 + t).
+routine me_ln1p(t: Me, n: USize) -> Me
+    block entry()
+        small : Bool = t.v.exp.le(-5)
+        branch small
+            ? return(me_ln1p_series(t, n))
+            : return(me_ln(me_add(me_int(1, n), t, n), n))
+
+// ── sin, cos, atan ────────────────────────────────────────────────────────────────────────────────
+
+/// Two values.
+record MePair
+    a : Me
+    b : Me
+
+/// sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below
+/// the first term left out).
+/// :param r: The argument.
+/// :param n: The precision in limbs.
+/// :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
+routine me_sincos(r: Me, n: USize) -> MePair
+    shared r2  : Me = me_mul(r, r, n)
+    shared one : Me = me_int(1, n)
+
+    block entry()
+        jump sine(r, r, 1)
+
+    // term = r^(2i - 1) / (2i - 1)!, signs alternating
+    block sine(term: Me, sum: Me, i: U64)
+        div  : U64  = i.mul(2).mul(i.mul(2).add(1))
+        next : Me   = me_div_u64(me_mul(term, r2, n), div, n).negate()
+        done : Bool = me_is_negligible(next, sum, n)
+        branch done
+            ? cosine(me_plus_abs(sum, next.v.exp, n), one, one, 1)
+            : sine(next, me_add(sum, next, n), i.add(1))
+
+    block cosine(s: Me, term: Me, sum: Me, i: U64)
+        div  : U64  = i.mul(2).sub(1).mul(i.mul(2))
+        next : Me   = me_div_u64(me_mul(term, r2, n), div, n).negate()
+        done : Bool = me_is_negligible(next, sum, n)
+        branch done
+            ? return({ a: s, b: me_plus_abs(sum, next.v.exp, n) })
+            : cosine(s, next, me_add(sum, next, n), i.add(1))
+
+/// atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
+/// :param d: The argument, below 2^-8 in magnitude.
+/// :param n: The precision in limbs.
+/// :returns: atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
+routine me_atan_series(d: Me, n: USize) -> Me
+    shared d2 : Me = me_mul(d, d, n)
+
+    block entry()
+        jump series(d, d, 3)
+
+    // power = d^(i - 2)
+    block series(power: Me, sum: Me, i: U64)
+        next_power : Me   = me_mul(power, d2, n)
+        term       : Me   = me_div_u64(next_power, i, n)
+        minus      : Bool = i.bitand(3).eq(3)
+        signed     : Me   = minus
+            ? term.negate()
+            : term
+        done : Bool = me_is_negligible(term, sum, n)
+        branch done
+            ? return(me_plus_abs(sum, term.v.exp, n))
+            : series(next_power, me_add(sum, signed, n), i.add(2))
+
+/// atan x: below 2^-8 its series; above 1 in magnitude pi/2 - atan(1/x); else from y0, the F64 arctangent:
+/// tan(y0 - atan x) = (sin y0 - x cos y0) / (cos y0 + x sin y0) = d is below 2^-50, and atan x = y0 - atan d.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: atan x.
+routine me_atan(x: Me, n: USize) -> Me
+    block entry()
+        small : Bool = x.v.exp.le(-8)
+        large : Bool = x.v.exp.ge(1).bitand(mp_compare_magnitude(x.v, mp_of_u128(1, 0, n), n).gt(0))
+        when
+            x.v.is_zero(n) -> return(x)
+            small          -> return(me_atan_series(x, n))
+            large          -> reciprocal()
+            else           -> newton()
+
+    block reciprocal()
+        inner   : Me = me_atan(me_div(me_int(1, n), x.magnitude(), n), n)
+        half_pi : Me = me_const(DEC_PI, n).ldexp(-1, n)
+        r       : Me = me_sub(half_pi, inner, n)
+        return(r.with_sign(x.v.neg))
+
+    block newton()
+        y0  : F64    = x.v.to_f64(n).atan()
+        y0m : Me     = me_exact(mp_of_f64(y0, n))
+        sc  : MePair = me_sincos(y0m, n)
+        num : Me     = me_sub(sc.a, me_mul(x, sc.b, n), n)
+        den : Me     = me_add(sc.b, me_mul(x, sc.a, n), n)
+        d   : Me     = me_div(num, den, n)
+        return(me_sub(y0m, me_atan_series(d, n), n))
+
+// ── decimal helpers ───────────────────────────────────────────────────────────────────────────────
+
+/// x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any
+/// use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few
+/// units of k).
+/// :param x: The operand.
+/// :param k: The integer to add.
+/// :returns: x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few units of k).
+routine dec_plus_int(x: Dec, k: S64) -> Dec
+    shared e : S64 = x.exp.min(0)
+
+    block entry()
+        deep : Bool = e.lt(-60).bitor(x.exp.gt(38))
+        branch deep
+            ? return(x)
+            : exact()
+
+    block exact()
+        scale : U256 = dec_p10(e.neg().min(76))
+        up    : S64  = x.exp.sub(e)
+        cx    : U256 = x.coeff.to<U256>().mul(dec_p10(up.min(76)))
+        ck    : U256 = k.abs_diff(0).to<U256>().mul(scale)
+        same  : Bool = x.neg.eq(k.lt(0))
+        when
+            same      -> return(dec_num(x.neg, cx.add(ck).to_wrap<U128>(), e))
+            cx.ge(ck) -> return(dec_num(x.neg, cx.sub(ck).to_wrap<U128>(), e))
+            else      -> return(dec_num(k.lt(0), ck.sub(cx).to_wrap<U128>(), e))
+
+/// |x| compared with c × 10^q: -1, 0, or 1.
+/// :param x: The operand.
+/// :param c: The coefficient compared with.
+/// :param q: Its exponent.
+/// :returns: |x| compared with c × 10^q.
+routine dec_compare_abs(x: Dec, c: U128, q: S64) -> S64
+    block entry()
+        branch x.coeff.eq(0)
+            ? return(-1)
+            : return(dec_compare_magnitude(x.coeff, x.exp, c, q))
+
+/// Whether a finite x is an integer.
+/// :param x: The operand.
+/// :returns: Whether a finite x is an integer.
+routine dec_is_integer(x: Dec) -> Bool
+    block entry()
+        when
+            x.coeff.eq(0) -> return(true)
+            x.exp.ge(0)   -> return(true)
+            x.exp.lt(-38) -> return(false)
+            else          -> test()
+
+    block test()
+        q : U128 = dec_div_p10(x.coeff, x.exp.neg())
+        return(q.mul(dec_p10_128(x.exp.neg())).eq(x.coeff))
+
+/// Whether a finite integer x is odd.
+/// :param x: The operand.
+/// :returns: Whether a finite integer x is odd.
+routine dec_is_odd_integer(x: Dec) -> Bool
+    block entry()
+        when
+            x.coeff.eq(0) -> return(false)
+            x.exp.gt(0)   -> return(false)
+            x.exp.lt(-38) -> return(false)
+            else          -> test()
+
+    block test()
+        q : U128 = dec_div_p10(x.coeff, x.exp.neg())
+        return(q.bitand(1).eq(1))
+
+// ── rounding to a decimal ─────────────────────────────────────────────────────────────────────────
+
+/// A rounding attempt: whether the band decided it, and the result.
+record DecTry
+    ok : Bool
+    d  : Dec
+
+/// The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when
+/// the band reaches a midpoint. A tie rule other than 0 settles a band on a midpoint: 1 takes it to be exactly
+/// there (half to even), 2 rounds the magnitude up, 3 down.
+/// The value is scaled by a power of ten so that its integer part has p digits (fewer at the bottom of the range)
+/// and the fraction decides.
+/// :param y: The value with its bound.
+/// :param f: The format the result rounds to.
+/// :param n: The precision in limbs.
+/// :param tie_rule: How a band on a midpoint is settled: 0 not at all, 1 half to even, 2 up, 3 down.
+/// :returns: The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the band reaches a midpoint.
+routine dec_round_me(y: Me, f: DecFormat, n: USize, tie_rule: U8) -> DecTry
+    shared neg : Bool = y.v.neg
+    shared ay  : Me   = y.magnitude()
+    shared p   : S64  = f.digits
+
+    block entry()
+        top : F64 = ay.v.top_f64(n)
+        lg  : F64 = top.log10().add(y.v.exp.to<F64>().mul(0.30102999566398120))
+        a   : S64 = lg.floor().to<S64>()
+        jump at(a.sub(p).add(1).max(f.qmin), 0)
+
+    // the digits at exponent q: z = |y| 10^-q
+    block at(q: S64, tries: S64)
+        high : Bool = q.gt(f.qmax.add(2))
+        branch high
+            ? return({ ok: true, d: dec_inf(neg) })
+            : scale(q, tries)
+
+    block scale(q: S64, tries: S64)
+        z : Me = me_scale10(ay, q.neg(), n)
+        jump split(q, tries, z)
+
+    block split(q: S64, tries: S64, z: Me)
+        int  : U128 = mp_floor_u128(z.v, n)
+        big  : Bool = int.ge(dec_p10_128(p))
+        tiny : Bool = int.lt(dec_p10_128(p.sub(1))).bitand(q.gt(f.qmin))
+        last : Bool = tries.ge(3)
+        when
+            last.bitnot().bitand(big)  -> at(q.add(1), tries.add(1))
+            last.bitnot().bitand(tiny) -> at(q.sub(1), tries.add(1))
+            else                       -> decide(q, z, int)
+
+    // the fraction against 1/2, with the band: |z| err 2^-64n
+    block decide(q: S64, z: Me, int: U128)
+        frac  : Mp   = mp_sub(z.v, mp_of_u128(int, 0, n), n)
+        half  : Mp   = mp_of_u128(1, -1, n)
+        d     : F64  = mp_sub(frac, half, n).to_f64(n)
+        zf    : F64  = z.v.to_f64(n)
+        band  : F64  = zf.mul(z.relative(n)).mul(2.0)
+        clear : Bool = d.abs().gt(band).bitand(band.lt(0.25))
+        up    : Bool = d.gt(0.0)
+        tie   : Bool = tie_rule.ne(0).bitand(clear.bitnot())
+        when
+            clear -> result(q, int.add(up.to<U128>()))
+            tie   -> result(q, int.add(dec_tie_step(tie_rule, int)))
+            else  -> return({ ok: false, d: dec_nan() })
+
+    block result(q: S64, c: U128)
+        carry : Bool = c.eq(dec_p10_128(p))
+        cc    : U128 = carry
+            ? dec_p10_128(p.sub(1))
+            : c
+        qq : S64 = q.add(carry.to<S64>())
+        when
+            cc.eq(0)      -> return({ ok: true, d: dec_num(neg, 0, f.qmin) })
+            qq.gt(f.qmax) -> return({ ok: true, d: dec_inf(neg) })
+            else          -> return({ ok: true, d: dec_num(neg, cc, qq).reduce(f) })
+
+/// floor(|x|) of an Mp below 2^128.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: floor(|x|) of an Mp below 2^128.
+routine mp_floor_u128(x: Mp, n: USize) -> U128
+    shared slot : @Mp <- x
+
+    block entry()
+        bits : S64 = n.to<S64>().mul(64)
+        when
+            x.is_zero(n)  -> return(0)
+            x.exp.le(0)   -> return(0)
+            x.exp.gt(128) -> return(U128.MAX)
+            else          -> gather(bits.sub(x.exp))
+
+    // the integer part is the mantissa shifted right by `drop` bits
+    block gather(drop: S64)
+        buf  : @Array<U64, 41> = slot.m.to<@U64>().to<@Array<U64, 41>>()
+        low  : U64             = mp_bits_at(buf, n, drop)
+        high : U64             = mp_bits_at(buf, n, drop.add(64))
+        v    : U128            = high.to<U128>().shl(64).bitor(low.to<U128>())
+        keep : S64             = x.exp
+        mask : U128            = keep.ge(128)
+            ? U128.MAX
+            : U128.shl(1, keep.max(0).to<U128>()).sub(1)
+        return(v.bitand(mask))
+
+// ── Ziv ───────────────────────────────────────────────────────────────────────────────────────────
+
+/// fn(x, y) correctly rounded to f: evaluated at more and more bits until its band settles the rounding.
+/// :param fn: Which function (a DEC_ code).
+/// :param x: The operand.
+/// :param y: The second argument (pow and atan2), else ignored.
+/// :param f: The format the result rounds to.
+/// :returns: fn(x, y) correctly rounded to f.
+routine dec_ziv(fn: U32, x: Dec, y: Dec, f: DecFormat) -> Dec
+    block entry()
+        narrow : Bool  = f.digits.le(16)
+        start  : USize = narrow
+            ? 2
+            : 3
+        jump attempt(start)
+
+    block attempt(n: USize)
+        v    : Me   = dec_eval(fn, x, y, n)
+        top  : Bool = n.ge(DEC_ZIV_TOP)
+        rule : U8   = top
+            ? dec_tie_rule(fn, x)
+            : 0
+        r : DecTry = dec_round_me(v, f, n, rule)
+        branch r.ok
+            ? return(r.d)
+            : attempt(n.mul(2).min(DEC_ZIV_TOP))
+
+/// fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
+/// :param fn: Which function (a DEC_ code).
+/// :param x: The operand.
+/// :param y: The second argument (pow and atan2), else ignored.
+/// :param n: The precision in limbs.
+/// :returns: fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
+routine dec_eval(fn: U32, x: Dec, y: Dec, n: USize) -> Me
+    block entry()
+        when fn
+            0    -> return(me_exp(me_of_dec(x, n), n))
+            1    -> return(me_expm1(me_of_dec(x, n), n))
+            2    -> return(me_exp(me_mul(me_of_dec(x, n), me_const(DEC_LN2, n), n), n))
+            3    -> return(me_exp(me_mul(me_of_dec(x, n), me_const(DEC_LN10, n), n), n))
+            4    -> return(dec_eval_ln(x, n))
+            5    -> return(dec_eval_ln1p(x, n))
+            6    -> return(me_div(dec_eval_ln(x, n), me_const(DEC_LN2, n), n))
+            7    -> return(me_div(dec_eval_ln(x, n), me_const(DEC_LN10, n), n))
+            8    -> return(dec_eval_asin(x, n))
+            9    -> return(dec_eval_acos(x, n))
+            10   -> return(dec_eval_atan(x, n))
+            11   -> return(dec_eval_sinh(x, n))
+            12   -> return(dec_eval_cosh(x, n))
+            13   -> return(dec_eval_tanh(x, n))
+            14   -> return(dec_eval_asinh(x, n))
+            15   -> return(dec_eval_acosh(x, n))
+            16   -> return(dec_eval_atanh(x, n))
+            17   -> return(dec_eval_erf(x, n, false))
+            18   -> return(dec_eval_erf(x, n, true))
+            19   -> return(dec_eval_gamma(x, n, false))
+            20   -> return(dec_eval_gamma(x, n, true))
+            21   -> return(dec_eval_trig(x, n, 0))
+            22   -> return(dec_eval_trig(x, n, 1))
+            23   -> return(dec_eval_trig(x, n, 2))
+            24   -> return(dec_eval_cbrt(x, n))
+            25   -> return(dec_eval_pow(x, y, n))
+            else -> return(dec_eval_atan2(x, y, n))
+
+// ── the evaluations ───────────────────────────────────────────────────────────────────────────────
+
+/// ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: ln x of a finite x > 0.
+routine dec_eval_ln(x: Dec, n: USize) -> Me
+    block entry()
+        near : Bool = dec_compare_abs(x, 5, -1).gt(0).bitand(dec_compare_abs(x, 15, -1).lt(0))
+        branch near
+            ? return(me_ln1p(me_of_dec(dec_plus_int(x, -1), n), n))
+            : return(me_ln(me_of_dec(x, n), n))
+
+/// ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: ln(1 + x) of a finite x > -1.
+routine dec_eval_ln1p(x: Dec, n: USize) -> Me
+    block entry()
+        low : Bool = x.neg.bitand(dec_compare_abs(x, 5, -1).gt(0))
+        branch low
+            ? return(me_ln(me_of_dec(dec_plus_int(x, 1), n), n))
+            : return(me_ln1p(me_of_dec(x, n), n))
+
+/// 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at n limbs.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: 1 - |x| for |x| <= 1.
+routine dec_one_minus_abs(x: Dec, n: USize) -> Me
+    shared ax : Dec = dec_num(false, x.coeff, x.exp)
+
+    block entry()
+        high : Bool = dec_compare_abs(x, 5, -1).ge(0)
+        branch high
+            ? return(me_of_dec(dec_plus_int(ax, -1).negate(), n))
+            : return(me_sub(me_int(1, n), me_of_dec(ax, n), n))
+
+/// asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: asin x for |x| <= 1.
+routine dec_eval_asin(x: Dec, n: USize) -> Me
+    shared omx : Me = dec_one_minus_abs(x, n)
+
+    block entry()
+        branch omx.v.is_zero(n)
+            ? return(me_const(DEC_PI, n).ldexp(-1, n).with_sign(x.neg))
+            : general()
+
+    block general()
+        opx : Me = me_sub(me_int(2, n), omx, n)
+        s   : Me = me_sqrt(me_mul(omx, opx, n), n)
+        a   : Me = me_atan(me_div(me_of_dec(x, n).magnitude(), s, n), n)
+        return(a.with_sign(x.neg))
+
+/// acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: acos x for |x| <= 1.
+routine dec_eval_acos(x: Dec, n: USize) -> Me
+    shared omx : Me = dec_one_minus_abs(x, n)
+
+    block entry()
+        minus_one : Bool = x.neg.bitand(omx.v.is_zero(n))
+        branch minus_one
+            ? return(me_const(DEC_PI, n))
+            : general()
+
+    // 1 - x and 1 + x: one of them is 1 - |x|, the other 2 - (1 - |x|)
+    block general()
+        other : Me = me_sub(me_int(2, n), omx, n)
+        num   : Me = x.neg
+            ? other
+            : omx
+        den : Me = x.neg
+            ? omx
+            : other
+        t : Me = me_sqrt(me_div(num, den, n), n)
+        return(me_atan(t, n).ldexp(1, n))
+
+/// atan x, ±pi/2 for an infinity.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: atan x, ±pi/2 for an infinity.
+routine dec_eval_atan(x: Dec, n: USize) -> Me
+    block entry()
+        branch x.is_inf()
+            ? return(me_const(DEC_PI, n).ldexp(-1, n).with_sign(x.neg))
+            : return(me_atan(me_of_dec(x, n), n))
+
+/// sinh x: below 1 its series (positive terms, relative accuracy), else (e^|x| - e^-|x|) / 2.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: sinh x.
+routine dec_eval_sinh(x: Dec, n: USize) -> Me
+    shared xm : Me = me_of_dec(x, n)
+    shared x2 : Me = me_mul(xm, xm, n)
+
+    block entry()
+        small : Bool = xm.v.exp.le(0)
+        branch small
+            ? series(xm, xm, 2)
+            : large()
+
+    block series(term: Me, sum: Me, i: U64)
+        next : Me   = me_div_u64(me_mul(term, x2, n), i.mul(i.add(1)), n)
+        done : Bool = me_is_negligible(next, sum, n)
+        branch done
+            ? return(me_plus_abs(sum, next.v.exp.add(1), n))
+            : series(next, me_add(sum, next, n), i.add(2))
+
+    block large()
+        e : Me = me_exp(xm.magnitude(), n)
+        d : Me = me_sub(e, me_div(me_int(1, n), e, n), n)
+        return(d.ldexp(-1, n).with_sign(x.neg))
+
+/// cosh x = (e^|x| + e^-|x|) / 2.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: cosh x = (e^|x| + e^-|x|) / 2.
+routine dec_eval_cosh(x: Dec, n: USize) -> Me
+    block entry()
+        e : Me = me_exp(me_of_dec(x, n).magnitude(), n)
+        s : Me = me_add(e, me_div(me_int(1, n), e, n), n)
+        return(s.ldexp(-1, n))
+
+/// tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+routine dec_eval_tanh(x: Dec, n: USize) -> Me
+    block entry()
+        u : Me = me_expm1(me_of_dec(x, n).magnitude().ldexp(1, n), n)
+        t : Me = me_div(u, me_add(u, me_int(2, n), n), n)
+        return(t.with_sign(x.neg))
+
+/// asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+routine dec_eval_asinh(x: Dec, n: USize) -> Me
+    shared ax  : Me = me_of_dec(x, n).magnitude()
+    shared one : Me = me_int(1, n)
+    shared x2  : Me = me_mul(ax, ax, n)
+    shared rt  : Me = me_sqrt(me_add(x2, one, n), n)
+
+    block entry()
+        small : Bool = ax.v.exp.le(-1)
+        branch small
+            ? near()
+            : far()
+
+    block near()
+        t : Me = me_add(ax, me_div(x2, me_add(one, rt, n), n), n)
+        return(me_ln1p(t, n).with_sign(x.neg))
+
+    block far()
+        return(me_ln(me_add(ax, rt, n), n).with_sign(x.neg))
+
+/// acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+routine dec_eval_acosh(x: Dec, n: USize) -> Me
+    block entry()
+        near : Bool = dec_compare_abs(x, 2, 0).lt(0)
+        t    : Me   = near
+            ? me_of_dec(dec_plus_int(x, -1), n)
+            : me_sub(me_of_dec(x, n), me_int(1, n), n)
+        r : Me = me_sqrt(me_mul(t, me_add(t, me_int(2, n), n), n), n)
+        return(me_ln1p(me_add(t, r, n), n))
+
+/// atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+routine dec_eval_atanh(x: Dec, n: USize) -> Me
+    block entry()
+        ax  : Me = me_of_dec(x, n).magnitude()
+        omx : Me = dec_one_minus_abs(x, n)
+        q   : Me = me_div(ax.ldexp(1, n), omx, n)
+        return(me_ln1p(q, n).ldexp(-1, n).with_sign(x.neg))
+
+/// cbrt x = e^(ln|x| / 3), signed.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: cbrt x = e^(ln|x| / 3), signed.
+routine dec_eval_cbrt(x: Dec, n: USize) -> Me
+    block entry()
+        l : Me = me_div_u64(dec_eval_ln(dec_num(false, x.coeff, x.exp), n), 3, n)
+        return(me_exp(l, n).with_sign(x.neg))
+
+// ── erf, erfc ─────────────────────────────────────────────────────────────────────────────────────
+
+/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)): positive terms, so no cancellation at any
+/// x. Once the term ratio 2x^2 / (2k + 3) is below 1/2 the rest is below the last term left out.
+/// :param ax: The magnitude of the argument.
+/// :param n: The precision in limbs.
+/// :returns: erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)).
+routine me_erf_positive(ax: Me, n: USize) -> Me
+    shared x2  : Me = me_mul(ax, ax, n)
+    shared two : Me = x2.ldexp(1, n)
+
+    block entry()
+        jump series(ax, ax, 3)
+
+    // the next term is term × 2x^2 / i
+    block series(term: Me, sum: Me, i: U64)
+        next  : Me   = me_div_u64(me_mul(term, two, n), i, n)
+        ratio : F64  = two.v.to_f64(n).div(i.add(2).to<F64>())
+        done  : Bool = me_is_negligible(next, sum, n).bitand(ratio.lt(0.5))
+        branch done
+            ? scale(me_plus_abs(sum, next.v.exp.add(1), n))
+            : series(next, me_add(sum, next, n), i.add(2))
+
+    block scale(sum: Me)
+        g : Me = me_exp(x2.negate(), n)
+        c : Me = me_const(DEC_TWO_OVER_SQRT_PI, n)
+        return(me_mul(me_mul(sum, g, n), c, n))
+
+/// erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
+/// smallest term or where terms stop mattering. The rest is below the first term left out.
+/// :param ax: The magnitude of the argument.
+/// :param n: The precision in limbs.
+/// :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
+routine me_erfc_asymptotic(ax: Me, n: USize) -> Me
+    shared x2  : Me = me_mul(ax, ax, n)
+    shared inv : Me = me_div(me_int(1, n), x2.ldexp(1, n), n)
+    shared one : Me = me_int(1, n)
+
+    block entry()
+        jump series(one, one, 1)
+
+    // term = (2k - 1)!! / (2x^2)^k, the next one term × (2k + 1) / (2x^2)
+    block series(term: Me, sum: Me, k: U64)
+        next    : Me   = me_mul(me_mul_u64(term, k.mul(2).sub(1), n), inv, n)
+        growing : Bool = mp_compare_magnitude(next.v, term.v, n).ge(0)
+        small   : Bool = me_is_negligible(next, sum, n)
+        odd     : Bool = k.bitand(1).eq(1)
+        signed  : Me   = odd
+            ? next.negate()
+            : next
+        when
+            growing -> scale(me_plus_abs(sum, term.v.exp, n))
+            small   -> scale(me_plus_abs(sum, next.v.exp, n))
+            else    -> series(next, me_add(sum, signed, n), k.add(1))
+
+    block scale(sum: Me)
+        g : Me = me_exp(x2.negate(), n)
+        c : Me = me_const(DEC_TWO_OVER_SQRT_PI, n).ldexp(-1, n)
+        d : Me = me_div(me_mul(g, c, n), ax, n)
+        return(me_mul(sum, d, n))
+
+/// erf x (complement false) or erfc x: erfc of a negative x is 1 + erf|x|, below 1/2 it is 1 - erf x, above it
+/// 1 - erf x at enough extra limbs for the cancellation (x^2 log2(e) bits), or the asymptotic series once that
+/// series alone is accurate enough (or the extra limbs would run out).
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :param complement: Whether erfc is wanted rather than erf.
+/// :returns: erf x (complement false) or erfc x.
+routine dec_eval_erf(x: Dec, n: USize, complement: Bool) -> Me
+    shared ax : Me = me_of_dec(x, n).magnitude()
+
+    block entry()
+        small : Bool = ax.v.exp.le(-1)
+        when
+            complement.bitnot() -> return(me_erf_positive(ax, n).with_sign(x.neg))
+            x.neg               -> return(me_add(me_int(1, n), me_erf_positive(ax, n), n))
+            small               -> return(me_sub(me_int(1, n), me_erf_positive(ax, n), n))
+            else                -> tail()
+
+    block tail()
+        xf     : F64   = ax.v.to_f64(n)
+        lost   : F64   = xf.mul(xf).mul(1.4426950408889634).add(4.0)
+        limbs  : U64   = lost.div(64.0).floor().to<U64>()
+        extra  : USize = limbs.to<USize>().add(1)
+        wide   : USize = n.add(extra)
+        enough : Bool  = lost.gt(n.to<F64>().mul(64.0).add(16.0))
+        fits   : Bool  = wide.le(MP_TOP)
+        when
+            enough -> return(me_erfc_asymptotic(ax, n))
+            fits   -> complement_at(wide)
+            else   -> return(me_erfc_asymptotic(ax, n))
+
+    block complement_at(wide: USize)
+        axw : Me = me_of_dec(x, wide).magnitude()
+        e   : Me = me_sub(me_int(1, wide), me_erf_positive(axw, wide), wide)
+        return(me_narrow(e, wide, n))
+
+// ── gamma ─────────────────────────────────────────────────────────────────────────────────────────
+
+/// ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 +
+/// Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
+/// :param z: The argument.
+/// :param n: The precision in limbs.
+/// :returns: ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 + Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
+routine me_lngamma_stirling(z: Me, n: USize) -> Me
+    shared inv  : Me = me_div(me_int(1, n), z, n)
+    shared inv2 : Me = me_mul(inv, inv, n)
+
+    block entry()
+        half : Me = me_of(mp_of_u128(1, -1, n), 0.0)
+        a    : Me = me_mul(me_sub(z, half, n), me_ln(z, n), n)
+        b    : Me = me_sub(a, z, n)
+        base : Me = me_add(b, me_const(DEC_HALF_LN_2PI, n), n)
+        jump series(base, inv, 0)
+
+    // power = z^-(2k + 1)
+    block series(sum: Me, power: Me, k: USize)
+        coefficient : Me   = dec_stirling_coefficient(k, n)
+        term        : Me   = me_mul(coefficient, power, n)
+        last        : Bool = k.add(1).ge(DEC_STIRLING_TERMS)
+        done        : Bool = me_is_negligible(term, sum, n).bitor(last)
+        branch done
+            ? return(me_plus_abs(sum, term.v.exp.add(1), n))
+            : series(me_add(sum, term, n), me_mul(power, inv2, n), k.add(1))
+
+/// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+/// :param k: Which coefficient, from 0.
+/// :param n: The precision in limbs.
+/// :returns: B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+routine dec_stirling_coefficient(k: USize, n: USize) -> Me
+    block entry()
+        c   : Me   = me_const(DEC_STIRLING.add(k), n)
+        neg : Bool = k.bitand(1).eq(1)
+        return(c.with_sign(neg))
+
+/// Where Stirling's series with its 100 terms is accurate to 64n + 20 bits: its 100th term,
+/// B_200 / (200 199 z^199), is about 2^700.8 z^-199.
+/// :param n: The precision in limbs.
+/// :returns: Where Stirling's series with its 100 terms is accurate to 64n + 20 bits.
+routine dec_stirling_floor(n: USize) -> F64
+    block entry()
+        bits : F64 = n.to<F64>().mul(64.0).add(741.0)
+        return(bits.div(199.0).exp2())
+
+/// Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
+/// Stirling floor, Γ(x) = Γ(x + N) / (x (x + 1) ... (x + N - 1)); for x < 0 by the reflection
+/// Γ(x) = pi / (sin(pi x) Γ(1 - x)), sin(pi x) = (-1)^k sin(pi r) with r = x - k exact in decimal.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :param log: Whether the logarithm is wanted.
+/// :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
+routine dec_eval_gamma(x: Dec, n: USize, log: Bool) -> Me
+    block entry()
+        branch x.neg
+            ? reflect()
+            : return(dec_gamma_positive(me_of_dec(x, n), n, log))
+
+    block reflect()
+        k     : Dec  = dec_round_int(x, 4, dec_format128())
+        r     : Dec  = dec_add(x, k.negate(), dec_format128())
+        odd   : Bool = dec_is_odd_integer(k)
+        pi    : Me   = me_const(DEC_PI, n)
+        sinpi : Me   = me_sin_of_pi_times(me_of_dec(r, n), n)
+        omx   : Me   = me_sub(me_int(1, n), me_of_dec(x, n), n)
+        g     : Me   = dec_gamma_positive(omx, n, log)
+        branch log
+            ? log_reflect(pi, sinpi, g)
+            : gamma_reflect(pi, sinpi, g, odd)
+
+    block log_reflect(pi: Me, sinpi: Me, g: Me)
+        a : Me = me_sub(me_ln(pi, n), me_ln(sinpi.magnitude(), n), n)
+        return(me_sub(a, g, n))
+
+    block gamma_reflect(pi: Me, sinpi: Me, g: Me, odd: Bool)
+        v : Me = me_div(pi, me_mul(sinpi, g, n), n)
+        branch odd
+            ? return(v.negate())
+            : return(v)
+
+/// sin(pi r) for |r| <= 1/2.
+/// :param r: The argument.
+/// :param n: The precision in limbs.
+/// :returns: sin(pi r) for |r| <= 1/2.
+routine me_sin_of_pi_times(r: Me, n: USize) -> Me
+    block entry()
+        t  : Me     = me_mul(r, me_const(DEC_PI, n), n)
+        sc : MePair = me_sincos(t, n)
+        return(sc.a)
+
+/// Γ(z) or ln Γ(z) for z > 0.
+/// :param z: The argument.
+/// :param n: The precision in limbs.
+/// :param log: Whether the logarithm is wanted.
+/// :returns: Γ(z) or ln Γ(z) for z > 0.
+routine dec_gamma_positive(z: Me, n: USize, log: Bool) -> Me
+    shared floor : F64 = dec_stirling_floor(n)
+    shared zf    : F64 = z.v.to_f64(n)
+
+    block entry()
+        short : Bool = zf.lt(floor)
+        count : U64  = short
+            ? dec_gamma_shift(floor, zf)
+            : 0
+        jump product(me_int(1, n), z, 0, count)
+
+    // prod = z (z + 1) ... (z + i - 1)
+    block product(prod: Me, at: Me, i: U64, count: U64)
+        done : Bool = i.ge(count)
+        branch done
+            ? stirling(prod, at, count)
+            : product(me_mul(prod, at, n), me_add(at, me_int(1, n), n), i.add(1), count)
+
+    block stirling(prod: Me, shifted: Me, count: U64)
+        lg   : Me   = me_lngamma_stirling(shifted, n)
+        none : Bool = count.eq(0)
+        when
+            log.bitand(none) -> return(lg)
+            log              -> return(me_sub(lg, me_ln(prod, n), n))
+            none             -> return(me_exp(lg, n))
+            else             -> return(me_div(me_exp(lg, n), prod, n))
+
+// ── sin, cos, tan ─────────────────────────────────────────────────────────────────────────────────
+
+/// An argument reduced modulo pi/2: x = r + k pi/2 with |r| about pi/4 at most, k taken mod 4.
+record DecReduced
+    k : U64
+    r : Me
+
+/// sin (which 0), cos (1), or tan (2) of a finite x: reduced to r and a quarter turn k, then the series.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :param which: 0 sine, 1 cosine, 2 tangent.
+/// :returns: sin (which 0), cos (1), or tan (2) of a finite x.
+routine dec_eval_trig(x: Dec, n: USize, which: U64) -> Me
+    block entry()
+        red : DecReduced = dec_reduce(x, n)
+        sc  : MePair     = me_sincos(red.r, n)
+        s   : Me         = dec_quadrant(red.k, sc)
+        c   : Me         = dec_quadrant(red.k.add(1), sc)
+        when which
+            0    -> return(s)
+            1    -> return(c)
+            else -> return(me_div(s, c, n))
+
+/// sin(r + k pi/2) from sin r and cos r: sin r, cos r, -sin r, -cos r.
+/// :param k: The quarter turns.
+/// :param sc: Sine and cosine of the reduced argument.
+/// :returns: sin(r + k pi/2) from sin r and cos r.
+routine dec_quadrant(k: U64, sc: MePair) -> Me
+    block entry()
+        q : U64 = k.bitand(3)
+        when q
+            0    -> return(sc.a)
+            1    -> return(sc.b)
+            2    -> return(sc.a.negate())
+            else -> return(sc.b.negate())
+
+/// x reduced modulo pi/2: below pi/4 as it is; below 10^38 (2^127) at three limbs more; beyond that x is an
+/// integer and the reduction is Payne and Hanek's.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: x reduced modulo pi/2.
+routine dec_reduce(x: Dec, n: USize) -> DecReduced
+    block entry()
+        small : Bool = dec_compare_abs(x, 785, -3).lt(0)
+        top   : S64  = dec_digits(x.coeff).add(x.exp)
+        when
+            small      -> return({ k: 0, r: me_of_dec(x, n) })
+            top.le(38) -> return(dec_reduce_moderate(x, n))
+            else       -> return(dec_reduce_payne_hanek(x, n))
+
+/// k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed: |x| < 2^127 leaves r at least 64n + 60
+/// good bits however close x is to a multiple of pi/2 (the error bound shows how many).
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed.
+routine dec_reduce_moderate(x: Dec, n: USize) -> DecReduced
+    shared w : USize = n.add(3)
+
+    block entry()
+        xm      : Me   = me_of_dec(x, w)
+        half_pi : Me   = me_const(DEC_PI, w).ldexp(-1, w)
+        q       : Me   = me_div(xm, half_pi, w)
+        qa      : Mp   = q.v.magnitude()
+        whole   : U128 = mp_floor_u128(qa, w)
+        frac    : Mp   = mp_sub(qa, mp_of_u128(whole, 0, w), w)
+        up      : Bool = mp_compare_magnitude(frac, mp_of_u128(1, -1, w), w).ge(0)
+        k       : U128 = whole.add(up.to<U128>())
+        km      : Me   = me_exact(mp_of_u128(k, 0, w)).with_sign(x.neg)
+        r       : Me   = me_sub(xm, me_mul(km, half_pi, w), w)
+        quarter : U64  = k.bitand(3).to_wrap<U64>()
+        turned  : U64  = U64.sub(4, quarter).bitand(3)
+        kk      : U64  = x.neg
+            ? turned
+            : quarter
+        return({ k: kk, r: me_narrow(r, w, n) })
+
+/// Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q: x / (2 pi) = M Σ t_j
+/// 2^(q - j) over the bits t_j of 1/(2 pi), whose terms with j <= q are whole turns. The turn fraction f is
+/// (M W) mod 2^L / 2^L with W the bits q + 1 .. q + L of 1/(2 pi) (more bits above them only add whole turns), off
+/// by less than M 2^-L; with L at least the bits of M plus 64n + 128 that is below 2^-(64n + 128). Then k is the
+/// quarter turn nearest 4f and r = 2 pi (f - k/4).
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q.
+routine dec_reduce_payne_hanek(x: Dec, n: USize) -> DecReduced
+    shared big     : @BigNat<800> <- uninit
+    shared window  : @BigNat<800> <- uninit
+    shared product : @BigNat<800> <- uninit
+
+    block entry()
+        big.set(x.coeff)
+        jump fives(x.exp)
+
+    block fives(left: S64)
+        k    : S64  = left.min(27)
+        done : Bool = left.eq(0)
+        branch done
+            ? window_bits()
+            : five(left, k)
+
+    block five(left: S64, k: S64)
+        big.mul_add(U64.pow(5, k.to<U32>()), 0)
+        jump fives(left.sub(k))
+
+    // the window: words q / 64 .. (q + L - 1) / 64 of the table, the first one most significant
+    block window_bits()
+        q     : S64   = x.exp
+        size  : S64   = big.bit_length().to<S64>()
+        want  : S64   = size.add(n.to<S64>().mul(64)).add(128)
+        first : USize = q.div(64).to<USize>()
+        end   : S64   = q.add(want).sub(1)
+        last  : USize = end.div(64).to<USize>()
+        zero  : U64   = 0
+        window.set(zero)
+        jump word(last, first)
+
+    block word(last: USize, w: USize)
+        done : Bool = w.gt(last)
+        branch done
+            ? multiply(last)
+            : add_word(last, w)
+
+    block add_word(last: USize, w: USize)
+        window.shl(64)
+        window.mul_add(1, DEC_INV_2PI.getitem(w))
+        jump word(last, w.add(1))
+
+    // the fraction has 64 (last + 1) - q bits
+    block multiply(last: USize)
+        product.set_product(big, window)
+        span      : S64 = last.add(1).to<S64>().mul(64)
+        frac_bits : S64 = span.sub(x.exp)
+        f         : Mp  = dec_bignat_window(product, frac_bits, n)
+        jump quarter(f)
+
+    block quarter(f: Mp)
+        f4     : Mp   = f.ldexp(2, n)
+        whole  : U128 = mp_floor_u128(f4, n)
+        rest   : Mp   = mp_sub(f4, mp_of_u128(whole, 0, n), n)
+        up     : Bool = mp_compare_magnitude(rest, mp_of_u128(1, -1, n), n).ge(0)
+        k      : U128 = whole.add(up.to<U128>())
+        d      : Mp   = mp_sub(f, mp_of_u128(k, -2, n), n)
+        dm     : Me   = me_plus_abs(me_exact(d), n.to<S64>().mul(-64).sub(120), n)
+        two_pi : Me   = me_const(DEC_PI, n).ldexp(1, n)
+        r      : Me   = me_mul(dm, two_pi, n)
+        quart  : U64  = k.bitand(3).to_wrap<U64>()
+        turned : U64  = U64.sub(4, quart).bitand(3)
+        kk     : U64  = x.neg
+            ? turned
+            : quart
+        rs : Me = r.with_sign(r.v.neg.bitxor(x.neg))
+        return({ k: kk, r: rs })
+
+/// The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs: those bits over 2^top.
+/// :param b: The big natural.
+/// :param top: The bit just above the window.
+/// :param n: The precision in limbs.
+/// :returns: The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs.
+routine dec_bignat_window(b: @BigNat<800>, top: S64, n: USize) -> Mp
+    shared buf   : @Array<U64, 41> <- MP_ZERO_BUF.load()
+    shared count : USize           = b.count.load()
+
+    block entry()
+        jump copy(0)
+
+    block copy(k: USize)
+        done : Bool = k.gt(n)
+        branch done
+            ? pack()
+            : one(k)
+
+    // the bit offset of limb k of the window
+    block one(k: USize)
+        base : S64 = top.sub(n.add(1).to<S64>().mul(64))
+        at   : S64 = base.add(k.to<S64>().mul(64))
+        word : U64 = dec_bignat_bits(b, count, at)
+        buf.setitem(k, word)
+        jump copy(k.add(1))
+
+    block pack()
+        scale : S64 = n.add(1).to<S64>().mul(-64)
+        return(mp_pack(false, buf, n.add(1), scale, n))
+
+/// The 64 bits of a big natural from bit `at` up (0 outside it).
+/// :param b: The big natural.
+/// :param count: How many limbs are in use.
+/// :param at: The bit position.
+/// :returns: The 64 bits of a big natural from bit `at` up (0 outside it).
+routine dec_bignat_bits(b: @BigNat<800>, count: USize, at: S64) -> U64
+    shared limb : S64 = at.shr(6)
+    shared off  : U64 = at.bitand(63).to<U64>()
+
+    block entry()
+        low  : U64 = dec_bignat_limb(b, count, limb)
+        high : U64 = dec_bignat_limb(b, count, limb.add(1))
+        branch off.eq(0)
+            ? return(low)
+            : return(low.shr(off).bitor(high.shl(64.sub(off))))
+
+/// Limb i of a big natural (0 outside it).
+/// :param b: The big natural.
+/// :param count: How many limbs are in use.
+/// :param i: The index.
+/// :returns: Limb i of a big natural (0 outside it).
+routine dec_bignat_limb(b: @BigNat<800>, count: USize, i: S64) -> U64
+    block entry()
+        inside : Bool = i.ge(0).bitand(i.lt(count.to<S64>()))
+        branch inside
+            ? return(b.limbs.getitem(i.to<USize>()))
+            : return(0)
+
+// ── pow, atan2 ────────────────────────────────────────────────────────────────────────────────────
+
+/// |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not
+/// past the range: dec_pow settles those).
+/// :param x: The base.
+/// :param y: The exponent.
+/// :param n: The precision in limbs.
+/// :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
+routine dec_eval_pow(x: Dec, y: Dec, n: USize) -> Me
+    block entry()
+        l   : Me   = dec_eval_ln(dec_num(false, x.coeff, x.exp), n)
+        z   : Me   = me_mul(me_of_dec(y, n), l, n)
+        neg : Bool = x.neg.bitand(dec_is_odd_integer(y))
+        return(me_exp(z, n).with_sign(neg))
+
+/// The angle of (x, y) for finite nonzero x and y: atan(y/x), plus or minus pi for a negative x.
+/// :param y: The ordinate.
+/// :param x: The abscissa.
+/// :param n: The precision in limbs.
+/// :returns: The angle of (x, y) for finite nonzero x and y.
+routine dec_eval_atan2(y: Dec, x: Dec, n: USize) -> Me
+    block entry()
+        a : Me = me_atan(me_div(me_of_dec(y, n), me_of_dec(x, n), n), n)
+        branch x.neg
+            ? turn(a)
+            : return(a)
+
+    block turn(a: Me)
+        pi : Me = me_const(DEC_PI, n).with_sign(y.neg)
+        return(me_add(a, pi, n))
+
+// ── the special values ────────────────────────────────────────────────────────────────────────────
+
+/// fn(x) correctly rounded to f (fn one of the unary DEC_ codes): the special values first, as RazorForge's
+/// engines gave them, then dec_ziv.
+/// :param fn: Which function (a DEC_ code).
+/// :param x: The operand.
+/// :param f: The format the result rounds to.
+/// :returns: fn(x) correctly rounded to f (fn one of the unary DEC_ codes).
+routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
+    shared zero : Bool = x.is_zero()
+    shared inf  : Bool = x.is_inf()
+    shared one  : Dec  = dec_num(false, 1, 0)
+
+    block entry()
+        when
+            x.is_nan() -> return(dec_nan())
+            fn.le(3)   -> exponential()
+            fn.le(7)   -> logarithm()
+            fn.le(10)  -> arc()
+            fn.le(16)  -> hyperbolic()
+            fn.le(18)  -> error_function()
+            fn.le(20)  -> gamma()
+            fn.le(23)  -> trigonometric()
+            else       -> cube_root()
+
+    // exp, expm1, exp2, exp10: past the range an infinity, 0, or -1 for expm1
+    block exponential()
+        limit : U128 = dec_exponential_limit(fn)
+        far   : Bool = inf.bitor(dec_compare_abs(x, limit, 0).gt(0))
+        m1    : Bool = fn.eq(DEC_EXPM1)
+        low   : Bool = m1.bitand(x.neg).bitand(dec_compare_abs(x, 100, 0).gt(0))
+        when
+            zero.bitand(m1) -> return(x.as_result())
+            zero            -> return(one)
+            far             -> past_range(m1)
+            low             -> return(dec_num(true, 1, 0))
+            else            -> return(dec_ziv(fn, x, x, f))
+
+    block past_range(m1: Bool)
+        when
+            x.neg.bitnot() -> return(dec_inf(false))
+            m1             -> return(dec_num(true, 1, 0))
+            inf            -> return(dec_num(false, 0, 0))
+            else           -> return(dec_num(false, 0, f.qmin))
+
+    // log, log1p, log2, log10
+    block logarithm()
+        branch fn.eq(DEC_LOG1P)
+            ? log_one_plus()
+            : log_plain()
+
+    block log_one_plus()
+        below  : Bool = x.neg.bitand(dec_compare_abs(x, 1, 0).gt(0))
+        at_one : Bool = x.neg.bitand(dec_compare_abs(x, 1, 0).eq(0))
+        keep   : Bool = zero.bitor(inf.bitand(x.neg.bitnot()))
+        when
+            below.bitor(inf.bitand(x.neg)) -> return(dec_nan())
+            at_one                         -> return(dec_inf(true))
+            keep                           -> return(x.as_result())
+            else                           -> return(dec_ziv(fn, x, x, f))
+
+    block log_plain()
+        negative : Bool = x.neg.bitand(zero.bitnot())
+        unit     : Bool = x.neg.bitnot().bitand(dec_compare_abs(x, 1, 0).eq(0))
+        when
+            negative -> return(dec_nan())
+            zero     -> return(dec_inf(true))
+            inf      -> return(x.as_result())
+            unit     -> return(dec_num(false, 0, 0))
+            else     -> return(dec_ziv(fn, x, x, f))
+
+    // asin, acos, atan
+    block arc()
+        outside : Bool = inf.bitor(dec_compare_abs(x, 1, 0).gt(0))
+        unit    : Bool = x.neg.bitnot().bitand(dec_compare_abs(x, 1, 0).eq(0))
+        acos    : Bool = fn.eq(DEC_ACOS)
+        when
+            fn.eq(DEC_ATAN).bitand(zero) -> return(x.as_result())
+            fn.eq(DEC_ATAN)              -> return(dec_ziv(fn, x, x, f))
+            outside                      -> return(dec_nan())
+            acos.bitand(unit)            -> return(dec_num(false, 0, 0))
+            acos                         -> return(dec_ziv(fn, x, x, f))
+            zero                         -> return(x.as_result())
+            else                         -> return(dec_ziv(fn, x, x, f))
+
+    // sinh, cosh, tanh, asinh, acosh, atanh
+    block hyperbolic()
+        when fn
+            11   -> sinh()
+            12   -> cosh()
+            13   -> tanh()
+            14   -> asinh()
+            15   -> acosh()
+            else -> atanh()
+
+    block sinh()
+        big : Bool = dec_compare_abs(x, 15000, 0).gt(0)
+        when
+            zero.bitor(inf) -> return(x.as_result())
+            big             -> return(dec_inf(x.neg))
+            else            -> return(dec_ziv(fn, x, x, f))
+
+    block cosh()
+        big : Bool = inf.bitor(dec_compare_abs(x, 15000, 0).gt(0))
+        branch big
+            ? return(dec_inf(false))
+            : return(dec_ziv(fn, x, x, f))
+
+    block tanh()
+        big : Bool = inf.bitor(dec_compare_abs(x, 100, 0).gt(0))
+        when
+            zero -> return(x.as_result())
+            big  -> return(dec_num(x.neg, 1, 0))
+            else -> return(dec_ziv(fn, x, x, f))
+
+    block asinh()
+        branch zero.bitor(inf)
+            ? return(x.as_result())
+            : return(dec_ziv(fn, x, x, f))
+
+    block acosh()
+        below  : Bool = x.neg.bitor(inf.bitnot().bitand(dec_compare_abs(x, 1, 0).lt(0)))
+        at_one : Bool = dec_compare_abs(x, 1, 0).eq(0)
+        when
+            below  -> return(dec_nan())
+            inf    -> return(x.as_result())
+            at_one -> return(dec_num(false, 0, 0))
+            else   -> return(dec_ziv(fn, x, x, f))
+
+    block atanh()
+        outside : Bool = inf.bitor(dec_compare_abs(x, 1, 0).gt(0))
+        at_one  : Bool = dec_compare_abs(x, 1, 0).eq(0)
+        when
+            outside -> return(dec_nan())
+            at_one  -> return(dec_inf(x.neg))
+            zero    -> return(x.as_result())
+            else    -> return(dec_ziv(fn, x, x, f))
+
+    // erf, erfc
+    block error_function()
+        beyond : Bool = inf.bitor(dec_compare_abs(x, 20, 0).gt(0))
+        tail   : Bool = inf.bitor(dec_compare_abs(x, 130, 0).gt(0))
+        branch fn.eq(DEC_ERF)
+            ? erf(beyond)
+            : erfc(beyond, tail)
+
+    block erf(beyond: Bool)
+        when
+            zero   -> return(x.as_result())
+            beyond -> return(dec_num(x.neg, 1, 0))
+            else   -> return(dec_ziv(fn, x, x, f))
+
+    block erfc(beyond: Bool, tail: Bool)
+        when
+            x.neg.bitand(beyond)        -> return(dec_num(false, 2, 0))
+            inf.bitand(x.neg.bitnot())  -> return(dec_num(false, 0, 0))
+            x.neg.bitnot().bitand(tail) -> return(dec_num(false, 0, f.qmin))
+            else                        -> return(dec_ziv(fn, x, x, f))
+
+    // tgamma, lgamma
+    block gamma()
+        tg   : Bool = fn.eq(DEC_TGAMMA)
+        pole : Bool = x.neg.bitand(dec_is_integer(x))
+        when
+            inf.bitand(tg).bitand(x.neg) -> return(dec_nan())
+            inf                          -> return(dec_inf(false))
+            zero.bitand(tg)              -> return(dec_inf(x.neg))
+            zero                         -> return(dec_inf(false))
+            pole.bitand(tg)              -> return(dec_nan())
+            pole                         -> return(dec_inf(false))
+            tg                           -> tgamma()
+            else                         -> lgamma()
+
+    block tgamma()
+        over  : Bool = x.neg.bitnot().bitand(dec_compare_abs(x, 3300, 0).gt(0))
+        under : Bool = x.neg.bitand(dec_compare_abs(x, 3300, 0).gt(0))
+        when
+            over  -> return(dec_inf(false))
+            under -> return(dec_gamma_underflow(x, f))
+            else  -> return(dec_ziv(fn, x, x, f))
+
+    block lgamma()
+        root : Bool = x.neg.bitnot().bitand(dec_compare_abs(x, 1,
+            0).eq(0).bitor(dec_compare_abs(x, 2, 0).eq(0)))
+        branch root
+            ? return(dec_num(false, 0, 0))
+            : return(dec_ziv(fn, x, x, f))
+
+    // sin, cos, tan
+    block trigonometric()
+        cos : Bool = fn.eq(DEC_COS)
+        when
+            inf              -> return(dec_nan())
+            zero.bitand(cos) -> return(one)
+            zero             -> return(x.as_result())
+            else             -> return(dec_ziv(fn, x, x, f))
+
+    block cube_root()
+        branch zero.bitor(inf)
+            ? return(x)
+            : return(dec_ziv(fn, x, x, f))
+
+/// Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
+/// :param fn: The function: DEC_EXP, DEC_EXPM1, DEC_EXP2, or DEC_EXP10.
+/// :returns: Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
+routine dec_exponential_limit(fn: U32) -> U128
+    block entry()
+        when fn
+            2    -> return(22000)
+            3    -> return(6300)
+            else -> return(15000)
+
+/// The zero Γ(x) underflows to for x below -3300 (at the format's smallest exponent), signed as sin(pi x): (-1)^k
+/// times the sign of x - k, k the integer nearest x.
+/// :param x: The operand.
+/// :param f: The format.
+/// :returns: The signed zero.
+routine dec_gamma_underflow(x: Dec, f: DecFormat) -> Dec
+    block entry()
+        k   : Dec  = dec_round_int(x, 3, dec_format128())
+        rd  : Dec  = dec_add(x, k.negate(), dec_format128())
+        odd : Bool = dec_is_odd_integer(k)
+        return(dec_num(rd.neg.ne(odd), 0, f.qmin))
+
+/// x^y correctly rounded to f, with C99's special cases.
+/// :param x: The base.
+/// :param y: The exponent.
+/// :param f: The format the result rounds to.
+/// :returns: x^y correctly rounded to f, with C99's special cases.
+routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
+    shared xnan  : Bool = x.is_nan()
+    shared ynan  : Bool = y.is_nan()
+    shared xinf  : Bool = x.is_inf()
+    shared yinf  : Bool = y.is_inf()
+    shared xzero : Bool = x.is_zero()
+    shared yzero : Bool = y.is_zero()
+    shared yfin  : Bool = y.is_finite()
+    shared yint  : Bool = yfin.bitand(dec_is_integer(y))
+    shared yodd  : Bool = yint.bitand(dec_is_odd_integer(y))
+    shared xfin  : Bool = x.is_finite()
+    shared xone  : Bool = xfin.bitand(x.neg.bitnot()).bitand(dec_compare_abs(x, 1, 0).eq(0))
+    shared xmone : Bool = xfin.bitand(x.neg).bitand(dec_compare_abs(x, 1, 0).eq(0))
+    shared one   : Dec  = dec_num(false, 1, 0)
+
+    block entry()
+        bad_base : Bool = x.neg.bitand(xnan.bitnot()).bitand(xinf.bitnot()).bitand(xzero.bitnot())
+        when
+            bad_base.bitand(yfin).bitand(yint.bitnot()) -> return(dec_nan())
+            xone.bitor(yzero)                           -> return(one)
+            xnan.bitor(ynan)                            -> return(dec_nan())
+            xzero                                       -> zero_base()
+            yinf                                        -> infinite_exponent()
+            xinf                                        -> infinite_base()
+            else                                        -> general()
+
+    block zero_base()
+        positive : Bool = y.neg.bitnot()
+        when
+            positive.bitand(yodd) -> return(x.as_result())
+            positive              -> return(dec_num(false, 0, 0))
+            yodd                  -> return(dec_inf(x.neg))
+            else                  -> return(dec_inf(false))
+
+    block infinite_exponent()
+        inside : Bool = xfin.bitand(dec_compare_abs(x, 1, 0).lt(0))
+        when
+            xmone                -> return(one)
+            y.neg.bitand(inside) -> return(dec_inf(false))
+            y.neg                -> return(dec_num(false, 0, 0))
+            inside               -> return(dec_num(false, 0, 0))
+            else                 -> return(dec_inf(false))
+
+    block infinite_base()
+        when
+            x.neg.bitand(y.neg).bitand(yodd) -> return(dec_num(true, 0, 0))
+            x.neg.bitand(y.neg)              -> return(dec_num(false, 0, 0))
+            x.neg.bitand(yodd)               -> return(dec_inf(true))
+            x.neg                            -> return(dec_inf(false))
+            y.neg                            -> return(dec_num(false, 0, 0))
+            else                             -> return(dec_inf(false))
+
+    // e^z with z = y ln|x|: far past the range the result is an infinity or a zero
+    block general()
+        lnx  : F64  = dec_eval_ln(dec_num(false, x.coeff, x.exp), 2).v.to_f64(2)
+        yf   : F64  = me_of_dec(y, 2).v.to_f64(2)
+        z    : F64  = yf.mul(lnx)
+        rneg : Bool = x.neg.bitand(yodd)
+        when
+            z.gt(16000.0)  -> return(dec_inf(rneg))
+            z.lt(-16000.0) -> return(dec_num(rneg, 0, f.qmin))
+            else           -> return(dec_ziv(DEC_POW, x, y, f))
+
+/// atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
+/// :param y: The ordinate.
+/// :param x: The abscissa.
+/// :param f: The format the result rounds to.
+/// :returns: atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
+routine dec_atan2(y: Dec, x: Dec, f: DecFormat) -> Dec
+    block entry()
+        nan : Bool = y.is_nan().bitor(x.is_nan())
+        when
+            nan         -> return(dec_nan())
+            y.is_zero() -> zero_y()
+            x.is_zero() -> return(dec_ziv(DEC_ATAN, dec_inf(y.neg), dec_inf(y.neg), f))
+            y.is_inf()  -> infinite_y()
+            x.is_inf()  -> infinite_x()
+            else        -> return(dec_ziv(DEC_ATAN2, y, x, f))
+
+    block zero_y()
+        branch x.neg
+            ? return(dec_signed_pi(y.neg, 1, f))
+            : return(dec_num(y.neg, 0, 0))
+
+    block infinite_y()
+        when
+            x.is_inf().bitand(x.neg) -> return(dec_signed_pi(y.neg, 3, f))
+            x.is_inf()               -> return(dec_signed_pi(y.neg, 2, f))
+            else                     -> return(dec_ziv(DEC_ATAN, dec_inf(y.neg), dec_inf(y.neg), f))
+
+    block infinite_x()
+        branch x.neg
+            ? return(dec_signed_pi(y.neg, 1, f))
+            : return(dec_num(y.neg, 0, 0))
+
+/// pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f: the arctangent of an infinity, of 1, of -1,
+/// turned.
+/// :param neg: Whether the result is negative.
+/// :param which: 1 for pi, 2 for pi/4, 3 for 3 pi/4.
+/// :param f: The format the result rounds to.
+/// :returns: pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f.
+routine dec_signed_pi(neg: Bool, which: U64, f: DecFormat) -> Dec
+    block entry()
+        unit : Dec = dec_num(neg, 1, 0)
+        when which
+            1    -> return(dec_ziv(DEC_ATAN2, dec_num(neg, 0, 0), dec_num(true, 1, 0), f))
+            2    -> return(dec_ziv(DEC_ATAN, unit, unit, f))
+            else -> return(dec_ziv(DEC_ATAN2, unit, dec_num(true, 1, 0), f))
+
+/// The value as a function result: a zero reduced to exponent 0 (its sign kept), anything else as it is.
+/// :returns: The value as a function result.
+routine Dec.as_result(self: Self) -> Self
+    block entry()
+        branch self.is_zero()
+            ? return(dec_num(self.neg, 0, 0))
+            : return(self)
+
+/// How far z must move up to reach the Stirling floor, as a whole number of steps.
+/// :param floor: The Stirling floor.
+/// :param zf: z as an F64.
+/// :returns: The steps.
+routine dec_gamma_shift(floor: F64, zf: F64) -> U64
+    block entry()
+        gap : F64 = floor.sub(zf.min(floor))
+        return(gap.floor().to<U64>().add(1))
+
+/// What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).
+/// :param tie_rule: 1 half to even, 2 up, 3 down.
+/// :param int: N.
+/// :returns: 1 to round up, 0 to round down.
+routine dec_tie_step(tie_rule: U8, int: U128) -> U128
+    block entry()
+        when tie_rule
+            2    -> return(1)
+            3    -> return(0)
+            else -> return(int.bitand(1))
+
+/// How fn settles a band that 1024 bits leave on a midpoint. A transcendental value of a decimal is never exactly a
+/// midpoint, but f(x) = x (1 + t) with t below 2^-1000 is that close to x, and x is a midpoint when its coefficient
+/// has one digit too many (a non-canonical encoding read at its face value): then the side is t's, whose sign each
+/// function knows (2 rounds the magnitude up, 3 down). Every other band on a midpoint is taken to be exactly on it
+/// (x^y and 2^x can be): 1, half to even.
+/// :param fn: Which function (a DEC_ code).
+/// :param x: The argument.
+/// :returns: The tie rule.
+routine dec_tie_rule(fn: U32, x: Dec) -> U8
+    shared tiny : Bool = dec_digits(x.coeff).add(x.exp).lt(-150)
+
+    block entry()
+        branch tiny
+            ? side()
+            : return(1)
+
+    block side()
+        when fn
+            8, 11, 16, 23  -> return(2)
+            10, 13, 14, 21 -> return(3)
+            1              -> sign_dependent(x.neg.bitnot())
+            5              -> sign_dependent(x.neg)
+            else           -> return(1)
+
+    // expm1 x = x + x^2/2 + ... lies above x, log1p x = x - x^2/2 + ... below it
+    block sign_dependent(up: Bool)
+        branch up
+            ? return(2)
+            : return(3)

@@ -1,0 +1,855 @@
+// The multiprecision binary floats the decimal transcendentals are computed in (dec_trans.tess), with a bound on
+// the error of every value.
+//
+// An Mp has n 64-bit limbs, n chosen per call (the precision; at most MP_TOP). Every operation truncates its exact
+// result to n limbs, which is off by less than one unit in the last place: a relative error below 2^(1 - 64n). An
+// Me is an Mp with a bound on how far the value it stands for can be from it, relative to it and counted in units
+// of 2^-64n (the "ulp" of the precision), so a bound of 2 is one truncation. The bounds are F64s rounded upward by a
+// small factor at every step, so they stay upper bounds. A transcendental computed this way comes with a proven
+// band around it; when the whole band rounds to one decimal, that decimal is the correctly rounded result
+// (dec_trans.tess), otherwise the computation is repeated with more limbs.
+
+/// The limbs of an Mp: up to MP_TOP in use, one more for the guard limb of a sum.
+preset MP_CAP: USize = 20
+/// The most limbs a computation uses: 1216 bits.
+preset MP_TOP: USize = 19
+/// The exponent of zero, far below every other.
+preset MP_ZERO_EXP: S64 = -1125899906842624
+
+/// Twenty zero limbs.
+preset MP_ZERO_LIMBS: @Array<U64, 20> <- { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0 }
+
+preset MP_ZERO_BUF: @Array<U64, 41> <- { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
+
+/// A binary float of n limbs (n given to each routine): (-1)^neg × m × 2^(exp - 64n), m = Σ m[i] 2^(64 i) over
+/// i < n with the top bit of m[n - 1] set, so 2^(exp - 1) <= |x| < 2^exp. Zero has every limb 0.
+record Mp
+    neg : Bool
+    exp : S64
+    m   : Array<U64, 20>
+
+/// An Mp and a bound on its error: the value it stands for is within err × 2^-64n × |v| of v (n the precision of
+/// the computation).
+record Me
+    v   : Mp
+    err : F64
+
+/// A working buffer: twice MP_CAP limbs and one.
+record MpBuf
+    l : Array<U64, 41>
+
+// ── making one ────────────────────────────────────────────────────────────────────────────────────
+
+/// Zero.
+/// :returns: The zero Mp.
+#inline
+routine Mp.zero() -> Self
+    block entry()
+        return({ neg: false, exp: MP_ZERO_EXP, m: MP_ZERO_LIMBS.load() })
+
+/// Whether the value is zero (whose exponent is MP_ZERO_EXP, never another's).
+/// :param n: The precision in limbs.
+/// :returns: Whether the value is zero (whose exponent is MP_ZERO_EXP, never another's).
+#inline
+routine Mp.is_zero(self: Self, n: USize) -> Bool
+    block entry()
+        return(self.exp.eq(MP_ZERO_EXP))
+
+/// The value with its sign flipped.
+/// :returns: -self.
+#inline
+routine Mp.negate(self: Self) -> Self
+    block entry()
+        return({ neg: self.neg.bitnot(), exp: self.exp, m: self.m })
+
+/// The value without its sign.
+/// :returns: |self|.
+#inline
+routine Mp.magnitude(self: Self) -> Self
+    block entry()
+        return({ neg: false, exp: self.exp, m: self.m })
+
+/// The magnitude with a given sign.
+/// :param neg: Whether it is negative.
+/// :returns: The signed value.
+#inline
+routine Mp.with_sign(self: Self, neg: Bool) -> Self
+    block entry()
+        return({ neg: neg, exp: self.exp, m: self.m })
+
+/// self × 2^k (exact).
+/// :param k: The power of two.
+/// :param n: The precision in limbs.
+/// :returns: self × 2^k (exact).
+#inline
+routine Mp.ldexp(self: Self, k: S64, n: USize) -> Self
+    block entry()
+        branch self.is_zero(n)
+            ? return(self)
+            : return({ neg: self.neg, exp: self.exp.add(k), m: self.m })
+
+/// The 64 bits of the number in buf[0 .. len) starting at bit `at` (bits outside it read as 0).
+/// :param buf: The limbs, least significant first.
+/// :param len: How many limbs of buf are in use.
+/// :param at: The lowest bit read.
+/// :returns: The 64 bits of the number in buf[0 .. len) starting at bit `at` (bits outside it read as 0).
+routine mp_bits_at(buf: @Array<U64, 41>, len: USize, at: S64) -> U64
+    shared limb : S64 = at.shr(6)
+    shared off  : U64 = at.bitand(63).to<U64>()
+
+    block entry()
+        low  : U64  = mp_limb_or_zero(buf, len, limb)
+        high : U64  = mp_limb_or_zero(buf, len, limb.add(1))
+        flat : Bool = off.eq(0)
+        branch flat
+            ? return(low)
+            : return(low.shr(off).bitor(high.shl(64.sub(off))))
+
+/// Limb i of buf[0 .. len), 0 outside it.
+/// :param buf: The limbs, least significant first.
+/// :param len: How many limbs are in use.
+/// :param i: The limb index (any).
+/// :returns: The limb or 0.
+#inline
+routine mp_limb_or_zero(buf: @Array<U64, 41>, len: USize, i: S64) -> U64
+    block entry()
+        inside : Bool = i.ge(0).bitand(i.lt(len.to<S64>()))
+        branch inside
+            ? return(buf.getitem(i.to<USize>()))
+            : return(0)
+
+/// The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
+/// :param neg: The sign.
+/// :param buf: The limbs, least significant first.
+/// :param len: How many limbs of buf are in use.
+/// :param scale: The power of two the limbs are scaled by.
+/// :param n: The precision in limbs.
+/// :returns: The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
+routine mp_pack(neg: Bool, buf: @Array<U64, 41>, len: USize, scale: S64, n: USize) -> Mp
+    shared r : @Mp <- uninit
+
+    block entry()
+        jump find(len)
+
+    // the top nonzero limb
+    block find(i: USize)
+        none : Bool = i.eq(0)
+        branch none
+            ? return(Mp.zero())
+            : look(i.sub(1))
+
+    block look(t: USize)
+        limb : U64 = buf.getitem(t)
+        branch limb.eq(0)
+            ? find(t)
+            : found(t, limb)
+
+    block found(t: USize, limb: U64)
+        top    : S64 = t.to<S64>().mul(64).add(64)
+        bitlen : S64 = top.sub(limb.leading_zeros().to<S64>())
+        low    : S64 = bitlen.sub(n.to<S64>().mul(64))
+        jump copy(0, low, bitlen)
+
+    block copy(k: USize, low: S64, bitlen: S64)
+        done : Bool = k.ge(n)
+        branch done
+            ? seal(bitlen)
+            : one(k, low, bitlen)
+
+    block one(k: USize, low: S64, bitlen: S64)
+        word : U64 = mp_bits_at(buf, len, k.to<S64>().mul(64).add(low))
+        r.m.setitem(k, word)
+        jump copy(k.add(1), low, bitlen)
+
+    block seal(bitlen: S64)
+        neg.store_into(r.neg)
+        scale.add(bitlen).store_into(r.exp)
+        return(r.load())
+
+/// v × 2^scale exactly, for n >= 2.
+/// :param v: The integer.
+/// :param scale: The power of two it is scaled by.
+/// :param n: The precision in limbs.
+/// :returns: v × 2^scale exactly, for n >= 2.
+routine mp_of_u128(v: U128, scale: S64, n: USize) -> Mp
+    shared buf : @Array<U64, 41> <- uninit
+
+    block entry()
+        buf.setitem(0, v.to_wrap<U64>())
+        buf.setitem(1, v.shr(64).to_wrap<U64>())
+        return(mp_pack(false, buf, 2, scale, n))
+
+/// An F64 exactly (finite).
+/// :param x: The float (finite).
+/// :param n: The precision in limbs.
+/// :returns: An F64 exactly (finite).
+routine mp_of_f64(x: F64, n: USize) -> Mp
+    shared bits   : U64 = x.bits()
+    shared biased : S64 = bits.shr(52).bitand(0x7FF).to<S64>()
+
+    block entry()
+        frac   : U64  = bits.bitand(0xFFFFFFFFFFFFF)
+        normal : Bool = biased.ne(0)
+        hidden : U64  = normal
+            ? 0x10000000000000
+            : 0
+        e : S64 = biased.max(1).sub(1075)
+        m : Mp  = mp_of_u128(frac.bitor(hidden).to<U128>(), e, n)
+        return(m.with_sign(bits.shr(63).eq(1)))
+
+/// A constant of the tables: limbs table[at .. at + 20) (least significant first), value = that × 2^(exp - 1280),
+/// truncated to n limbs.
+/// :param table: The table of limbs.
+/// :param at: Where its limbs start in the table.
+/// :param exp: Its exponent.
+/// :param n: The precision in limbs.
+/// :returns: A constant of the tables.
+routine mp_const(table: @U64, at: USize, exp: S64, n: USize) -> Mp
+    shared r    : @Mp   <- Mp.zero()
+    shared skip : USize = 20.sub(n)
+
+    block entry()
+        jump copy(0)
+
+    block copy(k: USize)
+        done : Bool = k.ge(n)
+        branch done
+            ? seal()
+            : one(k)
+
+    block one(k: USize)
+        word : U64 = table.stride(at.add(skip).add(k)).load()
+        r.m.setitem(k, word)
+        jump copy(k.add(1))
+
+    block seal()
+        exp.store_into(r.exp)
+        return(r.load())
+
+/// 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
+/// :param k: The power.
+/// :returns: 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
+routine f64_pow2(k: S64) -> F64
+    block entry()
+        when
+            k.gt(1023)  -> return(F64.from_bits(0x7FF0000000000000))
+            k.lt(-1022) -> return(0.0)
+            else        -> return(F64.from_bits(k.add(1023).to<U64>().shl(52)))
+
+/// The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero): the top 53 bits.
+/// :param n: The precision in limbs.
+/// :returns: The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero).
+routine Mp.top_f64(self: Self, n: USize) -> F64
+    shared slot : @Self <- self
+
+    block entry()
+        top  : U64 = slot.m.getitem(n.sub(1))
+        frac : F64 = top.shr(11).to<F64>().mul(f64_pow2(-53))
+        branch self.neg
+            ? return(frac.neg())
+            : return(frac)
+
+/// The value as an F64 (0 or an infinity outside F64's range).
+/// :param n: The precision in limbs.
+/// :returns: The value as an F64 (0 or an infinity outside F64's range).
+routine Mp.to_f64(self: Self, n: USize) -> F64
+    block entry()
+        when
+            self.is_zero(n)    -> return(0.0)
+            self.exp.gt(1023)  -> huge()
+            self.exp.lt(-1000) -> return(0.0)
+            else               -> return(self.top_f64(n).mul(f64_pow2(self.exp)))
+
+    block huge()
+        branch self.neg
+            ? return(F64.from_bits(0xFFF0000000000000))
+            : return(F64.from_bits(0x7FF0000000000000))
+
+// ── comparing ─────────────────────────────────────────────────────────────────────────────────────
+
+/// -1, 0, or 1 as |a| is below, equal to, or above |b|.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: -1, 0, or 1 as |a| is below, equal to, or above |b|.
+routine mp_compare_magnitude(a: Mp, b: Mp, n: USize) -> S32
+    shared sa : @Mp <- a
+    shared sb : @Mp <- b
+
+    block entry()
+        za : Bool = a.is_zero(n)
+        zb : Bool = b.is_zero(n)
+        when
+            za.bitand(zb)   -> return(0)
+            za              -> return(-1)
+            zb              -> return(1)
+            a.exp.lt(b.exp) -> return(-1)
+            a.exp.gt(b.exp) -> return(1)
+            else            -> limbs(n)
+
+    // top limb first
+    block limbs(left: USize)
+        done : Bool = left.eq(0)
+        branch done
+            ? return(0)
+            : limb(left.sub(1))
+
+    block limb(i: USize)
+        x : U64 = sa.m.getitem(i)
+        y : U64 = sb.m.getitem(i)
+        when
+            x.lt(y) -> return(-1)
+            x.gt(y) -> return(1)
+            else    -> limbs(i)
+
+// ── arithmetic ────────────────────────────────────────────────────────────────────────────────────
+
+/// a × b truncated to n limbs.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: a × b truncated to n limbs.
+routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
+    shared prod : @Array<U64, 41> <- uninit
+    shared sa   : @Mp             <- a
+    shared sb   : @Mp             <- b
+
+    block entry()
+        zero : Bool = a.is_zero(n).bitor(b.is_zero(n))
+        branch zero
+            ? return(Mp.zero())
+            : clear(0)
+
+    block clear(i: USize)
+        done : Bool = i.ge(n)
+        branch done
+            ? row(0)
+            : clear_one(i)
+
+    // row i writes limb i + n itself, so only the low n limbs need zeros
+    block clear_one(i: USize)
+        prod.setitem(i, 0)
+        jump clear(i.add(1))
+
+    block row(i: USize)
+        done : Bool = i.ge(n)
+        branch done
+            ? pack()
+            : column(i, 0, 0)
+
+    block column(i: USize, j: USize, carry: U64)
+        done : Bool = j.ge(n)
+        branch done
+            ? end_row(i, carry)
+            : term(i, j, carry)
+
+    // a[i] b[j] + prod[i + j] + carry stays below 2^128
+    block term(i: USize, j: USize, carry: U64)
+        at  : USize = i.add(j)
+        x   : U128  = sa.m.getitem(i).mul_wide(sb.m.getitem(j))
+        sum : U128  = x.add(prod.getitem(at).to<U128>()).add(carry.to<U128>())
+        prod.setitem(at, sum.to_wrap<U64>())
+        jump column(i, j.add(1), sum.shr(64).to_wrap<U64>())
+
+    block end_row(i: USize, carry: U64)
+        prod.setitem(i.add(n), carry)
+        jump row(i.add(1))
+
+    block pack()
+        size  : USize = n.mul(2)
+        scale : S64   = a.exp.add(b.exp).sub(size.to<S64>().mul(64))
+        return(mp_pack(a.neg.bitxor(b.neg), prod, size, scale, n))
+
+/// a × k for a small k > 0, truncated.
+/// :param a: The first operand.
+/// :param k: The multiplier (nonzero).
+/// :param n: The precision in limbs.
+/// :returns: a × k for a small k > 0, truncated.
+routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
+    shared buf : @Array<U64, 41> <- uninit
+    shared sa  : @Mp             <- a
+
+    block entry()
+        jump loop(0, 0)
+
+    block loop(i: USize, carry: U64)
+        done : Bool = i.ge(n)
+        branch done
+            ? pack(carry)
+            : step(i, carry)
+
+    block step(i: USize, carry: U64)
+        x : U128 = sa.m.getitem(i).mul_wide(k).add(carry.to<U128>())
+        buf.setitem(i, x.to_wrap<U64>())
+        jump loop(i.add(1), x.shr(64).to_wrap<U64>())
+
+    block pack(carry: U64)
+        buf.setitem(n, carry)
+        scale : S64 = a.exp.sub(n.to<S64>().mul(64))
+        return(mp_pack(a.neg, buf, n.add(1), scale, n))
+
+/// a / k for a small k > 0, truncated: one limb more of quotient than kept.
+/// :param a: The first operand.
+/// :param k: The divisor (nonzero).
+/// :param n: The precision in limbs.
+/// :returns: a / k for a small k > 0, truncated.
+routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
+    shared buf     : @Array<U64, 41> <- uninit
+    shared divisor : U128            = k.to<U128>()
+    shared sa      : @Mp             <- a
+
+    block entry()
+        jump loop(n, 0)
+
+    // the dividend's limbs top first, then one zero limb below them
+    block loop(left: USize, rem: U128)
+        done : Bool = left.eq(0)
+        branch done
+            ? last(rem)
+            : step(left.sub(1), rem)
+
+    block step(i: USize, rem: U128)
+        cur : U128 = rem.shl(64).bitor(sa.m.getitem(i).to<U128>())
+        buf.setitem(i.add(1), cur.div(divisor).to_wrap<U64>())
+        jump loop(i, cur.mod(divisor))
+
+    block last(rem: U128)
+        cur : U128 = rem.shl(64)
+        buf.setitem(0, cur.div(divisor).to_wrap<U64>())
+        scale : S64 = a.exp.sub(n.to<S64>().mul(64)).sub(64)
+        return(mp_pack(a.neg, buf, n.add(1), scale, n))
+
+/// a + b (signed), truncated: aligned under one guard limb, so what drops off the smaller one lies below the guard.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: a + b (signed), truncated.
+routine mp_add(a: Mp, b: Mp, n: USize) -> Mp
+    shared buf : @Array<U64, 41> <- uninit
+    shared low : @Array<U64, 41> <- uninit
+    shared sa  : @Mp             <- a
+    shared sb  : @Mp             <- b
+
+    block entry()
+        when
+            a.is_zero(n) -> return(b)
+            b.is_zero(n) -> return(a)
+            else         -> order()
+
+    block order()
+        a_big : Bool = mp_compare_magnitude(a, b, n).ge(0)
+        big   : @Mp  = a_big
+            ? sa
+            : sb
+        small : @Mp = a_big
+            ? sb
+            : sa
+        buf.setitem(0, 0)
+        jump place(big, small, 0)
+
+    // big's limbs one place up, small's shifted right by the exponent difference
+    block place(big: @Mp, small: @Mp, i: USize)
+        done : Bool = i.ge(n)
+        branch done
+            ? align(big, small)
+            : put(big, small, i)
+
+    block put(big: @Mp, small: @Mp, i: USize)
+        buf.setitem(i.add(1), big.m.getitem(i))
+        low.setitem(i, small.m.getitem(i))
+        jump place(big, small, i.add(1))
+
+    block align(big: @Mp, small: @Mp)
+        d : S64 = big.exp.load().sub(small.exp.load())
+        jump shifted(big, small, d, 0)
+
+    block shifted(big: @Mp, small: @Mp, d: S64, j: USize)
+        done : Bool = j.gt(n)
+        branch done
+            ? combine(big, small)
+            : shift_one(big, small, d, j)
+
+    // limb j of small × 2^(64 - d): bits from 64 j - 64 + d of small's mantissa
+    block shift_one(big: @Mp, small: @Mp, d: S64, j: USize)
+        base : S64 = j.to<S64>().mul(64)
+        at   : S64 = base.sub(64).add(d)
+        word : U64 = mp_bits_at(low, n, at)
+        jump store_one(big, small, d, j, word)
+
+    block store_one(big: @Mp, small: @Mp, d: S64, j: USize, word: U64)
+        buf.setitem(j.add(n).add(2), word)
+        jump shifted(big, small, d, j.add(1))
+
+    // the shifted small sits at buf[n + 2 ..] so the sum can go to buf[0 .. n + 2)
+    block combine(big: @Mp, small: @Mp)
+        same : Bool = big.neg.load().eq(small.neg.load())
+        branch same
+            ? add(big.load(), 0, 0)
+            : subtract(big.load(), 0, 0)
+
+    block add(big: Mp, i: USize, carry: U64)
+        done : Bool = i.gt(n)
+        branch done
+            ? carried(big, carry)
+            : add_one(big, i, carry)
+
+    block add_one(big: Mp, i: USize, carry: U64)
+        x : U128 = buf.getitem(i).to<U128>().add(buf.getitem(i.add(n).add(2)).to<U128>())
+        y : U128 = x.add(carry.to<U128>())
+        buf.setitem(i, y.to_wrap<U64>())
+        jump add(big, i.add(1), y.shr(64).to_wrap<U64>())
+
+    block carried(big: Mp, carry: U64)
+        buf.setitem(n.add(1), carry)
+        jump pack(big, n.add(2))
+
+    block subtract(big: Mp, i: USize, borrow: U64)
+        done : Bool = i.gt(n)
+        branch done
+            ? pack(big, n.add(1))
+            : sub_one(big, i, borrow)
+
+    block sub_one(big: Mp, i: USize, borrow: U64)
+        x     : U64  = buf.getitem(i)
+        y     : U64  = buf.getitem(i.add(n).add(2))
+        diff  : U64  = x.sub_wrap(y).sub_wrap(borrow)
+        under : Bool = x.lt(y).bitor(x.eq(y).bitand(borrow.eq(1)))
+        buf.setitem(i, diff)
+        jump subtract(big, i.add(1), under.to<U64>())
+
+    // the sum is buf[0 .. len): mp_pack reads nothing above it
+    block pack(big: Mp, len: USize)
+        scale : S64 = big.exp.sub(n.to<S64>().mul(64)).sub(64)
+        return(mp_pack(big.neg, buf, len, scale, n))
+
+/// a - b, truncated.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :param n: The precision in limbs.
+/// :returns: The difference.
+#inline
+routine mp_sub(a: Mp, b: Mp, n: USize) -> Mp
+    block entry()
+        return(mp_add(a, b.negate(), n))
+
+// ── values with error bounds ──────────────────────────────────────────────────────────────────────
+
+/// The factor every new bound is multiplied by, so the F64 roundings of the bound arithmetic only make it larger.
+preset MP_UP: F64 = 1.0000000001
+
+/// An exact value (its bound 0).
+/// :param v: The value.
+/// :returns: The value with a zero bound.
+#inline
+routine me_exact(v: Mp) -> Me
+    block entry()
+        return({ v: v, err: 0.0 })
+
+/// A value with a given bound.
+/// :param v: The value.
+/// :param err: Its bound, in units of 2^-64n.
+/// :returns: The bounded value.
+#inline
+routine me_of(v: Mp, err: F64) -> Me
+    block entry()
+        return({ v: v, err: err })
+
+/// The value with its sign flipped (the bound unchanged).
+/// :returns: -self.
+#inline
+routine Me.negate(self: Self) -> Self
+    block entry()
+        return({ v: self.v.negate(), err: self.err })
+
+/// The value without its sign (the bound unchanged).
+/// :returns: |self|.
+#inline
+routine Me.magnitude(self: Self) -> Self
+    block entry()
+        return({ v: self.v.magnitude(), err: self.err })
+
+/// self × 2^k (exact, the bound unchanged).
+/// :param k: The power of two.
+/// :param n: The precision in limbs.
+/// :returns: The scaled value.
+#inline
+routine Me.ldexp(self: Self, k: S64, n: USize) -> Self
+    block entry()
+        return({ v: self.v.ldexp(k, n), err: self.err })
+
+/// The bound widened by more units.
+/// :param more: The units to add.
+/// :returns: The bound widened by more units.
+#inline
+routine Me.widen(self: Self, more: F64) -> Self
+    block entry()
+        return({ v: self.v, err: self.err.add(more).mul(MP_UP) })
+
+/// The relative error as an F64 (not in units), for an n-limb value. The unit 2^-64n is applied in two halves:
+/// at 16 limbs it is 2^-1024, below the smallest normal F64, where f64_pow2 gives 0.
+/// :param n: The precision in limbs.
+/// :returns: The relative error as an F64 (not in units), for an n-limb value.
+routine Me.relative(self: Self, n: USize) -> F64
+    block entry()
+        half : S64 = n.to<S64>().mul(32)
+        unit : F64 = f64_pow2(half.neg())
+        return(self.err.mul(unit).mul(unit))
+
+/// A bound for an F64 relative error r, in units of 2^-64n.
+/// :param r: The argument.
+/// :param n: The precision in limbs.
+/// :returns: A bound for an F64 relative error r, in units of 2^-64n.
+routine me_units(r: F64, n: USize) -> F64
+    block entry()
+        bits : S64 = n.to<S64>().mul(64)
+        return(r.mul(f64_pow2(bits)).mul(MP_UP))
+
+/// a × b: the relative errors add (with their product) and the truncation adds 2.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: a × b.
+routine me_mul(a: Me, b: Me, n: USize) -> Me
+    block entry()
+        v     : Mp  = mp_mul(a.v, b.v, n)
+        unit  : F64 = f64_pow2(n.to<S64>().mul(-64))
+        cross : F64 = a.err.mul(b.err).mul(unit)
+        err   : F64 = a.err.add(b.err).add(cross).add(2.0)
+        return({ v: v, err: err.mul(MP_UP) })
+
+/// a × k for a small exact k.
+/// :param a: The first operand.
+/// :param k: The multiplier (nonzero).
+/// :param n: The precision in limbs.
+/// :returns: a × k for a small exact k.
+routine me_mul_u64(a: Me, k: U64, n: USize) -> Me
+    block entry()
+        return({ v: mp_mul_u64(a.v, k, n), err: a.err.add(2.0).mul(MP_UP) })
+
+/// a / k for a small exact k.
+/// :param a: The first operand.
+/// :param k: The divisor (nonzero).
+/// :param n: The precision in limbs.
+/// :returns: a / k for a small exact k.
+routine me_div_u64(a: Me, k: U64, n: USize) -> Me
+    block entry()
+        return({ v: mp_div_u64(a.v, k, n), err: a.err.add(2.0).mul(MP_UP) })
+
+/// a + b: each operand's absolute error over the result's magnitude (|a| < 2^ea, |r| >= 2^(er - 1)), what the
+/// alignment drops below the guard limb (under 2^(e_big - 64n - 64)), and the truncation.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: a + b.
+routine me_add(a: Me, b: Me, n: USize) -> Me
+    block entry()
+        v     : Mp   = mp_add(a.v, b.v, n)
+        za    : Bool = a.v.is_zero(n)
+        zb    : Bool = b.v.is_zero(n)
+        zr    : Bool = v.is_zero(n)
+        exact : Bool = a.err.eq(0.0).bitand(b.err.eq(0.0)).bitand(a.v.exp.eq(b.v.exp))
+        when
+            za               -> return(b)
+            zb               -> return(a)
+            zr.bitand(exact) -> return({ v: v, err: 0.0 })
+            zr               -> return({ v: v, err: F64.from_bits(0x7FF0000000000000) })
+            else             -> bound(v)
+
+    block bound(v: Mp)
+        er      : S64 = v.exp
+        big     : S64 = a.v.exp.max(b.v.exp)
+        from_a  : F64 = a.err.mul(f64_pow2(a.v.exp.sub(er).add(1)))
+        from_b  : F64 = b.err.mul(f64_pow2(b.v.exp.sub(er).add(1)))
+        dropped : F64 = f64_pow2(big.sub(er).sub(63))
+        err     : F64 = from_a.add(from_b).add(dropped).add(2.0)
+        return({ v: v, err: err.mul(MP_UP) })
+
+/// a - b.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :param n: The precision in limbs.
+/// :returns: The difference with its bound.
+#inline
+routine me_sub(a: Me, b: Me, n: USize) -> Me
+    block entry()
+        return(me_add(a, b.negate(), n))
+
+/// 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from an F64 start, at full precision: each step squares
+/// the relative error and adds a few truncations, so after enough steps it is within 16 units. The error of b
+/// passes through as its own size (1 / (b (1 + e)) = (1 - e + e^2 ...) / b).
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from an F64 start, at full precision.
+routine me_recip(b: Me, n: USize) -> Me
+    shared one   : Mp  = mp_of_u128(1, 0, n)
+    shared seed  : F64 = 1.0.div(b.v.top_f64(n))
+    shared steps : S64 = mp_newton_steps(n)
+
+    block entry()
+        y0 : Mp = mp_of_f64(seed, n).ldexp(b.v.exp.neg(), n)
+        jump step(y0, 0)
+
+    block step(y: Mp, k: S64)
+        done : Bool = k.ge(steps)
+        branch done
+            ? return({ v: y, err: b.err.mul(1.001).add(16.0).mul(MP_UP) })
+            : refine(y, k)
+
+    block refine(y: Mp, k: S64)
+        by : Mp = mp_mul(b.v, y, n)
+        t  : Mp = mp_sub(one, by, n)
+        jump step(mp_add(y, mp_mul(y, t, n), n), k.add(1))
+
+/// The Newton steps from a 50-bit start to 64n + 8 bits, each doubling the correct bits.
+/// :param n: The precision in limbs.
+/// :returns: The Newton steps from a 50-bit start to 64n + 8 bits, each doubling the correct bits.
+routine mp_newton_steps(n: USize) -> S64
+    shared want : S64 = n.to<S64>().mul(64).add(8)
+
+    block entry()
+        jump count(50, 0)
+
+    block count(bits: S64, k: S64)
+        branch bits.ge(want)
+            ? return(k)
+            : count(bits.mul(2), k.add(1))
+
+/// a / b.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param n: The precision in limbs.
+/// :returns: a / b.
+routine me_div(a: Me, b: Me, n: USize) -> Me
+    block entry()
+        return(me_mul(a, me_recip(b, n), n))
+
+/// sqrt(a) for a > 0: z = 1/sqrt(a) by Newton steps z + z (1 - a z^2) / 2 from an F64 start, then a z. a's error
+/// enters halved.
+/// :param a: The first operand.
+/// :param n: The precision in limbs.
+/// :returns: sqrt(a) for a > 0.
+routine me_sqrt(a: Me, n: USize) -> Me
+    shared one   : Mp  = mp_of_u128(1, 0, n)
+    shared half  : S64 = a.v.exp.shr(1)
+    shared steps : S64 = mp_newton_steps(n)
+
+    block entry()
+        zero : Bool = a.v.is_zero(n)
+        branch zero
+            ? return(a)
+            : start()
+
+    // a = t 2^exp with t in [0.5, 1): 1/sqrt(a) = 2^(-exp/2) / sqrt(t 2^(exp - 2 half))
+    block start()
+        t    : F64 = a.v.top_f64(n).mul(f64_pow2(a.v.exp.sub(half.mul(2))))
+        seed : F64 = 1.0.div(t.sqrt())
+        z0   : Mp  = mp_of_f64(seed, n).ldexp(half.neg(), n)
+        jump step(z0, 0)
+
+    block step(z: Mp, k: S64)
+        done : Bool = k.ge(steps)
+        branch done
+            ? root(z)
+            : refine(z, k)
+
+    block refine(z: Mp, k: S64)
+        zz : Mp = mp_mul(z, z, n)
+        t  : Mp = mp_sub(one, mp_mul(a.v, zz, n), n)
+        dz : Mp = mp_mul(z, t, n).ldexp(-1, n)
+        jump step(mp_add(z, dz, n), k.add(1))
+
+    block root(z: Mp)
+        r : Mp = mp_mul(a.v, z, n)
+        return({ v: r, err: a.err.mul(0.5001).add(24.0).mul(MP_UP) })
+
+/// An exact integer as an Me.
+/// :param v: The integer.
+/// :param n: The precision in limbs.
+/// :returns: An exact integer as an Me.
+routine me_of_u128(v: U128, n: USize) -> Me
+    block entry()
+        return(me_exact(mp_of_u128(v, 0, n)))
+
+/// 10^k for k >= 0, by squaring (exact while it fits, the error bound counting each truncation).
+/// :param k: The power (at least 0).
+/// :param n: The precision in limbs.
+/// :returns: 10^k for k >= 0, by squaring (exact while it fits, the error bound counting each truncation).
+routine me_pow10(k: S64, n: USize) -> Me
+    shared ten : Me = me_of_u128(10, n)
+
+    block entry()
+        small : Bool = k.le(38)
+        branch small
+            ? return(me_of_u128(dec_p10_128(k), n))
+            : square(me_of_u128(1, n), ten, k)
+
+    // result × base^left is 10^k
+    block square(result: Me, base: Me, left: S64)
+        done : Bool = left.eq(0)
+        odd  : Bool = left.bitand(1).eq(1)
+        when
+            done -> return(result)
+            odd  -> square(me_mul(result, base, n), me_mul(base, base, n), left.shr(1))
+            else -> square(result, me_mul(base, base, n), left.shr(1))
+
+/// The decimal x = (-1)^neg c 10^q (finite) as an Me.
+/// :param x: The operand.
+/// :param n: The precision in limbs.
+/// :returns: The decimal x = (-1)^neg c 10^q (finite) as an Me.
+routine me_of_dec(x: Dec, n: USize) -> Me
+    shared c : Me = me_of_u128(x.coeff, n)
+
+    block entry()
+        zero : Bool = x.coeff.eq(0)
+        when
+            zero        -> return(me_exact(Mp.zero()))
+            x.exp.ge(0) -> up()
+            else        -> down()
+
+    block up()
+        r : Me = me_scale10(c, x.exp, n)
+        return(r.with_sign(x.neg))
+
+    block down()
+        r : Me = me_scale10(c, x.exp, n)
+        return(r.with_sign(x.neg))
+
+/// x × 10^k: within 380 places by 10^19 at a time (a multiplication or division by one limb, 2 units each), past
+/// that by the power of ten itself.
+/// :param x: The operand.
+/// :param k: The power of ten.
+/// :param n: The precision in limbs.
+/// :returns: x × 10^k.
+routine me_scale10(x: Me, k: S64, n: USize) -> Me
+    block entry()
+        near : Bool = k.abs().le(380)
+        when
+            k.eq(0)              -> return(x)
+            near.bitand(k.gt(0)) -> up(x, k)
+            near                 -> down(x, k.neg())
+            k.gt(0)              -> return(me_mul(x, me_pow10(k, n), n))
+            else                 -> return(me_div(x, me_pow10(k.neg(), n), n))
+
+    block up(v: Me, left: S64)
+        step : S64  = left.min(19)
+        done : Bool = left.eq(0)
+        branch done
+            ? return(v)
+            : up(me_mul_u64(v, dec_p10_64(step), n), left.sub(step))
+
+    block down(v: Me, left: S64)
+        step : S64  = left.min(19)
+        done : Bool = left.eq(0)
+        branch done
+            ? return(v)
+            : down(me_div_u64(v, dec_p10_64(step), n), left.sub(step))
+
+/// The magnitude with a given sign (the bound unchanged).
+/// :param neg: Whether it is negative.
+/// :returns: The signed value.
+#inline
+routine Me.with_sign(self: Self, neg: Bool) -> Self
+    block entry()
+        return({ v: self.v.with_sign(neg), err: self.err })

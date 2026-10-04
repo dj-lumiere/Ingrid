@@ -1,0 +1,207 @@
+// The decimal transcendentals (Ingrid/tessera/decimal/dec_trans.tess) at D32, D64, and D128: exp, expm1, exp2,
+// exp10, the logarithms, the circular, inverse circular, hyperbolic, and inverse hyperbolic functions, erf, erfc,
+// tgamma, lgamma, cbrt, pow, and atan2, on arguments shaped for each: near 1 in magnitude, next to 1 (where asin,
+// acos, atanh, and log1p cancel), tiny, large enough to overflow, small integers and halves (the poles of gamma,
+// exact powers), zeros, infinities, and NaNs. Each line is "width function a b result" (BID bits as decimal
+// integers, b 0 for the one-argument functions). decimal_trans.expected was checked line by line against mpmath at
+// 1500 digits rounded half to even to the format: every finite result is the correctly rounded value, reduced (its
+// trailing zeros stripped), and the special cases follow C99.
+
+import Standard::Format
+import Standard::Os
+
+global STATE: @U64 <- 0x6A09E667F3BCC908
+
+/// The next word of the generator.
+/// :returns: The next word.
+routine draw() -> U64
+    block entry()
+        next : U64 = splitmix64(STATE.load())
+        next.store_into(STATE)
+        return(next)
+
+/// A coefficient of exactly p digits.
+/// :param p: The digits of the format.
+/// :returns: The coefficient.
+routine full_coefficient(p: S64) -> U128
+    block entry()
+        low  : U128 = dec_p10_128(p.sub(1))
+        span : U128 = low.mul(9)
+        high : U128 = draw().to<U128>().shl(64)
+        r    : U128 = high.bitor(draw().to<U128>())
+        return(low.add(r.mod(span)))
+
+/// An argument for a function of format f, shaped by a random mode.
+/// :param f: The format.
+/// :returns: The argument.
+routine argument(f: DecFormat) -> Dec
+    shared r    : U64  = draw()
+    shared neg  : Bool = r.bitand(1).eq(1)
+    shared p    : S64  = f.digits
+    shared pick : U64  = r.shr(8)
+
+    block entry()
+        mode : U64 = r.shr(1).mod(16)
+        when mode
+            0, 1, 2, 3, 4, 5 -> moderate(pick.mod(6).to<S64>().sub(3))
+            6, 7             -> near_one()
+            8                -> moderate(pick.mod(50).to<S64>().sub(60))
+            9                -> moderate(pick.mod(5).to<S64>().add(2))
+            10, 11           -> small_integer()
+            12               -> return(dec_inf(neg))
+            13               -> return(dec_nan())
+            14               -> return(dec_num(neg, 0, pick.mod(9).to<S64>().sub(4)))
+            else             -> moderate(pick.mod(3).to<S64>().sub(1))
+
+    // a full coefficient with its adjusted exponent at adj
+    block moderate(adj: S64)
+        return(dec_num(neg, full_coefficient(p), adj.sub(p).add(1)))
+
+    // 1 minus (or plus) a few units in the last places
+    block near_one()
+        top   : U128 = dec_p10_128(p)
+        units : U128 = pick.mod(1000).add(1).to<U128>()
+        below : Bool = r.shr(20).bitand(1).eq(1)
+        c     : U128 = below
+            ? top.sub(units)
+            : top.add(units)
+        return(dec_num(neg, c, p.neg()))
+
+    // k or k + 1/2 for k up to 40
+    block small_integer()
+        k    : U128 = r.shr(8).mod(41).to<U128>()
+        half : Bool = r.shr(16).bitand(1).eq(1)
+        branch half
+            ? return(dec_num(neg, k.mul(10).add(5), -1))
+            : return(dec_num(neg, k, 0))
+
+/// The name of a DEC_ function code.
+/// :param fn: The code.
+/// :returns: The name.
+routine fn_name(fn: U32) -> Bytes
+    block entry()
+        when fn
+            0    -> return("exp")
+            1    -> return("expm1")
+            2    -> return("exp2")
+            3    -> return("exp10")
+            4    -> return("log")
+            5    -> return("log1p")
+            6    -> return("log2")
+            7    -> return("log10")
+            8    -> return("asin")
+            9    -> return("acos")
+            10   -> return("atan")
+            11   -> return("sinh")
+            12   -> return("cosh")
+            13   -> return("tanh")
+            14   -> return("asinh")
+            15   -> return("acosh")
+            16   -> return("atanh")
+            17   -> return("erf")
+            18   -> return("erfc")
+            19   -> return("tgamma")
+            20   -> return("lgamma")
+            21   -> return("sin")
+            22   -> return("cos")
+            23   -> return("tan")
+            24   -> return("cbrt")
+            25   -> return("pow")
+            else -> return("atan2")
+
+/// A decimal's BID bits at the width of its format.
+/// :param x: The decimal.
+/// :param width: 32, 64, or 128.
+/// :returns: The bits.
+routine bits(x: Dec, width: U64) -> U128
+    block entry()
+        when width
+            32   -> return(x.to32().to<U128>())
+            64   -> return(x.to64().to<U128>())
+            else -> return(x.to128())
+
+/// An exponent for pow: a small integer half of the time, else an argument.
+/// :param f: The format.
+/// :returns: The exponent.
+routine power(f: DecFormat) -> Dec
+    shared r : U64 = draw()
+
+    block entry()
+        small : Bool = r.bitand(1).eq(1)
+        k     : U128 = r.shr(8).mod(6).to<U128>()
+        neg   : Bool = r.shr(16).bitand(1).eq(1)
+        branch small
+            ? return(dec_num(neg, k, 0))
+            : return(argument(f))
+
+/// Prints count lines of function fn at format f.
+/// :param fn: The DEC_ code.
+/// :param f: The format.
+/// :param width: Its width in bits.
+/// :param count: How many lines.
+routine run(fn: U32, f: DecFormat, width: U64, count: U64) -> Void
+    block entry()
+        jump loop(0)
+
+    block loop(i: U64)
+        branch i.ge(count)
+            ? return()
+            : one(i)
+
+    block one(i: U64)
+        a : Dec = argument(f)
+        when fn
+            25   -> pow(i, a)
+            26   -> atan2(i, a)
+            else -> unary(i, a)
+
+    block unary(i: U64, a: Dec)
+        show(width, fn_name(fn), bits(a, width), 0, bits(dec_unary(fn, a, f), width))
+        jump loop(i.add(1))
+
+    block pow(i: U64, a: Dec)
+        b : Dec = power(f)
+        show(width, "pow", bits(a, width), bits(b, width), bits(dec_pow(a, b, f), width))
+        jump loop(i.add(1))
+
+    block atan2(i: U64, a: Dec)
+        b : Dec = argument(f)
+        show(width, "atan2", bits(a, width), bits(b, width), bits(dec_atan2(a, b, f), width))
+        jump loop(i.add(1))
+
+/// Prints one line.
+/// :param width: The width in bits.
+/// :param name: The function.
+/// :param a: The first argument's bits.
+/// :param b: The second argument's bits.
+/// :param r: The result's bits.
+routine show(width: U64, name: Bytes, a: U128, b: U128, r: U128) -> Void
+    block entry()
+        Out.write("{width} {name} {a} {b} {r}\n")
+        return()
+
+/// Every function at format f.
+/// :param f: The format.
+/// :param width: Its width in bits.
+/// :param count: Lines per function.
+routine run_all(f: DecFormat, width: U64, count: U64) -> Void
+    block entry()
+        jump next(0)
+
+    block next(fn: U32)
+        branch fn.gt(26)
+            ? return()
+            : one(fn)
+
+    block one(fn: U32)
+        run(fn, f, width, count)
+        jump next(fn.add(1))
+
+/// Prints the lines.
+/// :returns: 0.
+routine main() -> S32
+    block entry()
+        run_all(dec_format32(), 32, 24)
+        run_all(dec_format64(), 64, 16)
+        run_all(dec_format128(), 128, 8)
+        return(0)
