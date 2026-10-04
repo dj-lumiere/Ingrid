@@ -94,33 +94,33 @@ routine current_task() -> @Task
 
 /// Whether the task has completed: its status is `TASK_COMPLETED` and its completion is in.
 /// :returns: True once completed.
-routine Task.is_completed(self: @Self) -> Bool
+routine Task.is_completed(me: @Me) -> Bool
     block entry()
-        done : Bool = self.status.atomic_load().eq(TASK_COMPLETED)
-        return(done.bitand(self.completion.load().ne(COMPLETION_PENDING)))
+        done : Bool = me.status.atomic_load().eq(TASK_COMPLETED)
+        return(done.bitand(me.completion.load().ne(COMPLETION_PENDING)))
 
 /// Stamps the completion order once, before the status says COMPLETED, so a racer that sees COMPLETED sees the
 /// stamp.
-routine Task.stamp(self: @Self) -> Void
+routine Task.stamp(me: @Me) -> Void
     block entry()
-        branch self.completion_seq.atomic_load().eq(U64.MAX)
+        branch me.completion_seq.atomic_load().eq(U64.MAX)
             ? continue
             : return()
-        self.completion_seq.atomic_store(next_completion_seq())
+        me.completion_seq.atomic_store(next_completion_seq())
         return()
 
 /// The completion is in: a coroutine waiting for it is woken, a race! over it re-polls, and a thread waiting in
 /// rf_task_wait returns.
-routine Task.signal_completion(self: @Self) -> Void
+routine Task.signal_completion(me: @Me) -> Void
     block entry()
-        self.coro_lock.lock()
-        sched       : @Sched = self.coro_sched.load()
-        waiter      : @Coro  = self.coro_waiter.load()
-        race_sched  : @Sched = self.race_sched.load()
-        race_waiter : @Coro  = self.race_waiter.load()
-        self.coro_sched.store(null)
-        self.coro_waiter.store(null)
-        self.coro_lock.unlock()
+        me.coro_lock.lock()
+        sched       : @Sched = me.coro_sched.load()
+        waiter      : @Coro  = me.coro_waiter.load()
+        race_sched  : @Sched = me.race_sched.load()
+        race_waiter : @Coro  = me.race_waiter.load()
+        me.coro_sched.store(null)
+        me.coro_waiter.store(null)
+        me.coro_lock.unlock()
         branch sched.is_null()
             ? race(race_sched, race_waiter)
             : continue
@@ -148,8 +148,8 @@ routine Task.signal_completion(self: @Self) -> Void
         jump threads()
 
     block threads()
-        self.done.atomic_store(1)
-        wake_all(self.done)
+        me.done.atomic_store(1)
+        wake_all(me.done)
         return()
 
 /// Registers (s not null) or clears the scheduler of a race! over a set that has this task, and its coroutine
@@ -180,12 +180,12 @@ routine rf_task_await_coro(task: @Task) -> U32
         branch task.is_null()
             ? return(1)
             : continue
-        sched : @Sched = rf_sched_current()
-        self  : @Coro  = current_coro()
-        branch sched.is_null().bitor(self.is_null())
+        sched     : @Sched = rf_sched_current()
+        this_coro : @Coro  = current_coro()
+        branch sched.is_null().bitor(this_coro.is_null())
             ? return(1)
             : continue
-        return(task.register_waiter(sched, self))
+        return(task.register_waiter(sched, this_coro))
 
 /// rf_task_await_coro bounded by timeout_ns: 1 completed, 0 timed out, 2 not in a scheduler-driven coroutine (the
 /// caller waits blocking with the deadline). On a timeout the registration is taken back, so a later completion
@@ -199,24 +199,24 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
         branch task.is_null()
             ? return(1)
             : continue
-        sched : @Sched = rf_sched_current()
-        self  : @Coro  = current_coro()
-        branch sched.is_null().bitor(self.is_null())
+        sched     : @Sched = rf_sched_current()
+        this_coro : @Coro  = current_coro()
+        branch sched.is_null().bitor(this_coro.is_null())
             ? return(2)
             : continue
         deadline : U64 = monotonic_ns().add_clamp(timeout_ns)
-        jump register(sched, self, deadline)
+        jump register(sched, this_coro, deadline)
 
-    block register(sched: @Sched, self: @Coro, deadline: U64)
-        branch task.register_waiter(sched, self).eq(1)
+    block register(sched: @Sched, this_coro: @Coro, deadline: U64)
+        branch task.register_waiter(sched, this_coro).eq(1)
             ? return(1)
             : continue
         now : U64 = monotonic_ns()
         branch now.ge(deadline)
-            ? return(task.withdraw_waiter(sched, self))
+            ? return(task.withdraw_waiter(sched, this_coro))
             : continue
         rf_sched_park_deadline(deadline.sub(now))
-        jump register(sched, self, deadline)
+        jump register(sched, this_coro, deadline)
 
 /// Registers waiter to be woken when the task completes, under the task's lock: 1 if it is complete already (read
 /// it, don't park), 0 once registered. The first registration promises a wake from another thread
@@ -224,19 +224,19 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 /// :param sched: The waiter's scheduler.
 /// :param waiter: The coroutine to wake.
 /// :returns: 1 when complete already, 0 once registered.
-routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
+routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     block entry()
-        self.coro_lock.lock()
-        branch self.is_completed()
+        me.coro_lock.lock()
+        branch me.is_completed()
             ? finish(1, false)
             : continue
-        arm : Bool = self.coro_sched.load().is_null()
-        self.coro_sched.store(sched)
-        self.coro_waiter.store(waiter)
+        arm : Bool = me.coro_sched.load().is_null()
+        me.coro_sched.store(sched)
+        me.coro_waiter.store(waiter)
         jump finish(0, arm)
 
     block finish(complete: U32, arm: Bool)
-        self.coro_lock.unlock()
+        me.coro_lock.unlock()
         branch arm
             ? continue
             : return(complete)
@@ -248,23 +248,23 @@ routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
 /// :param sched: The waiter's scheduler.
 /// :param waiter: The coroutine that gives up.
 /// :returns: 1 when the task completed meanwhile, else 0.
-routine Task.withdraw_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
+routine Task.withdraw_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     block entry()
-        self.coro_lock.lock()
-        branch self.is_completed()
+        me.coro_lock.lock()
+        branch me.is_completed()
             ? finish(1, false)
             : continue
-        mine   : Bool = self.coro_waiter.load().ptr_eq(waiter)
-        disarm : Bool = mine.bitand(self.coro_sched.load().is_not_null())
+        mine   : Bool = me.coro_waiter.load().ptr_eq(waiter)
+        disarm : Bool = mine.bitand(me.coro_sched.load().is_not_null())
         branch mine
             ? continue
             : finish(0, disarm)
-        self.coro_sched.store(null)
-        self.coro_waiter.store(null)
+        me.coro_sched.store(null)
+        me.coro_waiter.store(null)
         jump finish(0, disarm)
 
     block finish(complete: U32, disarm: Bool)
-        self.coro_lock.unlock()
+        me.coro_lock.unlock()
         branch disarm
             ? continue
             : return(complete)
@@ -325,15 +325,15 @@ routine rf_task_create(kind: U32) -> @Task
 
 /// Frees the task with a result nobody took (a deadline give-up, a race! loser) and the dependents list. The error
 /// payload is not freed.
-routine Task.free(self: @Self) -> Void
+routine Task.free(me: @Me) -> Void
     block entry()
-        payload : Addr = self.value_payload.load()
+        payload : Addr = me.value_payload.load()
         branch payload.is_null()
-            ? nodes(self.dependents_head.load())
+            ? nodes(me.dependents_head.load())
             : continue
         c_free(payload)
-        self.value_payload.store(null)
-        jump nodes(self.dependents_head.load())
+        me.value_payload.store(null)
+        jump nodes(me.dependents_head.load())
 
     block nodes(node: @TaskNode)
         branch node.is_null()
@@ -344,7 +344,7 @@ routine Task.free(self: @Self) -> Void
         jump nodes(next)
 
     block done()
-        c_free(self)
+        c_free(me)
         return()
 
 /// Frees a task at once, with its untaken result and dependents list. A null `task` does nothing.
@@ -640,14 +640,14 @@ routine rf_task_mark_parked(task: @Task) -> Void
 /// :param how: A `COMPLETION_` value.
 /// :param value: The result box, or null.
 /// :param error: The error payload, or null.
-routine Task.complete(self: @Self, how: U32, value: Addr, error: Addr) -> Void
+routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> Void
     block entry()
-        self.stamp()
-        self.completion.store(how)
-        self.value_payload.store(value)
-        self.error_payload.store(error)
-        self.status.atomic_store(TASK_COMPLETED)
-        self.signal_completion()
+        me.stamp()
+        me.completion.store(how)
+        me.value_payload.store(value)
+        me.error_payload.store(error)
+        me.status.atomic_store(TASK_COMPLETED)
+        me.signal_completion()
         return()
 
 /// A detached coroutine task (execute()) has no consumer: its result box and the task are freed here. A detached
@@ -788,10 +788,10 @@ routine rf_task_is_cancel_requested(task: @Task) -> Bool
 #export("rf_cancel_requested")
 routine rf_cancel_requested() -> U32
     block entry()
-        self : @Coro = current_coro()
-        branch self.is_null()
+        this_coro : @Coro = current_coro()
+        branch this_coro.is_null()
             ? thread()
-            : return(rf_coro_is_cancel_requested(self))
+            : return(rf_coro_is_cancel_requested(this_coro))
 
     block thread()
         task : @Task = current_task()

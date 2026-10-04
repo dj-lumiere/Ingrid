@@ -3,9 +3,9 @@
 //
 // An Mp has n 64-bit limbs, n chosen per call (the precision; at most MP_TOP). Every operation truncates its exact
 // result to n limbs, which is off by less than one unit in the last place: a relative error below 2^(1 - 64n). An
-// Me is an Mp with a bound on how far the value it stands for can be from it, relative to it and counted in units
-// of 2^-64n (the "ulp" of the precision), so a bound of 2 is one truncation. The bounds are F64s rounded upward by a
-// small factor at every step, so they stay upper bounds. A transcendental computed this way comes with a proven
+// MpApprox is an Mp with a bound on how far the value it stands for can be from it, relative to it and counted in
+// units of 2^-64n (the "ulp" of the precision), so a bound of 2 is one truncation. The bounds are F64s rounded upward
+// by a small factor at every step, so they stay upper bounds. A transcendental computed this way comes with a proven
 // band around it; when the whole band rounds to one decimal, that decimal is the correctly rounded result
 // (dec_trans.tess), otherwise the computation is repeated with more limbs.
 
@@ -32,7 +32,7 @@ record Mp
 
 /// An Mp and a bound on its error: the value it stands for is within err × 2^-64n × |v| of v (n the precision of
 /// the computation).
-record Me
+record MpApprox
     v   : Mp
     err : F64
 
@@ -45,7 +45,7 @@ record MpBuf
 /// Zero.
 /// :returns: The zero Mp.
 #inline
-routine Mp.zero() -> Self
+routine Mp.zero() -> Me
     block entry()
         return({ neg: false, exp: MP_ZERO_EXP, m: MP_ZERO_LIMBS.load() })
 
@@ -53,42 +53,42 @@ routine Mp.zero() -> Self
 /// :param n: The precision in limbs.
 /// :returns: Whether the value is zero (whose exponent is MP_ZERO_EXP, never another's).
 #inline
-routine Mp.is_zero(self: Self, n: USize) -> Bool
+routine Mp.is_zero(me: Me, n: USize) -> Bool
     block entry()
-        return(self.exp.eq(MP_ZERO_EXP))
+        return(me.exp.eq(MP_ZERO_EXP))
 
 /// The value with its sign flipped.
-/// :returns: -self.
+/// :returns: -me.
 #inline
-routine Mp.negate(self: Self) -> Self
+routine Mp.negate(me: Me) -> Me
     block entry()
-        return({ neg: self.neg.bitnot(), exp: self.exp, m: self.m })
+        return({ neg: me.neg.bitnot(), exp: me.exp, m: me.m })
 
 /// The value without its sign.
-/// :returns: |self|.
+/// :returns: |me|.
 #inline
-routine Mp.magnitude(self: Self) -> Self
+routine Mp.magnitude(me: Me) -> Me
     block entry()
-        return({ neg: false, exp: self.exp, m: self.m })
+        return({ neg: false, exp: me.exp, m: me.m })
 
 /// The magnitude with a given sign.
 /// :param neg: Whether it is negative.
 /// :returns: The signed value.
 #inline
-routine Mp.with_sign(self: Self, neg: Bool) -> Self
+routine Mp.with_sign(me: Me, neg: Bool) -> Me
     block entry()
-        return({ neg: neg, exp: self.exp, m: self.m })
+        return({ neg: neg, exp: me.exp, m: me.m })
 
-/// self × 2^k (exact).
+/// me × 2^k (exact).
 /// :param k: The power of two.
 /// :param n: The precision in limbs.
-/// :returns: self × 2^k (exact).
+/// :returns: me × 2^k (exact).
 #inline
-routine Mp.ldexp(self: Self, k: S64, n: USize) -> Self
+routine Mp.ldexp(me: Me, k: S64, n: USize) -> Me
     block entry()
-        branch self.is_zero(n)
-            ? return(self)
-            : return({ neg: self.neg, exp: self.exp.add(k), m: self.m })
+        branch me.is_zero(n)
+            ? return(me)
+            : return({ neg: me.neg, exp: me.exp.add(k), m: me.m })
 
 /// The 64 bits of the number in buf[0 .. len) starting at bit `at` (bits outside it read as 0).
 /// :param buf: The limbs, least significant first.
@@ -249,29 +249,29 @@ routine f64_pow2(k: S64) -> F64
 /// The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero): the top 53 bits.
 /// :param n: The precision in limbs.
 /// :returns: The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero).
-routine Mp.top_f64(self: Self, n: USize) -> F64
-    shared slot : @Self <- self
+routine Mp.top_f64(me: Me, n: USize) -> F64
+    shared slot : @Me <- me
 
     block entry()
         top  : U64 = slot.m.getitem(n.sub(1))
         frac : F64 = top.shr(11).to<F64>().mul(f64_pow2(-53))
-        branch self.neg
+        branch me.neg
             ? return(frac.neg())
             : return(frac)
 
 /// The value as an F64 (0 or an infinity outside F64's range).
 /// :param n: The precision in limbs.
 /// :returns: The value as an F64 (0 or an infinity outside F64's range).
-routine Mp.to_f64(self: Self, n: USize) -> F64
+routine Mp.to_f64(me: Me, n: USize) -> F64
     block entry()
         when
-            self.is_zero(n)    -> return(0.0)
-            self.exp.gt(1023)  -> huge()
-            self.exp.lt(-1000) -> return(0.0)
-            else               -> return(self.top_f64(n).mul(f64_pow2(self.exp)))
+            me.is_zero(n)    -> return(0.0)
+            me.exp.gt(1023)  -> huge()
+            me.exp.lt(-1000) -> return(0.0)
+            else             -> return(me.top_f64(n).mul(f64_pow2(me.exp)))
 
     block huge()
-        branch self.neg
+        branch me.neg
             ? return(F64.from_bits(0xFFF0000000000000))
             : return(F64.from_bits(0x7FF0000000000000))
 
@@ -591,7 +591,7 @@ preset MP_UP: F64 = 1.0000000001
 /// :param v: The value.
 /// :returns: The value with a zero bound.
 #inline
-routine me_exact(v: Mp) -> Me
+routine me_exact(v: Mp) -> MpApprox
     block entry()
         return({ v: v, err: 0.0 })
 
@@ -600,50 +600,50 @@ routine me_exact(v: Mp) -> Me
 /// :param err: Its bound, in units of 2^-64n.
 /// :returns: The bounded value.
 #inline
-routine me_of(v: Mp, err: F64) -> Me
+routine me_of(v: Mp, err: F64) -> MpApprox
     block entry()
         return({ v: v, err: err })
 
 /// The value with its sign flipped (the bound unchanged).
-/// :returns: -self.
+/// :returns: -me.
 #inline
-routine Me.negate(self: Self) -> Self
+routine MpApprox.negate(me: Me) -> Me
     block entry()
-        return({ v: self.v.negate(), err: self.err })
+        return({ v: me.v.negate(), err: me.err })
 
 /// The value without its sign (the bound unchanged).
-/// :returns: |self|.
+/// :returns: |me|.
 #inline
-routine Me.magnitude(self: Self) -> Self
+routine MpApprox.magnitude(me: Me) -> Me
     block entry()
-        return({ v: self.v.magnitude(), err: self.err })
+        return({ v: me.v.magnitude(), err: me.err })
 
-/// self × 2^k (exact, the bound unchanged).
+/// me × 2^k (exact, the bound unchanged).
 /// :param k: The power of two.
 /// :param n: The precision in limbs.
 /// :returns: The scaled value.
 #inline
-routine Me.ldexp(self: Self, k: S64, n: USize) -> Self
+routine MpApprox.ldexp(me: Me, k: S64, n: USize) -> Me
     block entry()
-        return({ v: self.v.ldexp(k, n), err: self.err })
+        return({ v: me.v.ldexp(k, n), err: me.err })
 
 /// The bound widened by more units.
 /// :param more: The units to add.
 /// :returns: The bound widened by more units.
 #inline
-routine Me.widen(self: Self, more: F64) -> Self
+routine MpApprox.widen(me: Me, more: F64) -> Me
     block entry()
-        return({ v: self.v, err: self.err.add(more).mul(MP_UP) })
+        return({ v: me.v, err: me.err.add(more).mul(MP_UP) })
 
 /// The relative error as an F64 (not in units), for an n-limb value. The unit 2^-64n is applied in two halves:
 /// at 16 limbs it is 2^-1024, below the smallest normal F64, where f64_pow2 gives 0.
 /// :param n: The precision in limbs.
 /// :returns: The relative error as an F64 (not in units), for an n-limb value.
-routine Me.relative(self: Self, n: USize) -> F64
+routine MpApprox.relative(me: Me, n: USize) -> F64
     block entry()
         half : S64 = n.to<S64>().mul(32)
         unit : F64 = f64_pow2(half.neg())
-        return(self.err.mul(unit).mul(unit))
+        return(me.err.mul(unit).mul(unit))
 
 /// A bound for an F64 relative error r, in units of 2^-64n.
 /// :param r: The argument.
@@ -659,7 +659,7 @@ routine me_units(r: F64, n: USize) -> F64
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
 /// :returns: a × b.
-routine me_mul(a: Me, b: Me, n: USize) -> Me
+routine me_mul(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         v     : Mp  = mp_mul(a.v, b.v, n)
         unit  : F64 = f64_pow2(n.to<S64>().mul(-64))
@@ -672,7 +672,7 @@ routine me_mul(a: Me, b: Me, n: USize) -> Me
 /// :param k: The multiplier (nonzero).
 /// :param n: The precision in limbs.
 /// :returns: a × k for a small exact k.
-routine me_mul_u64(a: Me, k: U64, n: USize) -> Me
+routine me_mul_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
     block entry()
         return({ v: mp_mul_u64(a.v, k, n), err: a.err.add(2.0).mul(MP_UP) })
 
@@ -681,7 +681,7 @@ routine me_mul_u64(a: Me, k: U64, n: USize) -> Me
 /// :param k: The divisor (nonzero).
 /// :param n: The precision in limbs.
 /// :returns: a / k for a small exact k.
-routine me_div_u64(a: Me, k: U64, n: USize) -> Me
+routine me_div_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
     block entry()
         return({ v: mp_div_u64(a.v, k, n), err: a.err.add(2.0).mul(MP_UP) })
 
@@ -691,7 +691,7 @@ routine me_div_u64(a: Me, k: U64, n: USize) -> Me
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
 /// :returns: a + b.
-routine me_add(a: Me, b: Me, n: USize) -> Me
+routine me_add(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         v     : Mp   = mp_add(a.v, b.v, n)
         za    : Bool = a.v.is_zero(n)
@@ -733,7 +733,7 @@ routine me_ratio(x: Mp, rt: F64, er: S64, n: USize) -> F64
 /// :param n: The precision in limbs.
 /// :returns: The difference with its bound.
 #inline
-routine me_sub(a: Me, b: Me, n: USize) -> Me
+routine me_sub(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         return(me_add(a, b.negate(), n))
 
@@ -743,7 +743,7 @@ routine me_sub(a: Me, b: Me, n: USize) -> Me
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
 /// :returns: 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from an F64 start, at full precision.
-routine me_recip(b: Me, n: USize) -> Me
+routine me_recip(b: MpApprox, n: USize) -> MpApprox
     shared one   : Mp  = mp_of_u128(1, 0, n)
     shared seed  : F64 = 1.0.div(b.v.top_f64(n))
     shared steps : S64 = mp_newton_steps(n)
@@ -782,7 +782,7 @@ routine mp_newton_steps(n: USize) -> S64
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
 /// :returns: a / b.
-routine me_div(a: Me, b: Me, n: USize) -> Me
+routine me_div(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         return(me_mul(a, me_recip(b, n), n))
 
@@ -791,7 +791,7 @@ routine me_div(a: Me, b: Me, n: USize) -> Me
 /// :param a: The first operand.
 /// :param n: The precision in limbs.
 /// :returns: sqrt(a) for a > 0.
-routine me_sqrt(a: Me, n: USize) -> Me
+routine me_sqrt(a: MpApprox, n: USize) -> MpApprox
     shared one   : Mp  = mp_of_u128(1, 0, n)
     shared half  : S64 = a.v.exp.shr(1)
     shared steps : S64 = mp_newton_steps(n)
@@ -825,11 +825,11 @@ routine me_sqrt(a: Me, n: USize) -> Me
         r : Mp = mp_mul(a.v, z, n)
         return({ v: r, err: a.err.mul(0.5001).add(24.0).mul(MP_UP) })
 
-/// An exact integer as an Me.
+/// An exact integer as an MpApprox.
 /// :param v: The integer.
 /// :param n: The precision in limbs.
-/// :returns: An exact integer as an Me.
-routine me_of_u128(v: U128, n: USize) -> Me
+/// :returns: An exact integer as an MpApprox.
+routine me_of_u128(v: U128, n: USize) -> MpApprox
     block entry()
         return(me_exact(mp_of_u128(v, 0, n)))
 
@@ -837,8 +837,8 @@ routine me_of_u128(v: U128, n: USize) -> Me
 /// :param k: The power (at least 0).
 /// :param n: The precision in limbs.
 /// :returns: 10^k for k >= 0, by squaring (exact while it fits, the error bound counting each truncation).
-routine me_pow10(k: S64, n: USize) -> Me
-    shared ten : Me = me_of_u128(10, n)
+routine me_pow10(k: S64, n: USize) -> MpApprox
+    shared ten : MpApprox = me_of_u128(10, n)
 
     block entry()
         small : Bool = k.le(38)
@@ -847,7 +847,7 @@ routine me_pow10(k: S64, n: USize) -> Me
             : square(me_of_u128(1, n), ten, k)
 
     // result × base^left is 10^k
-    block square(result: Me, base: Me, left: S64)
+    block square(result: MpApprox, base: MpApprox, left: S64)
         done : Bool = left.eq(0)
         odd  : Bool = left.bitand(1).eq(1)
         when
@@ -855,12 +855,12 @@ routine me_pow10(k: S64, n: USize) -> Me
             odd  -> square(me_mul(result, base, n), me_mul(base, base, n), left.shr(1))
             else -> square(result, me_mul(base, base, n), left.shr(1))
 
-/// The decimal x = (-1)^neg c 10^q (finite) as an Me.
+/// The decimal x = (-1)^neg c 10^q (finite) as an MpApprox.
 /// :param x: The operand.
 /// :param n: The precision in limbs.
-/// :returns: The decimal x = (-1)^neg c 10^q (finite) as an Me.
-routine me_of_dec(x: Dec, n: USize) -> Me
-    shared c : Me = me_of_u128(x.coeff, n)
+/// :returns: The decimal x = (-1)^neg c 10^q (finite) as an MpApprox.
+routine me_of_dec(x: Dec, n: USize) -> MpApprox
+    shared c : MpApprox = me_of_u128(x.coeff, n)
 
     block entry()
         zero : Bool = x.coeff.eq(0)
@@ -870,11 +870,11 @@ routine me_of_dec(x: Dec, n: USize) -> Me
             else        -> down()
 
     block up()
-        r : Me = me_scale10(c, x.exp, n)
+        r : MpApprox = me_scale10(c, x.exp, n)
         return(r.with_sign(x.neg))
 
     block down()
-        r : Me = me_scale10(c, x.exp, n)
+        r : MpApprox = me_scale10(c, x.exp, n)
         return(r.with_sign(x.neg))
 
 /// x × 10^k: within 380 places by 10^19 at a time (a multiplication or division by one limb, 2 units each), past
@@ -883,7 +883,7 @@ routine me_of_dec(x: Dec, n: USize) -> Me
 /// :param k: The power of ten.
 /// :param n: The precision in limbs.
 /// :returns: x × 10^k.
-routine me_scale10(x: Me, k: S64, n: USize) -> Me
+routine me_scale10(x: MpApprox, k: S64, n: USize) -> MpApprox
     block entry()
         near : Bool = k.abs().le(380)
         when
@@ -893,14 +893,14 @@ routine me_scale10(x: Me, k: S64, n: USize) -> Me
             k.gt(0)              -> return(me_mul(x, me_pow10(k, n), n))
             else                 -> return(me_div(x, me_pow10(k.neg(), n), n))
 
-    block up(v: Me, left: S64)
+    block up(v: MpApprox, left: S64)
         step : S64  = left.min(19)
         done : Bool = left.eq(0)
         branch done
             ? return(v)
             : up(me_mul_u64(v, dec_p10_64(step), n), left.sub(step))
 
-    block down(v: Me, left: S64)
+    block down(v: MpApprox, left: S64)
         step : S64  = left.min(19)
         done : Bool = left.eq(0)
         branch done
@@ -911,6 +911,6 @@ routine me_scale10(x: Me, k: S64, n: USize) -> Me
 /// :param neg: Whether it is negative.
 /// :returns: The signed value.
 #inline
-routine Me.with_sign(self: Self, neg: Bool) -> Self
+routine MpApprox.with_sign(me: Me, neg: Bool) -> Me
     block entry()
-        return({ v: self.v.with_sign(neg), err: self.err })
+        return({ v: me.v.with_sign(neg), err: me.err })

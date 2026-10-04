@@ -151,69 +151,69 @@ record ResultBuffer
 /// Starts an empty buffer with room for `cap` bytes (at least 16).
 /// :param cap: The starting capacity.
 /// :returns: False when the allocation fails.
-routine ResultBuffer.start(self: @Self, cap: USize) -> Bool
+routine ResultBuffer.start(me: @Me, cap: USize) -> Bool
     block entry()
         buf : Addr = c_malloc(cap.max(16))
-        self.buf.store(buf.to<@Byte>())
-        self.len.store(0)
-        self.cap.store(cap.max(16))
+        me.buf.store(buf.to<@Byte>())
+        me.len.store(0)
+        me.cap.store(cap.max(16))
         return(buf.is_not_null())
 
 /// Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
 /// :param n: The bytes about to be added.
 /// :returns: True when there is room.
-routine ResultBuffer.room(self: @Self, n: USize) -> Bool
+routine ResultBuffer.room(me: @Me, n: USize) -> Bool
     block entry()
-        filled      : USize = self.len.load().add(n)
+        filled      : USize = me.len.load().add(n)
         need        : USize = filled.add(1)
-        current_cap : USize = self.cap.load()
+        current_cap : USize = me.cap.load()
         branch need.gt(current_cap)
             ? grow(current_cap.mul(2).max(need))
             : return(true)
 
     block grow(cap: USize)
-        bigger : Addr = c_realloc(self.buf.load(), cap)
+        bigger : Addr = c_realloc(me.buf.load(), cap)
         branch bigger.is_null()
             ? return(false)
             : continue
-        self.buf.store(bigger.to<@Byte>())
-        self.cap.store(cap)
+        me.buf.store(bigger.to<@Byte>())
+        me.cap.store(cap)
         return(true)
 
 /// Appends `n` bytes, for which {ResultBuffer.room} made room.
 /// :param data: The bytes.
 /// :param n: The number of bytes.
-routine ResultBuffer.put(self: @Self, data: @Byte, n: USize) -> Void
+routine ResultBuffer.put(me: @Me, data: @Byte, n: USize) -> Void
     block entry()
-        c_memcpy(self.buf.load().stride(self.len.load()), data, n)
-        next_len : USize = self.len.load().add(n)
-        next_len.store_into(self.len)
+        c_memcpy(me.buf.load().stride(me.len.load()), data, n)
+        next_len : USize = me.len.load().add(n)
+        next_len.store_into(me.len)
         return()
 
 /// Appends one byte, for which {ResultBuffer.room} made room.
 /// :param b: The byte.
-routine ResultBuffer.byte(self: @Self, b: Byte) -> Void
+routine ResultBuffer.byte(me: @Me, b: Byte) -> Void
     block entry()
-        slot : @Byte = self.buf.load().stride(self.len.load())
+        slot : @Byte = me.buf.load().stride(me.len.load())
         slot.store(b)
-        next_len : USize = self.len.load().add(1)
-        next_len.store_into(self.len)
+        next_len : USize = me.len.load().add(1)
+        next_len.store_into(me.len)
         return()
 
 /// NUL-terminates the buffer and hands it over as the result.
 /// :returns: The buffer, its length recorded as the result's.
-routine ResultBuffer.finish(self: @Self) -> @Byte
+routine ResultBuffer.finish(me: @Me) -> @Byte
     block entry()
-        n          : USize = self.len.load()
-        terminator : @Byte = self.buf.load().stride(n)
+        n          : USize = me.len.load()
+        terminator : @Byte = me.buf.load().stride(n)
         terminator.store(0x00)
-        return(result(self.buf.load(), n))
+        return(result(me.buf.load(), n))
 
 /// Frees the buffer and records a failure.
 /// :returns: Null.
-routine ResultBuffer.fail(self: @Self) -> @Byte
+routine ResultBuffer.fail(me: @Me) -> @Byte
     block entry()
-        c_free(self.buf.load())
+        c_free(me.buf.load())
         return(no_result())
 
 // -- files by handle -----------------------------------------------------------------
@@ -291,35 +291,35 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
 
 /// Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
 /// :returns: True when nothing was pending or everything was written.
-routine OpenFile.drain(self: @Self) -> Bool
+routine OpenFile.drain(me: @Me) -> Bool
     block entry()
-        n : USize = self.end.load()
-        branch self.writer.load().bitand(n.gt(0))
+        n : USize = me.end.load()
+        branch me.writer.load().bitand(n.gt(0))
             ? continue
             : return(true)
-        self.end.store(0)
-        wrote : Result<Unit, FsError> = self.file.write_all_result(self.buffer.load(), n)
+        me.end.store(0)
+        wrote : Result<Unit, FsError> = me.file.write_all_result(me.buffer.load(), n)
         return(wrote.is_success())
 
 /// Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
 /// end).
 /// :returns: True when bytes were read.
-routine OpenFile.refill(self: @Self) -> Bool
+routine OpenFile.refill(me: @Me) -> Bool
     block entry()
-        got : Result<USize, FsError> = self.file.read_bytes_result(self.buffer.load(), FILE_BUFFER)
+        got : Result<USize, FsError> = me.file.read_bytes_result(me.buffer.load(), FILE_BUFFER)
         when got
             .Success(n) -> filled(n)
             .Failure    -> filled(0)
 
     block filled(n: USize)
-        self.start.store(0)
-        self.end.store(n)
+        me.start.store(0)
+        me.end.store(n)
         branch n.eq(0)
             ? ended()
             : return(true)
 
     block ended()
-        self.eof.store(true)
+        me.eof.store(true)
         return(false)
 
 /// Writes the pending bytes, closes the file, and frees its handle. A handle not open does nothing.
@@ -860,7 +860,7 @@ routine decimal(v: U64, out: @Byte) -> USize
 /// :param is_dir: True for a directory (typed only).
 /// :param mtime: The modification time in Unix seconds (typed only).
 /// :returns: False when the buffer can't grow.
-routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, mtime: S64) -> Bool
+routine ResultBuffer.entry(me: @Me, name: Bytes, typed: Bool, is_dir: Bool, mtime: S64) -> Bool
     shared digit_buffer : @Array<Byte, 24> <- uninit
     shared digits       : @Byte            = digit_buffer.to<@Byte>()
 
@@ -873,13 +873,13 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
         jump stamped(decimal(mtime.max(0).to<U64>(), digits))
 
     block stamped(dl: USize)
-        sep : USize = self.len.load().gt(0)
+        sep : USize = me.len.load().gt(0)
             ? 1
             : 0
         kind : USize = typed
             ? dl.add(2)
             : 0
-        branch self.room(sep.add(kind).add(name.count()))
+        branch me.room(sep.add(kind).add(name.count()))
             ? continue
             : return(false)
         branch sep.eq(1)
@@ -887,20 +887,20 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
             : body(dl)
 
     block newline(dl: USize)
-        self.byte(b'\n')
+        me.byte(b'\n')
         jump body(dl)
 
     block body(dl: USize)
         branch typed
             ? continue
             : named()
-        self.byte(is_dir ? b'd' : b'f')
-        self.put(digits, dl)
-        self.byte(b' ')
+        me.byte(is_dir ? b'd' : b'f')
+        me.put(digits, dl)
+        me.byte(b' ')
         jump named()
 
     block named()
-        self.put(name.data, name.count())
+        me.put(name.data, name.count())
         return(true)
 
 /// The entries, with each one's kind and modification time when typed (a link followed where the OS tells).

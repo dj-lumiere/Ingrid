@@ -80,12 +80,12 @@ routine next_completion_seq() -> U64
 #noreturn
 routine coro_trampoline() -> Void
     block entry()
-        self : @Coro                   = current_coro()
-        body : Callable<(Addr,), Void> = self.entry.load()
-        body.call(self.userdata.load())
-        self.completion_seq.atomic_store(next_completion_seq())
-        self.status.atomic_store(CORO_COMPLETED)
-        switch_stack(self.sp, self.resumer_sp.load())
+        this_coro : @Coro                   = current_coro()
+        body      : Callable<(Addr,), Void> = this_coro.entry.load()
+        body.call(this_coro.userdata.load())
+        this_coro.completion_seq.atomic_store(next_completion_seq())
+        this_coro.status.atomic_store(CORO_COMPLETED)
+        switch_stack(this_coro.sp, this_coro.resumer_sp.load())
         unreachable
 
 /// Reserves a coroutine stack from Standard::Fiber's stack allocator.
@@ -163,12 +163,12 @@ routine rf_coro_resume(coro: @Coro) -> U32
 /// The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
 routine coro_switch_out() -> Void
     block entry()
-        self : @Coro = current_coro()
-        branch self.is_null()
+        this_coro : @Coro = current_coro()
+        branch this_coro.is_null()
             ? return()
             : continue
-        self.status.atomic_store(CORO_PARKED)
-        switch_stack(self.sp, self.resumer_sp.load())
+        this_coro.status.atomic_store(CORO_PARKED)
+        switch_stack(this_coro.sp, this_coro.resumer_sp.load())
         return()
 
 /// A coroutine's status, a `CORO_` value.
@@ -194,10 +194,10 @@ routine rf_coro_current() -> @Coro
 #export("rf_current_task_id")
 routine rf_current_task_id() -> U64
     block entry()
-        self : @Coro = current_coro()
-        branch self.is_null()
+        this_coro : @Coro = current_coro()
+        branch this_coro.is_null()
             ? return(rf_current_thread_id())
-            : return(ptrtoint<Addr, U64>(self))
+            : return(ptrtoint<Addr, U64>(this_coro))
 
 /// Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
 /// null `coro` does nothing.
@@ -262,14 +262,14 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
 routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
     destroy_fn: Callable<(Addr,), Void>) -> Void
     block entry()
-        self : @Coro = current_coro()
-        branch frame.is_null().bitor(self.is_null())
+        this_coro : @Coro = current_coro()
+        branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
         frame.value_ptr.store(value_ptr)
         frame.destroy_fn.store(destroy_fn)
-        frame.prev.store(self.cf_top.load())
-        self.cf_top.store(frame)
+        frame.prev.store(this_coro.cf_top.load())
+        this_coro.cf_top.store(frame)
         return()
 
 /// The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
@@ -278,14 +278,14 @@ routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
 #export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
     block entry()
-        self : @Coro = current_coro()
-        branch frame.is_null().bitor(self.is_null())
+        this_coro : @Coro = current_coro()
+        branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
-        branch self.cf_top.load().ptr_eq(frame)
+        branch this_coro.cf_top.load().ptr_eq(frame)
             ? continue
             : return()
-        self.cf_top.store(frame.prev.load())
+        this_coro.cf_top.store(frame.prev.load())
         return()
 
 /// A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
