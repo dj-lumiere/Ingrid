@@ -26,7 +26,8 @@ record XS
 /// :returns: The result, or not ok.
 routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
     block entry()
-        v : We = wide_eval(fn, x, y)
+        bits : S64 = f.digits.mul(4).add(40)
+        v    : We  = wide_eval(fn, x, y, bits)
         return(wide_round(v, f))
 
 /// e^x for |x| < 2^40: x = k ln 2 + r with |r| < 1/2 (its bound from the subtraction), then r = j1/32 + j2/2048 + s
@@ -475,8 +476,9 @@ routine we_atan(x: We) -> We
 /// :param fn: Which function (a DEC_ code).
 /// :param x: The operand.
 /// :param y: The second argument (pow and atan2), else ignored.
+/// :param bits: The precision the result needs, in bits.
 /// :returns: fn(x, y) at 192 bits.
-routine wide_eval(fn: U32, x: Dec, y: Dec) -> We
+routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
     block entry()
         when fn
             0    -> return(we_exp(we_of_dec(x)))
@@ -496,10 +498,10 @@ routine wide_eval(fn: U32, x: Dec, y: Dec) -> We
             14   -> return(wide_eval_asinh(x))
             15   -> return(wide_eval_acosh(x))
             16   -> return(wide_eval_atanh(x))
-            17   -> return(wide_eval_erf(x, false))
-            18   -> return(wide_eval_erf(x, true))
-            19   -> return(wide_eval_gamma(x, false))
-            20   -> return(wide_eval_gamma(x, true))
+            17   -> return(wide_eval_erf(x, false, bits))
+            18   -> return(wide_eval_erf(x, true, bits))
+            19   -> return(wide_eval_gamma(x, false, bits))
+            20   -> return(wide_eval_gamma(x, true, bits))
             21   -> return(wide_eval_trig(x, 0))
             22   -> return(wide_eval_trig(x, 1))
             23   -> return(wide_eval_trig(x, 2))
@@ -686,36 +688,43 @@ routine wide_eval_cbrt(x: Dec) -> We
         l : We = we_div_u64(wide_eval_ln(dec_num(false, x.coeff, x.exp)), 3)
         return(we_exp(l).with_sign(x.neg))
 
-/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)): positive terms, so no cancellation at any
-/// x. Once the term ratio 2x^2 / (2k + 3) is below 1/2 the rest is below the last term left out.
+/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ y^k x / (1 3 5 ... (2k+1)) with y = 2x^2: positive terms, each the last times
+/// y / i, summed without a bound per step. Term k is off by at most ax.err + k (y.err + 4) units (each step one
+/// product and one division, 2 units each), and the sum of n positive terms by the largest of those plus 2 units per
+/// addition: ax.err + n (y.err + 6). Once the ratio y / (i + 2) is below 1/2 the rest is below twice the next term.
 /// :param ax: The magnitude of the argument.
-/// :returns: erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)).
-routine we_erf_positive(ax: We) -> We
-    shared x2  : We = we_mul(ax, ax)
-    shared two : We = x2.ldexp(1)
+/// :param bits: The precision the result needs, in bits.
+/// :returns: erf |x|.
+routine we_erf_positive(ax: We, bits: S64) -> We
+    shared x2 : We  = we_mul(ax, ax)
+    shared y  : We  = x2.ldexp(1)
+    shared yf : F64 = y.v.to_f64()
 
     block entry()
-        jump series(ax, ax, 3)
+        jump series(ax.v, ax.v, 3, 0)
 
-    // the next term is term × 2x^2 / i
-    block series(term: We, sum: We, i: U64)
-        next  : We   = we_div_u64(we_mul(term, two), i)
-        ratio : F64  = two.v.to_f64().div(i.add(2).to<F64>())
-        done  : Bool = we_is_negligible(next, sum).bitand(ratio.lt(0.5))
-        branch done
-            ? scale(we_plus_abs(sum, next.v.exp.add(1)))
-            : series(next, we_add(sum, next), i.add(2))
+    block series(term: W, sum: W, i: U64, n: U64)
+        next  : W    = w_div_u64(w_mul(term, y.v), i)
+        ratio : F64  = yf.div(i.add(2).to<F64>())
+        small : Bool = next.is_zero().bitor(next.exp.lt(sum.exp.sub(bits).sub(8)))
+        branch small.bitand(ratio.lt(0.5))
+            ? scale(sum, next, n)
+            : series(next, w_add(sum, next), i.add(2), n.add(1))
 
-    block scale(sum: We)
-        g : We = we_exp(x2.negate())
-        c : We = we_const(DEC_TWO_OVER_SQRT_PI)
-        return(we_mul(we_mul(sum, g), c))
+    block scale(sum: W, next: W, n: U64)
+        nf  : F64 = n.to<F64>()
+        err : F64 = ax.err.add(nf.mul(y.err.add(6.0))).mul(1.01)
+        s   : We  = we_plus_abs({ v: sum, err: err }, next.exp.add(1))
+        g   : We  = we_exp(x2.negate())
+        c   : We  = we_const(DEC_TWO_OVER_SQRT_PI)
+        return(we_mul(we_mul(s, g), c))
 
 /// erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
 /// smallest term or where terms stop mattering. The rest is below the first term left out.
 /// :param ax: The magnitude of the argument.
+/// :param bits: The precision the result needs, in bits.
 /// :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
-routine we_erfc_asymptotic(ax: We) -> We
+routine we_erfc_asymptotic(ax: We, bits: S64) -> We
     shared x2  : We = we_mul(ax, ax)
     shared inv : We = we_div(we_int(1), x2.ldexp(1))
     shared one : We = we_int(1)
@@ -727,7 +736,7 @@ routine we_erfc_asymptotic(ax: We) -> We
     block series(term: We, sum: We, k: U64)
         next    : We   = we_mul(we_mul_u64(term, k.mul(2).sub(1)), inv)
         growing : Bool = w_compare_magnitude(next.v, term.v).ge(0)
-        small   : Bool = we_is_negligible(next, sum)
+        small   : Bool = we_is_below(next, sum, bits)
         odd     : Bool = k.bitand(1).eq(1)
         signed  : We   = odd
             ? next.negate()
@@ -748,60 +757,108 @@ routine we_erfc_asymptotic(ax: We) -> We
 /// series alone is accurate enough (or the extra limbs would run out).
 /// :param x: The operand.
 /// :param complement: Whether erfc is wanted rather than erf.
+/// :param bits: The precision the result needs, in bits.
 /// :returns: erf x (complement false) or erfc x.
-routine wide_eval_erf(x: Dec, complement: Bool) -> We
+routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
     shared ax : We = we_of_dec(x).magnitude()
 
     block entry()
         small : Bool = ax.v.exp.le(-1)
         when
-            complement.bitnot() -> return(we_erf_positive(ax).with_sign(x.neg))
-            x.neg               -> return(we_add(we_int(1), we_erf_positive(ax)))
-            small               -> return(we_sub(we_int(1), we_erf_positive(ax)))
+            complement.bitnot() -> return(we_erf_positive(ax, bits).with_sign(x.neg))
+            x.neg               -> return(we_add(we_int(1), we_erf_positive(ax, bits)))
+            small               -> return(we_sub(we_int(1), we_erf_positive(ax, bits.add(4))))
             else                -> tail()
 
+    // 1 - erf x loses x^2 log2(e) bits and a few: at 192 bits while the rest still holds what the format needs,
+    // the asymptotic series once that alone is accurate enough, else at more limbs
     block tail()
         xf     : F64   = ax.v.to_f64()
         lost   : F64   = xf.mul(xf).mul(1.4426950408889634).add(4.0)
+        need   : F64   = bits.to<F64>()
         limbs  : U64   = lost.div(64.0).floor().to<U64>()
         extra  : USize = limbs.to<USize>().add(1)
         wide   : USize = extra.add(3)
-        enough : Bool  = lost.gt(208.0)
+        here   : Bool  = lost.add(need).add(8.0).le(192.0)
+        enough : Bool  = lost.gt(need.add(16.0))
         fits   : Bool  = wide.le(MP_TOP)
         when
-            enough -> return(we_erfc_asymptotic(ax))
+            here   -> direct(lost.to<S64>())
+            enough -> return(we_erfc_asymptotic(ax, bits))
             fits   -> complement_at(wide)
-            else   -> return(we_erfc_asymptotic(ax))
+            else   -> return(we_erfc_asymptotic(ax, bits))
+
+    block direct(lost: S64)
+        e : We = we_erf_positive(ax, bits.add(lost).add(8))
+        return(we_sub(we_int(1), e))
 
     block complement_at(wide: USize)
         axw : Me = me_of_dec(x, wide).magnitude()
         e   : Me = me_sub(me_int(1, wide), me_erf_positive(axw, wide), wide)
         return(we_of_me(me_narrow(e, wide, 3)))
 
-/// ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 +
-/// Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
+/// ln Γ(z) for z past the Stirling floor: (z - 1/2) ln z - z + ln(2 pi)/2 + (1/z) P(1/z^2), P(w) = Σ c_k w^k with
+/// c_k = B_2(k+1) / ((2k + 2)(2k + 1)) (signs alternating), whose rest is below its first term left out (z real and
+/// positive). How many terms (N + 1) is settled first from F64 estimates T_k = |c_k| w^k (with a margin), until one
+/// falls below 2^-(bits + 8) of the sum; then Horner's scheme on W values without a bound per step. Its error is at
+/// most (4N + 3) units of Σ T_k (two operations a step and the table's 3 units), w's error moves P by w.err Σ k T_k,
+/// and P is at least T_0 - Σ_{k>0} T_k.
 /// :param z: The argument.
-/// :returns: ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 + Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
-routine we_lngamma_stirling(z: We) -> We
-    shared inv  : We = we_div(we_int(1), z)
-    shared inv2 : We = we_mul(inv, inv)
+/// :param bits: The precision the result needs, in bits.
+/// :returns: ln Γ(z).
+routine we_lngamma_stirling(z: We, bits: S64) -> We
+    shared inv : We  = we_recip(z)
+    shared w   : We  = we_mul(inv, inv)
+    shared zf  : F64 = z.v.to_f64()
+    shared wf  : F64 = w.v.to_f64().mul(1.01)
 
     block entry()
-        half : We = we_exact(w_of_u128(1, -1))
-        a    : We = we_mul(we_sub(z, half), we_ln(z))
-        b    : We = we_sub(a, z)
-        base : We = we_add(b, we_const(DEC_HALF_LN_2PI))
-        jump series(base, inv, 0)
+        half  : We  = we_exact(w_of_u128(1, -1))
+        a     : We  = we_mul(we_sub(z, half), we_ln(z))
+        b     : We  = we_sub(a, z)
+        base  : We  = we_add(b, we_const(DEC_HALF_LN_2PI))
+        scale : F64 = f64_pow2(bits.add(8).neg()).mul(zf)
+        limit : F64 = base.v.to_f64().abs().mul(scale)
+        c0    : F64 = we_const(DEC_STIRLING).v.to_f64().abs()
+        jump count(base, limit, 1, wf, c0, 0.0)
 
-    // power = z^-(2k + 1)
-    block series(sum: We, power: We, k: USize)
-        coefficient : We   = wide_stirling_coefficient(k)
-        term        : We   = we_mul(coefficient, power)
-        last        : Bool = k.add(1).ge(DEC_STIRLING_TERMS)
-        done        : Bool = we_is_negligible(term, sum).bitor(last)
+    // T_k = |c_k| w^k (1.01): the terms 0 .. k - 1 are in when T_k falls below the limit
+    block count(base: We, limit: F64, k: USize, power: F64, total: F64, weighted: F64)
+        ck   : F64  = we_const(DEC_STIRLING.add(k)).v.to_f64().abs()
+        tk   : F64  = ck.mul(power).mul(1.01)
+        last : Bool = k.add(1).ge(DEC_STIRLING_TERMS)
+        done : Bool = tk.lt(limit).bitor(last)
         branch done
-            ? return(we_plus_abs(sum, term.v.exp.add(1)))
-            : series(we_add(sum, term), we_mul(power, inv2), k.add(1))
+            ? horner(base, k.sub(1), tk, total, weighted)
+            : count(base, limit, k.add(1), power.mul(wf), total.add(tk),
+                weighted.add(k.to<F64>().mul(tk)))
+
+    block horner(base: We, top: USize, rest: F64, total: F64, weighted: F64)
+        jump step(base, top, rest, total, weighted, top, wide_stirling_coefficient(top).v)
+
+    block step(base: We, top: USize, rest: F64, total: F64, weighted: F64, k: USize, acc: W)
+        branch k.eq(0)
+            ? sum(base, top, rest, total, weighted, acc)
+            : step(base, top, rest, total, weighted, k.sub(1),
+                w_add(wide_stirling_coefficient(k.sub(1)).v, w_mul(w.v, acc)))
+
+    block sum(base: We, top: USize, rest: F64, total: F64, weighted: F64, p: W)
+        c0     : F64 = we_const(DEC_STIRLING).v.to_f64().abs()
+        low    : F64 = c0.sub(total.sub(c0).mul(1.01))
+        n      : F64 = top.to<F64>()
+        steps  : F64 = n.mul(4.0).add(3.0)
+        spread : F64 = steps.mul(total).add(weighted.mul(w.err))
+        pe     : F64 = low.gt(0.0)
+            ? spread.div(low).mul(1.02).add(2.0)
+            : F64.from_bits(0x7FF0000000000000)
+        s    : We  = we_mul(inv, { v: p, err: pe })
+        r    : We  = we_add(base, s)
+        tail : F64 = rest.div(zf).mul(1.02)
+        hb   : U64 = tail.bits().shr(52)
+        e    : S64 = hb.to<S64>().sub(1022)
+        branch tail.eq(0.0)
+            ? return(r)
+            : return(we_plus_abs(r, e))
 
 /// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 /// :param k: Which coefficient, from 0.
@@ -817,12 +874,13 @@ routine wide_stirling_coefficient(k: USize) -> We
 /// Γ(x) = pi / (sin(pi x) Γ(1 - x)), sin(pi x) = (-1)^k sin(pi r) with r = x - k exact in decimal.
 /// :param x: The operand.
 /// :param log: Whether the logarithm is wanted.
+/// :param bits: The precision the result needs, in bits.
 /// :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
-routine wide_eval_gamma(x: Dec, log: Bool) -> We
+routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
     block entry()
         branch x.neg
             ? reflect()
-            : return(wide_gamma_positive(we_of_dec(x), log))
+            : return(wide_gamma_positive(we_of_dec(x), log, bits))
 
     block reflect()
         k     : Dec  = dec_round_int(x, 4, dec_format128())
@@ -831,7 +889,7 @@ routine wide_eval_gamma(x: Dec, log: Bool) -> We
         pi    : We   = we_const(DEC_PI)
         sinpi : We   = we_sin_of_pi_times(we_of_dec(r))
         omx   : We   = we_sub(we_int(1), we_of_dec(x))
-        g     : We   = wide_gamma_positive(omx, log)
+        g     : We   = wide_gamma_positive(omx, log, bits)
         branch log
             ? log_reflect(pi, sinpi, g)
             : gamma_reflect(pi, sinpi, g, odd)
@@ -894,9 +952,11 @@ routine wide_reduce(x: Dec) -> WReduced
 /// Γ(z) or ln Γ(z) for z > 0.
 /// :param z: The argument.
 /// :param log: Whether the logarithm is wanted.
+/// :param bits: The precision the result needs, in bits.
 /// :returns: Γ(z) or ln Γ(z) for z > 0.
-routine wide_gamma_positive(z: We, log: Bool) -> We
-    shared floor : F64 = dec_stirling_floor(3)
+routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
+    shared lift  : F64 = bits.add(741).to<F64>()
+    shared floor : F64 = lift.div(199.0).exp2()
     shared zf    : F64 = z.v.to_f64()
 
     block entry()
@@ -904,17 +964,23 @@ routine wide_gamma_positive(z: We, log: Bool) -> We
         count : U64  = short
             ? dec_gamma_shift(floor, zf)
             : 0
-        jump product(we_int(1), z, 0, count)
+        jump product(w_of_u128(1, 0), 0, count)
 
-    // prod = z (z + 1) ... (z + i - 1)
-    block product(prod: We, at: We, i: U64, count: U64)
+    // prod = z (z + 1) ... (z + i - 1) without a bound per step: each factor z + i is off by z.err + 2 units (one
+    // sum), each product adds 2
+    block product(prod: W, i: U64, count: U64)
         done : Bool = i.ge(count)
         branch done
-            ? stirling(prod, at, count)
-            : product(we_mul(prod, at), we_add(at, we_int(1)), i.add(1), count)
+            ? shifted(prod, count)
+            : product(w_mul(prod, w_add(z.v, w_of_u128(i.to<U128>(), 0))), i.add(1), count)
+
+    block shifted(prod: W, count: U64)
+        n   : F64 = count.to<F64>()
+        err : F64 = z.err.add(4.0).mul(n).mul(1.01)
+        jump stirling({ v: prod, err: err }, we_add(z, we_of_u128(count.to<U128>())), count)
 
     block stirling(prod: We, shifted: We, count: U64)
-        lg   : We   = we_lngamma_stirling(shifted)
+        lg   : We   = we_lngamma_stirling(shifted, bits)
         none : Bool = count.eq(0)
         when
             log.bitand(none) -> return(lg)
