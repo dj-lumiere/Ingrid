@@ -21,10 +21,17 @@ record DecSum
 /// :param c: The third operand.
 /// :returns: a × b + c exactly up to a sticky digit, as (neg, coefficient, exponent, preferred exponent) for one rounding, the preferred exponent the smaller of the product's and c's.
 routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecSum
-    shared pneg : Bool = a.neg.bitxor(b.neg)
-    shared pc   : U256 = a.coeff.mul_wide(b.coeff)
-    shared pe   : S64  = a.exp.add(b.exp)
-    shared cc   : U256 = c.coeff.to<U256>()
+    shared pneg   : Bool   = a.neg.bitxor(b.neg)
+    shared pc     : U256   = a.coeff.mul_wide(b.coeff)
+    shared pe     : S64    = a.exp.add(b.exp)
+    shared cc     : U256   = c.coeff.to<U256>()
+    shared c_high : Bool   = c.exp.gt(pe)
+    shared h      : DecSum = c_high
+        ? DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
+        : DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
+    shared l : DecSum = c_high
+        ? DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
+        : DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
 
     block entry()
         both_zero : Bool = pc.eq(0).bitand(cc.eq(0))
@@ -41,34 +48,27 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecSum
 
     // h: the addend with the larger exponent, l: the other
     block order()
-        c_high : Bool   = c.exp.gt(pe)
-        h      : DecSum = c_high
-            ? DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
-            : DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
-        l : DecSum = c_high
-            ? DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
-            : DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
         shift : S64  = h.exp.sub(l.exp)
         hd    : S64  = dec_digits256(h.coeff)
         fits  : Bool = hd.add(shift).le(75)
         branch fits
-            ? combine(h.coeff.mul(dec_p10(shift)), l.coeff, false, h, l, l.exp)
-            : cut(h, l, shift, 75.sub(hd))
+            ? combine(h.coeff.mul(dec_p10(shift)), l.coeff, false, l.exp)
+            : cut(shift, 75.sub(hd))
 
-    block cut(h: DecSum, l: DecSum, shift: S64, k: S64)
+    block cut(shift: S64, k: S64)
         high : U256 = h.coeff.mul(dec_p10(k))
         drop : S64  = shift.sub(k)
         far  : Bool = drop.gt(76)
         branch far
-            ? combine(high, 0, l.coeff.ne(0), h, l, h.exp.sub(k))
-            : floor(high, drop, h, l, h.exp.sub(k))
+            ? combine(high, 0, l.coeff.ne(0), h.exp.sub(k))
+            : floor(high, drop, h.exp.sub(k))
 
-    block floor(high: U256, drop: S64, h: DecSum, l: DecSum, e: S64)
+    block floor(high: U256, drop: S64, e: S64)
         q      : U256 = dec_div_p10_256(l.coeff, drop)
         sticky : Bool = q.mul_wrap(dec_p10(drop)).ne(l.coeff)
-        jump combine(high, q, sticky, h, l, e)
+        jump combine(high, q, sticky, e)
 
-    block combine(hc: U256, lc: U256, sticky: Bool, h: DecSum, l: DecSum, e: S64)
+    block combine(hc: U256, lc: U256, sticky: Bool, e: S64)
         same : Bool = h.neg.eq(l.neg)
         down : Bool = hc.ge(lc)
         when
@@ -221,16 +221,17 @@ routine dec_square_top(v: Dec) -> S64
 /// :param b: The second operand.
 /// :returns: c^2 10^(2q - b), floored, and whether the floor dropped anything.
 routine dec_scaled_square(v: Dec, b: S64) -> DecTerm
+    shared sq : U256 = v.coeff.mul_wide(v.coeff)
+
     block entry()
-        sq    : U256 = v.coeff.mul_wide(v.coeff)
-        shift : S64  = v.exp.mul(2).sub(b)
+        shift : S64 = v.exp.mul(2).sub(b)
         when
             v.coeff.eq(0) -> return({ value: 0, sticky: false })
             shift.ge(0)   -> return({ value: sq.mul(dec_p10(shift)), sticky: false })
-            shift.ge(-76) -> floor(sq, shift.neg())
+            shift.ge(-76) -> floor(shift.neg())
             else          -> return({ value: 0, sticky: true })
 
-    block floor(sq: U256, k: S64)
+    block floor(k: S64)
         q : U256 = dec_div_p10_256(sq, k)
         return({ value: q, sticky: q.mul_wrap(dec_p10(k)).ne(sq) })
 

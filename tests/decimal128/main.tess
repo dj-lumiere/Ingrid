@@ -61,13 +61,17 @@ routine c_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
 /// :param n: The power.
 /// :returns: 10^n.
 routine pow10(n: U64) -> U128
-    block entry()
-        jump step(0, 1)
+    shared power : @U128 <- 1
 
-    block step(i: U64, power: U128)
+    block entry()
+        jump step(0)
+
+    block step(i: U64)
         branch i.ge(n)
-            ? return(power)
-            : step(i.add(1), power.mul(10))
+            ? return(power.load())
+            : continue
+        power.load().mul(10).store_into(power)
+        jump step(i.add(1))
 
 /// An operand from three random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
 /// :param r: A random word.
@@ -80,13 +84,13 @@ routine operand(r: U64, s: U64, t: U64) -> U128
     shared negative : U128 = r.shr(40).bitand(1).to<U128>()
     shared sign     : U128 = negative.shl(127)
     shared spread   : U64  = r.shr(16)
+    shared kind     : U64  = r.mod(4)
 
     block entry()
-        kind : U64 = r.mod(4)
         when kind
             0    -> return(wide)
             3    -> special()
-            else -> finite(kind)
+            else -> finite()
 
     block special()
         which : U64 = r.shr(24).mod(4)
@@ -100,7 +104,7 @@ routine operand(r: U64, s: U64, t: U64) -> U128
         biased : U128 = spread.mod(12288).to<U128>()
         return(sign.bitor(biased.shl(113)))
 
-    block finite(kind: U64)
+    block finite()
         digits : U64  = r.shr(8).mod(35)
         coeff  : U128 = wide.mod(pow10(digits))
         near   : Bool = kind.eq(1)

@@ -26,37 +26,46 @@ routine fold(h: U64, v: U64) -> U64
 
 /// The checksum of a million 64-bit draws.
 routine fold_u64(state: @Words) -> U64
-    block entry()
-        jump each(0, FNV_START)
+    shared h : @U64 <- FNV_START
 
-    block each(i: U64, h: U64)
+    block entry()
+        jump each(0)
+
+    block each(i: U64)
         branch i.ge(DRAWS)
-            ? return(h)
+            ? return(h.load())
             : continue
-        jump each(i.add(1), fold(h, draw(state)))
+        fold(h.load(), draw(state)).store_into(h)
+        jump each(i.add(1))
 
 /// The checksum of a million 32-bit draws (the high half of a draw, widened back).
 routine fold_u32(state: @Words) -> U64
-    block entry()
-        jump each(0, FNV_START)
+    shared h : @U64 <- FNV_START
 
-    block each(i: U64, h: U64)
+    block entry()
+        jump each(0)
+
+    block each(i: U64)
         branch i.ge(DRAWS)
-            ? return(h)
+            ? return(h.load())
             : continue
-        jump each(i.add(1), fold(h, draw(state).shr(32)))
+        fold(h.load(), draw(state).shr(32)).store_into(h)
+        jump each(i.add(1))
 
 /// The checksum of the bits of a million [0, 1) draws.
 routine fold_b64(state: @Words) -> U64
-    block entry()
-        jump each(0, FNV_START)
+    shared h : @U64 <- FNV_START
 
-    block each(i: U64, h: U64)
+    block entry()
+        jump each(0)
+
+    block each(i: U64)
         branch i.ge(DRAWS)
-            ? return(h)
+            ? return(h.load())
             : continue
         unit : F64 = random_unit_b64(draw(state))
-        jump each(i.add(1), fold(h, unit.bits()))
+        fold(h.load(), unit.bits()).store_into(h)
+        jump each(i.add(1))
 
 /// RazorForge's range draw: low plus a draw modulo the wrapped span.
 routine range(state: @Words, low: U64, high: U64) -> U64
@@ -66,29 +75,35 @@ routine range(state: @Words, low: U64, high: U64) -> U64
 
 /// The checksum of a million pairs of range draws, [10, 1000) and a span that wraps past U64.MAX.
 routine fold_range(state: @Words) -> U64
-    block entry()
-        jump each(0, FNV_START)
+    shared h : @U64 <- FNV_START
 
-    block each(i: U64, h: U64)
+    block entry()
+        jump each(0)
+
+    block each(i: U64)
         branch i.ge(DRAWS)
-            ? return(h)
+            ? return(h.load())
             : continue
-        first  : U64 = fold(h, range(state, 10, 1000))
+        first  : U64 = fold(h.load(), range(state, 10, 1000))
         second : U64 = fold(first, range(state, 18446744073709551000, 5))
-        jump each(i.add(1), second)
+        second.store_into(h)
+        jump each(i.add(1))
 
 /// How many of a million chance(0.3) trials succeed.
 routine count_chance(state: @Words) -> U64
-    block entry()
-        jump each(0, 0)
+    shared heads : @U64 <- 0
 
-    block each(i: U64, heads: U64)
+    block entry()
+        jump each(0)
+
+    block each(i: U64)
         branch i.ge(DRAWS)
-            ? return(heads)
+            ? return(heads.load())
             : continue
         unit : F64  = random_unit_b64(draw(state))
         hit  : Bool = unit.lt(0.3)
-        jump each(i.add(1), heads.add(hit.to<U64>()))
+        heads.load().add(hit.to<U64>()).store_into(heads)
+        jump each(i.add(1))
 
 /// The checksum of a million rounds of the splitmix64 chain, each fed the last one's output.
 routine fold_splitmix(seed: U64) -> U64

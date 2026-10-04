@@ -25,15 +25,18 @@ preset CRASH_STATUS: CInt = 0x52
 /// :param digits: The number of digits, at most 16.
 /// :param upper: True for `A`-`F`, false for `a`-`f`.
 routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
-    block entry()
-        claim text : @Array<Byte, 16> <- uninit
-        jump digit(text.to<@Byte>(), value, digits)
+    shared text_buffer : @Array<Byte, 16> <- uninit
+    shared text        : @Byte            = text_buffer.to<@Byte>()
+    shared v           : @U64             <- value
 
-    block digit(text: @Byte, v: U64, left: USize)
+    block entry()
+        jump digit(digits)
+
+    block digit(left: USize)
         branch left.eq(0)
-            ? done(text)
+            ? done()
             : continue
-        d : U8 = v.bitand(15).to<U8>()
+        d : U8 = v.load().bitand(15).to<U8>()
         // '0' + d, or 'a' / 'A' + d - 10
         letter : U8 = upper
             ? 55
@@ -42,9 +45,10 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
             ? d.add(48)
             : d.add(letter)
         text.stride(left.sub(1)).store(c.bits())
-        jump digit(text, v.shr(4), left.sub(1))
+        v.load().shr(4).store_into(v)
+        jump digit(left.sub(1))
 
-    block done(text: @Byte)
+    block done()
         Err.write_all_result(text, digits)
         return()
 
@@ -142,39 +146,41 @@ routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol:
 #target(os: "windows")
 routine print_platform_stack() -> Void
     // SYMBOL_INFO and room for its name, 8-aligned
-    shared buffer : @Array<U64, 262> <- uninit
-    shared sym    : @Byte            = buffer.to<@Byte>()
+    shared buffer       : @Array<U64, 262> <- uninit
+    shared sym          : @Byte            = buffer.to<@Byte>()
+    shared stack_buffer : @Array<Addr, 64> <- uninit
+    // skip this helper's frame
+    shared captured : U16   = c_capture_stack_back_trace(1, 64, stack_buffer.to<@Addr>(), null)
+    shared process  : Addr  = c_get_current_process()
+    shared stack    : @Addr = stack_buffer.to<@Addr>()
+    shared frames   : U32   = captured.to<U32>()
 
     block entry()
-        claim stack : @Array<Addr, 64> <- uninit
-        // skip this helper's frame
-        frames  : U16  = c_capture_stack_back_trace(1, 64, stack.to<@Addr>(), null)
-        process : Addr = c_get_current_process()
         c_sym_initialize(process, null, 1)
         sym.to<@U32>().store(SYMBOL_INFO_SIZE)
         max_name_field : @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to<@U32>()
         max_name_field.store(MAX_SYM_NAME)
         Err.write("Stack trace:\n")
-        jump frame(stack.to<@Addr>(), frames.to<U32>(), process, 0)
+        jump frame(0)
 
-    block frame(stack: @Addr, frames: U32, process: Addr, i: U32)
+    block frame(i: U32)
         branch i.eq(frames)
             ? return()
             : continue
         address : U64 = ptrtoint<Addr, U64>(stack.stride(i.to<USize>()).load())
         branch c_sym_from_addr(process, address, null, sym).ne(0)
-            ? named(stack, frames, process, i)
+            ? named(i)
             : continue
         Err.write("  {i}: at 0x")
         write_hex(address, 16, false)
         Err.write("\n")
-        jump frame(stack, frames, process, i.add(1))
+        jump frame(i.add(1))
 
-    block named(stack: @Addr, frames: U32, process: Addr, i: U32)
+    block named(i: U32)
         symbol_name : @Byte = sym.stride(SYMBOL_INFO_NAME)
         name        : Bytes = symbol_name.to<CStr>().to<Bytes>()
         Err.write("  {i}: at {name}\n")
-        jump frame(stack, frames, process, i.add(1))
+        jump frame(i.add(1))
 
 // -- the platform stack: POSIX -------------------------------------------------------
 
@@ -196,33 +202,35 @@ routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
 /// Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
 #target(os: not "windows")
 routine print_platform_stack() -> Void
-    block entry()
-        claim stack : @Array<Addr, 64> <- uninit
-        frames  : CInt   = c_backtrace(stack.to<@Addr>(), 64)
-        symbols : @@Byte = c_backtrace_symbols(stack.to<@Addr>(), frames)
-        Err.write("Stack trace:\n")
-        jump frame(stack.to<@Addr>(), frames, symbols, 2)
+    shared stack_buffer : @Array<Addr, 64> <- uninit
+    shared frames       : CInt             = c_backtrace(stack_buffer.to<@Addr>(), 64)
+    shared symbols      : @@Byte           = c_backtrace_symbols(stack_buffer.to<@Addr>(), frames)
+    shared stack        : @Addr            = stack_buffer.to<@Addr>()
 
-    block frame(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt)
+    block entry()
+        Err.write("Stack trace:\n")
+        jump frame(2)
+
+    block frame(i: CInt)
         branch i.ge(frames)
-            ? done(symbols)
+            ? done()
             : continue
         branch symbols.is_null()
-            ? raw(stack, frames, symbols, i)
+            ? raw(i)
             : continue
         n    : CInt  = i.sub(2)
         text : @Byte = symbols.stride(i.to<USize>()).load()
         line : Bytes = text.to<CStr>().to<Bytes>()
         Err.write("  {n}: {line}\n")
-        jump frame(stack, frames, symbols, i.add(1))
+        jump frame(i.add(1))
 
-    block raw(stack: @Addr, frames: CInt, symbols: @@Byte, i: CInt)
+    block raw(i: CInt)
         n       : CInt = i.sub(2)
         address : Addr = stack.stride(i.to<USize>()).load()
         Err.write("  {n}: {address}\n")
-        jump frame(stack, frames, symbols, i.add(1))
+        jump frame(i.add(1))
 
-    block done(symbols: @@Byte)
+    block done()
         c_free(symbols)
         return()
 

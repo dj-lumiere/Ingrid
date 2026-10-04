@@ -673,6 +673,14 @@ routine dec_add_special(a: Dec, b: Dec) -> Dec
 /// :param f: The format the result rounds to.
 /// :returns: a + b rounded to f, the preferred exponent the smaller one.
 routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
+    shared a_high : Bool = a.exp.ge(b.exp)
+    shared h      : Dec  = a_high
+        ? a
+        : b
+    shared l : Dec = a_high
+        ? b
+        : a
+
     block entry()
         special : Bool = a.is_finite().bitand(b.is_finite()).bitnot()
         branch special
@@ -681,26 +689,19 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
 
     // h: the operand with the larger exponent, l: the other
     block order()
-        a_high : Bool = a.exp.ge(b.exp)
-        h      : Dec  = a_high
-            ? a
-            : b
-        l : Dec = a_high
-            ? b
-            : a
         quick_zero : Bool = h.coeff.eq(0).bitand(l.coeff.ne(0))
         branch quick_zero
             ? return(dec_finish(l.neg, l.coeff.to<U256>(), l.exp, l.exp, f))
-            : align(h, l)
+            : align()
 
-    block align(h: Dec, l: Dec)
+    block align()
         shift : S64  = h.exp.sub(l.exp)
         near  : Bool = shift.le(40)
         branch near
-            ? combine(h.coeff.to<U256>().mul(dec_p10(shift)), l.coeff.to<U256>(), h, l, l.exp)
-            : cut(h, l, shift.sub(40))
+            ? combine(h.coeff.to<U256>().mul(dec_p10(shift)), l.coeff.to<U256>(), l.exp)
+            : cut(shift.sub(40))
 
-    block cut(h: Dec, l: Dec, drop: S64)
+    block cut(drop: S64)
         high   : U256 = h.coeff.to<U256>().mul(dec_p10(40))
         q      : U128 = dec_div_p10(l.coeff, drop)
         whole  : Bool = q.mul_wrap(dec_p10_128(drop.min(38))).eq(l.coeff).bitand(drop.le(38))
@@ -708,18 +709,18 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
         sticky : U128 = exact
             ? q
             : q.bitor(1)
-        jump combine(high, sticky.to<U256>(), h, l, h.exp.sub(40))
+        jump combine(high, sticky.to<U256>(), h.exp.sub(40))
 
-    block combine(hc: U256, lc: U256, h: Dec, l: Dec, e: S64)
+    block combine(hc: U256, lc: U256, e: S64)
         same : Bool = h.neg.eq(l.neg)
         down : Bool = hc.ge(lc)
         when
-            same -> sum(hc.add(lc), h.neg, l, e)
-            down -> sum(hc.sub(lc), h.neg, l, e)
-            else -> sum(lc.sub(hc), l.neg, l, e)
+            same -> sum(hc.add(lc), h.neg, e)
+            down -> sum(hc.sub(lc), h.neg, e)
+            else -> sum(lc.sub(hc), l.neg, e)
 
     // an exact zero sum is +0, or -0 when both operands are negative
-    block sum(c: U256, neg: Bool, l: Dec, e: S64)
+    block sum(c: U256, neg: Bool, e: S64)
         zero : Bool = c.eq(0)
         both : Bool = a.neg.bitand(b.neg)
         sign : Bool = zero

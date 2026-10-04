@@ -210,48 +210,49 @@ routine rf_race_wait(r: @Race) -> SSize
 /// :param r: The race, with at least one competitor.
 /// :returns: The winner's index.
 private routine wait_for_winner(r: @Race) -> SSize
+    shared s    : @Sched = rf_sched_thread_default()
+    shared self : @Coro  = current_coro()
+
     block entry()
-        s    : @Sched = rf_sched_thread_default()
-        self : @Coro  = current_coro()
         r.register(s, self, true)
         s.lock.lock()
         next_waiters : SSize = s.waiters.load().add(1)
         next_waiters.store_into(s.waiters)
         branch self.is_null()
-            ? poll(s, self)
+            ? poll()
             : continue
         r.await_coros(self, true)
-        jump poll(s, self)
+        jump poll()
 
-    block poll(s: @Sched, self: @Coro)
+    block poll()
         winner : SSize = r.winner()
         branch winner.ge(0)
-            ? over(s, self, winner)
+            ? over(winner)
             : continue
         branch self.is_null()
-            ? blocking(s, self)
+            ? blocking()
             : continue
         // A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
         s.lock.unlock()
         rf_sched_park_external()
         s.lock.lock()
-        jump poll(s, self)
+        jump poll()
 
-    block blocking(s: @Sched, self: @Coro)
+    block blocking()
         s.block_cond.wait(s.lock)
-        jump poll(s, self)
+        jump poll()
 
-    block over(s: @Sched, self: @Coro, winner: SSize)
+    block over(winner: SSize)
         branch self.is_null()
             ? continue
-            : clear(s, self, winner)
-        jump finish(s, self, winner)
+            : clear(winner)
+        jump finish(winner)
 
-    block clear(s: @Sched, self: @Coro, winner: SSize)
+    block clear(winner: SSize)
         r.await_coros(self, false)
-        jump finish(s, self, winner)
+        jump finish(winner)
 
-    block finish(s: @Sched, self: @Coro, winner: SSize)
+    block finish(winner: SSize)
         remaining_waiters : SSize = s.waiters.load().sub(1)
         remaining_waiters.store_into(s.waiters)
         s.lock.unlock()

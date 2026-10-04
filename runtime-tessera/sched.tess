@@ -357,16 +357,16 @@ routine Sched.timer_sift_down(self: @Self, i: SSize) -> Void
     shared r : SSize = l.add(1)
 
     block entry()
-        jump left(i)
+        jump left()
 
-    block left(m: SSize)
+    block left()
         branch l.lt(n)
             ? continue
-            : right(m)
+            : right(i)
         left_wake : U64 = self.timer_at(l).wake_ns.load()
-        branch left_wake.lt(self.timer_at(m).wake_ns.load())
+        branch left_wake.lt(self.timer_at(i).wake_ns.load())
             ? right(l)
-            : right(m)
+            : right(i)
 
     block right(m: SSize)
         branch r.lt(n)
@@ -841,13 +841,14 @@ routine Sched.claim_work(self: @Self) -> @Coro
 /// :throws: Crashes with `DeadlockError` when every worker is idle, coroutines are awaited, and no wake can come,
 ///     confirmed `DEADLOCK_CONFIRMS` times in a row.
 routine Sched.step(self: @Self) -> Bool
+    shared c : @Coro = self.claim_work()
+
     block entry()
-        c : @Coro = self.claim_work()
         branch c.is_null()
             ? slow()
-            : run(c)
+            : run()
 
-    block run(c: @Coro)
+    block run()
         self.run_coro(c)
         return(true)
 
@@ -867,20 +868,20 @@ routine Sched.step(self: @Self) -> Bool
         jump found(mine)
 
     block injector()
-        c : @Coro = self.pop_injector()
-        branch c.is_null()
+        found_coro : @Coro = self.pop_injector()
+        branch found_coro.is_null()
             ? steal()
-            : found(c)
+            : found(found_coro)
 
     block steal()
-        c : @Coro = self.try_steal()
-        branch c.is_null()
+        found_coro : @Coro = self.try_steal()
+        branch found_coro.is_null()
             ? nothing()
-            : found(c)
+            : found(found_coro)
 
-    block found(c: @Coro)
+    block found(found_coro: @Coro)
         self.lock.unlock()
-        self.run_coro(c)
+        self.run_coro(found_coro)
         return(true)
 
     block nothing()

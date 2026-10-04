@@ -832,24 +832,26 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 /// :param out: Where the digits go, room for 20.
 /// :returns: The digit count.
 routine decimal(v: U64, out: @Byte) -> USize
-    block entry()
-        claim rev : @Array<Byte, 24> <- uninit
-        jump digit(v, rev.to<@Byte>(), 0)
+    shared rev_buffer : @Array<Byte, 24> <- uninit
+    shared rev        : @Byte            = rev_buffer.to<@Byte>()
 
-    block digit(remaining: U64, rev: @Byte, n: USize)
+    block entry()
+        jump digit(v, 0)
+
+    block digit(remaining: U64, n: USize)
         digit_value : U8 = remaining.mod(10).to<U8>()
         rev.stride(n).store(digit_value.add(48).bits())
         rest : U64 = remaining.div(10)
         branch rest.eq(0)
-            ? copy(rev, n.add(1), 0)
-            : digit(rest, rev, n.add(1))
+            ? copy(n.add(1), 0)
+            : digit(rest, n.add(1))
 
-    block copy(rev: @Byte, n: USize, i: USize)
+    block copy(n: USize, i: USize)
         branch i.eq(n)
             ? return(n)
             : continue
         out.stride(i).store(rev.stride(n.sub(1).sub(i)).load())
-        jump copy(rev, n, i.add(1))
+        jump copy(n, i.add(1))
 
 /// One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0), with
 /// '\n' before every entry but the first.
@@ -859,16 +861,18 @@ routine decimal(v: U64, out: @Byte) -> USize
 /// :param mtime: The modification time in Unix seconds (typed only).
 /// :returns: False when the buffer can't grow.
 routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, mtime: S64) -> Bool
+    shared digit_buffer : @Array<Byte, 24> <- uninit
+    shared digits       : @Byte            = digit_buffer.to<@Byte>()
+
     block entry()
-        claim digits : @Array<Byte, 24> <- uninit
         branch typed
-            ? stamp(digits.to<@Byte>())
-            : stamped(digits.to<@Byte>(), 0)
+            ? stamp()
+            : stamped(0)
 
-    block stamp(digits: @Byte)
-        jump stamped(digits, decimal(mtime.max(0).to<U64>(), digits))
+    block stamp()
+        jump stamped(decimal(mtime.max(0).to<U64>(), digits))
 
-    block stamped(digits: @Byte, dl: USize)
+    block stamped(dl: USize)
         sep : USize = self.len.load().gt(0)
             ? 1
             : 0
@@ -879,14 +883,14 @@ routine ResultBuffer.entry(self: @Self, name: Bytes, typed: Bool, is_dir: Bool, 
             ? continue
             : return(false)
         branch sep.eq(1)
-            ? newline(digits, dl)
-            : body(digits, dl)
+            ? newline(dl)
+            : body(dl)
 
-    block newline(digits: @Byte, dl: USize)
+    block newline(dl: USize)
         self.byte(b'\n')
-        jump body(digits, dl)
+        jump body(dl)
 
-    block body(digits: @Byte, dl: USize)
+    block body(dl: USize)
         branch typed
             ? continue
             : named()
