@@ -59,10 +59,8 @@ routine bytes_result(s: @Byte, len: USize) -> @Byte
 routine owned_result(r: Result<Bytes, FsError>) -> @Byte
     block entry()
         when r
-            .Success(text) -> terminate(text)
+            .Success(text) -> continue
             .Failure       -> return(no_result())
-
-    block terminate(text: Bytes)
         n   : USize = text.count()
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
@@ -215,10 +213,8 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
 
     block opened(r: Result<FileHandle, FsError>, writer: Bool)
         when r
-            .Success(f) -> buffered(f, writer)
+            .Success(f) -> continue
             .Failure    -> return(-1)
-
-    block buffered(f: FileHandle, writer: Bool)
         buffer : Addr = c_malloc(FILE_BUFFER)
         branch buffer.is_null()
             ? full(f, buffer)
@@ -466,10 +462,8 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
         claim alloc : @Allocator <- heap()
         r : Result<Bytes, FsError> = File.at(cpath.to<CStr>().to<Bytes>()).read_all_result(alloc)
         when r
-            .Success(text) -> terminate(text)
+            .Success(text) -> continue
             .Failure       -> return(-1)
-
-    block terminate(text: Bytes)
         n   : USize = text.count
         buf : Addr  = c_realloc(text.data, n.add(1))
         branch buf.is_null()
@@ -649,9 +643,7 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
         r : Result<Unit, FsError> = File.at(a).move_to_result(File.at(b))
         when r
             .Success        -> return(0)
-            .Failure(error) -> failed(error)
-
-    block failed(error: FsError)
+            .Failure(error) -> continue
         branch error.eq(FsError.CrossDevice)
             ? return(move_across(a, b))
             : return(-1)
@@ -666,9 +658,7 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
         r : Result<Unit, FsError> = File.at(a).move_to_if_absent_result(File.at(b))
         when r
             .Success        -> return(0)
-            .Failure(error) -> failed(error)
-
-    block failed(error: FsError)
+            .Failure(error) -> continue
         when
             error.eq(FsError.AlreadyExists) -> return(1)
             error.eq(FsError.CrossDevice)   -> across()
@@ -762,10 +752,8 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     block next()
         e : Option<DirEntry> = iter.next()
         when e
-            .Present(d) -> one(d)
+            .Present(d) -> continue
             .Absent     -> finish(true)
-
-    block one(d: DirEntry)
         branch typed
             ? continue
             : add(d, false, 0)
@@ -838,10 +826,8 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
     block entry()
         m : Result<Metadata, FsError> = File.at(path_of(path, len)).metadata_result()
         when m
-            .Success(info) -> cache(info)
+            .Success(info) -> continue
             .Failure       -> return(-1)
-
-    block cache(info: Metadata)
         META_SIZE.store(info.size.to_wrap<S64>())
         META_MODIFIED.store(seconds(info.modified_ns))
         META_CREATED.store(seconds(info.created_ns.unwrap_or(info.modified_ns)))
@@ -912,9 +898,7 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
         r : Result<FileHandle, FsError> = File.at(p).open_read_write_result()
         when r
             .Success(f)     -> sized(f)
-            .Failure(error) -> missing(error)
-
-    block missing(error: FsError)
+            .Failure(error) -> continue
         branch error.eq(FsError.NotFound)
             ? continue
             : return(-1)
@@ -949,10 +933,8 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
         MAP_DELTA.store(0)
         r : Result<Mapping, FsError> = File.at(path_of(path, len)).map_result(write, 0, USize.MAX)
         when r
-            .Success(m) -> mapped(m)
+            .Success(m) -> continue
             .Failure    -> return(no_result())
-
-    block mapped(m: Mapping)
         branch m.count().eq(0)
             ? empty()
             : continue
@@ -978,10 +960,8 @@ routine map_window(path: @Byte, len: S32, offset: USize, count: USize, write: Bo
         r : Result<Mapping, FsError> = File.at(path_of(path,
             len)).map_result(write, offset.to<U64>(), count)
         when r
-            .Success(m) -> mapped(m)
+            .Success(m) -> continue
             .Failure    -> return(no_result())
-
-    block mapped(m: Mapping)
         branch m.count().eq(0)
             ? empty()
             : continue
