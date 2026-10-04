@@ -22,15 +22,15 @@ on their own:
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
 Roamed entity runtime and its cycle collector, the crash handler, SipHash, the xoshiro256** generator with its
 splitmix64 seeding, JSON string escaping, the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
-numbers, quaternions, and 4x4 matrices, and the arithmetic of the decimal floats D32, D64, and D128. More
+numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
+arithmetic, rounding, conversions, and DPD encoding, one engine for the three widths). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
-Most of it is written in Tessera here. The big numeric engines whose source stays RazorForge (the decimal floats,
-later the arbitrary-precision Integer and Real) are written into `tessera/generated/` by RazorForge's Tessera
-backend: `RazorForge export-ingrid` builds each export file of RazorForge's `IngridExport/` and writes its
-`ingrid_*` routines, with everything they reach, as one Tessera file. Those files are committed, and a release ships
-them like the rest; don't edit them, change the RazorForge source and export again.
+It is written in Tessera here. The big numeric engines whose source is to stay RazorForge (the arbitrary-precision
+Integer and Real) will be written into `tessera/generated/` by RazorForge's Tessera backend: `RazorForge export-ingrid`
+builds each export file of RazorForge's `IngridExport/` and writes its `ingrid_*` routines, with everything they
+reach, as one Tessera file, committed and shipped like the rest.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
@@ -39,7 +39,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 ```
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
-└── generated/    # Written from RazorForge source by `RazorForge export-ingrid`
+└── decimal/      # The decimal floats D32, D64, and D128
 tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt
@@ -68,8 +68,8 @@ next to each executable. The full workspace setup is in the
 the reference test vectors, splitmix64, xoshiro256** and the JSON escaping against RazorForge's own streams and
 text, the binary-float exports against correctly rounded results from mpmath,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
-before they moved here (and the crashes their checked arithmetic reports), the generated D32, D64, and D128
-arithmetic against RazorForge's engines, the word division on its edge cases, the Roamed counts and lock, the cycle
+before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
+against RazorForge's engines and the other decimal operations against exact references, the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.tess`). Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.

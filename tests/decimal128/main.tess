@@ -1,13 +1,9 @@
-// D128 arithmetic (Ingrid/tessera/generated/decimal.tess, exported from RazorForge's Core/Numerics/D128.rf) against
-// RazorForge's own engine: each line is two operands and their sum, difference, product, quotient (as BID bits),
-// and their order, which decimal128.expected holds as RazorForge computed them before the arithmetic moved here.
-// The operands come from splitmix64: raw bits (every encoding, canonical or not), finite values near exponent 0
-// and anywhere in range with 0 to 34 digits, zeros with any exponent, infinities, and quiet and signaling NaNs.
-//
-// The calls go through the C ABI, as RazorForge makes them: each operand as its low and high 64 bits, each result
-// back in Words (w0 low, w1 high). The generated code reaches the heap calls of memory.tess on its crash paths,
-// and those report a failed allocation through the RazorForge runtime library's __rf_throw, which this program
-// defines.
+// D128 arithmetic (Ingrid/tessera/decimal/) against RazorForge's own engine before the move: each line is two
+// operands and their sum, difference, product, quotient (as BID bits), and their order, which decimal128.expected
+// holds as RazorForge computed them before the arithmetic moved here. The operands come from splitmix64: raw bits
+// (every encoding, canonical or not), finite values near exponent 0 and anywhere in range with 0 to 34 digits,
+// zeros with any exponent, infinities, and quiet and signaling NaNs. The calls go through the C ABI, as RazorForge
+// makes them: each operand as its low and high 64 bits, each result back in Words (w0 low, w1 high).
 
 import Standard::Format
 import Standard::Os
@@ -16,30 +12,54 @@ global STATE: @U64 <- 0x0123456789ABCDEF
 
 preset PAIRS: U64 = 1500
 
+/// ingrid_d128_add through the C ABI.
+/// :param a_low: The low 64 bits of a.
+/// :param a_high: The high 64 bits of a.
+/// :param b_low: The low 64 bits of b.
+/// :param b_high: The high 64 bits of b.
+/// :returns: The sum in Words.
 #[external("c"), symbol("ingrid_d128_add")]
 routine c_d128_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
+/// ingrid_d128_sub through the C ABI.
+/// :param a_low: The low 64 bits of a.
+/// :param a_high: The high 64 bits of a.
+/// :param b_low: The low 64 bits of b.
+/// :param b_high: The high 64 bits of b.
+/// :returns: The difference in Words.
 #[external("c"), symbol("ingrid_d128_sub")]
 routine c_d128_sub(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
+/// ingrid_d128_mul through the C ABI.
+/// :param a_low: The low 64 bits of a.
+/// :param a_high: The high 64 bits of a.
+/// :param b_low: The low 64 bits of b.
+/// :param b_high: The high 64 bits of b.
+/// :returns: The product in Words.
 #[external("c"), symbol("ingrid_d128_mul")]
 routine c_d128_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
+/// ingrid_d128_div through the C ABI.
+/// :param a_low: The low 64 bits of a.
+/// :param a_high: The high 64 bits of a.
+/// :param b_low: The low 64 bits of b.
+/// :param b_high: The high 64 bits of b.
+/// :returns: The quotient in Words.
 #[external("c"), symbol("ingrid_d128_div")]
 routine c_d128_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
+/// ingrid_d128_order through the C ABI.
+/// :param a_low: The low 64 bits of a.
+/// :param a_high: The high 64 bits of a.
+/// :param b_low: The low 64 bits of b.
+/// :param b_high: The high 64 bits of b.
+/// :returns: The order.
 #[external("c"), symbol("ingrid_d128_order")]
 routine c_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
 
-#[export("__rf_throw"), noreturn]
-routine stub_rf_throw(error_type: CStr, message: CStr) -> Void
-    block entry()
-        kind : Bytes = error_type.to<Bytes>()
-        text : Bytes = message.to<Bytes>()
-        Out.write("{kind}: {text}\n")
-        exit(82)
-
 /// 10 to the power n.
+/// :param n: The power.
+/// :returns: 10^n.
 routine pow10(n: U64) -> U128
     block entry()
         jump step(0, 1)
@@ -50,6 +70,10 @@ routine pow10(n: U64) -> U128
             : step(i.add(1), power.mul(10))
 
 /// An operand from three random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
+/// :param r: A random word.
+/// :param s: A random word.
+/// :param t: A random word.
+/// :returns: The operand's bits.
 routine operand(r: U64, s: U64, t: U64) -> U128
     shared high     : U128 = s.to<U128>().shl(64)
     shared wide     : U128 = high.bitor(t.to<U128>())
@@ -87,18 +111,23 @@ routine operand(r: U64, s: U64, t: U64) -> U128
         return(sign.bitor(place).bitor(coeff))
 
 /// A result handed back in Words, as its 128 bits.
+/// :param words: The words an export hands back.
+/// :returns: The 128 bits.
 routine bits(words: Words) -> U128
     block entry()
         high : U128 = words.w1.to<U128>().shl(64)
         return(high.bitor(words.w0.to<U128>()))
 
 /// The next word of the generator, as RazorForge's C::ingrid_splitmix64 steps it.
+/// :returns: The next word.
 routine draw() -> U64
     block entry()
         next : U64 = splitmix64(STATE.load())
         next.store_into(STATE)
         return(next)
 
+/// Prints the lines.
+/// :returns: 0.
 routine main() -> S32
     block entry()
         jump pair(0)

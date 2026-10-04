@@ -1,0 +1,288 @@
+// The decimal operations past + - * / (fused multiply-add, square root, hypot, rounding to an integer, quantize,
+// the remainders, normalize, scaleb, logb, DPD, the binary conversions, integers, and the narrowing conversions)
+// on operands shaped for the hard cases: coefficients next to powers of ten and halves, repeated digits, full
+// width; exponents near each other and near the ends of the range; infinities and NaNs now and then. Each line is
+// "width op a b c result" (BID bits as decimal integers, unused operands 0). decimal_ops.expected was checked line
+// by line against exact rational references in Python that follow RazorForge's rules (the preferred exponent of
+// each operation, function results reduced, the special cases of each).
+
+import Standard::Format
+import Standard::Os
+
+global STATE: @U64 <- 0x2545F4914F6CDD1D
+
+/// The next word of the generator.
+/// :returns: The next word.
+routine draw() -> U64
+    block entry()
+        next : U64 = splitmix64(STATE.load())
+        next.store_into(STATE)
+        return(next)
+
+/// A coefficient of at most p digits, shaped for hard cases.
+/// :param p: The digits of the format.
+/// :returns: The coefficient.
+routine coefficient(p: S64) -> U128
+    shared r     : U64  = draw()
+    shared s     : U64  = draw()
+    shared t     : U64  = draw()
+    shared kk    : U64  = r.shr(8).mod(p.to<U64>())
+    shared k     : S64  = kk.to<S64>().add(1)
+    shared small : U128 = s.mod(1000).to<U128>()
+    shared wide  : U128 = s.to<U128>().shl(64).bitor(t.to<U128>())
+
+    block entry()
+        mode : U64 = r.mod(8)
+        when mode
+            0    -> return(wide.mod(dec_p10_128(k)))
+            1    -> below_power()
+            2    -> above_power()
+            3    -> half()
+            4    -> full()
+            5    -> return(small.add(1))
+            6    -> return(0)
+            else -> repeated()
+
+    block below_power()
+        m : U128 = dec_p10_128(k)
+        return(m.sub(1).sub(small.mod(m)))
+
+    block above_power()
+        m : U128 = dec_p10_128(k.sub(1))
+        return(m.add(small.mod(m)))
+
+    block half()
+        u    : U128 = dec_p10_128(k.sub(1)).mul(5)
+        up   : Bool = t.bitand(1).eq(1)
+        less : U128 = small.min(u)
+        branch up
+            ? return(u.add(small.mod(u)))
+            : return(u.sub(less))
+
+    block full()
+        m    : U128 = dec_p10_128(p.sub(1))
+        span : U128 = m.mul(9)
+        return(m.add(wide.mod(span)))
+
+    block repeated()
+        top   : U128 = dec_p10_128(k).sub(1)
+        ones  : U128 = top.div(9)
+        digit : U128 = t.mod(9).add(1).to<U128>()
+        return(ones.mul(digit))
+
+/// An exponent for an operand of format f: near base, small, anywhere, or at an end of the range.
+/// :param f: The format.
+/// :param base: An exponent the operand is drawn near.
+/// :returns: The exponent.
+routine exponent(f: DecFormat, base: S64) -> S64
+    shared r    : U64 = draw()
+    shared span : U64 = f.qmax.sub(f.qmin).add(1).to<U64>()
+
+    block entry()
+        mode  : U64 = r.mod(8)
+        width : U64 = f.digits.mul(2).add(11).to<U64>()
+        when mode
+            0, 1, 2 -> spread(r.shr(8).mod(width).to<S64>())
+            3       -> small(r.shr(8).mod(41).to<S64>())
+            4       -> return(f.qmin.add(r.shr(8).mod(span).to<S64>()))
+            5       -> return(f.qmin.add(r.shr(8).mod(40).to<S64>()))
+            6       -> return(f.qmax.sub(r.shr(8).mod(60).to<S64>()))
+            else    -> return(base)
+
+    block spread(k: S64)
+        jump near(k.sub(f.digits).sub(5))
+
+    block small(k: S64)
+        return(k.sub(20))
+
+    block near(delta: S64)
+        e : S64 = base.add(delta)
+        return(e.max(f.qmin).min(f.qmax))
+
+/// A finite operand most of the time, a special now and then.
+/// :param f: The format.
+/// :param base: An exponent the operand is drawn near.
+/// :returns: The operand's bits.
+routine operand(f: DecFormat, base: S64) -> Dec
+    block entry()
+        r   : U64  = draw()
+        neg : Bool = r.bitand(1).eq(1)
+        sel : U64  = r.shr(1).mod(40)
+        when sel
+            0    -> return(dec_inf(neg))
+            1    -> return(dec_nan())
+            else -> finite(neg)
+
+    block finite(neg: Bool)
+        c : U128 = coefficient(f.digits)
+        e : S64  = exponent(f, base)
+        return(dec_num(neg, c, e))
+
+/// Prints one line.
+/// :param width: The width in bits.
+/// :param op: The operation's name.
+/// :param a: The first operand's bits.
+/// :param b: The second operand's bits.
+/// :param c: The third operand's bits.
+/// :param r: A random word.
+routine show(width: U64, op: Bytes, a: U128, b: U128, c: U128, r: U128) -> Void
+    block entry()
+        Out.write("{width} {op} {a} {b} {c} {r}\n")
+        return()
+
+/// The 128 bits a D128 export hands back in Words.
+/// :param w: The words an export hands back.
+/// :returns: The 128 bits.
+routine wbits(w: Words) -> U128
+    block entry()
+        return(w.w1.to<U128>().shl(64).bitor(w.w0.to<U128>()))
+
+/// Prints the D64 lines.
+/// :param n: The power.
+routine run64(n: U64) -> Void
+    block entry()
+        jump loop(0)
+
+    block loop(i: U64)
+        branch i.ge(n)
+            ? return()
+            : step(i)
+
+    block step(i: U64)
+        f    : DecFormat = dec_format64()
+        base : S64       = exponent(f, 0)
+        a    : U64       = operand(f, base).to64()
+        b    : U64       = operand(f, base).to64()
+        c    : U64       = operand(f, base).to64()
+        mode : U32       = draw().mod(5).to<U32>()
+        kr   : U64       = draw().mod(60)
+        k    : S64       = kr.to<S64>().sub(30)
+        show(64, "fma", a.to<U128>(), b.to<U128>(), c.to<U128>(),
+            ingrid_d64_fma(a, b, c).to<U128>())
+        show(64, "sqrt", a.to<U128>(), 0, 0, ingrid_d64_sqrt(a).to<U128>())
+        show(64, "hypot", a.to<U128>(), b.to<U128>(), 0, ingrid_d64_hypot(a, b).to<U128>())
+        show(64, "hypot3", a.to<U128>(), b.to<U128>(), c.to<U128>(),
+            ingrid_d64_hypot3(a, b, c).to<U128>())
+        show(64, "round_int", a.to<U128>(), mode.to<U128>(), 0,
+            ingrid_d64_round_int(a, mode).to<U128>())
+        show(64, "quantize", a.to<U128>(), b.to<U128>(), 0, ingrid_d64_quantize(a, b).to<U128>())
+        show(64, "fmod", a.to<U128>(), b.to<U128>(), 0, ingrid_d64_fmod(a, b).to<U128>())
+        show(64, "remainder", a.to<U128>(), b.to<U128>(), 0, ingrid_d64_remainder(a, b).to<U128>())
+        show(64, "normalize", a.to<U128>(), 0, 0, ingrid_d64_normalize(a).to<U128>())
+        kk : U128 = k.to_wrap<U64>().to<U128>()
+        show(64, "scaleb", a.to<U128>(), kk, 0, ingrid_d64_scaleb(a, k).to<U128>())
+        show(64, "logb", a.to<U128>(), 0, 0, ingrid_d64_logb(a).to<U128>())
+        show(64, "to_dpd", a.to<U128>(), 0, 0, ingrid_d64_to_dpd(a).to<U128>())
+        dpd : U64 = draw()
+        show(64, "from_dpd", dpd.to<U128>(), 0, 0, ingrid_d64_from_dpd(dpd).to<U128>())
+        bin       : U64  = draw()
+        f64       : F64  = F64.from_bits(bin)
+        wide_bits : U128 = f64.to<F128>().bits()
+        lo        : U64  = wide_bits.to_wrap<U64>()
+        hi        : U64  = wide_bits.shr(64).to_wrap<U64>()
+        show(64, "from_b64", bin.to<U128>(), 0, 0, ingrid_d64_from_binary(lo, hi).to<U128>())
+        show(64, "to_b64", a.to<U128>(), 0, 0, wbits(ingrid_d64_to_binary(a, 64)))
+        show(64, "to_b32", a.to<U128>(), 0, 0, wbits(ingrid_d64_to_binary(a, 32)))
+        m0  : U64 = draw()
+        m1  : U64 = draw().shr(draw().mod(64).to<U64>())
+        neg : U32 = draw().bitand(1).to<U32>()
+        show(64, "from_integer", neg.to<U128>(), m0.to<U128>(), m1.to<U128>(),
+            ingrid_d64_from_integer(neg, m0, m1, 0, 0).to<U128>())
+        show(64, "to_d32", a.to<U128>(), 0, 0, ingrid_d32_from_d64(a).to<U128>())
+        jump loop(i.add(1))
+
+/// Prints the D32 lines.
+/// :param n: The power.
+routine run32(n: U64) -> Void
+    block entry()
+        jump loop(0)
+
+    block loop(i: U64)
+        branch i.ge(n)
+            ? return()
+            : step(i)
+
+    block step(i: U64)
+        f    : DecFormat = dec_format32()
+        base : S64       = exponent(f, 0)
+        a    : U32       = operand(f, base).to32()
+        b    : U32       = operand(f, base).to32()
+        c    : U32       = operand(f, base).to32()
+        mode : U32       = draw().mod(5).to<U32>()
+        show(32, "fma", a.to<U128>(), b.to<U128>(), c.to<U128>(),
+            ingrid_d32_fma(a, b, c).to<U128>())
+        show(32, "sqrt", a.to<U128>(), 0, 0, ingrid_d32_sqrt(a).to<U128>())
+        show(32, "hypot", a.to<U128>(), b.to<U128>(), 0, ingrid_d32_hypot(a, b).to<U128>())
+        show(32, "round_int", a.to<U128>(), mode.to<U128>(), 0,
+            ingrid_d32_round_int(a, mode).to<U128>())
+        show(32, "quantize", a.to<U128>(), b.to<U128>(), 0, ingrid_d32_quantize(a, b).to<U128>())
+        show(32, "fmod", a.to<U128>(), b.to<U128>(), 0, ingrid_d32_fmod(a, b).to<U128>())
+        show(32, "remainder", a.to<U128>(), b.to<U128>(), 0, ingrid_d32_remainder(a, b).to<U128>())
+        show(32, "to_dpd", a.to<U128>(), 0, 0, ingrid_d32_to_dpd(a).to<U128>())
+        dpd : U32 = draw().to_wrap<U32>()
+        show(32, "from_dpd", dpd.to<U128>(), 0, 0, ingrid_d32_from_dpd(dpd).to<U128>())
+        show(32, "to_b16", a.to<U128>(), 0, 0, wbits(ingrid_d32_to_binary(a, 16)))
+        bin       : U32  = draw().to_wrap<U32>()
+        f32       : F32  = F32.from_bits(bin)
+        wide_bits : U128 = f32.to<F128>().bits()
+        lo        : U64  = wide_bits.to_wrap<U64>()
+        hi        : U64  = wide_bits.shr(64).to_wrap<U64>()
+        show(32, "from_b32", bin.to<U128>(), 0, 0, ingrid_d32_from_binary(lo, hi).to<U128>())
+        jump loop(i.add(1))
+
+/// Prints the D128 lines.
+/// :param n: The power.
+routine run128(n: U64) -> Void
+    block entry()
+        jump loop(0)
+
+    block loop(i: U64)
+        branch i.ge(n)
+            ? return()
+            : step(i)
+
+    block step(i: U64)
+        f    : DecFormat = dec_format128()
+        base : S64       = exponent(f, 0)
+        a    : U128      = operand(f, base).to128()
+        b    : U128      = operand(f, base).to128()
+        c    : U128      = operand(f, base).to128()
+        al   : U64       = a.to_wrap<U64>()
+        ah   : U64       = a.shr(64).to_wrap<U64>()
+        bl   : U64       = b.to_wrap<U64>()
+        bh   : U64       = b.shr(64).to_wrap<U64>()
+        cl   : U64       = c.to_wrap<U64>()
+        ch   : U64       = c.shr(64).to_wrap<U64>()
+        mode : U32       = draw().mod(5).to<U32>()
+        show(128, "fma", a, b, c, wbits(ingrid_d128_fma(al, ah, bl, bh, cl, ch)))
+        show(128, "sqrt", a, 0, 0, wbits(ingrid_d128_sqrt(al, ah)))
+        show(128, "hypot", a, b, 0, wbits(ingrid_d128_hypot(al, ah, bl, bh)))
+        show(128, "hypot3", a, b, c, wbits(ingrid_d128_hypot3(al, ah, bl, bh, cl, ch)))
+        show(128, "round_int", a, mode.to<U128>(), 0, wbits(ingrid_d128_round_int(al, ah, mode)))
+        show(128, "quantize", a, b, 0, wbits(ingrid_d128_quantize(al, ah, bl, bh)))
+        show(128, "fmod", a, b, 0, wbits(ingrid_d128_fmod(al, ah, bl, bh)))
+        show(128, "remainder", a, b, 0, wbits(ingrid_d128_remainder(al, ah, bl, bh)))
+        show(128, "to_dpd", a, 0, 0, wbits(ingrid_d128_to_dpd(al, ah)))
+        show(128, "to_b128", a, 0, 0, wbits(ingrid_d128_to_binary(al, ah, 128)))
+        show(128, "to_b64", a, 0, 0, wbits(ingrid_d128_to_binary(al, ah, 64)))
+        show(128, "to_d64", a, 0, 0, ingrid_d64_from_d128(al, ah).to<U128>())
+        show(128, "to_d32", a, 0, 0, ingrid_d32_from_d128(al, ah).to<U128>())
+        bl2 : U64 = draw()
+        bh2 : U64 = draw()
+        show(128, "from_b128", bh2.to<U128>().shl(64).bitor(bl2.to<U128>()), 0, 0,
+            wbits(ingrid_d128_from_binary(bl2, bh2)))
+        bin       : U64  = draw()
+        f64       : F64  = F64.from_bits(bin)
+        wide_bits : U128 = f64.to<F128>().bits()
+        show(128, "from_b64", bin.to<U128>(), 0, 0,
+            wbits(ingrid_d128_from_binary(wide_bits.to_wrap<U64>(), wide_bits.shr(64).to_wrap<U64>())))
+        jump loop(i.add(1))
+
+/// Prints the lines.
+/// :returns: 0.
+routine main() -> S32
+    block entry()
+        run64(300)
+        run32(300)
+        run128(200)
+        return(0)
