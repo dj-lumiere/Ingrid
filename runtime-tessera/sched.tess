@@ -152,19 +152,18 @@ routine Deque.pop_bottom(self: @Self) -> @Coro
         self.lock.lock()
         empty : Bool = self.bottom.load().eq(self.top.load())
         branch empty
-            ? none()
+            ? finish(null)
             : continue
         b : USize = self.bottom.load().sub(1)
         self.bottom.store(b)
         slot : @@Coro = self.slot(b)
         c    : @Coro  = slot.load()
         slot.store(null)
-        self.lock.unlock()
-        return(c)
+        jump finish(c)
 
-    block none()
+    block finish(taken: @Coro)
         self.lock.unlock()
-        return(null)
+        return(taken)
 
 /// The thieves' end: the oldest coroutine, or null.
 routine Deque.steal_top(self: @Self) -> @Coro
@@ -172,19 +171,18 @@ routine Deque.steal_top(self: @Self) -> @Coro
         self.lock.lock()
         empty : Bool = self.bottom.load().eq(self.top.load())
         branch empty
-            ? none()
+            ? finish(null)
             : continue
         t    : USize  = self.top.load()
         slot : @@Coro = self.slot(t)
         c    : @Coro  = slot.load()
         slot.store(null)
         self.top.store(t.add(1))
-        self.lock.unlock()
-        return(c)
+        jump finish(c)
 
-    block none()
+    block finish(taken: @Coro)
         self.lock.unlock()
-        return(null)
+        return(taken)
 
 /// Takes c out if it is there, closing the gap: whether it was.
 routine Deque.remove(self: @Self, c: @Coro) -> Bool
@@ -195,7 +193,7 @@ routine Deque.remove(self: @Self, c: @Coro) -> Bool
 
     block look(n: USize, i: USize)
         branch i.eq(n)
-            ? missing()
+            ? finish(false)
             : continue
         top      : USize = self.top.load()
         occupant : @Coro = self.slot(top.add(i)).load()
@@ -216,12 +214,11 @@ routine Deque.remove(self: @Self, c: @Coro) -> Bool
         b : USize = self.bottom.load().sub(1)
         self.bottom.store(b)
         self.slot(b).store(null)
-        self.lock.unlock()
-        return(true)
+        jump finish(true)
 
-    block missing()
+    block finish(found: Bool)
         self.lock.unlock()
-        return(false)
+        return(found)
 
 // -- the injector and the ready routing (callers hold the scheduler lock) ------------
 
@@ -488,20 +485,25 @@ routine rf_sched_spawn(s: @Sched, c: @Coro) -> Void
         branch s.is_null().bitor(c.is_null())
             ? return()
             : continue
-        s.lock.lock()
-        branch c.initial_spawned.load()
-            ? again()
-            : continue
-        c.initial_spawned.store(true)
-        s.enqueue_ready(c)
-        next_live : SSize = s.live.load().add(1)
-        next_live.store_into(s.live)
-        s.cond.wake_one()
-        s.lock.unlock()
+        s.spawn(c)
         return()
 
-    block again()
-        s.lock.unlock()
+/// rf_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
+routine Sched.spawn(self: @Self, c: @Coro) -> Void
+    block entry()
+        self.lock.lock()
+        branch c.initial_spawned.load()
+            ? finish()
+            : continue
+        c.initial_spawned.store(true)
+        self.enqueue_ready(c)
+        next_live : SSize = self.live.load().add(1)
+        next_live.store_into(self.live)
+        self.cond.wake_one()
+        jump finish()
+
+    block finish()
+        self.lock.unlock()
         return()
 
 /// Parks the running coroutine until delay_ns from now. The worker puts it on the timer heap once it is off its
@@ -872,8 +874,7 @@ routine Sched.step(self: @Self) -> Bool
         self.cond.wait_for(self.lock, DEADLOCK_GRACE_NS)
         fewer_idle : SSize = self.workers_idle.load().sub(1)
         fewer_idle.store_into(self.workers_idle)
-        self.lock.unlock()
-        return(false)
+        jump unlock()
 
     block deadlock()
         self.lock.unlock()
@@ -908,12 +909,12 @@ routine rf_sched_run(s: @Sched) -> Void
         done : Bool = s.live.load().le(0)
         s.lock.unlock()
         branch done
-            ? finish(prev)
+            ? restore(prev)
             : continue
         s.step()
         jump loop(prev)
 
-    block finish(prev: @Sched)
+    block restore(prev: @Sched)
         CURRENT_SCHED.store(prev)
         return()
 
@@ -935,12 +936,12 @@ routine rf_sched_run_until(s: @Sched, target: @Coro) -> Void
 
     block loop(prev: @Sched)
         branch finished(target)
-            ? finish(prev)
+            ? restore(prev)
             : continue
         s.step()
         jump loop(prev)
 
-    block finish(prev: @Sched)
+    block restore(prev: @Sched)
         CURRENT_SCHED.store(prev)
         return()
 
@@ -1208,20 +1209,27 @@ routine rf_sched_dispose_default(c: @Coro) -> U32
         branch s.is_null()
             ? return(1)
             : continue
-        s.lock.lock()
-        found : Bool = s.remove_locked(c)
+        return(s.dispose(c))
+
+/// rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
+/// holds it.
+routine Sched.dispose(self: @Self, c: @Coro) -> U32
+    block entry()
+        self.lock.lock()
+        found : Bool = self.remove_locked(c)
         st    : U32  = c.sched_state.atomic_load()
         held  : Bool = found.bitnot().bitand(st.eq(SCHED_RUNNING).bitor(st.eq(SCHED_QUEUED)))
         branch held
-            ? defer(s)
-            : continue
-        s.lock.unlock()
-        return(1)
+            ? defer()
+            : finish(1)
 
-    block defer(s: @Sched)
+    block defer()
         c.owner_released.store(true)
-        s.lock.unlock()
-        return(0)
+        jump finish(0)
+
+    block finish(caller_frees: U32)
+        self.lock.unlock()
+        return(caller_frees)
 
 /// The number of pool workers (making the pool): coroutines can move between threads only when it is more than 1.
 #export("rf_sched_worker_count")

@@ -751,19 +751,19 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     shared iter : @DirIter      <- uninit
 
     block entry()
-        branch out.start(256)
-            ? continue
-            : return(out.fail())
         opened : Result<Unit, FsError> = iter.open_result(Directory.at(path_of(path, len)))
         branch opened.is_success()
+            ? continue
+            : finish(false)
+        branch out.start(256)
             ? next()
-            : return(out.fail())
+            : finish(false)
 
     block next()
         e : Option<DirEntry> = iter.next()
         when e
             .Present(d) -> one(d)
-            .Absent     -> finish()
+            .Absent     -> finish(true)
 
     block one(d: DirEntry)
         branch typed
@@ -777,15 +777,15 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     block add(d: DirEntry, is_dir: Bool, mtime: S64)
         branch out.entry(d.name, typed, is_dir, mtime)
             ? next()
-            : broke()
+            : finish(false)
 
-    block finish()
+    // Every exit comes here: the listing is closed (open_result, the first step, sets the handle before anything
+    // can fail, so close() is safe on every path), and the text is handed back whole or freed.
+    block finish(complete: Bool)
         iter.close()
-        return(out.finish())
-
-    block broke()
-        iter.close()
-        return(out.fail())
+        branch complete
+            ? return(out.finish())
+            : return(out.fail())
 
 /// The entries' names, '\n' between them ("." and ".." left out).
 #export("rf_fs_list_dir")

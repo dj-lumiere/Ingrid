@@ -174,24 +174,7 @@ routine rf_task_await_coro(task: @Task) -> U32
         branch sched.is_null().bitor(self.is_null())
             ? return(1)
             : continue
-        task.coro_lock.lock()
-        branch task.completed()
-            ? already()
-            : continue
-        // The first registration promises a wake from another thread, and signal_completion keeps it.
-        arm : Bool = task.coro_sched.load().is_null()
-        task.coro_sched.store(sched)
-        task.coro_waiter.store(self)
-        task.coro_lock.unlock()
-        branch arm
-            ? continue
-            : return(0)
-        rf_sched_arm_cross_waker(sched)
-        return(0)
-
-    block already()
-        task.coro_lock.unlock()
-        return(1)
+        return(task.register_waiter(sched, self))
 
 /// rf_task_await_coro bounded by timeout_ns: 1 completed, 0 timed out, 2 not in a scheduler-driven coroutine (the
 /// caller waits blocking with the deadline). On a timeout the registration is taken back, so a later completion
@@ -211,54 +194,62 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
         jump register(sched, self, deadline)
 
     block register(sched: @Sched, self: @Coro, deadline: U64)
-        task.coro_lock.lock()
-        branch task.completed()
-            ? already()
+        branch task.register_waiter(sched, self).eq(1)
+            ? return(1)
             : continue
-        arm : Bool = task.coro_sched.load().is_null()
-        task.coro_sched.store(sched)
-        task.coro_waiter.store(self)
-        task.coro_lock.unlock()
-        branch arm
-            ? continue
-            : check(sched, self, deadline)
-        rf_sched_arm_cross_waker(sched)
-        jump check(sched, self, deadline)
-
-    block check(sched: @Sched, self: @Coro, deadline: U64)
         now : U64 = monotonic_ns()
         branch now.ge(deadline)
-            ? give_up(sched, self)
+            ? return(task.withdraw_waiter(sched, self))
             : continue
         rf_sched_park_deadline(deadline.sub(now))
         jump register(sched, self, deadline)
 
-    block already()
-        task.coro_lock.unlock()
-        return(1)
-
-    // The deadline passed: prefer a value that just came in, else take the registration back.
-    block give_up(sched: @Sched, self: @Coro)
-        task.coro_lock.lock()
-        branch task.completed()
-            ? already()
+/// Registers waiter to be woken when the task completes, under the task's lock: 1 if it is complete already (read
+/// it, don't park), 0 once registered. The first registration promises a wake from another thread
+/// (signal_completion keeps it), armed after the lock is given back.
+routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
+    block entry()
+        self.coro_lock.lock()
+        branch self.completed()
+            ? finish(1, false)
             : continue
-        mine   : Bool = task.coro_waiter.load().ptr_eq(self)
-        disarm : Bool = mine.bitand(task.coro_sched.load().is_not_null())
+        arm : Bool = self.coro_sched.load().is_null()
+        self.coro_sched.store(sched)
+        self.coro_waiter.store(waiter)
+        jump finish(0, arm)
+
+    block finish(complete: U32, arm: Bool)
+        self.coro_lock.unlock()
+        branch arm
+            ? continue
+            : return(complete)
+        rf_sched_arm_cross_waker(sched)
+        return(complete)
+
+/// The deadline passed: 1 for a value that just came in, else 0 with waiter's registration taken back (and its
+/// promised wake withdrawn after the lock is given back).
+routine Task.withdraw_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
+    block entry()
+        self.coro_lock.lock()
+        branch self.completed()
+            ? finish(1, false)
+            : continue
+        mine   : Bool = self.coro_waiter.load().ptr_eq(waiter)
+        disarm : Bool = mine.bitand(self.coro_sched.load().is_not_null())
         branch mine
             ? continue
-            : unlock(sched, disarm)
-        task.coro_sched.store(null)
-        task.coro_waiter.store(null)
-        jump unlock(sched, disarm)
+            : finish(0, disarm)
+        self.coro_sched.store(null)
+        self.coro_waiter.store(null)
+        jump finish(0, disarm)
 
-    block unlock(sched: @Sched, disarm: Bool)
-        task.coro_lock.unlock()
+    block finish(complete: U32, disarm: Bool)
+        self.coro_lock.unlock()
         branch disarm
             ? continue
-            : return(0)
+            : return(complete)
         rf_sched_disarm_cross_waker(sched)
-        return(0)
+        return(complete)
 
 #export("rf_task_kind_name")
 routine rf_task_kind_name(kind: U32) -> CStr
@@ -423,16 +414,16 @@ routine rf_task_wait(task: @Task) -> U32
             : continue
         branch task.kind.load().eq(TASK_THREADED)
             ? wait()
-            : finish()
+            : report()
 
     block wait()
         branch task.completed()
-            ? finish()
+            ? report()
             : continue
         wait_on(task.done, 0)
         jump wait()
 
-    block finish()
+    block report()
         return(task.completion.load())
 
 /// rf_task_wait for at most timeout_seconds and timeout_nanoseconds: COMPLETION_TIMEOUT if it didn't complete.
@@ -443,7 +434,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
             ? return(COMPLETION_ERROR)
             : continue
         branch task.completed().bitor(task.kind.load().ne(TASK_THREADED))
-            ? finish()
+            ? report()
             : continue
         secs     : U64 = timeout_seconds.max(0).to<U64>()
         span     : U64 = secs.mul_clamp(1000000000).add_clamp(timeout_nanoseconds.to<U64>())
@@ -452,7 +443,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
 
     block wait(deadline: U64)
         branch task.completed()
-            ? finish()
+            ? report()
             : continue
         now : U64 = monotonic_ns()
         branch now.ge(deadline)
@@ -461,7 +452,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         wait_on_for(task.done, 0, deadline.sub(now))
         jump wait(deadline)
 
-    block finish()
+    block report()
         return(task.completion.load())
 
 routine threaded_task_main(raw: Addr) -> Void
@@ -501,16 +492,14 @@ routine threaded_task_main(raw: Addr) -> Void
     block unlocked(task: @Task, reap: Bool, box: Addr)
         task.coro_lock.unlock()
         branch box.is_null()
-            ? continue
+            ? finish(task, reap)
             : invalidate(task, reap, box)
-        branch reap
-            ? continue
-            : return()
-        task.free()
-        return()
 
     block invalidate(task: @Task, reap: Bool, box: Addr)
         rf_invalidate(box)
+        jump finish(task, reap)
+
+    block finish(task: @Task, reap: Bool)
         branch reap
             ? continue
             : return()

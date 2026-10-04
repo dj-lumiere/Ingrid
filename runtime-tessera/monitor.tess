@@ -137,18 +137,26 @@ routine rf_signal_cast_one(sig: @Monitor) -> Void
         branch sig.is_null()
             ? return()
             : continue
-        sig.lock.lock()
-        w : @ChannelWaiter = sig.waiters.load()
+        sig.cast_one()
+        return()
+
+/// rf_signal_cast_one on a monitor that is there, under its lock.
+routine Monitor.cast_one(self: @Self) -> Void
+    block entry()
+        self.lock.lock()
+        w : @ChannelWaiter = self.waiters.load()
         branch w.is_null()
             ? thread()
             : continue
         rf_sched_wake(w.sched.load(), w.coro.load())
-        sig.lock.unlock()
-        return()
+        jump finish()
 
     block thread()
-        sig.cond.wake_one()
-        sig.lock.unlock()
+        self.cond.wake_one()
+        jump finish()
+
+    block finish()
+        self.lock.unlock()
         return()
 
 #export("rf_signal_cast_all")

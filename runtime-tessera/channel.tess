@@ -212,59 +212,60 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
         branch chan.is_null()
             ? return(0)
             : continue
-        chan.lock.lock()
+        return(chan.feed(payload))
+
+/// rf_channel_feed on a channel that is there: everything under the lock, which finish gives back.
+routine Channel.feed(self: @Self, payload: Addr) -> U32
+    block entry()
+        self.lock.lock()
         jump room()
 
     block room()
-        full       : Bool = chan.count.load().eq(chan.slot_cap.load())
-        not_closed : Bool = chan.closed.load().bitnot()
-        open       : Bool = not_closed.bitand(chan.consumer_refs.load().gt(0))
+        full       : Bool = self.count.load().eq(self.slot_cap.load())
+        not_closed : Bool = self.closed.load().bitnot()
+        open       : Bool = not_closed.bitand(self.consumer_refs.load().gt(0))
         branch full.bitand(open)
             ? continue
             : put()
         branch rf_cancel_requested().eq(0)
             ? continue
-            : fail()
-        chan.wait(chan.not_full_head)
+            : finish(0)
+        self.wait(self.not_full_head)
         jump room()
 
     block put()
-        branch chan.closed.load().bitor(chan.consumer_refs.load().eq(0))
-            ? fail()
+        branch self.closed.load().bitor(self.consumer_refs.load().eq(0))
+            ? finish(0)
             : continue
-        cap         : U64   = chan.slot_cap.load()
-        linear_tail : U64   = chan.head.load().add(chan.count.load())
+        cap         : U64   = self.slot_cap.load()
+        linear_tail : U64   = self.head.load().add(self.count.load())
         tail        : U64   = linear_tail.mod(cap)
-        tail_slot   : @Addr = chan.slots.load().stride(tail.to<USize>())
+        tail_slot   : @Addr = self.slots.load().stride(tail.to<USize>())
         tail_slot.store(payload)
-        next_count : U64 = chan.count.load().add(1)
-        next_count.store_into(chan.count)
-        chan.wake_all(chan.not_empty_head.load())
-        branch chan.capacity.load().eq(0)
+        next_count : U64 = self.count.load().add(1)
+        next_count.store_into(self.count)
+        self.wake_all(self.not_empty_head.load())
+        branch self.capacity.load().eq(0)
             ? taken()
-            : sent()
+            : finish(1)
 
     // A rendezvous: not over until this item was taken.
     block taken()
-        has_items : Bool = chan.count.load().gt(0)
-        pending   : Bool = has_items.bitand(chan.closed.load().bitnot())
-        waiting   : Bool = pending.bitand(chan.consumer_refs.load().gt(0))
+        has_items : Bool = self.count.load().gt(0)
+        pending   : Bool = has_items.bitand(self.closed.load().bitnot())
+        waiting   : Bool = pending.bitand(self.consumer_refs.load().gt(0))
         branch waiting
             ? continue
-            : sent()
+            : finish(1)
         branch rf_cancel_requested().eq(0)
             ? continue
-            : sent()
-        chan.wait(chan.not_full_head)
+            : finish(1)
+        self.wait(self.not_full_head)
         jump taken()
 
-    block sent()
-        chan.lock.unlock()
-        return(1)
-
-    block fail()
-        chan.lock.unlock()
-        return(0)
+    block finish(sent: U32)
+        self.lock.unlock()
+        return(sent)
 
 /// Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
 /// was cancelled.
@@ -274,38 +275,42 @@ routine rf_channel_next(chan: @Channel) -> Addr
         branch chan.is_null()
             ? return(null)
             : continue
-        chan.lock.lock()
+        return(chan.next())
+
+/// rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
+routine Channel.next(self: @Self) -> Addr
+    block entry()
+        self.lock.lock()
         jump item()
 
     block item()
-        empty : Bool = chan.count.load().eq(0)
-        branch empty.bitand(chan.closed.load().bitnot())
+        empty : Bool = self.count.load().eq(0)
+        branch empty.bitand(self.closed.load().bitnot())
             ? continue
             : take()
         branch rf_cancel_requested().eq(0)
             ? continue
-            : none()
-        chan.wait(chan.not_empty_head)
+            : finish(null)
+        self.wait(self.not_empty_head)
         jump item()
 
     block take()
-        branch chan.count.load().eq(0)
-            ? none()
+        branch self.count.load().eq(0)
+            ? finish(null)
             : continue
-        head    : U64   = chan.head.load()
-        slot    : @Addr = chan.slots.load().stride(head.to<USize>())
+        head    : U64   = self.head.load()
+        slot    : @Addr = self.slots.load().stride(head.to<USize>())
         payload : Addr  = slot.load()
         slot.store(null)
-        chan.head.store(head.add(1).mod(chan.slot_cap.load()))
-        remaining_count : U64 = chan.count.load().sub(1)
-        remaining_count.store_into(chan.count)
-        chan.wake_all(chan.not_full_head.load())
-        chan.lock.unlock()
-        return(payload)
+        self.head.store(head.add(1).mod(self.slot_cap.load()))
+        remaining_count : U64 = self.count.load().sub(1)
+        remaining_count.store_into(self.count)
+        self.wake_all(self.not_full_head.load())
+        jump finish(payload)
 
-    block none()
-        chan.lock.unlock()
-        return(null)
+    block finish(payload: Addr)
+        self.lock.unlock()
+        return(payload)
 
 #export("rf_channel_count")
 routine rf_channel_count(chan: @Channel) -> U64
