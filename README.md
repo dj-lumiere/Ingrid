@@ -20,8 +20,9 @@ on their own:
 - time, random numbers, and process signals
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
-Roamed entity runtime and its cycle collector, and the crash handler. Math, hashing, cryptography, and algorithms
-move here next, written once so that both languages build on one implementation.
+Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, and the math of the
+complex numbers, quaternions, and 4x4 matrices. More math, hashing, cryptography, and algorithms move here next,
+written once so that both languages build on one implementation.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
@@ -55,13 +56,14 @@ next to each executable. The full workspace setup is in the
 ## Tests
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
-the reference test vectors, splitmix64, the word division on its edge cases, the Roamed counts and lock, the cycle
-collector, the deadlock detector, the heap calls, and the crash report, and from `runtime-tessera/` the SignalCaster
-(`monitor.tess`). Each test is a directory with a `config.toml` that lists the files it builds with (`sources`), and
-`<name>.expected` (standard output) and `<name>.exit` (exit status) next to it. The routines a test reaches in the
-RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the scheduler's park and wake, ...) are
-defined in the test itself, so a test needs nothing but the builder. With Tessera checked out next to Ingrid and
-built (`dotnet build`), from Ingrid's directory:
+the reference test vectors, splitmix64, the complex numbers, quaternions, and matrices against RazorForge's bodies
+before they moved here (and the crashes their checked arithmetic reports), the word division on its edge cases, the
+Roamed counts and lock, the cycle collector, the deadlock detector, the heap calls, and the crash report, and from
+`runtime-tessera/` the SignalCaster (`monitor.tess`). Each test is a directory with a `config.toml` that lists the
+files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
+The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the
+scheduler's park and wake, ...) are defined in the test itself, so a test needs nothing but the builder. With Tessera
+checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 
 ```bash
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll test tests

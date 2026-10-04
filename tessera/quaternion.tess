@@ -1,0 +1,1120 @@
+// RazorForge's quaternions Q128 and Q256 (over B32 and B64, Tessera's F32 and F64): the bodies of their routines,
+// moved here from RazorForge's Math3D/Q128.rf and Q256.rf. RazorForge keeps the types, their protocols, and thin
+// routines that call the ingrid_ exports below.
+//
+// The formulas are RazorForge's own, unchanged, so every result has the same bits as before, and each `+ - * /` is
+// the checked one (finite.tess), which crashes where RazorForge's B32 and B64 operators do. Geometry comes in as
+// RazorForge's Vector3D and Matrix4R4C hold it, in F32: Q256 widens it exactly to F64 and narrows a vector it hands
+// back to F32, rounding to nearest, as RazorForge's conversions do.
+//
+// The exports take each component as its own float and hand a quaternion, a vector, or a tuple back in Words
+// (words.tess): an F32 in a word's low half, an F64 in a whole word.
+
+/// The tolerances RazorForge writes as literals: 0.000001_b32 (a rotation that is no turn, or half a turn), 0.00001_b32
+/// (unit length), 0.000000000001_b64 (Q256 uses it for all three), and 0.9995 (where slerp falls back to a normalized
+/// linear interpolation).
+private preset Q128_TOLERANCE:      F32 = F32.from_bits(0x358637BD)
+private preset Q128_UNIT_TOLERANCE: F32 = F32.from_bits(0x3727C5AC)
+private preset Q128_LINEAR:         F32 = F32.from_bits(0x3F7FDF3B)
+private preset Q256_TOLERANCE:      F64 = F64.from_bits(0x3D719799812DEA11)
+private preset Q256_LINEAR:         F64 = F64.from_bits(0x3FEFFBE76C8B4396)
+
+// ── Q128 ──────────────────────────────────────────────────────────────────────────
+
+/// RazorForge's Q128: a quaternion w + xi + yj + zk over F32, RazorForge's B32.
+record Q128
+    w : F32
+    x : F32
+    y : F32
+    z : F32
+
+/// The identity rotation 1 + 0i + 0j + 0k.
+#inline
+routine Q128.identity() -> Self
+    block entry()
+        return({ w: 1.0, x: 0.0, y: 0.0, z: 0.0 })
+
+/// The sum, component by component.
+#inline
+routine Q128.add(self: Self, other: Self) -> Self
+    block entry()
+        w : F32 = self.w.add_finite(other.w)
+        x : F32 = self.x.add_finite(other.x)
+        y : F32 = self.y.add_finite(other.y)
+        z : F32 = self.z.add_finite(other.z)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The difference, component by component.
+#inline
+routine Q128.sub(self: Self, other: Self) -> Self
+    block entry()
+        w : F32 = self.w.sub_finite(other.w)
+        x : F32 = self.x.sub_finite(other.x)
+        y : F32 = self.y.sub_finite(other.y)
+        z : F32 = self.z.sub_finite(other.z)
+        return({ w: w, x: x, y: y, z: z })
+
+/// Every component negated.
+#inline
+routine Q128.neg(self: Self) -> Self
+    block entry()
+        return({ w: self.w.neg(), x: self.x.neg(), y: self.y.neg(), z: self.z.neg() })
+
+/// The conjugate w - xi - yj - zk.
+#inline
+routine Q128.conjugate(self: Self) -> Self
+    block entry()
+        return({ w: self.w, x: self.x.neg(), y: self.y.neg(), z: self.z.neg() })
+
+/// Every component times factor.
+#inline
+routine Q128.scale(self: Self, factor: F32) -> Self
+    block entry()
+        w : F32 = self.w.mul_finite(factor)
+        x : F32 = self.x.mul_finite(factor)
+        y : F32 = self.y.mul_finite(factor)
+        z : F32 = self.z.mul_finite(factor)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The Hamilton product self · other, which turns by other and then by self (it doesn't commute).
+routine Q128.mul(self: Self, other: Self) -> Self
+    block entry()
+        ww : F32 = self.w.mul_finite(other.w)
+        xx : F32 = self.x.mul_finite(other.x)
+        w1 : F32 = ww.sub_finite(xx)
+        yy : F32 = self.y.mul_finite(other.y)
+        w2 : F32 = w1.sub_finite(yy)
+        zz : F32 = self.z.mul_finite(other.z)
+        w  : F32 = w2.sub_finite(zz)
+        wx : F32 = self.w.mul_finite(other.x)
+        xw : F32 = self.x.mul_finite(other.w)
+        x1 : F32 = wx.add_finite(xw)
+        yz : F32 = self.y.mul_finite(other.z)
+        x2 : F32 = x1.add_finite(yz)
+        zy : F32 = self.z.mul_finite(other.y)
+        x  : F32 = x2.sub_finite(zy)
+        wy : F32 = self.w.mul_finite(other.y)
+        xz : F32 = self.x.mul_finite(other.z)
+        y1 : F32 = wy.sub_finite(xz)
+        yw : F32 = self.y.mul_finite(other.w)
+        y2 : F32 = y1.add_finite(yw)
+        zx : F32 = self.z.mul_finite(other.x)
+        y  : F32 = y2.add_finite(zx)
+        wz : F32 = self.w.mul_finite(other.z)
+        xy : F32 = self.x.mul_finite(other.y)
+        z1 : F32 = wz.add_finite(xy)
+        yx : F32 = self.y.mul_finite(other.x)
+        z2 : F32 = z1.sub_finite(yx)
+        zw : F32 = self.z.mul_finite(other.w)
+        z  : F32 = z2.add_finite(zw)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The quotient self · other⁻¹.
+routine Q128.div(self: Self, other: Self) -> Self
+    block entry()
+        inverse : Self = other.reciprocal()
+        return(self.mul(inverse))
+
+/// The dot product of the two as 4-vectors.
+routine Q128.dot(self: Self, other: Self) -> F32
+    block entry()
+        ww : F32 = self.w.mul_finite(other.w)
+        xx : F32 = self.x.mul_finite(other.x)
+        s1 : F32 = ww.add_finite(xx)
+        yy : F32 = self.y.mul_finite(other.y)
+        s2 : F32 = s1.add_finite(yy)
+        zz : F32 = self.z.mul_finite(other.z)
+        return(s2.add_finite(zz))
+
+/// The squared norm w² + x² + y² + z².
+routine Q128.norm(self: Self) -> F32
+    block entry()
+        return(self.dot(self))
+
+/// The norm, the square root of the squared norm.
+routine Q128.abs(self: Self) -> F32
+    block entry()
+        return(self.norm().sqrt())
+
+/// The unit quaternion in the same direction, or this one when its norm is zero.
+routine Q128.normalize(self: Self) -> Self
+    shared n : F32 = self.abs()
+
+    block entry()
+        branch n.eq(0.0)
+            ? return(self)
+            : continue
+        return(self.scale(F32.div_finite(1.0, n)))
+
+/// The inverse, the conjugate over the squared norm.
+routine Q128.reciprocal(self: Self) -> Self
+    block entry()
+        n : F32 = self.norm()
+        return(self.conjugate().scale(F32.div_finite(1.0, n)))
+
+/// Whether the norm is 1 within the tolerance.
+routine Q128.is_unit(self: Self) -> Bool
+    block entry()
+        d     : F32  = self.norm().sub_finite(1.0)
+        below : Bool = d.le(Q128_UNIT_TOLERANCE)
+        return(below.bitand(d.ge(Q128_UNIT_TOLERANCE.neg())))
+
+/// v clamped to [-1, 1], so a unit quaternion whose w drifted just past 1 still has a real acos. NaN stays NaN.
+#inline
+routine Q128.clamp_unit(v: F32) -> F32
+    block entry()
+        when
+            v.gt(1.0)  -> return(1.0)
+            v.lt(-1.0) -> return(-1.0)
+            else       -> return(v)
+
+/// The vector (vx, vy, vz) turned by this unit quaternion: the vector part of self · (0, v) · conj(self).
+routine Q128.rotate(self: Self, vx: F32, vy: F32, vz: F32) -> Self
+    block entry()
+        p  : Self = { w: 0.0, x: vx, y: vy, z: vz }
+        sp : Self = self.mul(p)
+        return(sp.mul(self.conjugate()))
+
+/// The spherical interpolation from self (t = 0) to other (t = 1) along the shorter arc, both unit length. Nearly
+/// parallel ends fall back to a normalized linear interpolation, which avoids dividing by sin θ near 0.
+routine Q128.slerp(self: Self, other: Self, t: F32) -> Self
+    shared d : F32 = self.dot(other)
+
+    block entry()
+        branch d.lt(0.0)
+            ? arc(other.neg(), d.neg())
+            : arc(other, d)
+
+    block arc(target: Self, cosine: F32)
+        branch cosine.gt(Q128_LINEAR)
+            ? return(self.lerp(target, t))
+            : continue
+        theta     : F32  = cosine.acos()
+        sin_theta : F32  = theta.sin()
+        rest      : F32  = F32.sub_finite(1.0, t)
+        wa        : F32  = rest.mul_finite(theta).sin().div_finite(sin_theta)
+        wb        : F32  = t.mul_finite(theta).sin().div_finite(sin_theta)
+        a         : Self = self.scale(wa)
+        b         : Self = target.scale(wb)
+        return(a.add(b))
+
+/// self + (target - self) t, normalized.
+routine Q128.lerp(self: Self, target: Self, t: F32) -> Self
+    block entry()
+        step : Self = target.sub(self).scale(t)
+        return(self.add(step).normalize())
+
+/// The normalized linear interpolation from self to other along the shorter arc.
+routine Q128.nlerp(self: Self, other: Self, t: F32) -> Self
+    block entry()
+        branch self.dot(other).lt(0.0)
+            ? return(self.lerp(other.neg(), t))
+            : return(self.lerp(other, t))
+
+/// The angle this unit quaternion turns by, 2 acos w.
+routine Q128.angle(self: Self) -> F32
+    block entry()
+        half : F32 = Self.clamp_unit(self.w).acos()
+        return(F32.mul_finite(2.0, half))
+
+/// The unit axis (x, y, z) and the angle this unit quaternion turns by, the angle in the last place. A turn by
+/// nothing has no axis: it reports the x axis.
+routine Q128.to_axis_angle(self: Self) -> (F32, F32, F32, F32)
+    shared w     : F32 = Self.clamp_unit(self.w)
+    shared angle : F32 = F32.mul_finite(2.0, w.acos())
+
+    block entry()
+        ww : F32 = w.mul_finite(w)
+        s  : F32 = F32.sub_finite(1.0, ww).sqrt()
+        branch s.lt(Q128_TOLERANCE)
+            ? return({ 1.0, 0.0, 0.0, angle })
+            : continue
+        x : F32 = self.x.div_finite(s)
+        y : F32 = self.y.div_finite(s)
+        z : F32 = self.z.div_finite(s)
+        return({ x, y, z, angle })
+
+/// The rotation by angle about the axis (ax, ay, az), which needn't be unit length (right-hand rule). An axis of
+/// length zero gives the identity.
+routine Q128.from_axis_angle(ax: F32, ay: F32, az: F32, angle: F32) -> Self
+    shared length : F32 = Self.length(ax, ay, az)
+
+    block entry()
+        branch length.eq(0.0)
+            ? return(Self.identity())
+            : continue
+        half : F32 = angle.mul_finite(0.5)
+        s    : F32 = half.sin().div_finite(length)
+        x    : F32 = ax.mul_finite(s)
+        y    : F32 = ay.mul_finite(s)
+        z    : F32 = az.mul_finite(s)
+        return({ w: half.cos(), x: x, y: y, z: z })
+
+/// The length of the vector (x, y, z).
+routine Q128.length(x: F32, y: F32, z: F32) -> F32
+    block entry()
+        xx : F32 = x.mul_finite(x)
+        yy : F32 = y.mul_finite(y)
+        s  : F32 = xx.add_finite(yy)
+        zz : F32 = z.mul_finite(z)
+        return(s.add_finite(zz).sqrt())
+
+/// The shortest rotation that turns the direction (ux, uy, uz) onto (vx, vy, vz), neither unit length. Opposite
+/// directions turn half a turn about an axis perpendicular to the first.
+routine Q128.from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Self
+    shared la : F32 = Self.length(ux, uy, uz)
+    shared lb : F32 = Self.length(vx, vy, vz)
+
+    block entry()
+        degenerate : Bool = la.eq(0.0).bitor(lb.eq(0.0))
+        branch degenerate
+            ? return(Self.identity())
+            : continue
+        au : F32 = ux.div_finite(la)
+        bu : F32 = uy.div_finite(la)
+        cu : F32 = uz.div_finite(la)
+        av : F32 = vx.div_finite(lb)
+        bv : F32 = vy.div_finite(lb)
+        cv : F32 = vz.div_finite(lb)
+        aa : F32 = au.mul_finite(av)
+        bb : F32 = bu.mul_finite(bv)
+        s  : F32 = aa.add_finite(bb)
+        cc : F32 = cu.mul_finite(cv)
+        d  : F32 = s.add_finite(cc)
+        branch d.ge(F32.sub_finite(1.0, Q128_TOLERANCE))
+            ? return(Self.identity())
+            : continue
+        branch d.le(F32.add_finite(-1.0, Q128_TOLERANCE))
+            ? return(Self.half_turn(au, bu, cu))
+            : continue
+        w  : F32  = F32.add_finite(1.0, d)
+        b1 : F32  = bu.mul_finite(cv)
+        b2 : F32  = cu.mul_finite(bv)
+        x  : F32  = b1.sub_finite(b2)
+        c1 : F32  = cu.mul_finite(av)
+        c2 : F32  = au.mul_finite(cv)
+        y  : F32  = c1.sub_finite(c2)
+        a1 : F32  = au.mul_finite(bv)
+        a2 : F32  = bu.mul_finite(av)
+        z  : F32  = a1.sub_finite(a2)
+        q  : Self = { w: w, x: x, y: y, z: z }
+        return(q.normalize())
+
+/// Half a turn about an axis perpendicular to the unit vector (ux, uy, uz): the x axis crossed with it, or the y axis
+/// crossed with it when that is too short.
+routine Q128.half_turn(ux: F32, uy: F32, uz: F32) -> Self
+    shared py : F32 = uz.neg()
+
+    block entry()
+        yy    : F32  = py.mul_finite(py)
+        zz    : F32  = uy.mul_finite(uy)
+        short : Bool = yy.add_finite(zz).lt(Q128_TOLERANCE)
+        branch short
+            ? axis(uz, 0.0, ux.neg())
+            : axis(0.0, py, uy)
+
+    block axis(px: F32, qy: F32, pz: F32)
+        l : F32 = Self.length(px, qy, pz)
+        x : F32 = px.div_finite(l)
+        y : F32 = qy.div_finite(l)
+        z : F32 = pz.div_finite(l)
+        return({ w: 0.0, x: x, y: y, z: z })
+
+/// The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
+/// largest of 4w, 4x, 4y, and 4z to stay well conditioned.
+routine Q128.from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
+    m21: F32, m22: F32) -> Self
+    block entry()
+        trace : F32 = m00.add_finite(m11).add_finite(m22)
+        when
+            trace.gt(0.0)                   -> by_w(trace)
+            m00.gt(m11).bitand(m00.gt(m22)) -> by_x()
+            m11.gt(m22)                     -> by_y()
+            else                            -> by_z()
+
+    block by_w(trace: F32)
+        sw : F32 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
+        w  : F32 = F32.mul_finite(0.25, sw)
+        x  : F32 = m21.sub_finite(m12).div_finite(sw)
+        y  : F32 = m02.sub_finite(m20).div_finite(sw)
+        z  : F32 = m10.sub_finite(m01).div_finite(sw)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_x()
+        sx : F32 = F32.add_finite(1.0, m00).sub_finite(m11).sub_finite(m22)
+        s  : F32 = sx.sqrt().mul_finite(2.0)
+        w  : F32 = m21.sub_finite(m12).div_finite(s)
+        x  : F32 = F32.mul_finite(0.25, s)
+        y  : F32 = m01.add_finite(m10).div_finite(s)
+        z  : F32 = m02.add_finite(m20).div_finite(s)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_y()
+        sy : F32 = F32.add_finite(1.0, m11).sub_finite(m00).sub_finite(m22)
+        s  : F32 = sy.sqrt().mul_finite(2.0)
+        w  : F32 = m02.sub_finite(m20).div_finite(s)
+        x  : F32 = m01.add_finite(m10).div_finite(s)
+        y  : F32 = F32.mul_finite(0.25, s)
+        z  : F32 = m12.add_finite(m21).div_finite(s)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_z()
+        sz : F32 = F32.add_finite(1.0, m22).sub_finite(m00).sub_finite(m11)
+        s  : F32 = sz.sqrt().mul_finite(2.0)
+        w  : F32 = m10.sub_finite(m01).div_finite(s)
+        x  : F32 = m02.add_finite(m20).div_finite(s)
+        y  : F32 = m12.add_finite(m21).div_finite(s)
+        z  : F32 = F32.mul_finite(0.25, s)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The rotation by Euler angles in radians: yaw about z, then pitch about y, then roll about x (the aerospace Z-Y-X
+/// order, yaw · pitch · roll).
+routine Q128.from_euler(roll: F32, pitch: F32, yaw: F32) -> Self
+    block entry()
+        cr : F32 = roll.mul_finite(0.5).cos()
+        sr : F32 = roll.mul_finite(0.5).sin()
+        cp : F32 = pitch.mul_finite(0.5).cos()
+        sp : F32 = pitch.mul_finite(0.5).sin()
+        cy : F32 = yaw.mul_finite(0.5).cos()
+        sy : F32 = yaw.mul_finite(0.5).sin()
+        w1 : F32 = cr.mul_finite(cp).mul_finite(cy)
+        w2 : F32 = sr.mul_finite(sp).mul_finite(sy)
+        w  : F32 = w1.add_finite(w2)
+        x1 : F32 = sr.mul_finite(cp).mul_finite(cy)
+        x2 : F32 = cr.mul_finite(sp).mul_finite(sy)
+        x  : F32 = x1.sub_finite(x2)
+        y1 : F32 = cr.mul_finite(sp).mul_finite(cy)
+        y2 : F32 = sr.mul_finite(cp).mul_finite(sy)
+        y  : F32 = y1.add_finite(y2)
+        z1 : F32 = cr.mul_finite(cp).mul_finite(sy)
+        z2 : F32 = sr.mul_finite(sp).mul_finite(cy)
+        z  : F32 = z1.sub_finite(z2)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The Z-Y-X Euler angles (roll, pitch, yaw) of this unit quaternion, the inverse of from_euler. At pitch ±90 degrees
+/// (gimbal lock) roll and yaw aren't unique, and pitch is clamped there.
+routine Q128.to_euler(self: Self) -> (F32, F32, F32)
+    block entry()
+        wx    : F32 = self.w.mul_finite(self.x)
+        yz    : F32 = self.y.mul_finite(self.z)
+        ry    : F32 = F32.mul_finite(2.0, wx.add_finite(yz))
+        xx    : F32 = self.x.mul_finite(self.x)
+        yy    : F32 = self.y.mul_finite(self.y)
+        rx2   : F32 = F32.mul_finite(2.0, xx.add_finite(yy))
+        rx    : F32 = F32.sub_finite(1.0, rx2)
+        roll  : F32 = ry.atan2(rx)
+        wy    : F32 = self.w.mul_finite(self.y)
+        zx    : F32 = self.z.mul_finite(self.x)
+        sp    : F32 = F32.mul_finite(2.0, wy.sub_finite(zx))
+        pitch : F32 = Self.clamp_unit(sp).asin()
+        wz    : F32 = self.w.mul_finite(self.z)
+        xy    : F32 = self.x.mul_finite(self.y)
+        yy2   : F32 = F32.mul_finite(2.0, wz.add_finite(xy))
+        y2    : F32 = self.y.mul_finite(self.y)
+        z2    : F32 = self.z.mul_finite(self.z)
+        yx2   : F32 = F32.mul_finite(2.0, y2.add_finite(z2))
+        yx    : F32 = F32.sub_finite(1.0, yx2)
+        yaw   : F32 = yy2.atan2(yx)
+        return({ roll, pitch, yaw })
+
+/// The four components in Words, w first.
+#inline
+routine Q128.words(self: Self) -> Words
+    block entry()
+        return(Words.construct(self.w, self.x, self.y, self.z))
+
+// The exports RazorForge's Q128 calls: each component of a quaternion is its own F32, and a Vector3D's or a
+// Matrix4R4C's is its own F32.
+
+/// The Hamilton product, for Q128.mul.
+#[export("ingrid_q128_mul"), inline]
+routine q128_mul(w: F32, x: F32, y: F32, z: F32, other_w: F32, other_x: F32, other_y: F32,
+    other_z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        b : Q128 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.mul(b).words())
+
+/// The quotient, for Q128.truediv.
+#[export("ingrid_q128_div"), inline]
+routine q128_div(w: F32, x: F32, y: F32, z: F32, other_w: F32, other_x: F32, other_y: F32,
+    other_z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        b : Q128 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.div(b).words())
+
+/// Q128.dot.
+#[export("ingrid_q128_dot"), inline]
+routine q128_dot(w: F32, x: F32, y: F32, z: F32, other_w: F32, other_x: F32, other_y: F32,
+    other_z: F32) -> F32
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        b : Q128 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.dot(b))
+
+/// Q128.norm.
+#[export("ingrid_q128_norm"), inline]
+routine q128_norm(w: F32, x: F32, y: F32, z: F32) -> F32
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.norm())
+
+/// Q128.abs.
+#[export("ingrid_q128_abs"), inline]
+routine q128_abs(w: F32, x: F32, y: F32, z: F32) -> F32
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.abs())
+
+/// Q128.angle.
+#[export("ingrid_q128_angle"), inline]
+routine q128_angle(w: F32, x: F32, y: F32, z: F32) -> F32
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.angle())
+
+/// Q128.normalize.
+#[export("ingrid_q128_normalize"), inline]
+routine q128_normalize(w: F32, x: F32, y: F32, z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.normalize().words())
+
+/// Q128.reciprocal.
+#[export("ingrid_q128_reciprocal"), inline]
+routine q128_reciprocal(w: F32, x: F32, y: F32, z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.reciprocal().words())
+
+/// Q128.is_unit.
+#[export("ingrid_q128_is_unit"), inline]
+routine q128_is_unit(w: F32, x: F32, y: F32, z: F32) -> Bool
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        return(a.is_unit())
+
+/// Q128.rotate: the turned vector's x, y, and z in w0, w1, and w2, as F32s.
+#[export("ingrid_q128_rotate"), inline]
+routine q128_rotate(w: F32, x: F32, y: F32, z: F32, vx: F32, vy: F32, vz: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        r : Q128 = a.rotate(vx, vy, vz)
+        return(Words.construct(r.x, r.y, r.z, F32.from_bits(0)))
+
+/// Q128.slerp.
+#[export("ingrid_q128_slerp"), inline]
+routine q128_slerp(w: F32, x: F32, y: F32, z: F32, other_w: F32, other_x: F32, other_y: F32,
+    other_z: F32, t: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        b : Q128 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.slerp(b, t).words())
+
+/// Q128.nlerp.
+#[export("ingrid_q128_nlerp"), inline]
+routine q128_nlerp(w: F32, x: F32, y: F32, z: F32, other_w: F32, other_x: F32, other_y: F32,
+    other_z: F32, t: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        b : Q128 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.nlerp(b, t).words())
+
+/// Q128.to_axis_angle: the axis's x, y, and z as F32s in w0, w1, and w2, the angle as F32 in w3.
+#[export("ingrid_q128_to_axis_angle"), inline]
+routine q128_to_axis_angle(w: F32, x: F32, y: F32, z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        ax, ay, az, angle = a.to_axis_angle()
+        w0 : U64 = ax.bits().to<U64>()
+        w1 : U64 = ay.bits().to<U64>()
+        w2 : U64 = az.bits().to<U64>()
+        w3 : U64 = angle.bits().to<U64>()
+        return({ w0: w0, w1: w1, w2: w2, w3: w3 })
+
+/// Q128.to_euler: roll, pitch, and yaw in w0, w1, and w2.
+#[export("ingrid_q128_to_euler"), inline]
+routine q128_to_euler(w: F32, x: F32, y: F32, z: F32) -> Words
+    block entry()
+        a : Q128 = { w: w, x: x, y: y, z: z }
+        roll, pitch, yaw = a.to_euler()
+        return(Words.construct(roll, pitch, yaw, F32.from_bits(0)))
+
+/// Q128.from_axis_angle, for an F32 axis.
+#[export("ingrid_q128_from_axis_angle"), inline]
+routine q128_from_axis_angle(ax: F32, ay: F32, az: F32, angle: F32) -> Words
+    block entry()
+        return(Q128.from_axis_angle(ax, ay, az, angle).words())
+
+/// Q128.from_to, for F32 directions.
+#[export("ingrid_q128_from_to"), inline]
+routine q128_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Words
+    block entry()
+        q : Q128 = Q128.from_to(ux, uy, uz, vx, vy, vz)
+        return(q.words())
+
+/// Q128.from_matrix, for the F32 elements m{row}{column} of the upper-left 3x3 part.
+#[export("ingrid_q128_from_matrix"), inline]
+routine q128_from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
+    m21: F32, m22: F32) -> Words
+    block entry()
+        q : Q128 = Q128.from_matrix(m00, m01, m02, m10, m11, m12, m20, m21, m22)
+        return(q.words())
+
+/// Q128.from_euler.
+#[export("ingrid_q128_from_euler"), inline]
+routine q128_from_euler(roll: F32, pitch: F32, yaw: F32) -> Words
+    block entry()
+        return(Q128.from_euler(roll, pitch, yaw).words())
+
+// ── Q256 ──────────────────────────────────────────────────────────────────────────
+
+/// RazorForge's Q256: a quaternion w + xi + yj + zk over F64, RazorForge's B64.
+record Q256
+    w : F64
+    x : F64
+    y : F64
+    z : F64
+
+/// The identity rotation 1 + 0i + 0j + 0k.
+#inline
+routine Q256.identity() -> Self
+    block entry()
+        return({ w: 1.0, x: 0.0, y: 0.0, z: 0.0 })
+
+/// The sum, component by component.
+#inline
+routine Q256.add(self: Self, other: Self) -> Self
+    block entry()
+        w : F64 = self.w.add_finite(other.w)
+        x : F64 = self.x.add_finite(other.x)
+        y : F64 = self.y.add_finite(other.y)
+        z : F64 = self.z.add_finite(other.z)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The difference, component by component.
+#inline
+routine Q256.sub(self: Self, other: Self) -> Self
+    block entry()
+        w : F64 = self.w.sub_finite(other.w)
+        x : F64 = self.x.sub_finite(other.x)
+        y : F64 = self.y.sub_finite(other.y)
+        z : F64 = self.z.sub_finite(other.z)
+        return({ w: w, x: x, y: y, z: z })
+
+/// Every component negated.
+#inline
+routine Q256.neg(self: Self) -> Self
+    block entry()
+        return({ w: self.w.neg(), x: self.x.neg(), y: self.y.neg(), z: self.z.neg() })
+
+/// The conjugate w - xi - yj - zk.
+#inline
+routine Q256.conjugate(self: Self) -> Self
+    block entry()
+        return({ w: self.w, x: self.x.neg(), y: self.y.neg(), z: self.z.neg() })
+
+/// Every component times factor.
+#inline
+routine Q256.scale(self: Self, factor: F64) -> Self
+    block entry()
+        w : F64 = self.w.mul_finite(factor)
+        x : F64 = self.x.mul_finite(factor)
+        y : F64 = self.y.mul_finite(factor)
+        z : F64 = self.z.mul_finite(factor)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The Hamilton product self · other, which turns by other and then by self (it doesn't commute).
+routine Q256.mul(self: Self, other: Self) -> Self
+    block entry()
+        ww : F64 = self.w.mul_finite(other.w)
+        xx : F64 = self.x.mul_finite(other.x)
+        w1 : F64 = ww.sub_finite(xx)
+        yy : F64 = self.y.mul_finite(other.y)
+        w2 : F64 = w1.sub_finite(yy)
+        zz : F64 = self.z.mul_finite(other.z)
+        w  : F64 = w2.sub_finite(zz)
+        wx : F64 = self.w.mul_finite(other.x)
+        xw : F64 = self.x.mul_finite(other.w)
+        x1 : F64 = wx.add_finite(xw)
+        yz : F64 = self.y.mul_finite(other.z)
+        x2 : F64 = x1.add_finite(yz)
+        zy : F64 = self.z.mul_finite(other.y)
+        x  : F64 = x2.sub_finite(zy)
+        wy : F64 = self.w.mul_finite(other.y)
+        xz : F64 = self.x.mul_finite(other.z)
+        y1 : F64 = wy.sub_finite(xz)
+        yw : F64 = self.y.mul_finite(other.w)
+        y2 : F64 = y1.add_finite(yw)
+        zx : F64 = self.z.mul_finite(other.x)
+        y  : F64 = y2.add_finite(zx)
+        wz : F64 = self.w.mul_finite(other.z)
+        xy : F64 = self.x.mul_finite(other.y)
+        z1 : F64 = wz.add_finite(xy)
+        yx : F64 = self.y.mul_finite(other.x)
+        z2 : F64 = z1.sub_finite(yx)
+        zw : F64 = self.z.mul_finite(other.w)
+        z  : F64 = z2.add_finite(zw)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The quotient self · other⁻¹.
+routine Q256.div(self: Self, other: Self) -> Self
+    block entry()
+        inverse : Self = other.reciprocal()
+        return(self.mul(inverse))
+
+/// The dot product of the two as 4-vectors.
+routine Q256.dot(self: Self, other: Self) -> F64
+    block entry()
+        ww : F64 = self.w.mul_finite(other.w)
+        xx : F64 = self.x.mul_finite(other.x)
+        s1 : F64 = ww.add_finite(xx)
+        yy : F64 = self.y.mul_finite(other.y)
+        s2 : F64 = s1.add_finite(yy)
+        zz : F64 = self.z.mul_finite(other.z)
+        return(s2.add_finite(zz))
+
+/// The squared norm w² + x² + y² + z².
+routine Q256.norm(self: Self) -> F64
+    block entry()
+        return(self.dot(self))
+
+/// The norm, the square root of the squared norm.
+routine Q256.abs(self: Self) -> F64
+    block entry()
+        return(self.norm().sqrt())
+
+/// The unit quaternion in the same direction, or this one when its norm is zero.
+routine Q256.normalize(self: Self) -> Self
+    shared n : F64 = self.abs()
+
+    block entry()
+        branch n.eq(0.0)
+            ? return(self)
+            : continue
+        return(self.scale(F64.div_finite(1.0, n)))
+
+/// The inverse, the conjugate over the squared norm.
+routine Q256.reciprocal(self: Self) -> Self
+    block entry()
+        n : F64 = self.norm()
+        return(self.conjugate().scale(F64.div_finite(1.0, n)))
+
+/// Whether the norm is 1 within the tolerance.
+routine Q256.is_unit(self: Self) -> Bool
+    block entry()
+        d     : F64  = self.norm().sub_finite(1.0)
+        below : Bool = d.le(Q256_TOLERANCE)
+        return(below.bitand(d.ge(Q256_TOLERANCE.neg())))
+
+/// v clamped to [-1, 1], so a unit quaternion whose w drifted just past 1 still has a real acos. NaN stays NaN.
+#inline
+routine Q256.clamp_unit(v: F64) -> F64
+    block entry()
+        when
+            v.gt(1.0)  -> return(1.0)
+            v.lt(-1.0) -> return(-1.0)
+            else       -> return(v)
+
+/// The vector (vx, vy, vz) turned by this unit quaternion: the vector part of self · (0, v) · conj(self).
+routine Q256.rotate(self: Self, vx: F64, vy: F64, vz: F64) -> Self
+    block entry()
+        p  : Self = { w: 0.0, x: vx, y: vy, z: vz }
+        sp : Self = self.mul(p)
+        return(sp.mul(self.conjugate()))
+
+/// The spherical interpolation from self (t = 0) to other (t = 1) along the shorter arc, both unit length. Nearly
+/// parallel ends fall back to a normalized linear interpolation, which avoids dividing by sin θ near 0.
+routine Q256.slerp(self: Self, other: Self, t: F64) -> Self
+    shared d : F64 = self.dot(other)
+
+    block entry()
+        branch d.lt(0.0)
+            ? arc(other.neg(), d.neg())
+            : arc(other, d)
+
+    block arc(target: Self, cosine: F64)
+        branch cosine.gt(Q256_LINEAR)
+            ? return(self.lerp(target, t))
+            : continue
+        theta     : F64  = cosine.acos()
+        sin_theta : F64  = theta.sin()
+        rest      : F64  = F64.sub_finite(1.0, t)
+        wa        : F64  = rest.mul_finite(theta).sin().div_finite(sin_theta)
+        wb        : F64  = t.mul_finite(theta).sin().div_finite(sin_theta)
+        a         : Self = self.scale(wa)
+        b         : Self = target.scale(wb)
+        return(a.add(b))
+
+/// self + (target - self) t, normalized.
+routine Q256.lerp(self: Self, target: Self, t: F64) -> Self
+    block entry()
+        step : Self = target.sub(self).scale(t)
+        return(self.add(step).normalize())
+
+/// The normalized linear interpolation from self to other along the shorter arc.
+routine Q256.nlerp(self: Self, other: Self, t: F64) -> Self
+    block entry()
+        branch self.dot(other).lt(0.0)
+            ? return(self.lerp(other.neg(), t))
+            : return(self.lerp(other, t))
+
+/// The angle this unit quaternion turns by, 2 acos w.
+routine Q256.angle(self: Self) -> F64
+    block entry()
+        half : F64 = Self.clamp_unit(self.w).acos()
+        return(F64.mul_finite(2.0, half))
+
+/// The unit axis (x, y, z) and the angle this unit quaternion turns by, the angle in the last place. A turn by
+/// nothing has no axis: it reports the x axis.
+routine Q256.to_axis_angle(self: Self) -> (F64, F64, F64, F64)
+    shared w     : F64 = Self.clamp_unit(self.w)
+    shared angle : F64 = F64.mul_finite(2.0, w.acos())
+
+    block entry()
+        ww : F64 = w.mul_finite(w)
+        s  : F64 = F64.sub_finite(1.0, ww).sqrt()
+        branch s.lt(Q256_TOLERANCE)
+            ? return({ 1.0, 0.0, 0.0, angle })
+            : continue
+        x : F64 = self.x.div_finite(s)
+        y : F64 = self.y.div_finite(s)
+        z : F64 = self.z.div_finite(s)
+        return({ x, y, z, angle })
+
+/// The rotation by angle about the axis (ax, ay, az), which needn't be unit length (right-hand rule). An axis of
+/// length zero gives the identity.
+routine Q256.from_axis_angle(ax: F64, ay: F64, az: F64, angle: F64) -> Self
+    shared length : F64 = Self.length(ax, ay, az)
+
+    block entry()
+        branch length.eq(0.0)
+            ? return(Self.identity())
+            : continue
+        half : F64 = angle.mul_finite(0.5)
+        s    : F64 = half.sin().div_finite(length)
+        x    : F64 = ax.mul_finite(s)
+        y    : F64 = ay.mul_finite(s)
+        z    : F64 = az.mul_finite(s)
+        return({ w: half.cos(), x: x, y: y, z: z })
+
+/// The length of the vector (x, y, z).
+routine Q256.length(x: F64, y: F64, z: F64) -> F64
+    block entry()
+        xx : F64 = x.mul_finite(x)
+        yy : F64 = y.mul_finite(y)
+        s  : F64 = xx.add_finite(yy)
+        zz : F64 = z.mul_finite(z)
+        return(s.add_finite(zz).sqrt())
+
+/// The shortest rotation that turns the direction (ux, uy, uz) onto (vx, vy, vz), neither unit length. Opposite
+/// directions turn half a turn about an axis perpendicular to the first.
+routine Q256.from_to(ux: F64, uy: F64, uz: F64, vx: F64, vy: F64, vz: F64) -> Self
+    shared la : F64 = Self.length(ux, uy, uz)
+    shared lb : F64 = Self.length(vx, vy, vz)
+
+    block entry()
+        degenerate : Bool = la.eq(0.0).bitor(lb.eq(0.0))
+        branch degenerate
+            ? return(Self.identity())
+            : continue
+        au : F64 = ux.div_finite(la)
+        bu : F64 = uy.div_finite(la)
+        cu : F64 = uz.div_finite(la)
+        av : F64 = vx.div_finite(lb)
+        bv : F64 = vy.div_finite(lb)
+        cv : F64 = vz.div_finite(lb)
+        aa : F64 = au.mul_finite(av)
+        bb : F64 = bu.mul_finite(bv)
+        s  : F64 = aa.add_finite(bb)
+        cc : F64 = cu.mul_finite(cv)
+        d  : F64 = s.add_finite(cc)
+        branch d.ge(F64.sub_finite(1.0, Q256_TOLERANCE))
+            ? return(Self.identity())
+            : continue
+        branch d.le(F64.add_finite(-1.0, Q256_TOLERANCE))
+            ? return(Self.half_turn(au, bu, cu))
+            : continue
+        w  : F64  = F64.add_finite(1.0, d)
+        b1 : F64  = bu.mul_finite(cv)
+        b2 : F64  = cu.mul_finite(bv)
+        x  : F64  = b1.sub_finite(b2)
+        c1 : F64  = cu.mul_finite(av)
+        c2 : F64  = au.mul_finite(cv)
+        y  : F64  = c1.sub_finite(c2)
+        a1 : F64  = au.mul_finite(bv)
+        a2 : F64  = bu.mul_finite(av)
+        z  : F64  = a1.sub_finite(a2)
+        q  : Self = { w: w, x: x, y: y, z: z }
+        return(q.normalize())
+
+/// Half a turn about an axis perpendicular to the unit vector (ux, uy, uz): the x axis crossed with it, or the y axis
+/// crossed with it when that is too short.
+routine Q256.half_turn(ux: F64, uy: F64, uz: F64) -> Self
+    shared py : F64 = uz.neg()
+
+    block entry()
+        yy    : F64  = py.mul_finite(py)
+        zz    : F64  = uy.mul_finite(uy)
+        short : Bool = yy.add_finite(zz).lt(Q256_TOLERANCE)
+        branch short
+            ? axis(uz, 0.0, ux.neg())
+            : axis(0.0, py, uy)
+
+    block axis(px: F64, qy: F64, pz: F64)
+        l : F64 = Self.length(px, qy, pz)
+        x : F64 = px.div_finite(l)
+        y : F64 = qy.div_finite(l)
+        z : F64 = pz.div_finite(l)
+        return({ w: 0.0, x: x, y: y, z: z })
+
+/// The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
+/// largest of 4w, 4x, 4y, and 4z to stay well conditioned.
+routine Q256.from_matrix(m00: F64, m01: F64, m02: F64, m10: F64, m11: F64, m12: F64, m20: F64,
+    m21: F64, m22: F64) -> Self
+    block entry()
+        trace : F64 = m00.add_finite(m11).add_finite(m22)
+        when
+            trace.gt(0.0)                   -> by_w(trace)
+            m00.gt(m11).bitand(m00.gt(m22)) -> by_x()
+            m11.gt(m22)                     -> by_y()
+            else                            -> by_z()
+
+    block by_w(trace: F64)
+        sw : F64 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
+        w  : F64 = F64.mul_finite(0.25, sw)
+        x  : F64 = m21.sub_finite(m12).div_finite(sw)
+        y  : F64 = m02.sub_finite(m20).div_finite(sw)
+        z  : F64 = m10.sub_finite(m01).div_finite(sw)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_x()
+        sx : F64 = F64.add_finite(1.0, m00).sub_finite(m11).sub_finite(m22)
+        s  : F64 = sx.sqrt().mul_finite(2.0)
+        w  : F64 = m21.sub_finite(m12).div_finite(s)
+        x  : F64 = F64.mul_finite(0.25, s)
+        y  : F64 = m01.add_finite(m10).div_finite(s)
+        z  : F64 = m02.add_finite(m20).div_finite(s)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_y()
+        sy : F64 = F64.add_finite(1.0, m11).sub_finite(m00).sub_finite(m22)
+        s  : F64 = sy.sqrt().mul_finite(2.0)
+        w  : F64 = m02.sub_finite(m20).div_finite(s)
+        x  : F64 = m01.add_finite(m10).div_finite(s)
+        y  : F64 = F64.mul_finite(0.25, s)
+        z  : F64 = m12.add_finite(m21).div_finite(s)
+        return({ w: w, x: x, y: y, z: z })
+
+    block by_z()
+        sz : F64 = F64.add_finite(1.0, m22).sub_finite(m00).sub_finite(m11)
+        s  : F64 = sz.sqrt().mul_finite(2.0)
+        w  : F64 = m10.sub_finite(m01).div_finite(s)
+        x  : F64 = m02.add_finite(m20).div_finite(s)
+        y  : F64 = m12.add_finite(m21).div_finite(s)
+        z  : F64 = F64.mul_finite(0.25, s)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The rotation by Euler angles in radians: yaw about z, then pitch about y, then roll about x (the aerospace Z-Y-X
+/// order, yaw · pitch · roll).
+routine Q256.from_euler(roll: F64, pitch: F64, yaw: F64) -> Self
+    block entry()
+        cr : F64 = roll.mul_finite(0.5).cos()
+        sr : F64 = roll.mul_finite(0.5).sin()
+        cp : F64 = pitch.mul_finite(0.5).cos()
+        sp : F64 = pitch.mul_finite(0.5).sin()
+        cy : F64 = yaw.mul_finite(0.5).cos()
+        sy : F64 = yaw.mul_finite(0.5).sin()
+        w1 : F64 = cr.mul_finite(cp).mul_finite(cy)
+        w2 : F64 = sr.mul_finite(sp).mul_finite(sy)
+        w  : F64 = w1.add_finite(w2)
+        x1 : F64 = sr.mul_finite(cp).mul_finite(cy)
+        x2 : F64 = cr.mul_finite(sp).mul_finite(sy)
+        x  : F64 = x1.sub_finite(x2)
+        y1 : F64 = cr.mul_finite(sp).mul_finite(cy)
+        y2 : F64 = sr.mul_finite(cp).mul_finite(sy)
+        y  : F64 = y1.add_finite(y2)
+        z1 : F64 = cr.mul_finite(cp).mul_finite(sy)
+        z2 : F64 = sr.mul_finite(sp).mul_finite(cy)
+        z  : F64 = z1.sub_finite(z2)
+        return({ w: w, x: x, y: y, z: z })
+
+/// The Z-Y-X Euler angles (roll, pitch, yaw) of this unit quaternion, the inverse of from_euler. At pitch ±90 degrees
+/// (gimbal lock) roll and yaw aren't unique, and pitch is clamped there.
+routine Q256.to_euler(self: Self) -> (F64, F64, F64)
+    block entry()
+        wx    : F64 = self.w.mul_finite(self.x)
+        yz    : F64 = self.y.mul_finite(self.z)
+        ry    : F64 = F64.mul_finite(2.0, wx.add_finite(yz))
+        xx    : F64 = self.x.mul_finite(self.x)
+        yy    : F64 = self.y.mul_finite(self.y)
+        rx2   : F64 = F64.mul_finite(2.0, xx.add_finite(yy))
+        rx    : F64 = F64.sub_finite(1.0, rx2)
+        roll  : F64 = ry.atan2(rx)
+        wy    : F64 = self.w.mul_finite(self.y)
+        zx    : F64 = self.z.mul_finite(self.x)
+        sp    : F64 = F64.mul_finite(2.0, wy.sub_finite(zx))
+        pitch : F64 = Self.clamp_unit(sp).asin()
+        wz    : F64 = self.w.mul_finite(self.z)
+        xy    : F64 = self.x.mul_finite(self.y)
+        yy2   : F64 = F64.mul_finite(2.0, wz.add_finite(xy))
+        y2    : F64 = self.y.mul_finite(self.y)
+        z2    : F64 = self.z.mul_finite(self.z)
+        yx2   : F64 = F64.mul_finite(2.0, y2.add_finite(z2))
+        yx    : F64 = F64.sub_finite(1.0, yx2)
+        yaw   : F64 = yy2.atan2(yx)
+        return({ roll, pitch, yaw })
+
+/// The four components in Words, w first.
+#inline
+routine Q256.words(self: Self) -> Words
+    block entry()
+        return(Words.construct(self.w, self.x, self.y, self.z))
+
+// The exports RazorForge's Q256 calls: each component of a quaternion is its own F64, and a Vector3D's or a
+// Matrix4R4C's is its own F32.
+
+/// The Hamilton product, for Q256.mul.
+#[export("ingrid_q256_mul"), inline]
+routine q256_mul(w: F64, x: F64, y: F64, z: F64, other_w: F64, other_x: F64, other_y: F64,
+    other_z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        b : Q256 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.mul(b).words())
+
+/// The quotient, for Q256.truediv.
+#[export("ingrid_q256_div"), inline]
+routine q256_div(w: F64, x: F64, y: F64, z: F64, other_w: F64, other_x: F64, other_y: F64,
+    other_z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        b : Q256 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.div(b).words())
+
+/// Q256.dot.
+#[export("ingrid_q256_dot"), inline]
+routine q256_dot(w: F64, x: F64, y: F64, z: F64, other_w: F64, other_x: F64, other_y: F64,
+    other_z: F64) -> F64
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        b : Q256 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.dot(b))
+
+/// Q256.norm.
+#[export("ingrid_q256_norm"), inline]
+routine q256_norm(w: F64, x: F64, y: F64, z: F64) -> F64
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.norm())
+
+/// Q256.abs.
+#[export("ingrid_q256_abs"), inline]
+routine q256_abs(w: F64, x: F64, y: F64, z: F64) -> F64
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.abs())
+
+/// Q256.angle.
+#[export("ingrid_q256_angle"), inline]
+routine q256_angle(w: F64, x: F64, y: F64, z: F64) -> F64
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.angle())
+
+/// Q256.normalize.
+#[export("ingrid_q256_normalize"), inline]
+routine q256_normalize(w: F64, x: F64, y: F64, z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.normalize().words())
+
+/// Q256.reciprocal.
+#[export("ingrid_q256_reciprocal"), inline]
+routine q256_reciprocal(w: F64, x: F64, y: F64, z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.reciprocal().words())
+
+/// Q256.is_unit.
+#[export("ingrid_q256_is_unit"), inline]
+routine q256_is_unit(w: F64, x: F64, y: F64, z: F64) -> Bool
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        return(a.is_unit())
+
+/// Q256.rotate: the turned vector's x, y, and z in w0, w1, and w2, as F32s.
+#[export("ingrid_q256_rotate"), inline]
+routine q256_rotate(w: F64, x: F64, y: F64, z: F64, vx: F32, vy: F32, vz: F32) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        r : Q256 = a.rotate(vx.to<F64>(), vy.to<F64>(), vz.to<F64>())
+        return(Words.construct(r.x.to<F32>(), r.y.to<F32>(), r.z.to<F32>(), F32.from_bits(0)))
+
+/// Q256.slerp.
+#[export("ingrid_q256_slerp"), inline]
+routine q256_slerp(w: F64, x: F64, y: F64, z: F64, other_w: F64, other_x: F64, other_y: F64,
+    other_z: F64, t: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        b : Q256 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.slerp(b, t).words())
+
+/// Q256.nlerp.
+#[export("ingrid_q256_nlerp"), inline]
+routine q256_nlerp(w: F64, x: F64, y: F64, z: F64, other_w: F64, other_x: F64, other_y: F64,
+    other_z: F64, t: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        b : Q256 = { w: other_w, x: other_x, y: other_y, z: other_z }
+        return(a.nlerp(b, t).words())
+
+/// Q256.to_axis_angle: the axis's x, y, and z as F32s in w0, w1, and w2, the angle as F64 in w3.
+#[export("ingrid_q256_to_axis_angle"), inline]
+routine q256_to_axis_angle(w: F64, x: F64, y: F64, z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        ax, ay, az, angle = a.to_axis_angle()
+        w0 : U64 = ax.to<F32>().bits().to<U64>()
+        w1 : U64 = ay.to<F32>().bits().to<U64>()
+        w2 : U64 = az.to<F32>().bits().to<U64>()
+        w3 : U64 = angle.bits()
+        return({ w0: w0, w1: w1, w2: w2, w3: w3 })
+
+/// Q256.to_euler: roll, pitch, and yaw in w0, w1, and w2.
+#[export("ingrid_q256_to_euler"), inline]
+routine q256_to_euler(w: F64, x: F64, y: F64, z: F64) -> Words
+    block entry()
+        a : Q256 = { w: w, x: x, y: y, z: z }
+        roll, pitch, yaw = a.to_euler()
+        return(Words.construct(roll, pitch, yaw, F64.from_bits(0)))
+
+/// Q256.from_axis_angle, for an F32 axis.
+#[export("ingrid_q256_from_axis_angle"), inline]
+routine q256_from_axis_angle(ax: F32, ay: F32, az: F32, angle: F64) -> Words
+    block entry()
+        return(Q256.from_axis_angle(ax.to<F64>(), ay.to<F64>(), az.to<F64>(), angle).words())
+
+/// Q256.from_to, for F32 directions.
+#[export("ingrid_q256_from_to"), inline]
+routine q256_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Words
+    block entry()
+        q : Q256 = Q256.from_to(ux.to<F64>(), uy.to<F64>(), uz.to<F64>(), vx.to<F64>(),
+            vy.to<F64>(), vz.to<F64>())
+        return(q.words())
+
+/// Q256.from_matrix, for the F32 elements m{row}{column} of the upper-left 3x3 part.
+#[export("ingrid_q256_from_matrix"), inline]
+routine q256_from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
+    m21: F32, m22: F32) -> Words
+    block entry()
+        q : Q256 = Q256.from_matrix(m00.to<F64>(), m01.to<F64>(), m02.to<F64>(), m10.to<F64>(),
+            m11.to<F64>(), m12.to<F64>(), m20.to<F64>(), m21.to<F64>(), m22.to<F64>())
+        return(q.words())
+
+/// Q256.from_euler.
+#[export("ingrid_q256_from_euler"), inline]
+routine q256_from_euler(roll: F64, pitch: F64, yaw: F64) -> Words
+    block entry()
+        return(Q256.from_euler(roll, pitch, yaw).words())

@@ -1,0 +1,1475 @@
+// RazorForge's complex numbers C64, C128, and C256 (over B32, B64, and B128, which are Tessera's F32, F64, and F128):
+// the bodies of their routines, moved here from RazorForge's Core/Numerics/C64.rf, C128.rf, and C256.rf. RazorForge
+// keeps the types, their protocols, and thin routines that call the ingrid_ exports below, so both languages share
+// one implementation.
+//
+// The formulas are RazorForge's own, unchanged, so every result has the same bits as before: the textbook
+// identities, with no rescaling against overflow. Each `+ - * /` is the checked one (finite.tess), which crashes on
+// a result that is not finite exactly where RazorForge's B32, B64, and B128 operators do, and the elementary
+// functions are the standard library's correctly rounded ones (CORE-MATH ports), as RazorForge's are.
+//
+// The exports take each part as its own float, except a C256's: an F128 is a 128-bit integer to the C ABI, which
+// Win64 passes by pointer from Tessera and by value from RazorForge, so each part goes in as its low and high 64
+// bits, and an F128 result comes back in Words. A C64 result comes back packed in one U64 (the real part's bits
+// low, the imaginary part's high), a C128 result in Words (words.tess), and a C256 result as itself: 32 bytes of
+// 128-bit integers to both builders, which every target returns through a hidden pointer.
+
+/// The F128 constants the C256 formulas use.
+private preset F128_ZERO: F128 = F128.from_bits(0)
+private preset F128_ONE:  F128 = F128.from_bits(0x3FFF0000000000000000000000000000)
+private preset F128_TWO:  F128 = F128.from_bits(0x40000000000000000000000000000000)
+
+/// ln 10 and ln 2 as each RazorForge type spells them: B32_LN_10 and B32_LN_2, the B64 literal 2.302585092994046 and
+/// B64_LN_2, B128_LN_10 and B128_LN_2.
+private preset C64_LN_10:  F32  = F32.from_bits(0x40135D8E)
+private preset C64_LN_2:   F32  = F32.from_bits(0x3F317218)
+private preset C128_LN_10: F64  = F64.from_bits(0x40026BB1BBB55516)
+private preset C128_LN_2:  F64  = F64.from_bits(0x3FE62E42FEFA39EF)
+private preset C256_LN_10: F128 = F128.from_bits(0x400026BB1BBB5551582DD4ADAC5705A6)
+private preset C256_LN_2:  F128 = F128.from_bits(0x3FFE62E42FEFA39EF35793C7673007E6)
+
+// ── C64 ──────────────────────────────────────────────────────────────────────────
+
+/// RazorForge's C64: a complex number over F32, RazorForge's B32.
+record C64
+    real : F32
+    imag : F32
+
+/// 1 + 0i.
+#inline
+routine C64.one() -> Self
+    block entry()
+        return({ real: 1.0, imag: 0.0 })
+
+/// The sum, part by part.
+#inline
+routine C64.add(self: Self, other: Self) -> Self
+    block entry()
+        re : F32 = self.real.add_finite(other.real)
+        im : F32 = self.imag.add_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The difference, part by part.
+#inline
+routine C64.sub(self: Self, other: Self) -> Self
+    block entry()
+        re : F32 = self.real.sub_finite(other.real)
+        im : F32 = self.imag.sub_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The product (ac - bd) + (ad + bc)i.
+routine C64.mul(self: Self, other: Self) -> Self
+    block entry()
+        ac : F32 = self.real.mul_finite(other.real)
+        bd : F32 = self.imag.mul_finite(other.imag)
+        re : F32 = ac.sub_finite(bd)
+        ad : F32 = self.real.mul_finite(other.imag)
+        bc : F32 = self.imag.mul_finite(other.real)
+        im : F32 = ad.add_finite(bc)
+        return({ real: re, imag: im })
+
+/// The quotient: self times the conjugate of other, over other's squared modulus.
+routine C64.div(self: Self, other: Self) -> Self
+    block entry()
+        d  : F32 = other.norm()
+        ac : F32 = self.real.mul_finite(other.real)
+        bd : F32 = self.imag.mul_finite(other.imag)
+        re : F32 = ac.add_finite(bd).div_finite(d)
+        bc : F32 = self.imag.mul_finite(other.real)
+        ad : F32 = self.real.mul_finite(other.imag)
+        im : F32 = bc.sub_finite(ad).div_finite(d)
+        return({ real: re, imag: im })
+
+/// The squared modulus real² + imag².
+routine C64.norm(self: Self) -> F32
+    block entry()
+        rr : F32 = self.real.mul_finite(self.real)
+        ii : F32 = self.imag.mul_finite(self.imag)
+        return(rr.add_finite(ii))
+
+/// The modulus, the square root of the squared modulus.
+routine C64.abs(self: Self) -> F32
+    block entry()
+        return(self.norm().sqrt())
+
+/// The phase angle atan2(imag, real), in (-π, π].
+routine C64.arg(self: Self) -> F32
+    block entry()
+        return(self.imag.atan2(self.real))
+
+/// The sine, sin a cosh b + i cos a sinh b, with cosh and sinh from e^b and e^-b.
+routine C64.sin(self: Self) -> Self
+    block entry()
+        ep : F32 = self.imag.exp()
+        em : F32 = self.imag.neg().exp()
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        re : F32 = self.real.sin().mul_finite(ch)
+        im : F32 = self.real.cos().mul_finite(sh)
+        return({ real: re, imag: im })
+
+/// The cosine, cos a cosh b - i sin a sinh b, with cosh and sinh from e^b and e^-b.
+routine C64.cos(self: Self) -> Self
+    block entry()
+        ep : F32 = self.imag.exp()
+        em : F32 = self.imag.neg().exp()
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        re : F32 = self.real.cos().mul_finite(ch)
+        im : F32 = self.real.sin().mul_finite(sh).neg()
+        return({ real: re, imag: im })
+
+/// The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
+routine C64.tan(self: Self) -> Self
+    block entry()
+        a2 : F32 = self.real.add_finite(self.real)
+        b2 : F32 = self.imag.add_finite(self.imag)
+        ep : F32 = b2.exp()
+        em : F32 = b2.neg().exp()
+        ca : F32 = a2.cos()
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        d  : F32 = ca.add_finite(ch)
+        re : F32 = a2.sin().div_finite(d)
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        im : F32 = sh.div_finite(d)
+        return({ real: re, imag: im })
+
+/// The arcsine, -i log(iz + √(1 - z²)).
+routine C64.asin(self: Self) -> Self
+    block entry()
+        iz : Self = { real: self.imag.neg(), imag: self.real }
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        v  : Self = iz.add(s).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arccosine, -i log(z + i √(1 - z²)).
+routine C64.acos(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        is : Self = { real: s.imag.neg(), imag: s.real }
+        v  : Self = self.add(is).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arctangent, (i/2) log((i + z) / (i - z)).
+routine C64.atan(self: Self) -> Self
+    block entry()
+        num_imag : F32  = self.imag.add_finite(1.0)
+        den_imag : F32  = F32.sub_finite(1.0, self.imag)
+        num      : Self = { real: self.real, imag: num_imag }
+        den      : Self = { real: self.real.neg(), imag: den_imag }
+        v        : Self = num.div(den).ln()
+        re       : F32  = v.imag.neg().div_finite(2.0)
+        im       : F32  = v.real.div_finite(2.0)
+        return({ real: re, imag: im })
+
+/// The hyperbolic sine, sinh a cos b + i cosh a sin b, with sinh and cosh from e^a and e^-a.
+routine C64.sinh(self: Self) -> Self
+    block entry()
+        ep : F32 = self.real.exp()
+        em : F32 = self.real.neg().exp()
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        re : F32 = sh.mul_finite(self.imag.cos())
+        im : F32 = ch.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic cosine, cosh a cos b + i sinh a sin b, with sinh and cosh from e^a and e^-a.
+routine C64.cosh(self: Self) -> Self
+    block entry()
+        ep : F32 = self.real.exp()
+        em : F32 = self.real.neg().exp()
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        re : F32 = ch.mul_finite(self.imag.cos())
+        im : F32 = sh.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
+routine C64.tanh(self: Self) -> Self
+    block entry()
+        a2 : F32 = self.real.add_finite(self.real)
+        b2 : F32 = self.imag.add_finite(self.imag)
+        ep : F32 = a2.exp()
+        em : F32 = a2.neg().exp()
+        ch : F32 = ep.add_finite(em).div_finite(2.0)
+        d  : F32 = ch.add_finite(b2.cos())
+        sh : F32 = ep.sub_finite(em).div_finite(2.0)
+        re : F32 = sh.div_finite(d)
+        im : F32 = b2.sin().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The inverse hyperbolic sine, log(z + √(z² + 1)).
+routine C64.asinh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.add(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic cosine, log(z + √(z² - 1)).
+routine C64.acosh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.sub(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
+routine C64.atanh(self: Self) -> Self
+    block entry()
+        p  : Self = Self.one().add(self)
+        m  : Self = Self.one().sub(self)
+        v  : Self = p.div(m).ln()
+        re : F32  = v.real.div_finite(2.0)
+        im : F32  = v.imag.div_finite(2.0)
+        return({ real: re, imag: im })
+
+/// e to this power, eᵃ (cos b + i sin b).
+routine C64.exp(self: Self) -> Self
+    block entry()
+        ea : F32 = self.real.exp()
+        re : F32 = ea.mul_finite(self.imag.cos())
+        im : F32 = ea.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The principal natural logarithm, ln |z| + i arg z.
+routine C64.ln(self: Self) -> Self
+    block entry()
+        re : F32 = self.abs().ln()
+        return({ real: re, imag: self.arg() })
+
+/// The base-10 logarithm, ln z / ln 10.
+routine C64.log10(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F32  = v.real.div_finite(C64_LN_10)
+        im : F32  = v.imag.div_finite(C64_LN_10)
+        return({ real: re, imag: im })
+
+/// The base-2 logarithm, ln z / ln 2.
+routine C64.log2(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F32  = v.real.div_finite(C64_LN_2)
+        im : F32  = v.imag.div_finite(C64_LN_2)
+        return({ real: re, imag: im })
+
+/// 1 / z, the conjugate over the squared modulus.
+routine C64.reciprocal(self: Self) -> Self
+    block entry()
+        d  : F32 = self.norm()
+        re : F32 = self.real.div_finite(d)
+        im : F32 = self.imag.neg().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
+/// takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
+routine C64.sqrt(self: Self) -> Self
+    shared r : F32 = self.abs()
+
+    block entry()
+        branch r.eq(0.0)
+            ? return({ real: 0.0, imag: 0.0 })
+            : continue
+        rp : F32 = r.add_finite(self.real).div_finite(2.0).sqrt()
+        ip : F32 = r.sub_finite(self.real).div_finite(2.0).sqrt()
+        branch self.imag.lt(0.0)
+            ? return({ real: rp, imag: ip.neg() })
+            : return({ real: rp, imag: ip })
+
+/// This number to the complex power `power`, exp(power × ln self).
+routine C64.pow(self: Self, power: Self) -> Self
+    block entry()
+        return(power.mul(self.ln()).exp())
+
+/// This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
+/// negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
+/// as RazorForge's loop does, so that squaring can overflow too.
+routine C64.powi(self: Self, n: S64) -> Self
+    shared result : @Self <- Self.one()
+    shared k      : U64   = n.to_wrap<U64>()
+
+    block entry()
+        branch n.lt(0)
+            ? square(self.reciprocal(), U64.sub_wrap(0, k))
+            : square(self, k)
+
+    block square(base: Self, left: U64)
+        branch left.eq(0)
+            ? return(result.load())
+            : continue
+        odd : Bool = left.bitand(1).eq(1)
+        branch odd
+            ? multiply(base, left)
+            : next(base, left)
+
+    block multiply(base: Self, left: U64)
+        result.load().mul(base).store_into(result)
+        jump next(base, left)
+
+    block next(base: Self, left: U64)
+        jump square(base.mul(base), left.shr(1))
+
+/// The number at distance r and angle theta: r cos θ + i r sin θ.
+routine C64.from_polar(r: F32, theta: F32) -> Self
+    block entry()
+        re : F32 = r.mul_finite(theta.cos())
+        im : F32 = r.mul_finite(theta.sin())
+        return({ real: re, imag: im })
+
+/// Both parts in one U64, the way an export hands a C64 back: the real part's bits low, the imaginary part's high.
+#inline
+routine C64.bits(self: Self) -> U64
+    block entry()
+        low  : U64 = self.real.bits().to<U64>()
+        high : U64 = self.imag.bits().to<U64>()
+        return(low.bitor(high.shl(32)))
+
+// The exports RazorForge's C64 calls.
+
+/// The product, for C64.mul.
+#[export("ingrid_c64_mul"), inline]
+routine c64_mul(real: F32, imag: F32, other_real: F32, other_imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        w : C64 = { real: other_real, imag: other_imag }
+        return(z.mul(w).bits())
+
+/// The quotient, for C64.truediv.
+#[export("ingrid_c64_div"), inline]
+routine c64_div(real: F32, imag: F32, other_real: F32, other_imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        w : C64 = { real: other_real, imag: other_imag }
+        return(z.div(w).bits())
+
+/// The first number to the power of the second, for C64.pow.
+#[export("ingrid_c64_pow"), inline]
+routine c64_pow(real: F32, imag: F32, other_real: F32, other_imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        w : C64 = { real: other_real, imag: other_imag }
+        return(z.pow(w).bits())
+
+/// C64.abs.
+#[export("ingrid_c64_abs"), inline]
+routine c64_abs(real: F32, imag: F32) -> F32
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.abs())
+
+/// C64.arg.
+#[export("ingrid_c64_arg"), inline]
+routine c64_arg(real: F32, imag: F32) -> F32
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.arg())
+
+/// C64.norm.
+#[export("ingrid_c64_norm"), inline]
+routine c64_norm(real: F32, imag: F32) -> F32
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.norm())
+
+/// C64.sin.
+#[export("ingrid_c64_sin"), inline]
+routine c64_sin(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.sin().bits())
+
+/// C64.cos.
+#[export("ingrid_c64_cos"), inline]
+routine c64_cos(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.cos().bits())
+
+/// C64.tan.
+#[export("ingrid_c64_tan"), inline]
+routine c64_tan(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.tan().bits())
+
+/// C64.asin.
+#[export("ingrid_c64_asin"), inline]
+routine c64_asin(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.asin().bits())
+
+/// C64.acos.
+#[export("ingrid_c64_acos"), inline]
+routine c64_acos(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.acos().bits())
+
+/// C64.atan.
+#[export("ingrid_c64_atan"), inline]
+routine c64_atan(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.atan().bits())
+
+/// C64.sinh.
+#[export("ingrid_c64_sinh"), inline]
+routine c64_sinh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.sinh().bits())
+
+/// C64.cosh.
+#[export("ingrid_c64_cosh"), inline]
+routine c64_cosh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.cosh().bits())
+
+/// C64.tanh.
+#[export("ingrid_c64_tanh"), inline]
+routine c64_tanh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.tanh().bits())
+
+/// C64.asinh.
+#[export("ingrid_c64_asinh"), inline]
+routine c64_asinh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.asinh().bits())
+
+/// C64.acosh.
+#[export("ingrid_c64_acosh"), inline]
+routine c64_acosh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.acosh().bits())
+
+/// C64.atanh.
+#[export("ingrid_c64_atanh"), inline]
+routine c64_atanh(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.atanh().bits())
+
+/// C64.exp.
+#[export("ingrid_c64_exp"), inline]
+routine c64_exp(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.exp().bits())
+
+/// C64.ln.
+#[export("ingrid_c64_ln"), inline]
+routine c64_ln(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.ln().bits())
+
+/// C64.log10.
+#[export("ingrid_c64_log10"), inline]
+routine c64_log10(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.log10().bits())
+
+/// C64.log2.
+#[export("ingrid_c64_log2"), inline]
+routine c64_log2(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.log2().bits())
+
+/// C64.reciprocal.
+#[export("ingrid_c64_reciprocal"), inline]
+routine c64_reciprocal(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.reciprocal().bits())
+
+/// C64.sqrt.
+#[export("ingrid_c64_sqrt"), inline]
+routine c64_sqrt(real: F32, imag: F32) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.sqrt().bits())
+
+/// C64 to an integer power.
+#[export("ingrid_c64_powi"), inline]
+routine c64_powi(real: F32, imag: F32, n: S64) -> U64
+    block entry()
+        z : C64 = { real: real, imag: imag }
+        return(z.powi(n).bits())
+
+/// The C64 at distance r and angle theta.
+#[export("ingrid_c64_from_polar"), inline]
+routine c64_from_polar(r: F32, theta: F32) -> U64
+    block entry()
+        return(C64.from_polar(r, theta).bits())
+
+// ── C128 ──────────────────────────────────────────────────────────────────────────
+
+/// RazorForge's C128: a complex number over F64, RazorForge's B64.
+record C128
+    real : F64
+    imag : F64
+
+/// 1 + 0i.
+#inline
+routine C128.one() -> Self
+    block entry()
+        return({ real: 1.0, imag: 0.0 })
+
+/// The sum, part by part.
+#inline
+routine C128.add(self: Self, other: Self) -> Self
+    block entry()
+        re : F64 = self.real.add_finite(other.real)
+        im : F64 = self.imag.add_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The difference, part by part.
+#inline
+routine C128.sub(self: Self, other: Self) -> Self
+    block entry()
+        re : F64 = self.real.sub_finite(other.real)
+        im : F64 = self.imag.sub_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The product (ac - bd) + (ad + bc)i.
+routine C128.mul(self: Self, other: Self) -> Self
+    block entry()
+        ac : F64 = self.real.mul_finite(other.real)
+        bd : F64 = self.imag.mul_finite(other.imag)
+        re : F64 = ac.sub_finite(bd)
+        ad : F64 = self.real.mul_finite(other.imag)
+        bc : F64 = self.imag.mul_finite(other.real)
+        im : F64 = ad.add_finite(bc)
+        return({ real: re, imag: im })
+
+/// The quotient: self times the conjugate of other, over other's squared modulus.
+routine C128.div(self: Self, other: Self) -> Self
+    block entry()
+        d  : F64 = other.norm()
+        ac : F64 = self.real.mul_finite(other.real)
+        bd : F64 = self.imag.mul_finite(other.imag)
+        re : F64 = ac.add_finite(bd).div_finite(d)
+        bc : F64 = self.imag.mul_finite(other.real)
+        ad : F64 = self.real.mul_finite(other.imag)
+        im : F64 = bc.sub_finite(ad).div_finite(d)
+        return({ real: re, imag: im })
+
+/// The squared modulus real² + imag².
+routine C128.norm(self: Self) -> F64
+    block entry()
+        rr : F64 = self.real.mul_finite(self.real)
+        ii : F64 = self.imag.mul_finite(self.imag)
+        return(rr.add_finite(ii))
+
+/// The modulus, the square root of the squared modulus.
+routine C128.abs(self: Self) -> F64
+    block entry()
+        return(self.norm().sqrt())
+
+/// The phase angle atan2(imag, real), in (-π, π].
+routine C128.arg(self: Self) -> F64
+    block entry()
+        return(self.imag.atan2(self.real))
+
+/// The sine, sin a cosh b + i cos a sinh b, with cosh and sinh from e^b and e^-b.
+routine C128.sin(self: Self) -> Self
+    block entry()
+        ep : F64 = self.imag.exp()
+        em : F64 = self.imag.neg().exp()
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        re : F64 = self.real.sin().mul_finite(ch)
+        im : F64 = self.real.cos().mul_finite(sh)
+        return({ real: re, imag: im })
+
+/// The cosine, cos a cosh b - i sin a sinh b, with cosh and sinh from e^b and e^-b.
+routine C128.cos(self: Self) -> Self
+    block entry()
+        ep : F64 = self.imag.exp()
+        em : F64 = self.imag.neg().exp()
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        re : F64 = self.real.cos().mul_finite(ch)
+        im : F64 = self.real.sin().mul_finite(sh).neg()
+        return({ real: re, imag: im })
+
+/// The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
+routine C128.tan(self: Self) -> Self
+    block entry()
+        a2 : F64 = self.real.add_finite(self.real)
+        b2 : F64 = self.imag.add_finite(self.imag)
+        ep : F64 = b2.exp()
+        em : F64 = b2.neg().exp()
+        ca : F64 = a2.cos()
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        d  : F64 = ca.add_finite(ch)
+        re : F64 = a2.sin().div_finite(d)
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        im : F64 = sh.div_finite(d)
+        return({ real: re, imag: im })
+
+/// The arcsine, -i log(iz + √(1 - z²)).
+routine C128.asin(self: Self) -> Self
+    block entry()
+        iz : Self = { real: self.imag.neg(), imag: self.real }
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        v  : Self = iz.add(s).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arccosine, -i log(z + i √(1 - z²)).
+routine C128.acos(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        is : Self = { real: s.imag.neg(), imag: s.real }
+        v  : Self = self.add(is).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arctangent, (i/2) log((i + z) / (i - z)).
+routine C128.atan(self: Self) -> Self
+    block entry()
+        num_imag : F64  = self.imag.add_finite(1.0)
+        den_imag : F64  = F64.sub_finite(1.0, self.imag)
+        num      : Self = { real: self.real, imag: num_imag }
+        den      : Self = { real: self.real.neg(), imag: den_imag }
+        v        : Self = num.div(den).ln()
+        re       : F64  = v.imag.neg().div_finite(2.0)
+        im       : F64  = v.real.div_finite(2.0)
+        return({ real: re, imag: im })
+
+/// The hyperbolic sine, sinh a cos b + i cosh a sin b, with sinh and cosh from e^a and e^-a.
+routine C128.sinh(self: Self) -> Self
+    block entry()
+        ep : F64 = self.real.exp()
+        em : F64 = self.real.neg().exp()
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        re : F64 = sh.mul_finite(self.imag.cos())
+        im : F64 = ch.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic cosine, cosh a cos b + i sinh a sin b, with sinh and cosh from e^a and e^-a.
+routine C128.cosh(self: Self) -> Self
+    block entry()
+        ep : F64 = self.real.exp()
+        em : F64 = self.real.neg().exp()
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        re : F64 = ch.mul_finite(self.imag.cos())
+        im : F64 = sh.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
+routine C128.tanh(self: Self) -> Self
+    block entry()
+        a2 : F64 = self.real.add_finite(self.real)
+        b2 : F64 = self.imag.add_finite(self.imag)
+        ep : F64 = a2.exp()
+        em : F64 = a2.neg().exp()
+        ch : F64 = ep.add_finite(em).div_finite(2.0)
+        d  : F64 = ch.add_finite(b2.cos())
+        sh : F64 = ep.sub_finite(em).div_finite(2.0)
+        re : F64 = sh.div_finite(d)
+        im : F64 = b2.sin().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The inverse hyperbolic sine, log(z + √(z² + 1)).
+routine C128.asinh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.add(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic cosine, log(z + √(z² - 1)).
+routine C128.acosh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.sub(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
+routine C128.atanh(self: Self) -> Self
+    block entry()
+        p  : Self = Self.one().add(self)
+        m  : Self = Self.one().sub(self)
+        v  : Self = p.div(m).ln()
+        re : F64  = v.real.div_finite(2.0)
+        im : F64  = v.imag.div_finite(2.0)
+        return({ real: re, imag: im })
+
+/// e to this power, eᵃ (cos b + i sin b).
+routine C128.exp(self: Self) -> Self
+    block entry()
+        ea : F64 = self.real.exp()
+        re : F64 = ea.mul_finite(self.imag.cos())
+        im : F64 = ea.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The principal natural logarithm, ln |z| + i arg z.
+routine C128.ln(self: Self) -> Self
+    block entry()
+        re : F64 = self.abs().ln()
+        return({ real: re, imag: self.arg() })
+
+/// The base-10 logarithm, ln z / ln 10.
+routine C128.log10(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F64  = v.real.div_finite(C128_LN_10)
+        im : F64  = v.imag.div_finite(C128_LN_10)
+        return({ real: re, imag: im })
+
+/// The base-2 logarithm, ln z / ln 2.
+routine C128.log2(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F64  = v.real.div_finite(C128_LN_2)
+        im : F64  = v.imag.div_finite(C128_LN_2)
+        return({ real: re, imag: im })
+
+/// 1 / z, the conjugate over the squared modulus.
+routine C128.reciprocal(self: Self) -> Self
+    block entry()
+        d  : F64 = self.norm()
+        re : F64 = self.real.div_finite(d)
+        im : F64 = self.imag.neg().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
+/// takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
+routine C128.sqrt(self: Self) -> Self
+    shared r : F64 = self.abs()
+
+    block entry()
+        branch r.eq(0.0)
+            ? return({ real: 0.0, imag: 0.0 })
+            : continue
+        rp : F64 = r.add_finite(self.real).div_finite(2.0).sqrt()
+        ip : F64 = r.sub_finite(self.real).div_finite(2.0).sqrt()
+        branch self.imag.lt(0.0)
+            ? return({ real: rp, imag: ip.neg() })
+            : return({ real: rp, imag: ip })
+
+/// This number to the complex power `power`, exp(power × ln self).
+routine C128.pow(self: Self, power: Self) -> Self
+    block entry()
+        return(power.mul(self.ln()).exp())
+
+/// This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
+/// negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
+/// as RazorForge's loop does, so that squaring can overflow too.
+routine C128.powi(self: Self, n: S64) -> Self
+    shared result : @Self <- Self.one()
+    shared k      : U64   = n.to_wrap<U64>()
+
+    block entry()
+        branch n.lt(0)
+            ? square(self.reciprocal(), U64.sub_wrap(0, k))
+            : square(self, k)
+
+    block square(base: Self, left: U64)
+        branch left.eq(0)
+            ? return(result.load())
+            : continue
+        odd : Bool = left.bitand(1).eq(1)
+        branch odd
+            ? multiply(base, left)
+            : next(base, left)
+
+    block multiply(base: Self, left: U64)
+        result.load().mul(base).store_into(result)
+        jump next(base, left)
+
+    block next(base: Self, left: U64)
+        jump square(base.mul(base), left.shr(1))
+
+/// The number at distance r and angle theta: r cos θ + i r sin θ.
+routine C128.from_polar(r: F64, theta: F64) -> Self
+    block entry()
+        re : F64 = r.mul_finite(theta.cos())
+        im : F64 = r.mul_finite(theta.sin())
+        return({ real: re, imag: im })
+
+/// Both parts in Words, the way an export hands a C128 back: the real part's bits in w0, the imaginary part's in w1.
+#inline
+routine C128.words(self: Self) -> Words
+    block entry()
+        return(Words.construct(self.real, self.imag, 0.0, 0.0))
+
+// The exports RazorForge's C128 calls.
+
+/// The product, for C128.mul.
+#[export("ingrid_c128_mul"), inline]
+routine c128_mul(real: F64, imag: F64, other_real: F64, other_imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        w : C128 = { real: other_real, imag: other_imag }
+        return(z.mul(w).words())
+
+/// The quotient, for C128.truediv.
+#[export("ingrid_c128_div"), inline]
+routine c128_div(real: F64, imag: F64, other_real: F64, other_imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        w : C128 = { real: other_real, imag: other_imag }
+        return(z.div(w).words())
+
+/// The first number to the power of the second, for C128.pow.
+#[export("ingrid_c128_pow"), inline]
+routine c128_pow(real: F64, imag: F64, other_real: F64, other_imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        w : C128 = { real: other_real, imag: other_imag }
+        return(z.pow(w).words())
+
+/// C128.abs.
+#[export("ingrid_c128_abs"), inline]
+routine c128_abs(real: F64, imag: F64) -> F64
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.abs())
+
+/// C128.arg.
+#[export("ingrid_c128_arg"), inline]
+routine c128_arg(real: F64, imag: F64) -> F64
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.arg())
+
+/// C128.norm.
+#[export("ingrid_c128_norm"), inline]
+routine c128_norm(real: F64, imag: F64) -> F64
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.norm())
+
+/// C128.sin.
+#[export("ingrid_c128_sin"), inline]
+routine c128_sin(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.sin().words())
+
+/// C128.cos.
+#[export("ingrid_c128_cos"), inline]
+routine c128_cos(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.cos().words())
+
+/// C128.tan.
+#[export("ingrid_c128_tan"), inline]
+routine c128_tan(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.tan().words())
+
+/// C128.asin.
+#[export("ingrid_c128_asin"), inline]
+routine c128_asin(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.asin().words())
+
+/// C128.acos.
+#[export("ingrid_c128_acos"), inline]
+routine c128_acos(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.acos().words())
+
+/// C128.atan.
+#[export("ingrid_c128_atan"), inline]
+routine c128_atan(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.atan().words())
+
+/// C128.sinh.
+#[export("ingrid_c128_sinh"), inline]
+routine c128_sinh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.sinh().words())
+
+/// C128.cosh.
+#[export("ingrid_c128_cosh"), inline]
+routine c128_cosh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.cosh().words())
+
+/// C128.tanh.
+#[export("ingrid_c128_tanh"), inline]
+routine c128_tanh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.tanh().words())
+
+/// C128.asinh.
+#[export("ingrid_c128_asinh"), inline]
+routine c128_asinh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.asinh().words())
+
+/// C128.acosh.
+#[export("ingrid_c128_acosh"), inline]
+routine c128_acosh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.acosh().words())
+
+/// C128.atanh.
+#[export("ingrid_c128_atanh"), inline]
+routine c128_atanh(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.atanh().words())
+
+/// C128.exp.
+#[export("ingrid_c128_exp"), inline]
+routine c128_exp(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.exp().words())
+
+/// C128.ln.
+#[export("ingrid_c128_ln"), inline]
+routine c128_ln(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.ln().words())
+
+/// C128.log10.
+#[export("ingrid_c128_log10"), inline]
+routine c128_log10(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.log10().words())
+
+/// C128.log2.
+#[export("ingrid_c128_log2"), inline]
+routine c128_log2(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.log2().words())
+
+/// C128.reciprocal.
+#[export("ingrid_c128_reciprocal"), inline]
+routine c128_reciprocal(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.reciprocal().words())
+
+/// C128.sqrt.
+#[export("ingrid_c128_sqrt"), inline]
+routine c128_sqrt(real: F64, imag: F64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.sqrt().words())
+
+/// C128 to an integer power.
+#[export("ingrid_c128_powi"), inline]
+routine c128_powi(real: F64, imag: F64, n: S64) -> Words
+    block entry()
+        z : C128 = { real: real, imag: imag }
+        return(z.powi(n).words())
+
+/// The C128 at distance r and angle theta.
+#[export("ingrid_c128_from_polar"), inline]
+routine c128_from_polar(r: F64, theta: F64) -> Words
+    block entry()
+        return(C128.from_polar(r, theta).words())
+
+// ── C256 ──────────────────────────────────────────────────────────────────────────
+
+/// RazorForge's C256: a complex number over F128, RazorForge's B128.
+record C256
+    real : F128
+    imag : F128
+
+/// 1 + 0i.
+#inline
+routine C256.one() -> Self
+    block entry()
+        return({ real: F128_ONE, imag: F128_ZERO })
+
+/// The sum, part by part.
+#inline
+routine C256.add(self: Self, other: Self) -> Self
+    block entry()
+        re : F128 = self.real.add_finite(other.real)
+        im : F128 = self.imag.add_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The difference, part by part.
+#inline
+routine C256.sub(self: Self, other: Self) -> Self
+    block entry()
+        re : F128 = self.real.sub_finite(other.real)
+        im : F128 = self.imag.sub_finite(other.imag)
+        return({ real: re, imag: im })
+
+/// The product (ac - bd) + (ad + bc)i.
+routine C256.mul(self: Self, other: Self) -> Self
+    block entry()
+        ac : F128 = self.real.mul_finite(other.real)
+        bd : F128 = self.imag.mul_finite(other.imag)
+        re : F128 = ac.sub_finite(bd)
+        ad : F128 = self.real.mul_finite(other.imag)
+        bc : F128 = self.imag.mul_finite(other.real)
+        im : F128 = ad.add_finite(bc)
+        return({ real: re, imag: im })
+
+/// The quotient: self times the conjugate of other, over other's squared modulus.
+routine C256.div(self: Self, other: Self) -> Self
+    block entry()
+        d  : F128 = other.norm()
+        ac : F128 = self.real.mul_finite(other.real)
+        bd : F128 = self.imag.mul_finite(other.imag)
+        re : F128 = ac.add_finite(bd).div_finite(d)
+        bc : F128 = self.imag.mul_finite(other.real)
+        ad : F128 = self.real.mul_finite(other.imag)
+        im : F128 = bc.sub_finite(ad).div_finite(d)
+        return({ real: re, imag: im })
+
+/// The squared modulus real² + imag².
+routine C256.norm(self: Self) -> F128
+    block entry()
+        rr : F128 = self.real.mul_finite(self.real)
+        ii : F128 = self.imag.mul_finite(self.imag)
+        return(rr.add_finite(ii))
+
+/// The modulus, the square root of the squared modulus.
+routine C256.abs(self: Self) -> F128
+    block entry()
+        return(self.norm().sqrt())
+
+/// The phase angle atan2(imag, real), in (-π, π].
+routine C256.arg(self: Self) -> F128
+    block entry()
+        return(self.imag.atan2(self.real))
+
+/// The sine, sin a cosh b + i cos a sinh b.
+routine C256.sin(self: Self) -> Self
+    block entry()
+        re : F128 = self.real.sin().mul_finite(self.imag.cosh())
+        im : F128 = self.real.cos().mul_finite(self.imag.sinh())
+        return({ real: re, imag: im })
+
+/// The cosine, cos a cosh b - i sin a sinh b.
+routine C256.cos(self: Self) -> Self
+    block entry()
+        re : F128 = self.real.cos().mul_finite(self.imag.cosh())
+        im : F128 = self.real.sin().mul_finite(self.imag.sinh()).neg()
+        return({ real: re, imag: im })
+
+/// The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
+routine C256.tan(self: Self) -> Self
+    block entry()
+        a2 : F128 = self.real.add_finite(self.real)
+        b2 : F128 = self.imag.add_finite(self.imag)
+        d  : F128 = a2.cos().add_finite(b2.cosh())
+        re : F128 = a2.sin().div_finite(d)
+        im : F128 = b2.sinh().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The arcsine, -i log(iz + √(1 - z²)).
+routine C256.asin(self: Self) -> Self
+    block entry()
+        iz : Self = { real: self.imag.neg(), imag: self.real }
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        v  : Self = iz.add(s).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arccosine, -i log(z + i √(1 - z²)).
+routine C256.acos(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = Self.one().sub(zz).sqrt()
+        is : Self = { real: s.imag.neg(), imag: s.real }
+        v  : Self = self.add(is).ln()
+        return({ real: v.imag, imag: v.real.neg() })
+
+/// The arctangent, (i/2) log((i + z) / (i - z)).
+routine C256.atan(self: Self) -> Self
+    block entry()
+        num_imag : F128 = self.imag.add_finite(F128_ONE)
+        den_imag : F128 = F128.sub_finite(F128_ONE, self.imag)
+        num      : Self = { real: self.real, imag: num_imag }
+        den      : Self = { real: self.real.neg(), imag: den_imag }
+        v        : Self = num.div(den).ln()
+        re       : F128 = v.imag.neg().div_finite(F128_TWO)
+        im       : F128 = v.real.div_finite(F128_TWO)
+        return({ real: re, imag: im })
+
+/// The hyperbolic sine, sinh a cos b + i cosh a sin b.
+routine C256.sinh(self: Self) -> Self
+    block entry()
+        re : F128 = self.real.sinh().mul_finite(self.imag.cos())
+        im : F128 = self.real.cosh().mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic cosine, cosh a cos b + i sinh a sin b.
+routine C256.cosh(self: Self) -> Self
+    block entry()
+        re : F128 = self.real.cosh().mul_finite(self.imag.cos())
+        im : F128 = self.real.sinh().mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
+routine C256.tanh(self: Self) -> Self
+    block entry()
+        a2 : F128 = self.real.add_finite(self.real)
+        b2 : F128 = self.imag.add_finite(self.imag)
+        d  : F128 = a2.cosh().add_finite(b2.cos())
+        re : F128 = a2.sinh().div_finite(d)
+        im : F128 = b2.sin().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The inverse hyperbolic sine, log(z + √(z² + 1)).
+routine C256.asinh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.add(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic cosine, log(z + √(z² - 1)).
+routine C256.acosh(self: Self) -> Self
+    block entry()
+        zz : Self = self.mul(self)
+        s  : Self = zz.sub(Self.one()).sqrt()
+        return(self.add(s).ln())
+
+/// The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
+routine C256.atanh(self: Self) -> Self
+    block entry()
+        p  : Self = Self.one().add(self)
+        m  : Self = Self.one().sub(self)
+        v  : Self = p.div(m).ln()
+        re : F128 = v.real.div_finite(F128_TWO)
+        im : F128 = v.imag.div_finite(F128_TWO)
+        return({ real: re, imag: im })
+
+/// e to this power, eᵃ (cos b + i sin b).
+routine C256.exp(self: Self) -> Self
+    block entry()
+        ea : F128 = self.real.exp()
+        re : F128 = ea.mul_finite(self.imag.cos())
+        im : F128 = ea.mul_finite(self.imag.sin())
+        return({ real: re, imag: im })
+
+/// The principal natural logarithm, ln |z| + i arg z.
+routine C256.ln(self: Self) -> Self
+    block entry()
+        re : F128 = self.abs().ln()
+        return({ real: re, imag: self.arg() })
+
+/// The base-10 logarithm, ln z / ln 10.
+routine C256.log10(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F128 = v.real.div_finite(C256_LN_10)
+        im : F128 = v.imag.div_finite(C256_LN_10)
+        return({ real: re, imag: im })
+
+/// The base-2 logarithm, ln z / ln 2.
+routine C256.log2(self: Self) -> Self
+    block entry()
+        v  : Self = self.ln()
+        re : F128 = v.real.div_finite(C256_LN_2)
+        im : F128 = v.imag.div_finite(C256_LN_2)
+        return({ real: re, imag: im })
+
+/// 1 / z, the conjugate over the squared modulus.
+routine C256.reciprocal(self: Self) -> Self
+    block entry()
+        d  : F128 = self.norm()
+        re : F128 = self.real.div_finite(d)
+        im : F128 = self.imag.neg().div_finite(d)
+        return({ real: re, imag: im })
+
+/// The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
+/// takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
+routine C256.sqrt(self: Self) -> Self
+    shared r : F128 = self.abs()
+
+    block entry()
+        branch r.eq(F128_ZERO)
+            ? return({ real: F128_ZERO, imag: F128_ZERO })
+            : continue
+        rp : F128 = r.add_finite(self.real).div_finite(F128_TWO).sqrt()
+        ip : F128 = r.sub_finite(self.real).div_finite(F128_TWO).sqrt()
+        branch self.imag.lt(F128_ZERO)
+            ? return({ real: rp, imag: ip.neg() })
+            : return({ real: rp, imag: ip })
+
+/// This number to the complex power `power`, exp(power × ln self).
+routine C256.pow(self: Self, power: Self) -> Self
+    block entry()
+        return(power.mul(self.ln()).exp())
+
+/// This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
+/// negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
+/// as RazorForge's loop does, so that squaring can overflow too.
+routine C256.powi(self: Self, n: S64) -> Self
+    shared result : @Self <- Self.one()
+    shared k      : U64   = n.to_wrap<U64>()
+
+    block entry()
+        branch n.lt(0)
+            ? square(self.reciprocal(), U64.sub_wrap(0, k))
+            : square(self, k)
+
+    block square(base: Self, left: U64)
+        branch left.eq(0)
+            ? return(result.load())
+            : continue
+        odd : Bool = left.bitand(1).eq(1)
+        branch odd
+            ? multiply(base, left)
+            : next(base, left)
+
+    block multiply(base: Self, left: U64)
+        result.load().mul(base).store_into(result)
+        jump next(base, left)
+
+    block next(base: Self, left: U64)
+        jump square(base.mul(base), left.shr(1))
+
+/// The number at distance r and angle theta: r cos θ + i r sin θ.
+routine C256.from_polar(r: F128, theta: F128) -> Self
+    block entry()
+        re : F128 = r.mul_finite(theta.cos())
+        im : F128 = r.mul_finite(theta.sin())
+        return({ real: re, imag: im })
+
+/// The F128 whose bits are high × 2^64 + low.
+#inline
+routine f128_from_halves(low: U64, high: U64) -> F128
+    block entry()
+        top  : U128 = high.to<U128>().shl(64)
+        bits : U128 = top.bitor(low.to<U128>())
+        return(F128.from_bits(bits))
+
+/// The C256 whose parts' bits are given as their low and high 64 bits.
+#inline
+routine C256.from_halves(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Self
+    block entry()
+        re : F128 = f128_from_halves(real_low, real_high)
+        im : F128 = f128_from_halves(imag_low, imag_high)
+        return({ real: re, imag: im })
+
+/// An F128 in Words, the way an export hands one back: its low 64 bits in w0, its high 64 bits in w1.
+#inline
+routine f128_words(v: F128) -> Words
+    block entry()
+        bits : U128 = v.bits()
+        low  : U64  = bits.to_wrap<U64>()
+        high : U64  = bits.shr(64).to_wrap<U64>()
+        return({ w0: low, w1: high, w2: 0, w3: 0 })
+
+// The exports RazorForge's C256 calls.
+
+/// The product, for C256.mul.
+#[export("ingrid_c256_mul"), inline]
+routine c256_mul(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        w : C256 = C256.from_halves(other_real_low, other_real_high, other_imag_low,
+            other_imag_high)
+        return(z.mul(w))
+
+/// The quotient, for C256.truediv.
+#[export("ingrid_c256_div"), inline]
+routine c256_div(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        w : C256 = C256.from_halves(other_real_low, other_real_high, other_imag_low,
+            other_imag_high)
+        return(z.div(w))
+
+/// The first number to the power of the second, for C256.pow.
+#[export("ingrid_c256_pow"), inline]
+routine c256_pow(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        w : C256 = C256.from_halves(other_real_low, other_real_high, other_imag_low,
+            other_imag_high)
+        return(z.pow(w))
+
+/// C256.abs.
+#[export("ingrid_c256_abs"), inline]
+routine c256_abs(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Words
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(f128_words(z.abs()))
+
+/// C256.arg.
+#[export("ingrid_c256_arg"), inline]
+routine c256_arg(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Words
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(f128_words(z.arg()))
+
+/// C256.norm.
+#[export("ingrid_c256_norm"), inline]
+routine c256_norm(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Words
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(f128_words(z.norm()))
+
+/// C256.sin.
+#[export("ingrid_c256_sin"), inline]
+routine c256_sin(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.sin())
+
+/// C256.cos.
+#[export("ingrid_c256_cos"), inline]
+routine c256_cos(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.cos())
+
+/// C256.tan.
+#[export("ingrid_c256_tan"), inline]
+routine c256_tan(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.tan())
+
+/// C256.asin.
+#[export("ingrid_c256_asin"), inline]
+routine c256_asin(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.asin())
+
+/// C256.acos.
+#[export("ingrid_c256_acos"), inline]
+routine c256_acos(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.acos())
+
+/// C256.atan.
+#[export("ingrid_c256_atan"), inline]
+routine c256_atan(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.atan())
+
+/// C256.sinh.
+#[export("ingrid_c256_sinh"), inline]
+routine c256_sinh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.sinh())
+
+/// C256.cosh.
+#[export("ingrid_c256_cosh"), inline]
+routine c256_cosh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.cosh())
+
+/// C256.tanh.
+#[export("ingrid_c256_tanh"), inline]
+routine c256_tanh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.tanh())
+
+/// C256.asinh.
+#[export("ingrid_c256_asinh"), inline]
+routine c256_asinh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.asinh())
+
+/// C256.acosh.
+#[export("ingrid_c256_acosh"), inline]
+routine c256_acosh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.acosh())
+
+/// C256.atanh.
+#[export("ingrid_c256_atanh"), inline]
+routine c256_atanh(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.atanh())
+
+/// C256.exp.
+#[export("ingrid_c256_exp"), inline]
+routine c256_exp(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.exp())
+
+/// C256.ln.
+#[export("ingrid_c256_ln"), inline]
+routine c256_ln(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.ln())
+
+/// C256.log10.
+#[export("ingrid_c256_log10"), inline]
+routine c256_log10(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.log10())
+
+/// C256.log2.
+#[export("ingrid_c256_log2"), inline]
+routine c256_log2(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.log2())
+
+/// C256.reciprocal.
+#[export("ingrid_c256_reciprocal"), inline]
+routine c256_reciprocal(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.reciprocal())
+
+/// C256.sqrt.
+#[export("ingrid_c256_sqrt"), inline]
+routine c256_sqrt(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.sqrt())
+
+/// C256 to an integer power.
+#[export("ingrid_c256_powi"), inline]
+routine c256_powi(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, n: S64) -> C256
+    block entry()
+        z : C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+        return(z.powi(n))
+
+/// The C256 at distance r and angle theta.
+#[export("ingrid_c256_from_polar"), inline]
+routine c256_from_polar(r_low: U64, r_high: U64, theta_low: U64, theta_high: U64) -> C256
+    block entry()
+        return(C256.from_polar(f128_from_halves(r_low, r_high),
+            f128_from_halves(theta_low, theta_high)))
