@@ -688,16 +688,31 @@ routine wide_eval_cbrt(x: Dec) -> We
         l : We = we_div_u64(wide_eval_ln(dec_num(false, x.coeff, x.exp)), 3)
         return(we_exp(l).with_sign(x.neg))
 
-/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ y^k x / (1 3 5 ... (2k+1)) with y = 2x^2: positive terms, each the last times
-/// y / i, summed without a bound per step. Term k is off by at most ax.err + k (y.err + 4) units (each step one
-/// product and one division, 2 units each), and the sum of n positive terms by the largest of those plus 2 units per
-/// addition: ax.err + n (y.err + 6). Once the ratio y / (i + 2) is below 1/2 the rest is below twice the next term.
+/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ x y^k / (1 3 5 ... (2k+1)) with y = 2x^2 (we_erf_series), or, where erfc x is
+/// below 2^-(bits + 16) (2 x^2 log2(e) past bits + 16), 1 - erfc x from the asymptotic series.
 /// :param ax: The magnitude of the argument.
 /// :param bits: The precision the result needs, in bits.
 /// :returns: erf |x|.
 routine we_erf_positive(ax: We, bits: S64) -> We
-    shared x2 : We  = we_mul(ax, ax)
-    shared y  : We  = x2.ldexp(1)
+    shared x2  : We  = we_mul(ax, ax)
+    shared x2f : F64 = x2.v.to_f64()
+
+    block entry()
+        far : Bool = x2f.mul(2.8853900817779268).gt(bits.add(16).to<F64>())
+        branch far
+            ? return(we_sub(we_int(1), we_erfc_asymptotic(ax, bits)))
+            : return(we_erf_series(ax, x2, x2.ldexp(1), bits))
+
+/// The series of we_erf_positive on W values without a bound per step: term k is off by at most ax.err + k (y.err +
+/// 4) units (each step one product and one division, 2 units each), and the sum of n positive terms by the largest
+/// of those plus 2 units per addition: ax.err + n (y.err + 6). Once the ratio y / i is below 1/2 the rest is below
+/// twice the next term.
+/// :param ax: The magnitude of the argument.
+/// :param x2: Its square.
+/// :param y: 2 x^2.
+/// :param bits: The precision the result needs, in bits.
+/// :returns: erf |x|.
+routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
     shared yf : F64 = y.v.to_f64()
 
     block entry()
