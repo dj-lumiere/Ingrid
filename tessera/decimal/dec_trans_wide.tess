@@ -12,6 +12,11 @@ record WReduced
     k : U64
     r : We
 
+/// A signed fixed-point number: (-1)^neg × mag.
+record XS
+    neg : Bool
+    mag : X
+
 /// fn(x, y) correctly rounded to f from one evaluation at 192 bits, or not ok when the band of that evaluation
 /// reaches a rounding midpoint.
 /// :param fn: Which function (a DEC_ code).
@@ -133,30 +138,156 @@ routine we_ln1p_series(t: We) -> We
             ? return(we_plus_abs(sum, term.v.exp.add(1)))
             : series(next_power, we_add(sum, signed), i.add(1))
 
-/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the F128 logarithm of m, and ln m = y0 + ln(1 + t) with
-/// t = m e^-y0 - 1, which is below 2^-110, so its series ends after two terms.
+/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), ln x = E ln 2 + ln m (we_ln_reduced).
 /// :param x: The operand.
 /// :returns: ln x for x > 0.
 routine we_ln(x: We) -> We
     shared top : F64  = x.v.magnitude().top_f64()
     shared low : Bool = top.lt(0.75)
     shared e   : S64  = x.v.exp.sub(low.to<S64>())
-    shared m   : We   = x.ldexp(e.neg())
-    shared y0  : F128 = m.v.to_f128().ln()
-    shared y0m : We   = we_exact(w_of_f128(y0))
-    shared one : We   = we_int(1)
 
     block entry()
-        scaled : We = we_mul(m, we_exp(y0m.negate()))
-        t      : We = we_sub(scaled, one)
-        lnm    : We = we_add(y0m, we_ln1p_series(t))
+        lnm  : We = we_ln_reduced(x.ldexp(e.neg()))
+        part : We = we_mul_u64(we_const(DEC_LN2), e.abs_diff(0)).with_sign(e.lt(0))
         branch e.eq(0)
             ? return(lnm)
-            : with_exponent(lnm)
+            : return(we_add(part, lnm))
 
-    block with_exponent(lnm: We)
-        part : We = we_mul(we_const(DEC_LN2), we_int(e))
-        return(we_add(part, lnm))
+/// a + b for signed fixed-point numbers (no carry out of 192 bits).
+/// :param a: The first term.
+/// :param b: The second term.
+/// :returns: The sum.
+routine xs_add(a: XS, b: XS) -> XS
+    block entry()
+        branch a.neg.eq(b.neg)
+            ? return({ neg: a.neg, mag: x_add(a.mag, b.mag) })
+            : differ()
+
+    block differ()
+        a_big : Bool = x_compare(a.mag, b.mag).ge(0)
+        branch a_big
+            ? return({ neg: a.neg, mag: x_sub(a.mag, b.mag) })
+            : return({ neg: b.neg, mag: x_sub(b.mag, a.mag) })
+
+/// x × k for k < 2^64 as five limbs, exactly.
+/// :param x: The number.
+/// :param k: The multiplier.
+/// :returns: The limbs.
+#inline
+routine x_mul_u64(x: X, k: U64) -> WLimbs
+    block entry()
+        x0 : U128 = x.l.mul_wide(k)
+        x1 : U128 = w_fma(x.m, k, x0.shr(64).to_wrap<U64>(), 0)
+        x2 : U128 = w_fma(x.h, k, x1.shr(64).to_wrap<U64>(), 0)
+        return({ l4: 0, l3: x2.shr(64).to_wrap<U64>(), l2: x2.to_wrap<U64>(), l1: x1.to_wrap<U64>(),
+            l0: x0.to_wrap<U64>() })
+
+/// The bits at .. at + 191 of five limbs as a fixed-point number.
+/// :param r: The limbs.
+/// :param at: The lowest bit kept.
+/// :returns: The bits.
+#inline
+routine x_of_limbs(r: WLimbs, at: S64) -> X
+    block entry()
+        return({ h: r.bits(at.add(128)), m: r.bits(at.add(64)), l: r.bits(at) })
+
+/// ln m for m in [0.75, 1.5), in fixed point. With M = m 2^191 (its last bit cut), i = round(128 m) and r1 =
+/// round(2^17 / i) / 2^10, t1 = m r1 - 1 is below 2^-7.39 and comes exactly from M r1; with j = round(2^14 t1) and r2 =
+/// 1 - j 2^-14 + j^2 2^-28, t2 = (1 + t1) r2 - 1 = t1 + (r2 - 1) + t1 (r2 - 1) is below 2^-14.9 (each cut at
+/// 2^-199). Then ln m = -ln r1 - ln r2 + ln(1 + t2), the logarithms of r1 and r2 from tables (2 units each) and
+/// ln(1 + t2) = t2 P(t2) with P = Σ (-t2)^k / (k + 1) to k = 14 (the rest below 2^-208 relative) by Horner's scheme:
+/// 8.3 units, its product 2.
+///
+/// The absolute error: M's cut moves m by 2^-191 (ln m by under 2^-190.6), the cuts of t1 and t2 by 2^-197, and m's
+/// own bound (relative) moves ln m by m.err 2^-192: 3 + m.err units of 2^-192, added at the end.
+/// :param m: The operand, in [0.75, 1.5).
+/// :returns: ln m.
+routine we_ln_reduced(m: We) -> We
+    shared big : X   = x_of_w(m.v, 191)
+    shared i   : U64 = big.h.add(U64.shl(1, 55)).shr(56)
+    shared r1  : U64 = U64.add(131072, i.shr(1)).div(i)
+
+    // t1 2^201 = M r1 - 2^201, kept at 2^199
+    block entry()
+        p     : WLimbs = x_mul_u64(big, r1)
+        above : Bool   = p.l3.ge(U64.shl(1, 9))
+        jump t1_from(p, above)
+
+    block t1_from(p: WLimbs, above: Bool)
+        two : WLimbs = { l4: 0, l3: U64.shl(1, 9), l2: 0, l1: 0, l0: 0 }
+        d   : WLimbs = above
+            ? w_limbs_sub(p, two)
+            : w_limbs_sub(two, p)
+        t1 : XS = { neg: above.bitnot(), mag: x_of_limbs(d, 2) }
+        jump second(t1)
+
+    // a = (r2 - 1) 2^28 = -j 2^14 + j^2, |a| < 2^21
+    block second(t1: XS)
+        jm : U64 = t1.mag.h.add(U64.shl(1, 56)).shr(57)
+        js : S64 = t1.neg
+            ? jm.to<S64>().neg()
+            : jm.to<S64>()
+        a    : S64 = js.mul(js).sub(js.mul(16384))
+        am   : U64 = a.abs_diff(0)
+        term : XS  = { neg: a.lt(0), mag: { h: am.shl(43), m: 0, l: 0 } }
+        prod : XS  = { neg: t1.neg.bitxor(a.lt(0)), mag: x_of_limbs(x_mul_u64(t1.mag, am), 28) }
+        t2   : XS  = xs_add(xs_add(t1, term), prod)
+        jump series(js, t2)
+
+    block series(js: S64, t2: XS)
+        u   : X  = x_shl(t2.mag, 5)
+        p   : X  = we_poly_signed(WIDE_INV_INT.to<@U64>(), u, 14, t2.neg)
+        t2w : W  = w_of_x(t2.mag, 199, t2.neg)
+        lt  : We = we_mul(we_exact(t2w), { v: w_of_x(p, 190, false), err: 8.3 })
+        l1  : We = we_entry(WIDE_LN_R1.to<@U64>(), i.sub(96).to<USize>()).with_sign(r1.gt(1024))
+        l2  : We = we_entry(WIDE_LN_R2.to<@U64>(), js.add(100).to<USize>()).with_sign(js.lt(0))
+        sum : We = we_add(we_add(l1, l2), lt)
+        jump finish(sum)
+
+    block finish(sum: We)
+        delta : F64 = m.err.add(3.0)
+        return(we_widen_abs(sum, delta))
+
+/// a - b for five-limb numbers, a >= b.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :returns: The difference.
+routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
+    block entry()
+        d0 : U64 = a.l0.sub_wrap(b.l0)
+        c0 : U64 = a.l0.lt(b.l0).to<U64>()
+        d1 : U64 = a.l1.sub_wrap(b.l1).sub_wrap(c0)
+        c1 : U64 = w_borrow(a.l1, b.l1, c0)
+        d2 : U64 = a.l2.sub_wrap(b.l2).sub_wrap(c1)
+        c2 : U64 = w_borrow(a.l2, b.l2, c1)
+        d3 : U64 = a.l3.sub_wrap(b.l3).sub_wrap(c2)
+        c3 : U64 = w_borrow(a.l3, b.l3, c2)
+        d4 : U64 = a.l4.sub_wrap(b.l4).sub_wrap(c3)
+        return({ l4: d4, l3: d3, l2: d2, l1: d1, l0: d0 })
+
+/// Σ (-t)^k c_k for k = 0 .. top (or Σ |t|^k c_k when t is negative) by Horner's scheme in fixed point, u = |t|
+/// scaled by 2^204, the coefficients and the sum by 2^190.
+/// :param table: The coefficients c_0 .. c_top as fixed-point numbers of 2^-190.
+/// :param u: |t|, scaled by 2^204.
+/// :param top: The last index.
+/// :param negative: Whether t is negative (all terms add).
+/// :returns: The sum, scaled by 2^190.
+routine we_poly_signed(table: @U64, u: X, top: USize, negative: Bool) -> X
+    block entry()
+        jump step(top, x_entry(table, top))
+
+    block step(k: USize, acc: X)
+        done : Bool = k.eq(0)
+        branch done
+            ? return(acc)
+            : next(k.sub(1), acc)
+
+    block next(k: USize, acc: X)
+        c : X = x_entry(table, k)
+        p : X = x_mul_shift(acc, u, 204)
+        branch negative
+            ? step(k, x_add(c, p))
+            : step(k, x_sub(c, p))
 
 /// ln(1 + t): its series below 2^-24, else ln of the sum (the cancellation costs at most 24 bits).
 /// :param t: The argument.
