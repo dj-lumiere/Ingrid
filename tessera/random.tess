@@ -1,10 +1,42 @@
-// Random-number building blocks shared by the RazorForge and Suflae standard libraries.
+// Random numbers shared by the RazorForge and Suflae standard libraries. The generator is Tessera's xoshiro256**
+// (Standard/Random.tess): these are its C entry points. RazorForge's `Random` entity keeps the four state words and
+// calls them, so a seed gives the same stream in Tessera and in both languages.
+//
+// A state goes in as its four words and a new state comes back in Words (words.tess), which every target returns
+// through a hidden pointer.
+
+import Standard::Random
 
 /// One round of the splitmix64 mixer: expands a seed into well-spread state words (xoshiro256** seeding).
 #[export("ingrid_splitmix64"), inline]
 routine splitmix64(x: U64) -> U64
     block entry()
-        z : U64 = x.add_wrap(0x9E3779B97F4A7C15)
-        a : U64 = z.bitxor(z.shr(30)).mul_wrap(0xBF58476D1CE4E5B9)
-        b : U64 = a.bitxor(a.shr(27)).mul_wrap(0x94D049BB133111EB)
-        return(b.bitxor(b.shr(31)))
+        return(Standard::Random::splitmix64(x))
+
+/// The xoshiro256** state a seed starts from: each word splitmix64 of the one before it, starting from the seed.
+#[export("ingrid_xoshiro256ss_seed"), inline]
+routine xoshiro256ss_seed(seed: U64) -> Words
+    block entry()
+        state : Xoshiro256 = Xoshiro256.from_seed(seed)
+        return({ w0: state.s0, w1: state.s1, w2: state.s2, w3: state.s3 })
+
+/// The 64 random bits a xoshiro256** state gives (its word 1, scrambled), without stepping it.
+#[export("ingrid_xoshiro256ss_output"), inline]
+routine xoshiro256ss_output(s0: U64, s1: U64, s2: U64, s3: U64) -> U64
+    block entry()
+        state : Xoshiro256 = { s0: s0, s1: s1, s2: s2, s3: s3 }
+        return(state.output())
+
+/// The xoshiro256** state after this one.
+#[export("ingrid_xoshiro256ss_step"), inline]
+routine xoshiro256ss_step(s0: U64, s1: U64, s2: U64, s3: U64) -> Words
+    block entry()
+        state : Xoshiro256 = { s0: s0, s1: s1, s2: s2, s3: s3 }
+        next  : Xoshiro256 = state.step()
+        return({ w0: next.s0, w1: next.s1, w2: next.s2, w3: next.s3 })
+
+/// The double in [0, 1) that 64 random bits stand for: their top 53 bits times 2^-53.
+#[export("ingrid_random_unit_b64"), inline]
+routine random_unit_b64(bits: U64) -> F64
+    block entry()
+        return(unit_f64(bits))

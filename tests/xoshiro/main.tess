@@ -1,0 +1,136 @@
+// RazorForge's Random streams through Ingrid's xoshiro256** exports (tessera/random.tess): six seeds, each draw kind a
+// million times, folded into FNV-style checksums. The expected output is what RazorForge printed for the same program
+// (Tessera/scratch/random-json/random_streams.rf) with its own xoshiro256** bodies, before they moved here: `range`
+// is RazorForge's `low +% draw % span` and `chance(p)` its `next_b64() < p`.
+
+import Standard::Format
+import Standard::Os
+
+preset FNV_START: U64 = 14695981039346656037
+preset FNV_PRIME: U64 = 1099511628211
+preset DRAWS:     U64 = 1000000
+
+/// One draw: the state's output, and the state steps.
+routine draw(state: @Words) -> U64
+    block entry()
+        s      : Words = state.load()
+        result : U64   = xoshiro256ss_output(s.w0, s.w1, s.w2, s.w3)
+        xoshiro256ss_step(s.w0, s.w1, s.w2, s.w3).store_into(state)
+        return(result)
+
+/// Folds a value into a running checksum.
+#inline
+routine fold(h: U64, v: U64) -> U64
+    block entry()
+        return(h.bitxor(v).mul_wrap(FNV_PRIME))
+
+/// The checksum of a million 64-bit draws.
+routine fold_u64(state: @Words) -> U64
+    block entry()
+        jump each(0, FNV_START)
+
+    block each(i: U64, h: U64)
+        branch i.ge(DRAWS)
+            ? return(h)
+            : continue
+        jump each(i.add(1), fold(h, draw(state)))
+
+/// The checksum of a million 32-bit draws (the high half of a draw, widened back).
+routine fold_u32(state: @Words) -> U64
+    block entry()
+        jump each(0, FNV_START)
+
+    block each(i: U64, h: U64)
+        branch i.ge(DRAWS)
+            ? return(h)
+            : continue
+        jump each(i.add(1), fold(h, draw(state).shr(32)))
+
+/// The checksum of the bits of a million [0, 1) draws.
+routine fold_b64(state: @Words) -> U64
+    block entry()
+        jump each(0, FNV_START)
+
+    block each(i: U64, h: U64)
+        branch i.ge(DRAWS)
+            ? return(h)
+            : continue
+        unit : F64 = random_unit_b64(draw(state))
+        jump each(i.add(1), fold(h, unit.bits()))
+
+/// RazorForge's range draw: low plus a draw modulo the wrapped span.
+routine range(state: @Words, low: U64, high: U64) -> U64
+    block entry()
+        span : U64 = high.sub_wrap(low)
+        return(low.add_wrap(draw(state).mod(span)))
+
+/// The checksum of a million pairs of range draws, [10, 1000) and a span that wraps past U64.MAX.
+routine fold_range(state: @Words) -> U64
+    block entry()
+        jump each(0, FNV_START)
+
+    block each(i: U64, h: U64)
+        branch i.ge(DRAWS)
+            ? return(h)
+            : continue
+        first  : U64 = fold(h, range(state, 10, 1000))
+        second : U64 = fold(first, range(state, 18446744073709551000, 5))
+        jump each(i.add(1), second)
+
+/// How many of a million chance(0.3) trials succeed.
+routine count_chance(state: @Words) -> U64
+    block entry()
+        jump each(0, 0)
+
+    block each(i: U64, heads: U64)
+        branch i.ge(DRAWS)
+            ? return(heads)
+            : continue
+        unit : F64  = random_unit_b64(draw(state))
+        hit  : Bool = unit.lt(0.3)
+        jump each(i.add(1), heads.add(hit.to<U64>()))
+
+/// The checksum of a million rounds of the splitmix64 chain, each fed the last one's output.
+routine fold_splitmix(seed: U64) -> U64
+    block entry()
+        jump each(0, seed, FNV_START)
+
+    block each(i: U64, acc: U64, h: U64)
+        branch i.ge(DRAWS)
+            ? return(h)
+            : continue
+        next : U64 = splitmix64(acc)
+        jump each(i.add(1), next, fold(h, next))
+
+/// Writes every line random_streams.rf writes for one seed.
+routine stream(seed: U64) -> Void
+    shared state : @Words <- xoshiro256ss_seed(seed)
+
+    block entry()
+        jump first(0)
+
+    block first(i: U64)
+        branch i.ge(5)
+            ? sums()
+            : continue
+        Out.write("seed {seed} u64 #{i}: {draw(state)}\n")
+        jump first(i.add(1))
+
+    block sums()
+        Out.write("seed {seed} u64 x1e6: {fold_u64(state)}\n")
+        Out.write("seed {seed} u32 x1e6: {fold_u32(state)}\n")
+        Out.write("seed {seed} b64 x1e6: {fold_b64(state)}\n")
+        Out.write("seed {seed} range x2e6: {fold_range(state)}\n")
+        Out.write("seed {seed} chance(0.3) x1e6: {count_chance(state)}\n")
+        Out.write("seed {seed} splitmix chain x1e6: {fold_splitmix(seed)}\n")
+        return()
+
+routine main() -> S32
+    block entry()
+        stream(0)
+        stream(1)
+        stream(42)
+        stream(12345)
+        stream(1311768467463790320)
+        stream(18446744073709551615)
+        return(0)
