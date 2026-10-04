@@ -1,0 +1,126 @@
+// D128 arithmetic (Ingrid/tessera/generated/decimal.tess, exported from RazorForge's Core/Numerics/D128.rf) against
+// RazorForge's own engine: each line is two operands and their sum, difference, product, quotient (as BID bits),
+// and their order, which decimal128.expected holds as RazorForge computed them before the arithmetic moved here.
+// The operands come from splitmix64: raw bits (every encoding, canonical or not), finite values near exponent 0
+// and anywhere in range with 0 to 34 digits, zeros with any exponent, infinities, and quiet and signaling NaNs.
+//
+// The calls go through the C ABI, as RazorForge makes them: each operand as its low and high 64 bits, each result
+// back in Words (w0 low, w1 high). The generated code reaches the heap calls of memory.tess on its crash paths,
+// and those report a failed allocation through the RazorForge runtime library's __rf_throw, which this program
+// defines.
+
+import Standard::Format
+import Standard::Os
+
+global STATE: @U64 <- 0x0123456789ABCDEF
+
+preset PAIRS: U64 = 1500
+
+#[external("c"), symbol("ingrid_d128_add")]
+routine c_d128_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+
+#[external("c"), symbol("ingrid_d128_sub")]
+routine c_d128_sub(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+
+#[external("c"), symbol("ingrid_d128_mul")]
+routine c_d128_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+
+#[external("c"), symbol("ingrid_d128_div")]
+routine c_d128_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+
+#[external("c"), symbol("ingrid_d128_order")]
+routine c_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
+
+#[export("__rf_throw"), noreturn]
+routine stub_rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry()
+        kind : Bytes = error_type.to<Bytes>()
+        text : Bytes = message.to<Bytes>()
+        Out.write("{kind}: {text}\n")
+        exit(82)
+
+/// 10 to the power n.
+routine pow10(n: U64) -> U128
+    block entry()
+        jump step(0, 1)
+
+    block step(i: U64, power: U128)
+        branch i.ge(n)
+            ? return(power)
+            : step(i.add(1), power.mul(10))
+
+/// An operand from three random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
+routine operand(r: U64, s: U64, t: U64) -> U128
+    shared high     : U128 = s.to<U128>().shl(64)
+    shared wide     : U128 = high.bitor(t.to<U128>())
+    shared negative : U128 = r.shr(40).bitand(1).to<U128>()
+    shared sign     : U128 = negative.shl(127)
+    shared spread   : U64  = r.shr(16)
+
+    block entry()
+        kind : U64 = r.mod(4)
+        when kind
+            0    -> return(wide)
+            3    -> special()
+            else -> finite(kind)
+
+    block special()
+        which : U64 = r.shr(24).mod(4)
+        when which
+            0    -> zero()
+            1    -> return(sign.bitor(0x78000000000000000000000000000000))
+            2    -> return(0x7C000000000000000000000000000000)
+            else -> return(0x7E000000000000000000000000000000)
+
+    block zero()
+        biased : U128 = spread.mod(12288).to<U128>()
+        return(sign.bitor(biased.shl(113)))
+
+    block finite(kind: U64)
+        digits : U64  = r.shr(8).mod(35)
+        coeff  : U128 = wide.mod(pow10(digits))
+        near   : Bool = kind.eq(1)
+        biased : U64  = near
+            ? spread.mod(81).add(6136)
+            : spread.mod(12288)
+        place : U128 = biased.to<U128>().shl(113)
+        return(sign.bitor(place).bitor(coeff))
+
+/// A result handed back in Words, as its 128 bits.
+routine bits(words: Words) -> U128
+    block entry()
+        high : U128 = words.w1.to<U128>().shl(64)
+        return(high.bitor(words.w0.to<U128>()))
+
+/// The next word of the generator, as RazorForge's C::ingrid_splitmix64 steps it.
+routine draw() -> U64
+    block entry()
+        next : U64 = splitmix64(STATE.load())
+        next.store_into(STATE)
+        return(next)
+
+routine main() -> S32
+    block entry()
+        jump pair(0)
+
+    block pair(i: U64)
+        branch i.ge(PAIRS)
+            ? return(0)
+            : continue
+        r1     : U64  = draw()
+        s1     : U64  = draw()
+        t1     : U64  = draw()
+        r2     : U64  = draw()
+        s2     : U64  = draw()
+        t2     : U64  = draw()
+        a      : U128 = operand(r1, s1, t1)
+        b      : U128 = operand(r2, s2, t2)
+        a_low  : U64  = a.to_wrap<U64>()
+        a_high : U64  = a.shr(64).to<U64>()
+        b_low  : U64  = b.to_wrap<U64>()
+        b_high : U64  = b.shr(64).to<U64>()
+        Out.write("{a} {b} {bits(c_d128_add(a_low, a_high, b_low, b_high))} ")
+        Out.write("{bits(c_d128_sub(a_low, a_high, b_low, b_high))} ")
+        Out.write("{bits(c_d128_mul(a_low, a_high, b_low, b_high))} ")
+        Out.write("{bits(c_d128_div(a_low, a_high, b_low, b_high))} {c_d128_order(a_low, a_high, b_low, b_high)}\n")
+        jump pair(i.add(1))

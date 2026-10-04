@@ -21,8 +21,9 @@ on their own:
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
 Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, the math of the
-complex numbers, quaternions, and 4x4 matrices, and the decimal floats' arithmetic. More math, hashing,
-cryptography, and algorithms move here next, written once so that both languages build on one implementation.
+complex numbers, quaternions, and 4x4 matrices, and the arithmetic of the decimal floats D32, D64, and D128. More
+math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
+implementation.
 
 Most of it is written in Tessera here. The big numeric engines whose source stays RazorForge (the decimal floats,
 later the arbitrary-precision Integer and Real) are written into `tessera/generated/` by RazorForge's Tessera
@@ -64,9 +65,9 @@ next to each executable. The full workspace setup is in the
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
 the reference test vectors, splitmix64, the complex numbers, quaternions, and matrices against RazorForge's bodies
-before they moved here (and the crashes their checked arithmetic reports), the generated D64 arithmetic against
-RazorForge's engine, the word division on its edge cases, the Roamed counts and lock, the cycle collector, the
-deadlock detector, the heap calls, and the crash report, and from
+before they moved here (and the crashes their checked arithmetic reports), the generated D32, D64, and D128
+arithmetic against RazorForge's engines, the word division on its edge cases, the Roamed counts and lock, the cycle
+collector, the deadlock detector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.tess`). Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
 The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the

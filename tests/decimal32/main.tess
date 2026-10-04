@@ -1,8 +1,8 @@
-// D64 arithmetic (Ingrid/tessera/generated/decimal.tess, exported from RazorForge's Core/Numerics/D64.rf) against
+// D32 arithmetic (Ingrid/tessera/generated/decimal.tess, exported from RazorForge's Core/Numerics/D32.rf) against
 // RazorForge's own engine: each line is two operands and their sum, difference, product, quotient (as BID bits),
-// and their order, which decimal64.expected holds as RazorForge computed them before the arithmetic moved here.
+// and their order, which decimal32.expected holds as RazorForge computed them before the arithmetic moved here.
 // The operands come from splitmix64: raw bits (every encoding, canonical or not), finite values near exponent 0
-// and anywhere in range with 0 to 16 digits, zeros with any exponent, infinities, and quiet and signaling NaNs.
+// and anywhere in range with 0 to 7 digits, zeros with any exponent, infinities, and quiet and signaling NaNs.
 //
 // The generated code reaches the heap calls of memory.tess on its crash paths, and those report a failed
 // allocation through the RazorForge runtime library's __rf_throw, which this program defines.
@@ -33,14 +33,14 @@ routine pow10(n: U64) -> U64
             : step(i.add(1), power.mul(10))
 
 /// An operand from two random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
-routine operand(r: U64, s: U64) -> U64
-    shared sign   : U64 = r.shr(40).bitand(1).shl(63)
+routine operand(r: U64, s: U64) -> U32
+    shared sign   : U64 = r.shr(40).bitand(1).shl(31)
     shared spread : U64 = r.shr(16)
 
     block entry()
         kind : U64 = r.mod(4)
         when kind
-            0    -> return(s)
+            0    -> return(s.to_wrap<U32>())
             3    -> special()
             else -> finite(kind)
 
@@ -48,22 +48,23 @@ routine operand(r: U64, s: U64) -> U64
         which : U64 = r.shr(24).mod(4)
         when which
             0    -> zero()
-            1    -> return(sign.bitor(0x7800000000000000))
-            2    -> return(0x7C00000000000000)
-            else -> return(0x7E00000000000000)
+            1    -> return(sign.bitor(0x78000000).to<U32>())
+            2    -> return(0x7C000000)
+            else -> return(0x7E000000)
 
     block zero()
-        biased : U64 = spread.mod(768)
-        return(sign.bitor(biased.shl(53)))
+        biased : U64 = spread.mod(192)
+        return(sign.bitor(biased.shl(23)).to<U32>())
 
     block finite(kind: U64)
-        digits : U64  = r.shr(8).mod(17)
-        coeff  : U64  = s.mod(pow10(digits)).bitand(0x1FFFFFFFFFFFFF)
+        digits : U64  = r.shr(8).mod(8)
+        coeff  : U64  = s.mod(pow10(digits)).bitand(0x7FFFFF)
         near   : Bool = kind.eq(1)
         biased : U64  = near
-            ? spread.mod(41).add(378)
-            : spread.mod(768)
-        return(sign.bitor(biased.shl(53)).bitor(coeff))
+            ? spread.mod(21).add(91)
+            : spread.mod(192)
+        bits : U64 = sign.bitor(biased.shl(23)).bitor(coeff)
+        return(bits.to<U32>())
 
 /// The next word of the generator, as RazorForge's C::ingrid_splitmix64 steps it.
 routine draw() -> U64
@@ -84,8 +85,8 @@ routine main() -> S32
         s1 : U64 = draw()
         r2 : U64 = draw()
         s2 : U64 = draw()
-        a  : U64 = operand(r1, s1)
-        b  : U64 = operand(r2, s2)
-        Out.write("{a} {b} {ingrid_d64_add(a, b)} {ingrid_d64_sub(a, b)} {ingrid_d64_mul(a, b)} ")
-        Out.write("{ingrid_d64_div(a, b)} {ingrid_d64_order(a, b)}\n")
+        a  : U32 = operand(r1, s1)
+        b  : U32 = operand(r2, s2)
+        Out.write("{a} {b} {ingrid_d32_add(a, b)} {ingrid_d32_sub(a, b)} {ingrid_d32_mul(a, b)} ")
+        Out.write("{ingrid_d32_div(a, b)} {ingrid_d32_order(a, b)}\n")
         jump pair(i.add(1))
