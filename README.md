@@ -69,7 +69,8 @@ the reference test vectors, splitmix64, xoshiro256** and the JSON escaping again
 text, the binary-float exports against correctly rounded results from mpmath,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
 before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
-against RazorForge's engines and the other decimal operations against exact references, the word division on its edge cases, the Roamed counts and lock, the cycle
+against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
+D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.tess`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the

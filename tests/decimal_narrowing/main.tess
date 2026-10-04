@@ -1,0 +1,196 @@
+// Why D32 and D64 run the decimal engine at their own format instead of computing in D128 and narrowing.
+//
+// For + - * / and the square root of canonical operands, rounding to D128 first and then to D32 or D64 gives the
+// same result as rounding once: D128's 34 digits are at least 2p + 2 for p = 7 and 16, the bound under which
+// double rounding of these operations is innocuous in radix 10 (Roux, "Innocuous Double Rounding of Basic
+// Arithmetic Operations", J. Formalized Reasoning 7(1), 2014: p' >= 2p for + - * /, p' >= 2p + 1 for the square
+// root, and D128's exponent range covers D32's and D64's). The first part checks that on a sample (the scratch
+// run behind this test compared 9 * 10^8 D32 and 10^8 D64 results, every 7-digit coefficient among them, without
+// a difference).
+//
+// The bound says nothing about fused multiply-add, and an operand with more digits than its format allows (a
+// non-canonical encoding read at its face value, as RazorForge reads it) breaks its premise. The second part
+// shows one counterexample of each: the D128 rounding lands exactly on a D64 midpoint and the second rounding
+// goes to even, while the exact value lies just above the midpoint. So the engine rounds every result once, at
+// the target format.
+
+import Standard::Format
+import Standard::Os
+
+global STATE: @U64 <- 0x9E3779B97F4A7C15
+global BAD: @U64 <- 0
+global COUNT: @U64 <- 0
+
+preset SECONDS: @Array<U64, 16> <- { 5, 25, 125, 625, 3125, 9999999, 1000001, 5000001, 4999999,
+    1000000, 1, 3, 7, 5000000, 9999995, 1234567 }
+
+/// The next word of the generator.
+/// :returns: The next word.
+routine draw() -> U64
+    block entry()
+        next : U64 = splitmix64(STATE.load())
+        next.store_into(STATE)
+        return(next)
+
+/// One operation at format f: op 0 add, 1 subtract, 2 multiply, 3 divide, 4 square root of a.
+/// :param a: The first operand.
+/// :param b: The second operand (unused by the square root).
+/// :param op: Which operation.
+/// :param f: The format the result rounds to.
+/// :returns: The result.
+routine dec_op(a: Dec, b: Dec, op: U32, f: DecFormat) -> Dec
+    block entry()
+        when op
+            0    -> return(dec_add(a, b, f))
+            1    -> return(dec_add(a, b.negate(), f))
+            2    -> return(dec_mul(a, b, f))
+            3    -> return(dec_div(a, b, f))
+            else -> return(dec_sqrt(a, f))
+
+/// Whether two decimals are the same encoding (kind, sign, exponent, coefficient).
+/// :param x: One decimal.
+/// :param y: The other.
+/// :returns: Whether they are the same.
+routine dec_is_same(x: Dec, y: Dec) -> Bool
+    block entry()
+        same : Bool = x.kind.eq(y.kind).bitand(x.neg.eq(y.neg)).bitand(x.exp.eq(y.exp))
+        return(same.bitand(x.coeff.eq(y.coeff)))
+
+/// Compares one operation rounded once at f with the same operation rounded to D128 and then to f, and counts it.
+/// The square root's single rounding is reduced (its result is), so the narrowed one is reduced too.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param op: Which operation (dec_op).
+/// :param f: The narrow format.
+routine compare(a: Dec, b: Dec, op: U32, f: DecFormat) -> Void
+    block entry()
+        narrow : Dec  = dec_op(a, b, op, dec_format128()).narrow(f)
+        root   : Bool = op.eq(4)
+        twice  : Dec  = root
+            ? narrow.reduce(f)
+            : narrow
+        COUNT.load().add(1).store_into(COUNT)
+        branch dec_is_same(dec_op(a, b, op, f), twice)
+            ? return()
+            : differ()
+
+    block differ()
+        BAD.load().add(1).store_into(BAD)
+        return()
+
+/// Every operation on a and b at format f.
+/// :param a: The first operand.
+/// :param b: The second operand.
+/// :param f: The narrow format.
+routine compare_all(a: Dec, b: Dec, f: DecFormat) -> Void
+    block entry()
+        compare(a, b, 0, f)
+        compare(a, b, 1, f)
+        compare(a, b, 2, f)
+        compare(a, b, 3, f)
+        compare(a, b, 4, f)
+        return()
+
+/// D32: coefficients across the whole 7-digit range against second operands that put results near halfway
+/// points, at exponent gaps 0 to 9.
+routine d32_sample() -> Void
+    block entry()
+        jump coefficient(1)
+
+    block coefficient(c: U64)
+        branch c.ge(10000000)
+            ? return()
+            : seconds(c, 0)
+
+    block seconds(c: U64, j: USize)
+        branch j.ge(18)
+            ? coefficient(c.add(4999))
+            : one(c, j)
+
+    block one(c: U64, j: USize)
+        r   : U64  = draw()
+        fix : Bool = j.lt(16)
+        bc  : U64  = fix
+            ? SECONDS.getitem(j.min(15))
+            : r.mod(9999999).add(1)
+        gap : S64  = r.shr(32).mod(10).to<S64>()
+        neg : Bool = r.shr(40).bitand(1).eq(1)
+        compare_all(dec_num(false, c.to<U128>(), 0), dec_num(neg, bc.to<U128>(), gap.neg()),
+            dec_format32())
+        jump seconds(c, j.add(1))
+
+/// A 16-digit coefficient, sometimes one next to a halfway point of fewer digits.
+/// :returns: The coefficient.
+routine d64_coefficient() -> U128
+    block entry()
+        r    : U64 = draw()
+        base : U64 = r.mod(9000000000000000).add(1000000000000000)
+        mode : U64 = r.shr(60)
+        tens : U64 = base.div(10).mul(10)
+        hund : U64 = base.div(100).mul(100)
+        mill : U64 = base.div(1000000).mul(1000000)
+        when mode
+            0    -> return(tens.add(5).to<U128>())
+            1    -> return(hund.add(50).to<U128>())
+            2    -> return(9999999999999999)
+            3    -> return(mill.add(500001).to<U128>())
+            else -> return(base.to<U128>())
+
+/// D64: count random pairs of such coefficients at exponent gaps 0 to 35.
+/// :param count: How many pairs.
+routine d64_sample(count: U64) -> Void
+    block entry()
+        jump loop(0)
+
+    block loop(i: U64)
+        branch i.ge(count)
+            ? return()
+            : one(i)
+
+    block one(i: U64)
+        r   : U64  = draw()
+        a   : Dec  = dec_num(false, d64_coefficient(), r.mod(41).to<S64>().sub(20))
+        gap : S64  = r.shr(8).mod(36).to<S64>()
+        neg : Bool = r.shr(20).bitand(1).eq(1)
+        compare_all(a, dec_num(neg, d64_coefficient(), a.exp.sub(gap)), dec_format64())
+        jump loop(i.add(1))
+
+/// Writes a decimal as coefficient e exponent.
+/// :param label: What the value is.
+/// :param x: The value.
+routine show(label: Bytes, x: Dec) -> Void
+    block entry()
+        Out.write("  {label}: {x.coeff}e{x.exp}\n")
+        return()
+
+/// The two counterexamples, each rounded once at D64 and through D128.
+routine counterexamples() -> Void
+    block entry()
+        f    : DecFormat = dec_format64()
+        wide : DecFormat = dec_format128()
+        a    : Dec       = dec_num(false, 2000000000000001, 0)
+        b    : Dec       = dec_num(false, 5, 0)
+        tiny : Dec       = dec_num(false, 1, -20)
+        // 2000000000000001 * 5 + 10^-20: D128 drops the 10^-20 and leaves the D64 midpoint 10000000000000005
+        Out.write("fma 2000000000000001 * 5 + 1e-20 (exactly 10000000000000005.00000000000000000001)\n")
+        show("once at D64", dec_fma(a, b, tiny, f))
+        show("through D128", dec_fma(a, b, tiny, wide).narrow(f))
+        // a D64 encoding whose coefficient 10000000000000005 has 17 digits, read at its face value
+        wide_face : Dec = dec_num(false, 10000000000000005, 0)
+        Out.write("add 10000000000000005 (17 digits, non-canonical) + 1e-20\n")
+        show("once at D64", dec_add(wide_face, tiny, f))
+        show("through D128", dec_add(wide_face, tiny, wide).narrow(f))
+        return()
+
+/// Runs the samples and the counterexamples.
+/// :returns: 0.
+routine main() -> S32
+    block entry()
+        d32_sample()
+        Out.write("d32: {COUNT.load()} results, {BAD.load()} differ\n")
+        0.store_into(BAD)
+        0.store_into(COUNT)
+        d64_sample(20000)
+        Out.write("d64: {COUNT.load()} results, {BAD.load()} differ\n")
+        counterexamples()
+        return(0)
