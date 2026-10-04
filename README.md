@@ -20,9 +20,15 @@ on their own:
 - time, random numbers, and process signals
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
-Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, and the math of the
-complex numbers, quaternions, and 4x4 matrices. More math, hashing, cryptography, and algorithms move here next,
-written once so that both languages build on one implementation.
+Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, the math of the
+complex numbers, quaternions, and 4x4 matrices, and the decimal floats' arithmetic. More math, hashing,
+cryptography, and algorithms move here next, written once so that both languages build on one implementation.
+
+Most of it is written in Tessera here. The big numeric engines whose source stays RazorForge (the decimal floats,
+later the arbitrary-precision Integer and Real) are written into `tessera/generated/` by RazorForge's Tessera
+backend: `RazorForge export-ingrid` builds each export file of RazorForge's `IngridExport/` and writes its
+`ingrid_*` routines, with everything they reach, as one Tessera file. Those files are committed, and a release ships
+them like the rest; don't edit them, change the RazorForge source and export again.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
@@ -31,6 +37,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 ```
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
+└── generated/    # Written from RazorForge source by `RazorForge export-ingrid`
 tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt
@@ -57,8 +64,9 @@ next to each executable. The full workspace setup is in the
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
 the reference test vectors, splitmix64, the complex numbers, quaternions, and matrices against RazorForge's bodies
-before they moved here (and the crashes their checked arithmetic reports), the word division on its edge cases, the
-Roamed counts and lock, the cycle collector, the deadlock detector, the heap calls, and the crash report, and from
+before they moved here (and the crashes their checked arithmetic reports), the generated D64 arithmetic against
+RazorForge's engine, the word division on its edge cases, the Roamed counts and lock, the cycle collector, the
+deadlock detector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.tess`). Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
 The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the
