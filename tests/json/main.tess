@@ -1,0 +1,80 @@
+// JSON string escaping through Ingrid's exports (tessera/json.tess), on text held as code points the way RazorForge's
+// Text keeps it. The expected output is what RazorForge's JSON encoder printed for the same strings
+// (Tessera/scratch/random-json/json_escape.rf) with its own escaper, before it moved here: every code point from 0 to
+// 0x2FF between `a` and `z`, a few awkward ones, the empty text, and the length of a 20000-character string.
+
+import Standard::Format
+import Standard::Os
+
+/// Quotes `count` code points from `chars` and writes the result as UTF-8.
+routine quote(chars: @U32, count: U64) -> Void
+    shared quoted : @Array<U32, 256> <- uninit
+    shared utf8   : @Array<Byte, 4>  <- uninit
+
+    block entry()
+        needed  : U64  = json_quoted_count_utf32(chars, count)
+        written : U64  = json_quote_utf32(chars, count, quoted.to<@U32>(), 256)
+        same    : Bool = needed.eq(written)
+        branch same
+            ? each(0, written)
+            : crash_logic_breached()
+
+    block each(i: U64, written: U64)
+        branch i.ge(written)
+            ? done()
+            : continue
+        c     : Char  = quoted.getitem(i.to<USize>()).to<Char>()
+        width : USize = utf8_encode_into(c, utf8.to<@Byte>())
+        Out.writer().write_bytes(utf8.to<@Byte>(), width)
+        jump each(i.add(1), written)
+
+    block done()
+        Out.write("\n")
+        return()
+
+/// Quotes `a`, `c`, `z`.
+routine between(c: U32) -> Void
+    shared chars : @Array<U32, 3> <- { 0x61, c, 0x7A }
+
+    block entry()
+        quote(chars.to<@U32>(), 3)
+        return()
+
+routine main() -> S32
+    shared long : @Array<U32, 20000> <- uninit
+
+    block entry()
+        jump each(0)
+
+    block each(c: U32)
+        branch c.ge(0x300)
+            ? awkward()
+            : continue
+        Out.write("{c}: ")
+        between(c)
+        jump each(c.add(1))
+
+    block awkward()
+        between(0xD7FF)
+        between(0xE000)
+        between(0xFFFD)
+        between(0xFFFF)
+        between(0x1F600)
+        between(0x10FFFF)
+        between(0x2028)
+        between(0x2029)
+        claim none : @U32 <- 0
+        quote(none, 0)
+        jump fill(0)
+
+    block fill(i: U32)
+        branch i.ge(20000)
+            ? measure()
+            : continue
+        long.setitem(i.to<USize>(), i.mod(0x90))
+        jump fill(i.add(1))
+
+    block measure()
+        count : U64 = json_quoted_count_utf32(long.to<@U32>(), 20000)
+        Out.write("long count: {count}\n")
+        return(0)
