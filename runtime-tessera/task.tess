@@ -88,7 +88,7 @@ routine current_task() -> @Task
         t : @Task = CURRENT_TASK.load()
         return(t)
 
-routine Task.completed(self: @Self) -> Bool
+routine Task.is_completed(self: @Self) -> Bool
     block entry()
         done : Bool = self.status.atomic_load().eq(TASK_COMPLETED)
         return(done.bitand(self.completion.load().ne(COMPLETION_PENDING)))
@@ -210,7 +210,7 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
     block entry()
         self.coro_lock.lock()
-        branch self.completed()
+        branch self.is_completed()
             ? finish(1, false)
             : continue
         arm : Bool = self.coro_sched.load().is_null()
@@ -231,7 +231,7 @@ routine Task.register_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
 routine Task.withdraw_waiter(self: @Self, sched: @Sched, waiter: @Coro) -> U32
     block entry()
         self.coro_lock.lock()
-        branch self.completed()
+        branch self.is_completed()
             ? finish(1, false)
             : continue
         mine   : Bool = self.coro_waiter.load().ptr_eq(waiter)
@@ -417,7 +417,7 @@ routine rf_task_wait(task: @Task) -> U32
             : report()
 
     block wait()
-        branch task.completed()
+        branch task.is_completed()
             ? report()
             : continue
         wait_on(task.done, 0)
@@ -433,7 +433,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         branch task.is_null()
             ? return(COMPLETION_ERROR)
             : continue
-        branch task.completed().bitor(task.kind.load().ne(TASK_THREADED))
+        branch task.is_completed().bitor(task.kind.load().ne(TASK_THREADED))
             ? report()
             : continue
         secs     : U64 = timeout_seconds.max(0).to<U64>()
@@ -442,7 +442,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         jump wait(deadline)
 
     block wait(deadline: U64)
-        branch task.completed()
+        branch task.is_completed()
             ? report()
             : continue
         now : U64 = monotonic_ns()
