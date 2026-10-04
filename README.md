@@ -20,8 +20,9 @@ on their own:
 - time, random numbers, and process signals
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
-Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, the math of the
-complex numbers, quaternions, and 4x4 matrices, and the arithmetic of the decimal floats D32, D64, and D128. More
+Roamed entity runtime and its cycle collector, the crash handler, SipHash and splitmix64, the library functions
+of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
+numbers, quaternions, and 4x4 matrices, and the arithmetic of the decimal floats D32, D64, and D128. More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
@@ -64,7 +65,8 @@ next to each executable. The full workspace setup is in the
 ## Tests
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
-the reference test vectors, splitmix64, the complex numbers, quaternions, and matrices against RazorForge's bodies
+the reference test vectors, splitmix64, the binary-float exports against correctly rounded results from mpmath,
+the complex numbers, quaternions, and matrices against RazorForge's bodies
 before they moved here (and the crashes their checked arithmetic reports), the generated D32, D64, and D128
 arithmetic against RazorForge's engines, the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from

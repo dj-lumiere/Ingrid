@@ -1,5 +1,5 @@
-// How an Ingrid export hands RazorForge a result wider than one register: a C128, a Q128, a Q256, or several
-// values at once.
+// How an Ingrid export hands RazorForge a result wider than one register (a C128, a Q128, a Q256, a B128, or several
+// values at once).
 //
 // A small record of floats crosses a call by rules that differ between targets (Win64 passes 16 bytes through
 // memory, System V splits them over two registers, AArch64 passes up to four floats of one type as a homogeneous
@@ -30,3 +30,33 @@ routine Words.construct(a: F32, b: F32, c: F32, d: F32) -> Self
 routine Words.construct(a: F64, b: F64, c: F64, d: F64) -> Self
     block entry()
         return({ w0: a.bits(), w1: b.bits(), w2: c.bits(), w3: d.bits() })
+
+/// Two F128s, each as its low 64 bits and then its high 64 bits: a in w0 and w1, b in w2 and w3.
+#inline
+routine Words.construct(a: F128, b: F128) -> Self
+    block entry()
+        a_bits : U128 = a.bits()
+        b_bits : U128 = b.bits()
+        w0     : U64  = a_bits.to_wrap<U64>()
+        w1     : U64  = a_bits.shr(64).to_wrap<U64>()
+        w2     : U64  = b_bits.to_wrap<U64>()
+        w3     : U64  = b_bits.shr(64).to_wrap<U64>()
+        return({ w0: w0, w1: w1, w2: w2, w3: w3 })
+
+/// An F128 in Words, the way an export hands one back: its low 64 bits in w0, its high 64 bits in w1.
+#inline
+routine f128_words(v: F128) -> Words
+    block entry()
+        bits : U128 = v.bits()
+        low  : U64  = bits.to_wrap<U64>()
+        high : U64  = bits.shr(64).to_wrap<U64>()
+        return({ w0: low, w1: high, w2: 0, w3: 0 })
+
+/// The F128 whose bits are high × 2^64 + low, the way an export takes one: an F128 is a 128-bit integer to the C
+/// ABI, which Win64 passes by pointer from Tessera and by value from RazorForge, so neither side passes one whole.
+#inline
+routine f128_from_halves(low: U64, high: U64) -> F128
+    block entry()
+        top  : U128 = high.to<U128>().shl(64)
+        bits : U128 = top.bitor(low.to<U128>())
+        return(F128.from_bits(bits))
