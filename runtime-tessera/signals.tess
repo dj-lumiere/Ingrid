@@ -257,8 +257,9 @@ routine posix_signal_handler(signo: CInt) -> Void
             : return()
 
 /// Reads which-codes from the pipe and runs the handlers.
+/// :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 #target(os: not "windows")
-routine signal_dispatch_main(raw: Addr) -> Void
+routine signal_dispatch_main(pipe: @Array<CInt, 2>) -> Void
     shared code : @U8 <- 0
 
     block entry()
@@ -266,7 +267,7 @@ routine signal_dispatch_main(raw: Addr) -> Void
         jump read()
 
     block read()
-        rc : SSize = c_read(SELF_PIPE.to<@CInt>().load(), code.to<@Byte>(), 1)
+        rc : SSize = c_read(pipe.getitem(0), code.to<@Byte>(), 1)
         branch rc.eq(1)
             ? got()
             : continue
@@ -287,7 +288,7 @@ routine install_signal_dispatch() -> Void
         branch c_pipe(fds).ne(0)
             ? return()
             : continue
-        Thread.spawn(signal_dispatch_main.to<Callable>(), null, runtime_heap()).detach()
+        Thread.spawn(signal_dispatch_main.to<Callable>(), SELF_PIPE, runtime_heap()).detach()
         claim sa : @SigAction <- uninit
         c_memset(sa, 0, sizeof<SigAction>())
         sa.handler.store(posix_signal_handler.to<Callable>())

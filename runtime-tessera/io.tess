@@ -112,10 +112,11 @@ routine io_do_work(req: @IoReq) -> Void
         return()
 
 /// An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
-routine io_thread_main(raw: Addr) -> Void
+/// :param lock: The lock the request queue is kept under (IO_LOCK).
+routine io_thread_main(lock: @Mutex) -> Void
     block entry()
         rf_thread_stack_guarantee()
-        IO_LOCK.lock()
+        lock.lock()
         jump look()
 
     block look()
@@ -132,11 +133,11 @@ routine io_thread_main(raw: Addr) -> Void
         jump run(req)
 
     block sleep()
-        IO_WORK.wait(IO_LOCK)
+        IO_WORK.wait(lock)
         jump look()
 
     block run(req: @IoReq)
-        IO_LOCK.unlock()
+        lock.unlock()
         io_do_work(req)
         rf_sched_wake(req.sched.load(), req.coro.load())
         jump entry()
@@ -159,7 +160,7 @@ routine rf_io_runtime_init() -> Void
         return()
 
     block one(i: USize)
-        Thread.spawn(io_thread_main.to<Callable>(), null, runtime_heap()).detach()
+        Thread.spawn(io_thread_main.to<Callable>(), IO_LOCK, runtime_heap()).detach()
         jump start(i.add(1))
 
 routine io_submit(req: @IoReq) -> Void
