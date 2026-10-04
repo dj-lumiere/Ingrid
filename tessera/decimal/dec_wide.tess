@@ -566,7 +566,11 @@ routine we_recip(b: We) -> We
     shared one  : W   = w_of_u128(1, 0)
     shared seed : F64 = 1.0.div(b.v.top_f64())
 
+    // a zero divisor gives an unbounded result, which no rounding accepts
     block entry()
+        branch b.v.is_zero()
+            ? return({ v: one, err: F64.from_bits(0x7FF0000000000000) })
+            : continue
         y0 : W = w_of_f64(seed).ldexp(b.v.exp.neg())
         jump step(y0, 0)
 
@@ -764,3 +768,159 @@ routine we_is_negligible(term: We, sum: We) -> Bool
     block entry()
         tiny : Bool = term.v.exp.lt(sum.v.exp.sub(200))
         return(term.v.is_zero().bitor(tiny))
+
+// ── fixed point ───────────────────────────────────────────────────────────────────────────────────
+
+/// A fixed-point number of 192 bits: (h 2^128 + m 2^64 + l) × 2^-scale, the scale fixed by its use. Polynomials run
+/// in it: a product is cut at one fixed bit, a sum is exact, and the error of a whole evaluation is a few units of
+/// its last bit.
+record X
+    h : U64
+    m : U64
+    l : U64
+
+/// Six limbs of a fixed-point product, least significant last.
+record XLimbs
+    l5 : U64
+    l4 : U64
+    l3 : U64
+    l2 : U64
+    l1 : U64
+    l0 : U64
+
+/// Limb i (0 the lowest) of a six-limb number, 0 outside it.
+/// :param i: The index.
+/// :returns: The limb.
+#inline
+routine XLimbs.limb(self: Self, i: S64) -> U64
+    block entry()
+        when i
+            0    -> return(self.l0)
+            1    -> return(self.l1)
+            2    -> return(self.l2)
+            3    -> return(self.l3)
+            4    -> return(self.l4)
+            5    -> return(self.l5)
+            else -> return(0)
+
+/// The 64 bits of a six-limb number starting at bit `at` (bits outside it read as 0).
+/// :param at: The lowest bit read.
+/// :returns: The 64 bits.
+#inline
+routine XLimbs.bits(self: Self, at: S64) -> U64
+    block entry()
+        limb : S64 = at.shr(6)
+        off  : U64 = at.bitand(63).to<U64>()
+        low  : U64 = self.limb(limb)
+        high : U64 = self.limb(limb.add(1))
+        return(low.shr(off).bitor(high.shl(U64.sub(64, off))))
+
+/// |r| × 2^scale as a fixed-point number, truncated (the caller keeps it below 2^192).
+/// :param r: The value.
+/// :param scale: The power of two it is multiplied by.
+/// :returns: The fixed-point number.
+routine x_of_w(r: W, scale: S64) -> X
+    block entry()
+        shift : S64    = r.exp.sub(192).add(scale)
+        src   : WLimbs = { l4: 0, l3: 0, l2: r.h, l1: r.m, l0: r.l }
+        h     : U64    = src.bits(U64.to<S64>(128).sub(shift))
+        m     : U64    = src.bits(U64.to<S64>(64).sub(shift))
+        l     : U64    = src.bits(shift.neg())
+        return({ h: h, m: m, l: l })
+
+/// x × 2^-scale as a W (exact).
+/// :param x: The fixed-point number.
+/// :param scale: Its scale.
+/// :param neg: The sign.
+/// :returns: The W.
+routine w_of_x(x: X, scale: S64, neg: Bool) -> W
+    block entry()
+        r : WLimbs = { l4: 0, l3: 0, l2: x.h, l1: x.m, l0: x.l }
+        return(w_pack(neg, r, scale.neg()))
+
+/// a + b (no carry out of 192 bits).
+/// :param a: The first term.
+/// :param b: The second term.
+/// :returns: The sum.
+#inline
+routine x_add(a: X, b: X) -> X
+    block entry()
+        x1 : U128 = a.l.to<U128>().add_wrap(b.l.to<U128>())
+        x2 : U128 = w_fma(a.m, 1, b.m, x1.shr(64).to_wrap<U64>())
+        h  : U64  = a.h.add_wrap(b.h).add_wrap(x2.shr(64).to_wrap<U64>())
+        return({ h: h, m: x2.to_wrap<U64>(), l: x1.to_wrap<U64>() })
+
+/// a - b for a >= b.
+/// :param a: The minuend.
+/// :param b: The subtrahend.
+/// :returns: The difference.
+#inline
+routine x_sub(a: X, b: X) -> X
+    block entry()
+        l  : U64 = a.l.sub_wrap(b.l)
+        b0 : U64 = a.l.lt(b.l).to<U64>()
+        m  : U64 = a.m.sub_wrap(b.m).sub_wrap(b0)
+        b1 : U64 = w_borrow(a.m, b.m, b0)
+        h  : U64 = a.h.sub_wrap(b.h).sub_wrap(b1)
+        return({ h: h, m: m, l: l })
+
+/// The bits shift .. shift + 191 of a × b: the six-limb product exactly, then cut (truncated toward zero).
+/// :param a: The first factor.
+/// :param b: The second factor.
+/// :param shift: The lowest bit kept.
+/// :returns: The product.
+#inline
+routine x_mul_shift(a: X, b: X, shift: S64) -> X
+    block entry()
+        x0 : U128   = a.l.mul_wide(b.l)
+        x1 : U128   = w_fma(a.l, b.m, x0.shr(64).to_wrap<U64>(), 0)
+        x2 : U128   = w_fma(a.l, b.h, x1.shr(64).to_wrap<U64>(), 0)
+        y1 : U128   = w_fma(a.m, b.l, x1.to_wrap<U64>(), 0)
+        y2 : U128   = w_fma(a.m, b.m, x2.to_wrap<U64>(), y1.shr(64).to_wrap<U64>())
+        y3 : U128   = w_fma(a.m, b.h, x2.shr(64).to_wrap<U64>(), y2.shr(64).to_wrap<U64>())
+        z2 : U128   = w_fma(a.h, b.l, y2.to_wrap<U64>(), 0)
+        z3 : U128   = w_fma(a.h, b.m, y3.to_wrap<U64>(), z2.shr(64).to_wrap<U64>())
+        z4 : U128   = w_fma(a.h, b.h, y3.shr(64).to_wrap<U64>(), z3.shr(64).to_wrap<U64>())
+        r  : XLimbs = { l5: z4.shr(64).to_wrap<U64>(), l4: z4.to_wrap<U64>(), l3: z3.to_wrap<U64>(),
+            l2: z2.to_wrap<U64>(), l1: y1.to_wrap<U64>(), l0: x0.to_wrap<U64>() }
+        return({ h: r.bits(shift.add(128)), m: r.bits(shift.add(64)), l: r.bits(shift) })
+
+/// x × 2^k for 0 <= k < 64 (the caller keeps it below 2^192).
+/// :param x: The number.
+/// :param k: The shift.
+/// :returns: The shifted number.
+#inline
+routine x_shl(x: X, k: U64) -> X
+    block entry()
+        back : U64 = U64.sub(64, k)
+        h    : U64 = x.h.shl(k).bitor(x.m.shr(back))
+        m    : U64 = x.m.shl(k).bitor(x.l.shr(back))
+        return({ h: h, m: m, l: x.l.shl(k) })
+
+/// Entry i of a table of fixed-point numbers (three words each: h, m, l).
+/// :param table: The table.
+/// :param i: The index.
+/// :returns: The number.
+#inline
+routine x_entry(table: @U64, i: USize) -> X
+    block entry()
+        at : USize = i.mul(3)
+        h  : U64   = table.stride(at).load()
+        m  : U64   = table.stride(at.add(1)).load()
+        l  : U64   = table.stride(at.add(2)).load()
+        return({ h: h, m: m, l: l })
+
+/// Entry i of a table of positive W values (four words each: h, m, l, and the exponent's bits), truncated from the
+/// true value: within 2 units.
+/// :param table: The table.
+/// :param i: The index.
+/// :returns: The value with its bound.
+#inline
+routine we_entry(table: @U64, i: USize) -> We
+    block entry()
+        at : USize = i.mul(4)
+        h  : U64   = table.stride(at).load()
+        m  : U64   = table.stride(at.add(1)).load()
+        l  : U64   = table.stride(at.add(2)).load()
+        e  : S64   = table.stride(at.add(3)).load().to_wrap<S64>()
+        return({ v: { neg: false, exp: e, h: h, m: m, l: l }, err: 2.0 })
