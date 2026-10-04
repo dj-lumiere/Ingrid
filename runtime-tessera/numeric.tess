@@ -1,6 +1,6 @@
 // Small things the standard library binds: the platform libm's exact float operations (remainder, fdim, nextafter,
-// scalbn, ilogb, and the B64 cbrt that seeds B128's Newton step), a cryptographically random word, the wall-clock
-// time, and two helpers the FFI tests call with a struct holding a callback.
+// scalbn, ilogb, and the B64 cbrt that seeds B128's Newton step), a cryptographically random word (from Tessera's
+// entropy_key), the wall-clock time, and two helpers the FFI tests call with a struct holding a callback.
 
 module Ingrid::Runtime
 
@@ -182,57 +182,16 @@ routine rf_b64_ilogb(x: F64) -> S64
 
 // -- a random word -------------------------------------------------------------------
 
-/// Windows' `BCryptGenRandom`: fills `buffer` with `size` random bytes.
-/// :param algorithm: The algorithm handle, or null with the system-preferred flag.
-/// :param buffer: Where the bytes go.
-/// :param size: The number of bytes.
-/// :param flags: The BCRYPT flags.
-/// :returns: An NTSTATUS, 0 on success.
-#[external("c"), symbol("BCryptGenRandom"), callconv("stdcall"), target(os: "windows")]
-routine c_bcrypt_gen_random(algorithm: Addr, buffer: @U64, size: U32, flags: U32) -> CInt
-
-/// Linux's `getrandom`: fills `buffer` with up to `size` random bytes.
-/// :param buffer: Where the bytes go.
-/// :param size: The number of bytes.
-/// :param flags: The GRND flags.
-/// :returns: The number of bytes written, or -1 on error.
-#[external("c"), symbol("getrandom"), target(os: "linux")]
-routine c_getrandom(buffer: @U64, size: USize, flags: U32) -> SSize
-
-/// macOS's `getentropy`: fills `buffer` with `size` random bytes (at most 256).
-/// :param buffer: Where the bytes go.
-/// :param size: The number of bytes.
-/// :returns: 0 on success, -1 on error.
-#[external("c"), symbol("getentropy"), target(os: "macos")]
-routine c_getentropy(buffer: @U64, size: USize) -> CInt
-
-/// 64 cryptographically random bits from the operating system, through `BCryptGenRandom`.
-/// :returns: The random word, or 0 when the call fails (its status is not checked).
-#[export("rf_random_u64"), target(os: "windows")]
+/// 64 cryptographically random bits from the operating system, from the source Tessera's hash key comes from
+/// (`entropy_key()`: getrandom on Linux, arc4random_buf on macOS, ProcessPrng on Windows), drawn anew on every call.
+/// :returns: The random word.
+/// :throws: Crashes with `InvalidValueError` when the operating system gives no random bytes (getrandom failing on
+///     Linux, no ProcessPrng before Windows 10), instead of handing back a word that isn't random.
+#export("rf_random_u64")
 routine rf_random_u64() -> U64
     block entry()
-        claim value : @U64 <- 0
-        // BCRYPT_USE_SYSTEM_PREFERRED_RNG
-        c_bcrypt_gen_random(null, value, 8, 2)
-        return(value.load())
-
-/// 64 cryptographically random bits from the operating system, through `getrandom`.
-/// :returns: The random word. Bytes the call did not fill stay 0 (its result is not checked).
-#[export("rf_random_u64"), target(os: "linux")]
-routine rf_random_u64() -> U64
-    block entry()
-        claim value : @U64 <- 0
-        c_getrandom(value, 8, 0)
-        return(value.load())
-
-/// 64 cryptographically random bits from the operating system, through `getentropy`.
-/// :returns: The random word, or 0 when the call fails (its result is not checked).
-#[export("rf_random_u64"), target(os: "macos")]
-routine rf_random_u64() -> U64
-    block entry()
-        claim value : @U64 <- 0
-        c_getentropy(value, 8)
-        return(value.load())
+        key : SipKey = entropy_key()
+        return(key.k0)
 
 // -- the wall clock ------------------------------------------------------------------
 
@@ -254,21 +213,27 @@ record FileTime
     target(os: "windows")]
 routine c_get_system_time_precise_as_file_time(time: @FileTime) -> Void
 
-/// The current wall-clock time, from the system's precise FILETIME.
+/// The Moment a FILETIME stands for. A time before 1970 has negative seconds and nanoseconds counted forward from
+/// them, in [0, 10^9), as POSIX's timespec has.
+/// :param file_time: 100 ns ticks since 1601-01-01 (Windows keeps them below 2^63).
 /// :returns: The seconds since the Unix epoch and the nanoseconds after them.
-/// :throws: Crashes with `IntegerOverflowError` when the system clock is before 1970.
+routine moment_from_file_time(file_time: U64) -> Moment
+    block entry()
+        ticks            : S64 = file_time.to_wrap<S64>().sub(EPOCH_TICKS.to<S64>())
+        seconds          : S64 = ticks.div_euclid(10000000)
+        sub_second_ticks : S64 = ticks.mod_euclid(10000000)
+        return(Moment { seconds: seconds, nanoseconds: sub_second_ticks.mul(100).to<U32>() })
+
+/// The current wall-clock time, from the system's precise FILETIME.
+/// :returns: The seconds since the Unix epoch and the nanoseconds after them, negative seconds before 1970.
 #[export("rf_moment_now"), target(os: "windows")]
 routine rf_moment_now() -> Moment
     block entry()
         claim ft : @FileTime <- FileTime { low: 0, high: 0 }
         c_get_system_time_precise_as_file_time(ft)
-        high_part        : U64    = ft.high.load().to<U64>()
-        file_time        : U64    = high_part.shl(32).bitor(ft.low.load().to<U64>())
-        ticks            : U64    = file_time.sub(EPOCH_TICKS)
-        sub_second_ticks : U64    = ticks.mod(10000000)
-        now              : Moment = Moment { seconds: ticks.div(10000000).to<S64>(),
-            nanoseconds: sub_second_ticks.mul(100).to<U32>() }
-        return(now)
+        high_part : U64 = ft.high.load().to<U64>()
+        file_time : U64 = high_part.shl(32).bitor(ft.low.load().to<U64>())
+        return(moment_from_file_time(file_time))
 
 /// POSIX `clock_gettime`: the time of `clock`.
 /// :param clock: The clock id.

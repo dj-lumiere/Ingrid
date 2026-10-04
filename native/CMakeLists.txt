@@ -73,8 +73,9 @@ set_target_properties(razorforge_runtime PROPERTIES LINKER_LANGUAGE C)
 # The libraries the runtime calls into, beyond the C library.
 if(WIN32)
     # The C runtime (msvcrt brings the UCRT and vcruntime, and the DLL's entry point): with no C source in the
-    # library, no object asks for it. dbghelp: stack traces; synchronization: WaitOnAddress; bcrypt: random words.
-    target_link_libraries(razorforge_runtime msvcrt dbghelp synchronization bcrypt)
+    # library, no object asks for it. dbghelp gives the stack traces, synchronization WaitOnAddress. Random words come
+    # from ProcessPrng, which Tessera's stdlib looks up at run time.
+    target_link_libraries(razorforge_runtime msvcrt dbghelp synchronization)
 elseif(APPLE)
     # libSystem has everything
 else()

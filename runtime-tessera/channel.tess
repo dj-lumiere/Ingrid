@@ -73,11 +73,23 @@ routine rf_channel_create(capacity: U64) -> @Channel
         chan.consumer_refs.store(1)
         return(chan)
 
-/// Frees the channel once both counts are 0, reading them without the lock. The caller doesn't hold the lock.
-routine Channel.maybe_free(self: @Self) -> Void
+/// Whether the drop that just took a count from 1 to 0 left no handle at all. The caller holds the lock: deciding
+/// under it means exactly one of two drops racing for the last handles frees the channel.
+/// :param refs: The count before this drop.
+/// :returns: Whether the channel is to be freed once the lock is given back.
+routine Channel.is_last_drop(self: @Self, refs: U32) -> Bool
     block entry()
+        dropped_last : Bool = refs.eq(1)
         no_producers : Bool = self.producer_refs.load().eq(0)
-        branch no_producers.bitand(self.consumer_refs.load().eq(0))
+        none_left    : Bool = no_producers.bitand(self.consumer_refs.load().eq(0))
+        return(dropped_last.bitand(none_left))
+
+/// Frees the channel when the drop decided so under the lock. The caller has given the lock back, and no handle is
+/// left to reach the channel.
+/// :param last: What is_last_drop said.
+routine Channel.free_if(self: @Self, last: Bool) -> Void
+    block entry()
+        branch last
             ? continue
             : return()
         c_free(self.slots.load())
@@ -125,16 +137,17 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
         refs : U32 = chan.producer_refs.load()
         left : U32 = refs.sub_clamp(1)
         chan.producer_refs.store(left)
+        last : Bool = chan.is_last_drop(refs)
         branch left.eq(0).bitand(chan.closed.load().bitnot())
             ? continue
-            : done()
+            : done(last)
         chan.closed.store(true)
         chan.wake_all(chan.not_empty_head.load())
-        jump done()
+        jump done(last)
 
-    block done()
+    block done(last: Bool)
         chan.lock.unlock()
-        chan.maybe_free()
+        chan.free_if(last)
         return()
 
 /// Drops a consumer handle. With no consumer left, producers waiting for room wake and fail instead of waiting
@@ -150,15 +163,16 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
         refs : U32 = chan.consumer_refs.load()
         left : U32 = refs.sub_clamp(1)
         chan.consumer_refs.store(left)
+        last : Bool = chan.is_last_drop(refs)
         branch left.eq(0)
             ? continue
-            : done()
+            : done(last)
         chan.wake_all(chan.not_full_head.load())
-        jump done()
+        jump done(last)
 
-    block done()
+    block done(last: Bool)
         chan.lock.unlock()
-        chan.maybe_free()
+        chan.free_if(last)
         return()
 
 /// Closes the channel and wakes every waiting producer and consumer. Closing twice, or a null `chan`, does nothing.

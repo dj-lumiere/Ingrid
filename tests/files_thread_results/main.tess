@@ -1,0 +1,65 @@
+// RazorForge files (files.tess) hand a result's length back through rf_get_result_len and a mapping's delta through
+// rf_file_map_delta, read right after the call that set them. Two threads interleave here, step by step: each makes
+// a result (and records a delta), the other makes its own in between, and each still reads its own length and delta.
+// With one process-wide length and delta, the first thread read the second one's.
+
+module Ingrid::Runtime
+
+import Standard::Format
+import Standard::Os
+
+/// The step the two threads have reached: each waits for its turn.
+global STEP: @U32
+
+// -- what files.tess calls in the rest of the runtime library ------------------------
+
+#[external("c"), symbol("free")]
+routine c_free(ptr: Addr) -> Void
+
+#[external("c"), symbol("malloc")]
+routine c_malloc(size: USize) -> Addr
+
+#[external("c"), symbol("realloc")]
+routine c_realloc(ptr: Addr, size: USize) -> Addr
+
+#[external("c"), symbol("memcpy")]
+routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
+
+// -- the two threads -----------------------------------------------------------------
+
+/// Spins until STEP is `step`.
+routine wait_for_step(step: U32) -> Void
+    block entry()
+        jump look()
+
+    block look()
+        here : Bool = STEP.atomic_load().eq(step)
+        branch here
+            ? return()
+            : look()
+
+/// The second thread: makes its result and delta between the first thread's call and its read.
+routine second(unused: @U32) -> Void
+    block entry()
+        wait_for_step(1)
+        buf : @Byte = bytes_result("nine byte", 9)
+        MAP_DELTA.store(900)
+        c_free(buf)
+        STEP.atomic_store(2)
+        return()
+
+routine main() -> S32
+    shared unused : @U32 <- 0
+
+    block entry()
+        other : Thread = Thread.spawn(second.to<Callable>(), unused)
+        buf   : @Byte  = bytes_result("five!", 5)
+        MAP_DELTA.store(500)
+        STEP.atomic_store(1)
+        wait_for_step(2)
+        len   : U64 = rf_get_result_len()
+        delta : U64 = rf_file_map_delta()
+        other.join()
+        c_free(buf)
+        Out.write("this thread's result length: {len}, mapping delta: {delta}\n")
+        return(0)

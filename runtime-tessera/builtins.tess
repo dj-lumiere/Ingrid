@@ -80,7 +80,8 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 /// first use of `control` on any thread gives it the next free slot.
 /// :param control: The thread-local variable's control block.
 /// :returns: The calling thread's copy of the variable.
-/// :throws: Crashes with `OutOfMemoryError` when the thread's slot table can't be allocated.
+/// :throws: Crashes with `OutOfMemoryError` when the thread's slot table, its growth, or the object can't be
+///     allocated.
 #export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
     block entry()
@@ -121,6 +122,9 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
             ? continue
             : object(arr, index)
         grown : Addr = c_realloc(arr.data.load(), index.mul(sizeof<Addr>()))
+        branch grown.is_null()
+            ? rf_throw("OutOfMemoryError", "Failed to grow thread-local storage")
+            : continue
         c_memset(grown.to<@Byte>().stride(have.mul(sizeof<Addr>())), 0,
             index.sub(have).mul(sizeof<Addr>()))
         arr.data.store(grown.to<@Addr>())
@@ -137,7 +141,10 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
     block make(slot: @Addr)
         size : USize = control.size.load()
         made : Addr  = aligned_alloc(size, control.align.load())
-        init : Addr  = control.value.load()
+        branch made.is_null()
+            ? rf_throw("OutOfMemoryError", "Failed to allocate a thread-local variable")
+            : continue
+        init : Addr = control.value.load()
         branch init.is_null()
             ? zero(slot, made, size)
             : continue

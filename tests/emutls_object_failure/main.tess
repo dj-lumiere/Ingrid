@@ -1,0 +1,58 @@
+// __emutls_get_address (builtins.tess), the accessor the in-process JIT calls for a thread-local, without the rest
+// of the runtime library. A thread-local is made from its initial value, then one too
+// large to allocate raises OutOfMemoryError instead of copying into a null object.
+
+module Ingrid::Runtime
+
+import Standard::Format
+import Standard::Os
+
+/// Whether the stand-in c_realloc fails.
+global REALLOC_FAILS: @Bool
+
+// -- what builtins.tess calls in the rest of the runtime library ---------------------
+
+#[external("c"), symbol("calloc")]
+routine c_calloc(count: USize, size: USize) -> Addr
+
+#[external("c"), symbol("realloc")]
+routine c_realloc_real(ptr: Addr, size: USize) -> Addr
+
+#[external("c"), symbol("memcpy")]
+routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
+
+/// C's realloc, or a failure (null) when REALLOC_FAILS says so.
+routine c_realloc(ptr: Addr, size: USize) -> Addr
+    block entry()
+        branch REALLOC_FAILS.load()
+            ? return(null)
+            : return(c_realloc_real(ptr, size))
+
+/// count zeroed Ts.
+routine zeroed<T>(count: USize, what: CStr) -> @T
+require T: typename
+    block entry()
+        p : Addr = c_calloc(count, sizeof<T>())
+        return(p.to<@T>())
+
+#[external("c"), symbol("exit"), noreturn]
+routine exit(status: CInt) -> Void
+
+/// Reports the error RazorForge would raise and exits with status 3.
+#noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry()
+        Out.write("{error_type.to<Bytes>()}: {message.to<Bytes>()}\n")
+        exit(3)
+
+routine main() -> S32
+    shared value : @U64           <- 42
+    shared plain : @EmutlsControl <- { size: 8, align: 8, index: 0, value: value }
+    shared huge  : @EmutlsControl <- { size: USize.MAX.shr(1), align: 8, index: 0, value: null }
+
+    block entry()
+        first : Addr = emutls_get_address(plain)
+        Out.write("first variable: {first.to<@U64>().load()}\n")
+        unreached : Addr = emutls_get_address(huge)
+        Out.write("not reached {unreached}\n")
+        return(0)

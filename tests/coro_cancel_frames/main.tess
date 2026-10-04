@@ -1,0 +1,83 @@
+// RazorForge coroutines (coro.tess) without running one: the test makes a coroutine control block the running one
+// and works its cancellation shadow stack. Two frames push and pop in order, an unbalanced pop leaves the stack as
+// it is, and a pop of a null frame (which push never links) on the empty stack does nothing. It used to read the
+// null frame's link, since the empty stack's top is null too.
+
+module Ingrid::Runtime
+
+import Standard::Format
+import Standard::Os
+
+// -- what coro.tess calls in the rest of the runtime library -------------------------
+
+#[external("c"), symbol("calloc")]
+routine c_calloc(count: USize, size: USize) -> Addr
+
+#[external("c"), symbol("free")]
+routine c_free(ptr: Addr) -> Void
+
+/// count zeroed Ts.
+routine zeroed<T>(count: USize, what: CStr) -> @T
+require T: typename
+    block entry()
+        p : Addr = c_calloc(count, sizeof<T>())
+        return(p.to<@T>())
+
+#[external("c"), symbol("exit"), noreturn]
+routine exit(status: CInt) -> Void
+
+#noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry()
+        Out.write("rf_throw\n")
+        exit(1)
+
+routine rf_current_thread_id() -> U64
+    block entry()
+        return(1)
+
+// -- the shadow stack ----------------------------------------------------------------
+
+/// The depth of the running coroutine's shadow stack.
+routine depth(coro: @Coro) -> USize
+    shared found : @USize <- 0
+
+    block entry()
+        jump next(coro.cf_top.load())
+
+    block next(f: @CancelFrame)
+        branch f.is_null()
+            ? return(found.load())
+            : continue
+        found.load().add(1).store_into(found)
+        jump next(f.prev.load())
+
+/// Destroys nothing: the frames' values are never abandoned here.
+routine keep(value: Addr) -> Void
+    block entry()
+        return()
+
+routine main() -> S32
+    shared coro   : @Coro        = zeroed<Coro>(1, "coroutine")
+    shared first  : @CancelFrame <- uninit
+    shared second : @CancelFrame <- uninit
+
+    block entry()
+        CURRENT_CORO.store(coro)
+        rf_coro_cf_pop(null)
+        Out.write("pop of null on the empty stack: depth {depth(coro)}\n")
+        rf_coro_cf_push(first, null, keep.to<Callable>())
+        rf_coro_cf_push(second, null, keep.to<Callable>())
+        Out.write("after two pushes: depth {depth(coro)}\n")
+        rf_coro_cf_pop(first)
+        Out.write("after an unbalanced pop: depth {depth(coro)}\n")
+        rf_coro_cf_pop(null)
+        Out.write("after a pop of null: depth {depth(coro)}\n")
+        rf_coro_cf_pop(second)
+        rf_coro_cf_pop(first)
+        Out.write("after both pops: depth {depth(coro)}\n")
+        rf_coro_cf_pop(null)
+        Out.write("pop of null on the empty stack again: depth {depth(coro)}\n")
+        CURRENT_CORO.store(null)
+        c_free(coro)
+        return(0)

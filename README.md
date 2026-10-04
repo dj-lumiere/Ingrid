@@ -71,7 +71,8 @@ the complex numbers, quaternions, and matrices against RazorForge's bodies
 before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from
-`runtime-tessera/` the SignalCaster (`monitor.tess`). Each test is a directory with a `config.toml` that lists the
+`runtime-tessera/` the SignalCaster (`monitor.tess`), the channels' last-handle drop, the per-thread file results, the
+coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
 The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the
 scheduler's park and wake, ...) are defined in the test itself, so a test needs nothing but the builder. With Tessera

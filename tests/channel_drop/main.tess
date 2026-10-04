@@ -1,0 +1,156 @@
+// RazorForge's channels (channel.tess) without the rest of the runtime library: the last producer handle and the
+// last consumer handle are dropped at the same moment on two threads, many times over, and the channel (its buffer
+// and itself) is freed exactly once each time. Deciding to free after giving the lock back let both threads see
+// both counts at 0 and free it twice.
+//
+// The test's c_free counts instead of freeing, so a second free shows up in the count instead of corrupting the heap.
+
+module Ingrid::Runtime
+
+import Standard::Format
+import Standard::Os
+
+/// The blocks c_free was handed.
+global FREES: @U64
+
+/// Rounds of the race.
+preset ROUNDS: U32 = 100000
+
+/// The scheduler a coroutine runs on: not used, every wait here is on a plain thread.
+record Sched
+    id : U32
+
+/// A coroutine: not used.
+record Coro
+    id : U32
+
+/// What the main thread and the two droppers share: the channel of the current round, the round the droppers may
+/// start, and how many drops are done.
+record Race
+    chan  : @Channel
+    round : U32
+    done  : U32
+
+/// One dropper: its side of the channel and the race.
+record Dropper
+    race     : @Race
+    producer : Bool
+
+// -- what channel.tess calls in the rest of the runtime library ----------------------
+
+#[external("c"), symbol("calloc")]
+routine c_calloc(count: USize, size: USize) -> Addr
+
+/// Counts the block instead of freeing it.
+routine c_free(ptr: Addr) -> Void
+    block entry()
+        branch ptr.is_null()
+            ? return()
+            : continue
+        discard_previous : U64 = FREES.atomic_fetch_add(1)
+        return()
+
+/// count zeroed Ts.
+routine zeroed<T>(count: USize, what: CStr) -> @T
+require T: typename
+    block entry()
+        p : Addr = c_calloc(count, sizeof<T>())
+        return(p.to<@T>())
+
+#[external("c"), symbol("exit"), noreturn]
+routine exit(status: CInt) -> Void
+
+#noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> Void
+    block entry()
+        Out.write("rf_throw\n")
+        exit(1)
+
+routine rf_sched_current() -> @Sched
+    block entry()
+        return(null)
+
+routine current_coro() -> @Coro
+    block entry()
+        return(null)
+
+routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
+    block entry()
+        return()
+
+routine rf_sched_park_external() -> Void
+    block entry()
+        return()
+
+routine rf_cancel_requested() -> U32
+    block entry()
+        return(0)
+
+// -- the race ------------------------------------------------------------------------
+
+/// Drops one side of each round's channel as soon as the round starts.
+routine drop_each_round(me: @Dropper) -> Void
+    shared race : @Race = me.race.load()
+
+    block entry()
+        jump wait(1)
+
+    block wait(round: U32)
+        past : Bool = round.gt(ROUNDS)
+        branch past
+            ? return()
+            : continue
+        started : Bool = race.round.atomic_load().ge(round)
+        branch started
+            ? continue
+            : wait(round)
+        chan : @Channel = race.chan.atomic_load()
+        branch me.producer.load()
+            ? feeder(round, chan)
+            : consumer(round, chan)
+
+    block feeder(round: U32, chan: @Channel)
+        rf_channel_drop_feeder(chan)
+        jump dropped(round)
+
+    block consumer(round: U32, chan: @Channel)
+        rf_channel_drop_consumer(chan)
+        jump dropped(round)
+
+    block dropped(round: U32)
+        discard_previous : U32 = race.done.atomic_fetch_add(1)
+        jump wait(round.add(1))
+
+routine main() -> S32
+    shared race     : @Race    <- Race { chan: null, round: 0, done: 0 }
+    shared producer : @Dropper <- Dropper { race: race, producer: true }
+    shared consumer : @Dropper <- Dropper { race: race, producer: false }
+    shared a        : Thread   = Thread.spawn(drop_each_round.to<Callable>(), producer)
+    shared b        : Thread   = Thread.spawn(drop_each_round.to<Callable>(), consumer)
+
+    block entry()
+        jump round(1)
+
+    block round(n: U32)
+        past : Bool = n.gt(ROUNDS)
+        branch past
+            ? report()
+            : continue
+        chan : @Channel = rf_channel_create(1)
+        race.chan.atomic_store(chan)
+        race.round.atomic_store(n)
+        jump wait(n)
+
+    block wait(n: U32)
+        both_done : Bool = race.done.atomic_load().eq(n.mul(2))
+        branch both_done
+            ? round(n.add(1))
+            : wait(n)
+
+    block report()
+        a.join()
+        b.join()
+        expected : U64 = ROUNDS.to<U64>().mul(2)
+        frees    : U64 = FREES.atomic_load()
+        Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
+        return(0)
