@@ -4,13 +4,6 @@
 
 // ── fused multiply-add ────────────────────────────────────────────────────────────────────────────
 
-/// An exact (or sticky) result waiting for its rounding.
-record DecSum
-    neg   : Bool
-    coeff : U256
-    exp   : S64
-    pref  : S64
-
 /// a × b + c exactly up to a sticky digit, as (neg, coefficient, exponent, preferred exponent) for one rounding,
 /// the preferred exponent the smaller of the product's and c's: the addend with the larger exponent is scaled up to
 /// the other's while it stays within 75 digits; past that it is scaled to 75 digits and the other one floored to
@@ -20,18 +13,18 @@ record DecSum
 /// :param b: The second operand.
 /// :param c: The third operand.
 /// :returns: a × b + c exactly up to a sticky digit, as (neg, coefficient, exponent, preferred exponent) for one rounding, the preferred exponent the smaller of the product's and c's.
-routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecSum
-    shared pneg   : Bool   = a.neg.bitxor(b.neg)
-    shared pc     : U256   = a.coeff.mul_wide(b.coeff)
-    shared pe     : S64    = a.exp.add(b.exp)
-    shared cc     : U256   = c.coeff.to<U256>()
-    shared c_high : Bool   = c.exp.gt(pe)
-    shared h      : DecSum = c_high
-        ? DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
-        : DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
-    shared l : DecSum = c_high
-        ? DecSum { neg: pneg, coeff: pc, exp: pe, pref: 0 }
-        : DecSum { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
+routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
+    shared pneg   : Bool     = a.neg.bitxor(b.neg)
+    shared pc     : U256     = a.coeff.mul_wide(b.coeff)
+    shared pe     : S64      = a.exp.add(b.exp)
+    shared cc     : U256     = c.coeff.to<U256>()
+    shared c_high : Bool     = c.exp.gt(pe)
+    shared h      : DecExact = c_high
+        ? DecExact { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
+        : DecExact { neg: pneg, coeff: pc, exp: pe, pref: 0 }
+    shared l : DecExact = c_high
+        ? DecExact { neg: pneg, coeff: pc, exp: pe, pref: 0 }
+        : DecExact { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
 
     block entry()
         both_zero : Bool = pc.eq(0).bitand(cc.eq(0))
@@ -117,8 +110,8 @@ routine dec_fma(a: Dec, b: Dec, c: Dec, f: DecFormat) -> Dec
             else       -> return(dec_inf(pneg))
 
     block finite()
-        s : DecSum = dec_fma_exact(a, b, c)
-        return(dec_finish(s.neg, s.coeff, s.exp, s.pref, f))
+        s : DecExact = dec_fma_exact(a, b, c)
+        return(dec_finish(s, f))
 
 // ── square root, hypot ────────────────────────────────────────────────────────────────────────────
 
@@ -151,7 +144,8 @@ routine dec_sqrt_positive(x: Dec, f: DecFormat) -> Dec
         root  : U256 = carry
             ? dec_p10(p.sub(1))
             : s
-        return(dec_finish(false, root, e.add(carry.to<S64>()), f.qmax, f))
+        return(dec_finish(
+            DecExact { neg: false, coeff: root, exp: e.add(carry.to<S64>()), pref: f.qmax }, f))
 
 /// The square root rounded to f: a NaN or a negative nonzero value gives a NaN, a zero or +infinity is itself.
 /// :param x: The operand.
@@ -199,7 +193,8 @@ routine dec_hypot_finite(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
         rest : Bool    = s.mul(s).ne(all)
         st   : Bool    = sx.sticky.bitor(sy.sticky).bitor(sz.sticky).bitor(rest)
         coef : U256    = s.mul(10).add(st.to<U64>().to<U256>())
-        r    : Dec     = dec_finish(false, coef, b.shr(1).sub(1), f.qmax, f)
+        r    : Dec     = dec_finish(
+            DecExact { neg: false, coeff: coef, exp: b.shr(1).sub(1), pref: f.qmax }, f)
         return(r.reduce(f))
 
 /// The decimal exponent of the top digit of c^2 10^(2q) plus one (its digits plus 2q), S64.MIN for a zero.
@@ -252,6 +247,15 @@ routine dec_hypot(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
 
 // ── rounding to an integer, quantize ──────────────────────────────────────────────────────────────
 
+/// What dropping a value's fraction cut off, as the rounding modes read it.
+record DecDroppedFraction
+    /// Whether there was a fraction at all.
+    rest : Bool
+    /// Whether rounding to nearest with ties away moves the magnitude up.
+    nearest : Bool
+    /// Whether rounding to nearest with ties to even moves the magnitude up.
+    even : Bool
+
 /// Whether x comes back from round-to-integral unchanged: a special, a zero, or a value without a fraction.
 /// :param x: The operand.
 /// :returns: Whether x comes back from round-to-integral unchanged.
@@ -283,27 +287,25 @@ routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
         jump decide(q, r.ne(0), twice.eq(unit), twice.gt(unit))
 
     block decide(q: U128, rest: Bool, half: Bool, above: Bool)
-        odd  : Bool = q.bitand(1).eq(1)
-        near : Bool = above.bitor(half)
-        even : Bool = above.bitor(half.bitand(odd))
-        up   : Bool = dec_is_rounded_up(mode, x.neg, rest, near, even)
+        odd  : Bool               = q.bitand(1).eq(1)
+        near : Bool               = above.bitor(half)
+        even : Bool               = above.bitor(half.bitand(odd))
+        cut  : DecDroppedFraction = { rest: rest, nearest: near, even: even }
+        up   : Bool               = dec_is_rounded_up(mode, x.neg, cut)
         return(dec_num(x.neg, q.add(up.to<U128>()), 0))
 
-/// Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up: rest says a fraction is
-/// there, nearest and even what the two rounds to nearest do.
+/// Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
 /// :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
 /// :param neg: Whether the value is negative.
-/// :param rest: Whether it has a fraction.
-/// :param nearest: Whether rounding to nearest with ties away moves it up.
-/// :param even: Whether rounding to nearest with ties to even moves it up.
+/// :param cut: What dropping the fraction cut off.
 /// :returns: Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
-routine dec_is_rounded_up(mode: U32, neg: Bool, rest: Bool, nearest: Bool, even: Bool) -> Bool
+routine dec_is_rounded_up(mode: U32, neg: Bool, cut: DecDroppedFraction) -> Bool
     block entry()
         when mode
-            1    -> return(neg.bitand(rest))
-            2    -> return(neg.bitnot().bitand(rest))
-            3    -> return(nearest)
-            4    -> return(even)
+            1    -> return(neg.bitand(cut.rest))
+            2    -> return(neg.bitnot().bitand(cut.rest))
+            3    -> return(cut.nearest)
+            4    -> return(cut.even)
             else -> return(false)
 
 /// Whether quantize returns a unchanged: neither is a NaN, and both are infinities or their exponents match.
@@ -498,7 +500,7 @@ routine dec_logb(x: Dec, f: DecFormat) -> Dec
 routine dec_from_s64(n: S64, f: DecFormat) -> Dec
     block entry()
         magnitude : U256 = n.abs_diff(0).to<U256>()
-        return(dec_finish(n.lt(0), magnitude, 0, 0, f))
+        return(dec_finish(DecExact { neg: n.lt(0), coeff: magnitude, exp: 0, pref: 0 }, f))
 
 // ── DPD ───────────────────────────────────────────────────────────────────────────────────────────
 

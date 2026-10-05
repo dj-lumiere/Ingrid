@@ -29,6 +29,18 @@ record Dec
     exp   : S64
     coeff : U128
 
+/// An exact (or sticky) value waiting for its one rounding: (-1)^neg × coeff × 10^exp, and the exponent IEEE 754
+/// prefers for the result.
+record DecExact
+    /// Whether the value is negative.
+    neg : Bool
+    /// The coefficient, below 10^77.
+    coeff : U256
+    /// The exponent of the coefficient's last digit.
+    exp : S64
+    /// The exponent the result takes when the digits allow.
+    pref : S64
+
 /// An interchange format: the digits of its coefficient and the range of its exponent, the exponent of the
 /// coefficient's last digit.
 record DecFormat
@@ -380,16 +392,17 @@ routine dec_trailing_zeros(c: U128, cap: S64) -> S64
 /// then takes the exponent nearest pref (trailing zeros stripped while it is below pref, zeros appended while it
 /// is above), an inexact one keeps every digit; above f.qmax the coefficient is padded with zeros, and when it
 /// cannot be the result is an infinity.
-/// :param neg: Whether the result is negative.
-/// :param coeff: The coefficient.
-/// :param exp: The exponent.
-/// :param pref: The preferred exponent.
+/// :param value: The exact value, with its preferred exponent.
 /// :param f: The format the result rounds to.
 /// :returns: (-1)^neg × coeff × 10^exp (coeff below 10^77) rounded half to even to the format f, the exponent as IEEE 754 prefers it.
-routine dec_finish(neg: Bool, coeff: U256, exp: S64, pref: S64, f: DecFormat) -> Dec
-    shared p    : S64 = f.digits
-    shared qmin : S64 = f.qmin
-    shared qmax : S64 = f.qmax
+routine dec_finish(value: DecExact, f: DecFormat) -> Dec
+    shared neg   : Bool = value.neg
+    shared coeff : U256 = value.coeff
+    shared exp   : S64  = value.exp
+    shared pref  : S64  = value.pref
+    shared p     : S64  = f.digits
+    shared qmin  : S64  = f.qmin
+    shared qmax  : S64  = f.qmax
 
     block entry()
         zero : Bool = coeff.eq(0)
@@ -472,7 +485,8 @@ routine dec_finish(neg: Bool, coeff: U256, exp: S64, pref: S64, f: DecFormat) ->
 routine Dec.narrow(me: Me, f: DecFormat) -> Me
     block entry()
         branch me.is_finite()
-            ? return(dec_finish(me.neg, me.coeff.to<U256>(), me.exp, me.exp, f))
+            ? return(dec_finish(
+                DecExact { neg: me.neg, coeff: me.coeff.to<U256>(), exp: me.exp, pref: me.exp }, f))
             : return(me)
 
 /// A value rounded to f and reduced: trailing zeros stripped as far as the exponent range allows (the form every
@@ -484,7 +498,8 @@ routine Dec.reduce(me: Me, f: DecFormat) -> Me
         keep : Bool = me.is_finite().bitnot().bitor(me.coeff.eq(0))
         branch keep
             ? return(me)
-            : return(dec_finish(me.neg, me.coeff.to<U256>(), me.exp, f.qmax, f))
+            : return(dec_finish(
+                DecExact { neg: me.neg, coeff: me.coeff.to<U256>(), exp: me.exp, pref: f.qmax }, f))
 
 // ── the encodings ─────────────────────────────────────────────────────────────────────────────────
 
@@ -691,7 +706,8 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
     block order()
         quick_zero : Bool = h.coeff.eq(0).bitand(l.coeff.ne(0))
         branch quick_zero
-            ? return(dec_finish(l.neg, l.coeff.to<U256>(), l.exp, l.exp, f))
+            ? return(dec_finish(
+                DecExact { neg: l.neg, coeff: l.coeff.to<U256>(), exp: l.exp, pref: l.exp }, f))
             : align()
 
     block align()
@@ -726,7 +742,7 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
         sign : Bool = zero
             ? both
             : neg
-        return(dec_finish(sign, c, e, l.exp, f))
+        return(dec_finish(DecExact { neg: sign, coeff: c, exp: e, pref: l.exp }, f))
 
 /// a × b for an infinity or a NaN among them: a NaN, or an infinity times zero, gives a NaN.
 /// :param a: The first operand.
@@ -756,7 +772,8 @@ routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
     block product()
         neg : Bool = a.neg.bitxor(b.neg)
         e   : S64  = a.exp.add(b.exp)
-        return(dec_finish(neg, a.coeff.mul_wide(b.coeff), e, e, f))
+        return(dec_finish(DecExact { neg: neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e },
+            f))
 
 /// a / b for an infinity or a NaN among them: a NaN or infinity over infinity gives a NaN, an infinity over a
 /// number an infinity, a number over an infinity a zero at the smallest exponent.
@@ -790,7 +807,8 @@ routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
         when
             special       -> return(dec_div_special(a, b, f))
             b.coeff.eq(0) -> by_zero()
-            a.coeff.eq(0) -> return(dec_finish(neg, 0, pref, pref, f))
+            a.coeff.eq(0) -> return(dec_finish(
+                DecExact { neg: neg, coeff: 0, exp: pref, pref: pref }, f))
             else          -> divide()
 
     block by_zero()
@@ -805,7 +823,7 @@ routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
         qr     : U256DivRem = wide_divrem(num, b.coeff.to<U256>())
         sticky : U256       = qr.remainder.ne(0).to<U64>().to<U256>()
         q      : U256       = qr.quotient.bitor(sticky)
-        return(dec_finish(neg, q, pref.sub(shift), pref, f))
+        return(dec_finish(DecExact { neg: neg, coeff: q, exp: pref.sub(shift), pref: pref }, f))
 
 /// -1, 0, or 1 as |a| = ca × 10^ea is below, equal to, or above |b| = cb × 10^eb (both coefficients nonzero): a
 /// different adjusted exponent decides alone, else the coefficient with the larger exponent is scaled to the other

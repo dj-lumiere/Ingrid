@@ -19,6 +19,40 @@ private preset Q128_LINEAR:         F32 = F32.from_bits(0x3F7FDF3B)
 private preset Q256_TOLERANCE:      F64 = F64.from_bits(0x3D719799812DEA11)
 private preset Q256_LINEAR:         F64 = F64.from_bits(0x3FEFFBE76C8B4396)
 
+/// A direction or a point in 3D space: RazorForge's Vector3D, over the quaternion's float.
+/// :typeparam T: The float of the components, F32 or F64.
+record Vector3<T>
+require T: typename
+    /// The x component.
+    x : T
+    /// The y component.
+    y : T
+    /// The z component.
+    z : T
+
+/// The upper-left 3x3 part of a rotation matrix, row after row, m{row}{column}.
+/// :typeparam T: The float of the elements, F32 or F64.
+record Matrix3<T>
+require T: typename
+    /// Row 0, column 0.
+    m00 : T
+    /// Row 0, column 1.
+    m01 : T
+    /// Row 0, column 2.
+    m02 : T
+    /// Row 1, column 0.
+    m10 : T
+    /// Row 1, column 1.
+    m11 : T
+    /// Row 1, column 2.
+    m12 : T
+    /// Row 2, column 0.
+    m20 : T
+    /// Row 2, column 1.
+    m21 : T
+    /// Row 2, column 2.
+    m22 : T
+
 // ── Q128 ──────────────────────────────────────────────────────────────────────────
 
 /// RazorForge's Q128: a quaternion w + xi + yj + zk over F32, RazorForge's B32.
@@ -338,31 +372,27 @@ routine Q128.length(x: F32, y: F32, z: F32) -> F32
         zz : F32 = z.mul_finite(z)
         return(s.add_finite(zz).sqrt())
 
-/// The shortest rotation that turns the direction (ux, uy, uz) onto (vx, vy, vz), neither unit length. Opposite
+/// The shortest rotation that turns the direction `source` onto the direction `target`, neither unit length. Opposite
 /// directions turn half a turn about an axis perpendicular to the first.
-/// :param ux: The first direction's x.
-/// :param uy: The first direction's y.
-/// :param uz: The first direction's z.
-/// :param vx: The second direction's x.
-/// :param vy: The second direction's y.
-/// :param vz: The second direction's z.
+/// :param source: The direction to turn from.
+/// :param target: The direction to turn onto.
 /// :returns: The rotation.
 /// :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
-routine Q128.from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Me
-    shared la : F32 = Me.length(ux, uy, uz)
-    shared lb : F32 = Me.length(vx, vy, vz)
+routine Q128.from_to(source: Vector3<F32>, target: Vector3<F32>) -> Me
+    shared la : F32 = Me.length(source.x, source.y, source.z)
+    shared lb : F32 = Me.length(target.x, target.y, target.z)
 
     block entry()
         degenerate : Bool = la.eq(0.0).bitor(lb.eq(0.0))
         branch degenerate
             ? return(Me.identity())
             : continue
-        au : F32 = ux.div_finite(la)
-        bu : F32 = uy.div_finite(la)
-        cu : F32 = uz.div_finite(la)
-        av : F32 = vx.div_finite(lb)
-        bv : F32 = vy.div_finite(lb)
-        cv : F32 = vz.div_finite(lb)
+        au : F32 = source.x.div_finite(la)
+        bu : F32 = source.y.div_finite(la)
+        cu : F32 = source.z.div_finite(la)
+        av : F32 = target.x.div_finite(lb)
+        bv : F32 = target.y.div_finite(lb)
+        cv : F32 = target.z.div_finite(lb)
         aa : F32 = au.mul_finite(av)
         bb : F32 = bu.mul_finite(bv)
         s  : F32 = aa.add_finite(bb)
@@ -414,61 +444,52 @@ routine Q128.half_turn(ux: F32, uy: F32, uz: F32) -> Me
 
 /// The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
 /// largest of 4w, 4x, 4y, and 4z to stay well conditioned.
-/// :param m00: The element in row 0, column 0.
-/// :param m01: The element in row 0, column 1.
-/// :param m02: The element in row 0, column 2.
-/// :param m10: The element in row 1, column 0.
-/// :param m11: The element in row 1, column 1.
-/// :param m12: The element in row 1, column 2.
-/// :param m20: The element in row 2, column 0.
-/// :param m21: The element in row 2, column 1.
-/// :param m22: The element in row 2, column 2.
+/// :param m: The 3x3 part.
 /// :returns: The rotation.
 /// :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
 ///     or `NumericOverflowError` when one is infinite.
-routine Q128.from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
-    m21: F32, m22: F32) -> Me
-    shared trace : F32 = m00.add_finite(m11).add_finite(m22)
+routine Q128.from_matrix(m: Matrix3<F32>) -> Me
+    shared trace : F32 = m.m00.add_finite(m.m11).add_finite(m.m22)
 
     block entry()
         when
-            trace.gt(0.0)                   -> by_w()
-            m00.gt(m11).bitand(m00.gt(m22)) -> by_x()
-            m11.gt(m22)                     -> by_y()
-            else                            -> by_z()
+            trace.gt(0.0)                           -> by_w()
+            m.m00.gt(m.m11).bitand(m.m00.gt(m.m22)) -> by_x()
+            m.m11.gt(m.m22)                         -> by_y()
+            else                                    -> by_z()
 
     block by_w()
         sw : F32 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
         w  : F32 = F32.mul_finite(0.25, sw)
-        x  : F32 = m21.sub_finite(m12).div_finite(sw)
-        y  : F32 = m02.sub_finite(m20).div_finite(sw)
-        z  : F32 = m10.sub_finite(m01).div_finite(sw)
+        x  : F32 = m.m21.sub_finite(m.m12).div_finite(sw)
+        y  : F32 = m.m02.sub_finite(m.m20).div_finite(sw)
+        z  : F32 = m.m10.sub_finite(m.m01).div_finite(sw)
         return({ w: w, x: x, y: y, z: z })
 
     block by_x()
-        sx : F32 = F32.add_finite(1.0, m00).sub_finite(m11).sub_finite(m22)
+        sx : F32 = F32.add_finite(1.0, m.m00).sub_finite(m.m11).sub_finite(m.m22)
         s  : F32 = sx.sqrt().mul_finite(2.0)
-        w  : F32 = m21.sub_finite(m12).div_finite(s)
+        w  : F32 = m.m21.sub_finite(m.m12).div_finite(s)
         x  : F32 = F32.mul_finite(0.25, s)
-        y  : F32 = m01.add_finite(m10).div_finite(s)
-        z  : F32 = m02.add_finite(m20).div_finite(s)
+        y  : F32 = m.m01.add_finite(m.m10).div_finite(s)
+        z  : F32 = m.m02.add_finite(m.m20).div_finite(s)
         return({ w: w, x: x, y: y, z: z })
 
     block by_y()
-        sy : F32 = F32.add_finite(1.0, m11).sub_finite(m00).sub_finite(m22)
+        sy : F32 = F32.add_finite(1.0, m.m11).sub_finite(m.m00).sub_finite(m.m22)
         s  : F32 = sy.sqrt().mul_finite(2.0)
-        w  : F32 = m02.sub_finite(m20).div_finite(s)
-        x  : F32 = m01.add_finite(m10).div_finite(s)
+        w  : F32 = m.m02.sub_finite(m.m20).div_finite(s)
+        x  : F32 = m.m01.add_finite(m.m10).div_finite(s)
         y  : F32 = F32.mul_finite(0.25, s)
-        z  : F32 = m12.add_finite(m21).div_finite(s)
+        z  : F32 = m.m12.add_finite(m.m21).div_finite(s)
         return({ w: w, x: x, y: y, z: z })
 
     block by_z()
-        sz : F32 = F32.add_finite(1.0, m22).sub_finite(m00).sub_finite(m11)
+        sz : F32 = F32.add_finite(1.0, m.m22).sub_finite(m.m00).sub_finite(m.m11)
         s  : F32 = sz.sqrt().mul_finite(2.0)
-        w  : F32 = m10.sub_finite(m01).div_finite(s)
-        x  : F32 = m02.add_finite(m20).div_finite(s)
-        y  : F32 = m12.add_finite(m21).div_finite(s)
+        w  : F32 = m.m10.sub_finite(m.m01).div_finite(s)
+        x  : F32 = m.m02.add_finite(m.m20).div_finite(s)
+        y  : F32 = m.m12.add_finite(m.m21).div_finite(s)
         z  : F32 = F32.mul_finite(0.25, s)
         return({ w: w, x: x, y: y, z: z })
 
@@ -790,7 +811,9 @@ routine q128_from_axis_angle(ax: F32, ay: F32, az: F32, angle: F32) -> Words
 #[export("ingrid_q128_from_to"), inline]
 routine q128_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Words
     block entry()
-        q : Q128 = Q128.from_to(ux, uy, uz, vx, vy, vz)
+        source : Vector3<F32> = { x: ux, y: uy, z: uz }
+        target : Vector3<F32> = { x: vx, y: vy, z: vz }
+        q      : Q128         = Q128.from_to(source, target)
         return(q.words())
 
 /// Q128.from_matrix, for the F32 elements m{row}{column} of the upper-left 3x3 part.
@@ -810,7 +833,9 @@ routine q128_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Wo
 routine q128_from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
     m21: F32, m22: F32) -> Words
     block entry()
-        q : Q128 = Q128.from_matrix(m00, m01, m02, m10, m11, m12, m20, m21, m22)
+        m : Matrix3<F32> = { m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12, m20: m20,
+            m21: m21, m22: m22 }
+        q : Q128         = Q128.from_matrix(m)
         return(q.words())
 
 /// The rotation by Euler angles, for Q128.from_euler.
@@ -1143,31 +1168,27 @@ routine Q256.length(x: F64, y: F64, z: F64) -> F64
         zz : F64 = z.mul_finite(z)
         return(s.add_finite(zz).sqrt())
 
-/// The shortest rotation that turns the direction (ux, uy, uz) onto (vx, vy, vz), neither unit length. Opposite
+/// The shortest rotation that turns the direction `source` onto the direction `target`, neither unit length. Opposite
 /// directions turn half a turn about an axis perpendicular to the first.
-/// :param ux: The first direction's x.
-/// :param uy: The first direction's y.
-/// :param uz: The first direction's z.
-/// :param vx: The second direction's x.
-/// :param vy: The second direction's y.
-/// :param vz: The second direction's z.
+/// :param source: The direction to turn from.
+/// :param target: The direction to turn onto.
 /// :returns: The rotation.
 /// :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
-routine Q256.from_to(ux: F64, uy: F64, uz: F64, vx: F64, vy: F64, vz: F64) -> Me
-    shared la : F64 = Me.length(ux, uy, uz)
-    shared lb : F64 = Me.length(vx, vy, vz)
+routine Q256.from_to(source: Vector3<F64>, target: Vector3<F64>) -> Me
+    shared la : F64 = Me.length(source.x, source.y, source.z)
+    shared lb : F64 = Me.length(target.x, target.y, target.z)
 
     block entry()
         degenerate : Bool = la.eq(0.0).bitor(lb.eq(0.0))
         branch degenerate
             ? return(Me.identity())
             : continue
-        au : F64 = ux.div_finite(la)
-        bu : F64 = uy.div_finite(la)
-        cu : F64 = uz.div_finite(la)
-        av : F64 = vx.div_finite(lb)
-        bv : F64 = vy.div_finite(lb)
-        cv : F64 = vz.div_finite(lb)
+        au : F64 = source.x.div_finite(la)
+        bu : F64 = source.y.div_finite(la)
+        cu : F64 = source.z.div_finite(la)
+        av : F64 = target.x.div_finite(lb)
+        bv : F64 = target.y.div_finite(lb)
+        cv : F64 = target.z.div_finite(lb)
         aa : F64 = au.mul_finite(av)
         bb : F64 = bu.mul_finite(bv)
         s  : F64 = aa.add_finite(bb)
@@ -1219,61 +1240,52 @@ routine Q256.half_turn(ux: F64, uy: F64, uz: F64) -> Me
 
 /// The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
 /// largest of 4w, 4x, 4y, and 4z to stay well conditioned.
-/// :param m00: The element in row 0, column 0.
-/// :param m01: The element in row 0, column 1.
-/// :param m02: The element in row 0, column 2.
-/// :param m10: The element in row 1, column 0.
-/// :param m11: The element in row 1, column 1.
-/// :param m12: The element in row 1, column 2.
-/// :param m20: The element in row 2, column 0.
-/// :param m21: The element in row 2, column 1.
-/// :param m22: The element in row 2, column 2.
+/// :param m: The 3x3 part.
 /// :returns: The rotation.
 /// :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
 ///     or `NumericOverflowError` when one is infinite.
-routine Q256.from_matrix(m00: F64, m01: F64, m02: F64, m10: F64, m11: F64, m12: F64, m20: F64,
-    m21: F64, m22: F64) -> Me
-    shared trace : F64 = m00.add_finite(m11).add_finite(m22)
+routine Q256.from_matrix(m: Matrix3<F64>) -> Me
+    shared trace : F64 = m.m00.add_finite(m.m11).add_finite(m.m22)
 
     block entry()
         when
-            trace.gt(0.0)                   -> by_w()
-            m00.gt(m11).bitand(m00.gt(m22)) -> by_x()
-            m11.gt(m22)                     -> by_y()
-            else                            -> by_z()
+            trace.gt(0.0)                           -> by_w()
+            m.m00.gt(m.m11).bitand(m.m00.gt(m.m22)) -> by_x()
+            m.m11.gt(m.m22)                         -> by_y()
+            else                                    -> by_z()
 
     block by_w()
         sw : F64 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
         w  : F64 = F64.mul_finite(0.25, sw)
-        x  : F64 = m21.sub_finite(m12).div_finite(sw)
-        y  : F64 = m02.sub_finite(m20).div_finite(sw)
-        z  : F64 = m10.sub_finite(m01).div_finite(sw)
+        x  : F64 = m.m21.sub_finite(m.m12).div_finite(sw)
+        y  : F64 = m.m02.sub_finite(m.m20).div_finite(sw)
+        z  : F64 = m.m10.sub_finite(m.m01).div_finite(sw)
         return({ w: w, x: x, y: y, z: z })
 
     block by_x()
-        sx : F64 = F64.add_finite(1.0, m00).sub_finite(m11).sub_finite(m22)
+        sx : F64 = F64.add_finite(1.0, m.m00).sub_finite(m.m11).sub_finite(m.m22)
         s  : F64 = sx.sqrt().mul_finite(2.0)
-        w  : F64 = m21.sub_finite(m12).div_finite(s)
+        w  : F64 = m.m21.sub_finite(m.m12).div_finite(s)
         x  : F64 = F64.mul_finite(0.25, s)
-        y  : F64 = m01.add_finite(m10).div_finite(s)
-        z  : F64 = m02.add_finite(m20).div_finite(s)
+        y  : F64 = m.m01.add_finite(m.m10).div_finite(s)
+        z  : F64 = m.m02.add_finite(m.m20).div_finite(s)
         return({ w: w, x: x, y: y, z: z })
 
     block by_y()
-        sy : F64 = F64.add_finite(1.0, m11).sub_finite(m00).sub_finite(m22)
+        sy : F64 = F64.add_finite(1.0, m.m11).sub_finite(m.m00).sub_finite(m.m22)
         s  : F64 = sy.sqrt().mul_finite(2.0)
-        w  : F64 = m02.sub_finite(m20).div_finite(s)
-        x  : F64 = m01.add_finite(m10).div_finite(s)
+        w  : F64 = m.m02.sub_finite(m.m20).div_finite(s)
+        x  : F64 = m.m01.add_finite(m.m10).div_finite(s)
         y  : F64 = F64.mul_finite(0.25, s)
-        z  : F64 = m12.add_finite(m21).div_finite(s)
+        z  : F64 = m.m12.add_finite(m.m21).div_finite(s)
         return({ w: w, x: x, y: y, z: z })
 
     block by_z()
-        sz : F64 = F64.add_finite(1.0, m22).sub_finite(m00).sub_finite(m11)
+        sz : F64 = F64.add_finite(1.0, m.m22).sub_finite(m.m00).sub_finite(m.m11)
         s  : F64 = sz.sqrt().mul_finite(2.0)
-        w  : F64 = m10.sub_finite(m01).div_finite(s)
-        x  : F64 = m02.add_finite(m20).div_finite(s)
-        y  : F64 = m12.add_finite(m21).div_finite(s)
+        w  : F64 = m.m10.sub_finite(m.m01).div_finite(s)
+        x  : F64 = m.m02.add_finite(m.m20).div_finite(s)
+        y  : F64 = m.m12.add_finite(m.m21).div_finite(s)
         z  : F64 = F64.mul_finite(0.25, s)
         return({ w: w, x: x, y: y, z: z })
 
@@ -1595,8 +1607,9 @@ routine q256_from_axis_angle(ax: F32, ay: F32, az: F32, angle: F64) -> Words
 #[export("ingrid_q256_from_to"), inline]
 routine q256_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Words
     block entry()
-        q : Q256 = Q256.from_to(ux.to<F64>(), uy.to<F64>(), uz.to<F64>(), vx.to<F64>(),
-            vy.to<F64>(), vz.to<F64>())
+        source : Vector3<F64> = { x: ux.to<F64>(), y: uy.to<F64>(), z: uz.to<F64>() }
+        target : Vector3<F64> = { x: vx.to<F64>(), y: vy.to<F64>(), z: vz.to<F64>() }
+        q      : Q256         = Q256.from_to(source, target)
         return(q.words())
 
 /// Q256.from_matrix, for the F32 elements m{row}{column} of the upper-left 3x3 part.
@@ -1616,8 +1629,10 @@ routine q256_from_to(ux: F32, uy: F32, uz: F32, vx: F32, vy: F32, vz: F32) -> Wo
 routine q256_from_matrix(m00: F32, m01: F32, m02: F32, m10: F32, m11: F32, m12: F32, m20: F32,
     m21: F32, m22: F32) -> Words
     block entry()
-        q : Q256 = Q256.from_matrix(m00.to<F64>(), m01.to<F64>(), m02.to<F64>(), m10.to<F64>(),
-            m11.to<F64>(), m12.to<F64>(), m20.to<F64>(), m21.to<F64>(), m22.to<F64>())
+        m : Matrix3<F64> = { m00: m00.to<F64>(), m01: m01.to<F64>(), m02: m02.to<F64>(),
+            m10: m10.to<F64>(), m11: m11.to<F64>(), m12: m12.to<F64>(), m20: m20.to<F64>(),
+            m21: m21.to<F64>(), m22: m22.to<F64>() }
+        q : Q256         = Q256.from_matrix(m)
         return(q.words())
 
 /// The rotation by Euler angles, for Q256.from_euler.

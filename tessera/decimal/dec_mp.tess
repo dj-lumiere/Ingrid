@@ -36,6 +36,17 @@ record MpApprox
     v   : Mp
     err : F64
 
+/// A number in a working buffer before it is packed into an Mp: (-1)^neg × limbs[0 .. len) × 2^scale.
+record MpUnpacked
+    /// Whether the number is negative.
+    neg : Bool
+    /// The working buffer, least significant limb first.
+    limbs : @Array<U64, 41>
+    /// How many limbs of the buffer are in use.
+    len : USize
+    /// The power of two the limbs are scaled by.
+    scale : S64
+
 /// A working buffer: twice MP_CAP limbs and one.
 record MpBuf
     l : Array<U64, 41>
@@ -128,17 +139,17 @@ routine mp_word(src: @U64, len: USize, i: S64) -> U64
             ? return(src.stride(i.to<USize>()).load())
             : return(0)
 
-/// The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
-/// :param neg: The sign.
-/// :param buf: The limbs, least significant first.
-/// :param len: How many limbs of buf are in use.
-/// :param scale: The power of two the limbs are scaled by.
+/// The unpacked number as an Mp of n limbs, truncated toward zero.
+/// :param value: The number: its sign, its limbs in a working buffer, and their scale.
 /// :param n: The precision in limbs.
-/// :returns: The number buf[0 .. len) × 2^scale as an Mp of n limbs, its sign neg, truncated toward zero.
-routine mp_pack(neg: Bool, buf: @Array<U64, 41>, len: USize, scale: S64, n: USize) -> Mp
-    shared r   : @Mp  <- uninit
-    shared src : @U64 = buf.to<@U64>()
-    shared dst : @U64 = r.m.to<@U64>()
+/// :returns: The number as an Mp of n limbs, truncated toward zero.
+routine mp_pack(value: MpUnpacked, n: USize) -> Mp
+    shared neg   : Bool  = value.neg
+    shared len   : USize = value.len
+    shared scale : S64   = value.scale
+    shared r     : @Mp   <- uninit
+    shared src   : @U64  = value.limbs.to<@U64>()
+    shared dst   : @U64  = r.m.to<@U64>()
 
     block entry()
         jump find(len)
@@ -186,7 +197,7 @@ routine mp_of_u128(v: U128, scale: S64, n: USize) -> Mp
     block entry()
         buf.setitem(0, v.to_wrap<U64>())
         buf.setitem(1, v.shr(64).to_wrap<U64>())
-        return(mp_pack(false, buf, 2, scale, n))
+        return(mp_pack(MpUnpacked { neg: false, limbs: buf, len: 2, scale: scale }, n))
 
 /// An F64 exactly (finite).
 /// :param x: The float (finite).
@@ -424,7 +435,8 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
 
     block general(size: USize)
         scale : S64 = a.exp.add(b.exp).sub(size.to<S64>().mul(64))
-        return(mp_pack(a.neg.bitxor(b.neg), prod, size, scale, n))
+        return(mp_pack(
+            MpUnpacked { neg: a.neg.bitxor(b.neg), limbs: prod, len: size, scale: scale }, n))
 
 /// a × k for a small k > 0, truncated.
 /// :param a: The first operand.
@@ -456,7 +468,7 @@ routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
     block pack(carry: U64)
         carry.store_into(pb.stride(n))
         scale : S64 = a.exp.sub(n.to<S64>().mul(64))
-        return(mp_pack(a.neg, buf, n.add(1), scale, n))
+        return(mp_pack(MpUnpacked { neg: a.neg, limbs: buf, len: n.add(1), scale: scale }, n))
 
 /// a / k for a small k > 0, truncated: one limb more of quotient than kept. The dividend is a's mantissa × 2^64,
 /// shifted up with the divisor until the divisor's top bit is set, so each quotient limb is one 2-by-1 division.
@@ -495,7 +507,7 @@ routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
 
     block pack()
         scale : S64 = a.exp.sub(n.to<S64>().mul(64)).sub(64)
-        return(mp_pack(a.neg, buf, n.add(1), scale, n))
+        return(mp_pack(MpUnpacked { neg: a.neg, limbs: buf, len: n.add(1), scale: scale }, n))
 
 /// a + b (signed), truncated: aligned under one guard limb, so what drops off the smaller one lies below the guard.
 /// Limb i of the aligned larger operand is its limb i - 1 (limb 0 the guard), and limb i of the aligned smaller one
@@ -570,7 +582,7 @@ routine mp_add(a: Mp, b: Mp, n: USize) -> Mp
     // the sum is buf[0 .. len): mp_pack reads nothing above it
     block pack(len: USize)
         scale : S64 = big.exp.load().sub(n.to<S64>().mul(64)).sub(64)
-        return(mp_pack(big.neg.load(), buf, len, scale, n))
+        return(mp_pack(MpUnpacked { neg: big.neg.load(), limbs: buf, len: len, scale: scale }, n))
 
 /// a - b, truncated.
 /// :param a: The minuend.
