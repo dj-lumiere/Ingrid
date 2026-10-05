@@ -42,42 +42,35 @@ routine cross_difference(a: F32, b: F32, c: F32, d: F32) -> F32
         cd : F32 = c.mul_finite(d)
         return(ab.sub_finite(cd))
 
-/// a × p - b × q + c × r.
-/// :param a: The first factor of the first product.
-/// :param p: The second factor of the first product.
-/// :param b: The first factor of the second product.
-/// :param q: The second factor of the second product.
-/// :param c: The first factor of the third product.
-/// :param r: The second factor of the third product.
+/// row.x × minors.x - row.y × minors.y + row.z × minors.z: three elements of a row, each times the 2x2 determinant
+/// that goes with it.
+/// :param row: The row's three elements.
+/// :param minors: The three 2x2 determinants, in the same order.
 /// :returns: The sum.
 /// :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
 ///     infinite.
 #inline
-routine cofactor(a: F32, p: F32, b: F32, q: F32, c: F32, r: F32) -> F32
+routine cofactor(row: Vector3D<F32>, minors: Vector3D<F32>) -> F32
     block entry()
-        ap : F32 = a.mul_finite(p)
-        bq : F32 = b.mul_finite(q)
+        ap : F32 = row.x.mul_finite(minors.x)
+        bq : F32 = row.y.mul_finite(minors.y)
         d  : F32 = ap.sub_finite(bq)
-        cr : F32 = c.mul_finite(r)
+        cr : F32 = row.z.mul_finite(minors.z)
         return(d.add_finite(cr))
 
-/// -a × p + b × q - c × r.
-/// :param a: The first factor of the first product.
-/// :param p: The second factor of the first product.
-/// :param b: The first factor of the second product.
-/// :param q: The second factor of the second product.
-/// :param c: The first factor of the third product.
-/// :param r: The second factor of the third product.
+/// -row.x × minors.x + row.y × minors.y - row.z × minors.z: the cofactor with the opposite sign.
+/// :param row: The row's three elements.
+/// :param minors: The three 2x2 determinants, in the same order.
 /// :returns: The sum.
 /// :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
 ///     infinite.
 #inline
-routine negated_cofactor(a: F32, p: F32, b: F32, q: F32, c: F32, r: F32) -> F32
+routine negated_cofactor(row: Vector3D<F32>, minors: Vector3D<F32>) -> F32
     block entry()
-        ap : F32 = a.neg().mul_finite(p)
-        bq : F32 = b.mul_finite(q)
+        ap : F32 = row.x.neg().mul_finite(minors.x)
+        bq : F32 = row.y.mul_finite(minors.y)
         d  : F32 = ap.add_finite(bq)
-        cr : F32 = c.mul_finite(r)
+        cr : F32 = row.z.mul_finite(minors.z)
         return(d.sub_finite(cr))
 
 /// The determinant, by cofactor expansion along the top row with the bottom two rows' 2x2 determinants.
@@ -110,10 +103,14 @@ routine m4_determinant(m00: F32, m01: F32, m02: F32, m03: F32, m10: F32, m11: F3
         s3 : F32 = cross_difference(m21, m32, m22, m31)
         s4 : F32 = cross_difference(m21, m33, m23, m31)
         s5 : F32 = cross_difference(m22, m33, m23, m32)
-        d0 : F32 = m00.mul_finite(cofactor(m11, s5, m12, s4, m13, s3))
-        d1 : F32 = m01.mul_finite(cofactor(m10, s5, m12, s2, m13, s1))
-        d2 : F32 = m02.mul_finite(cofactor(m10, s4, m11, s2, m13, s0))
-        d3 : F32 = m03.mul_finite(cofactor(m10, s3, m11, s1, m12, s0))
+        d0 : F32 = m00.mul_finite(cofactor(Vector3D<F32> { x: m11, y: m12, z: m13 },
+            Vector3D<F32> { x: s5, y: s4, z: s3 }))
+        d1 : F32 = m01.mul_finite(cofactor(Vector3D<F32> { x: m10, y: m12, z: m13 },
+            Vector3D<F32> { x: s5, y: s2, z: s1 }))
+        d2 : F32 = m02.mul_finite(cofactor(Vector3D<F32> { x: m10, y: m11, z: m13 },
+            Vector3D<F32> { x: s4, y: s2, z: s0 }))
+        d3 : F32 = m03.mul_finite(cofactor(Vector3D<F32> { x: m10, y: m11, z: m12 },
+            Vector3D<F32> { x: s3, y: s1, z: s0 }))
         e  : F32 = d0.sub_finite(d1).add_finite(d2)
         return(e.sub_finite(d3))
 
@@ -165,22 +162,38 @@ routine m4_inverse(m00: F32, m01: F32, m02: F32, m03: F32, m10: F32, m11: F32, m
             : adjugate(F32.div_finite(1.0, det))
 
     block adjugate(inv: F32)
-        r00 : F32 = cofactor(m11, b5, m12, b4, m13, b3).mul_finite(inv)
-        r01 : F32 = negated_cofactor(m01, b5, m02, b4, m03, b3).mul_finite(inv)
-        r02 : F32 = cofactor(m31, a5, m32, a4, m33, a3).mul_finite(inv)
-        r03 : F32 = negated_cofactor(m21, a5, m22, a4, m23, a3).mul_finite(inv)
-        r10 : F32 = negated_cofactor(m10, b5, m12, b2, m13, b1).mul_finite(inv)
-        r11 : F32 = cofactor(m00, b5, m02, b2, m03, b1).mul_finite(inv)
-        r12 : F32 = negated_cofactor(m30, a5, m32, a2, m33, a1).mul_finite(inv)
-        r13 : F32 = cofactor(m20, a5, m22, a2, m23, a1).mul_finite(inv)
-        r20 : F32 = cofactor(m10, b4, m11, b2, m13, b0).mul_finite(inv)
-        r21 : F32 = negated_cofactor(m00, b4, m01, b2, m03, b0).mul_finite(inv)
-        r22 : F32 = cofactor(m30, a4, m31, a2, m33, a0).mul_finite(inv)
-        r23 : F32 = negated_cofactor(m20, a4, m21, a2, m23, a0).mul_finite(inv)
-        r30 : F32 = negated_cofactor(m10, b3, m11, b1, m12, b0).mul_finite(inv)
-        r31 : F32 = cofactor(m00, b3, m01, b1, m02, b0).mul_finite(inv)
-        r32 : F32 = negated_cofactor(m30, a3, m31, a1, m32, a0).mul_finite(inv)
-        r33 : F32 = cofactor(m20, a3, m21, a1, m22, a0).mul_finite(inv)
+        r00 : F32 = cofactor(Vector3D<F32> { x: m11, y: m12, z: m13 },
+            Vector3D<F32> { x: b5, y: b4, z: b3 }).mul_finite(inv)
+        r01 : F32 = negated_cofactor(Vector3D<F32> { x: m01, y: m02, z: m03 },
+            Vector3D<F32> { x: b5, y: b4, z: b3 }).mul_finite(inv)
+        r02 : F32 = cofactor(Vector3D<F32> { x: m31, y: m32, z: m33 },
+            Vector3D<F32> { x: a5, y: a4, z: a3 }).mul_finite(inv)
+        r03 : F32 = negated_cofactor(Vector3D<F32> { x: m21, y: m22, z: m23 },
+            Vector3D<F32> { x: a5, y: a4, z: a3 }).mul_finite(inv)
+        r10 : F32 = negated_cofactor(Vector3D<F32> { x: m10, y: m12, z: m13 },
+            Vector3D<F32> { x: b5, y: b2, z: b1 }).mul_finite(inv)
+        r11 : F32 = cofactor(Vector3D<F32> { x: m00, y: m02, z: m03 },
+            Vector3D<F32> { x: b5, y: b2, z: b1 }).mul_finite(inv)
+        r12 : F32 = negated_cofactor(Vector3D<F32> { x: m30, y: m32, z: m33 },
+            Vector3D<F32> { x: a5, y: a2, z: a1 }).mul_finite(inv)
+        r13 : F32 = cofactor(Vector3D<F32> { x: m20, y: m22, z: m23 },
+            Vector3D<F32> { x: a5, y: a2, z: a1 }).mul_finite(inv)
+        r20 : F32 = cofactor(Vector3D<F32> { x: m10, y: m11, z: m13 },
+            Vector3D<F32> { x: b4, y: b2, z: b0 }).mul_finite(inv)
+        r21 : F32 = negated_cofactor(Vector3D<F32> { x: m00, y: m01, z: m03 },
+            Vector3D<F32> { x: b4, y: b2, z: b0 }).mul_finite(inv)
+        r22 : F32 = cofactor(Vector3D<F32> { x: m30, y: m31, z: m33 },
+            Vector3D<F32> { x: a4, y: a2, z: a0 }).mul_finite(inv)
+        r23 : F32 = negated_cofactor(Vector3D<F32> { x: m20, y: m21, z: m23 },
+            Vector3D<F32> { x: a4, y: a2, z: a0 }).mul_finite(inv)
+        r30 : F32 = negated_cofactor(Vector3D<F32> { x: m10, y: m11, z: m12 },
+            Vector3D<F32> { x: b3, y: b1, z: b0 }).mul_finite(inv)
+        r31 : F32 = cofactor(Vector3D<F32> { x: m00, y: m01, z: m02 },
+            Vector3D<F32> { x: b3, y: b1, z: b0 }).mul_finite(inv)
+        r32 : F32 = negated_cofactor(Vector3D<F32> { x: m30, y: m31, z: m32 },
+            Vector3D<F32> { x: a3, y: a1, z: a0 }).mul_finite(inv)
+        r33 : F32 = cofactor(Vector3D<F32> { x: m20, y: m21, z: m22 },
+            Vector3D<F32> { x: a3, y: a1, z: a0 }).mul_finite(inv)
         return({ m00: r00, m10: r10, m20: r20, m30: r30, m01: r01, m11: r11, m21: r21, m31: r31,
             m02: r02, m12: r12, m22: r22, m32: r32, m03: r03, m13: r13, m23: r23, m33: r33 })
 
