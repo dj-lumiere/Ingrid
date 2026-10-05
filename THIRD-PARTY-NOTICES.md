@@ -60,7 +60,8 @@ Used by the RazorForge arbitrary-precision engines: **`Real`** (`RealEngine`) an
 (`IntegerEngine`, built on the same limb layer). The limb primitives, the NTT multiplication over
 five ~2^62 primes, Newton-reciprocal division and square root, the rounding core, decimal
 conversion, and the transcendentals with Ziv correct-rounding loops are ports of LibBF (64-bit limb
-configuration).
+configuration). The engines run in Ingrid: `tessera/generated/numerics.tess` is written from them by
+`RazorForge export-ingrid`, so it is a derivative of LibBF too.
 
 - Project: **LibBF** — https://bellard.org/libbf/
 - Copyright © 2017-2025 Fabrice Bellard.
@@ -95,7 +96,8 @@ THE SOFTWARE.
 Used by the RazorForge **`Integer`** engine (`IntegerEngine`, `Integer`). The engine replaced the
 LibTomMath-backed runtime and follows its integer semantics and algorithms: sign-magnitude values,
 Euclidean division, binary GCD, two's-complement bitwise operations on negative values, and the radix
-text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36).
+text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36). The engine runs in Ingrid as
+part of `tessera/generated/numerics.tess`.
 
 - Project: **LibTomMath** — https://github.com/libtom/libtommath
 - Copyright © Tom St Denis and LibTomMath contributors.

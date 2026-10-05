@@ -1,0 +1,908 @@
+// Integer and Real (Ingrid/tessera/generated/numerics.tess, written from RazorForge's engines) through the C ABI, as
+// RazorForge calls them. numerics.expected holds what this engine computed when it moved here, after RazorForge
+// programs gave the same results bit for bit with the engines running in RazorForge and running here. The
+// operands come from splitmix64: integers of 0 to 159 limbs (zero, all-ones and one-bit limbs among random ones, either
+// sign), reals of 1 to 6 limbs with exponents from -20 to 19. Each result prints as its status, sign, length (and a
+// real's exponent) and a mix of its limbs. Last, the call protocol: a call with too little scratch or too small a
+// result buffer says what it needs, and retrying with more until the call is done gives the same result.
+
+import Standard::Format
+import Standard::Os
+
+global STATE: @U64 <- 0x0123456789ABCDEF
+
+/// The limbs of the first operand.
+global A: @Array<U64, 256>
+
+/// The limbs of the second operand.
+global B: @Array<U64, 256>
+
+/// The limbs of a third operand (a real below 1).
+global Z: @Array<U64, 256>
+
+/// A result's limbs.
+global OUT: @Array<U64, 4096>
+
+/// A second result's limbs (a remainder).
+global OUT2: @Array<U64, 4096>
+
+/// The scratch every call gets.
+global SCRATCH: @Array<U64, 1048576>
+
+/// Text, one code point per element.
+global TEXT: @Array<U32, 16384>
+
+preset SCRATCH_ROOM: U64 = 1048576
+preset OUT_ROOM: U64 = 4096
+preset TEXT_ROOM: U64 = 16384
+preset INTEGERS: U64 = 48
+preset REALS: U64 = 48
+preset ONE: U64 = 1
+
+/// ingrid_integer_add.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_add")]
+routine c_integer_add(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+
+/// ingrid_integer_mul.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_mul")]
+routine c_integer_mul(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_mul_scratch_size.
+/// :param a_len: a's limbs.
+/// :param b_len: b's limbs.
+/// :returns: The scratch the product takes.
+#[external("c"), symbol("ingrid_integer_mul_scratch_size")]
+routine c_integer_mul_scratch_size(a_len: U64, b_len: U64) -> U64
+
+/// ingrid_integer_divmod.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param q_out: The quotient's buffer.
+/// :param q_cap: Its limbs.
+/// :param r_out: The remainder's buffer.
+/// :param r_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status, the quotient's length and sign, and the remainder's length.
+#[external("c"), symbol("ingrid_integer_divmod")]
+routine c_integer_divmod(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    q_out: @U64, q_cap: U64, r_out: @U64, r_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_shift_left.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param bits: The shift.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_shift_left")]
+routine c_integer_shift_left(a_neg: U64, a_len: U64, a_tab: @U64, bits: U64, out: @U64,
+    out_cap: U64) -> Words
+
+/// ingrid_integer_shift_right.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param bits: The shift.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_shift_right")]
+routine c_integer_shift_right(a_neg: U64, a_len: U64, a_tab: @U64, bits: U64, out: @U64,
+    out_cap: U64) -> Words
+
+/// ingrid_integer_and.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_and")]
+routine c_integer_and(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+
+/// ingrid_integer_or.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_or")]
+routine c_integer_or(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+
+/// ingrid_integer_xor.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_xor")]
+routine c_integer_xor(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+
+/// ingrid_integer_pow.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param e: The exponent.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length and sign.
+#[external("c"), symbol("ingrid_integer_pow")]
+routine c_integer_pow(a_neg: U64, a_len: U64, a_tab: @U64, e: U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_sqrtrem.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param s_out: The root's buffer.
+/// :param s_cap: Its limbs.
+/// :param r_out: The remainder's buffer.
+/// :param r_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status, the root's length, and the remainder's length.
+#[external("c"), symbol("ingrid_integer_sqrtrem")]
+routine c_integer_sqrtrem(a_len: U64, a_tab: @U64, s_out: @U64, s_cap: U64, r_out: @U64, r_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_gcd.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length.
+#[external("c"), symbol("ingrid_integer_gcd")]
+routine c_integer_gcd(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_lcm.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length.
+#[external("c"), symbol("ingrid_integer_lcm")]
+routine c_integer_lcm(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_compare.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_neg: 1 when b is negative.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :returns: -1, 0 or 1.
+#[external("c"), symbol("ingrid_integer_compare")]
+routine c_integer_compare(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64,
+    b_tab: @U64) -> S64
+
+/// ingrid_integer_to_text.
+/// :param a_neg: 1 when a is negative.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param radix: The radix.
+/// :param out: The characters.
+/// :param out_cap: Their room.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the character count.
+#[external("c"), symbol("ingrid_integer_to_text")]
+routine c_integer_to_text(a_neg: U64, a_len: U64, a_tab: @U64, radix: U64, out: @U32, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_integer_parse.
+/// :param chars: The characters.
+/// :param count: How many.
+/// :param radix: The radix.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status, the value's length and sign, and 1 when the text is an integer.
+#[external("c"), symbol("ingrid_integer_parse")]
+routine c_integer_parse(chars: @U32, count: U64, radix: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_add.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_sign: 1 when b is negative.
+/// :param b_expn: b's exponent.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_add")]
+routine c_real_add(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, b_sign: U64, b_expn: S64,
+    b_len: U64, b_tab: @U64, out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_sub.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_sign: 1 when b is negative.
+/// :param b_expn: b's exponent.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_sub")]
+routine c_real_sub(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, b_sign: U64, b_expn: S64,
+    b_len: U64, b_tab: @U64, out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_mul.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_sign: 1 when b is negative.
+/// :param b_expn: b's exponent.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_mul")]
+routine c_real_mul(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, b_sign: U64, b_expn: S64,
+    b_len: U64, b_tab: @U64, out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_divide.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_sign: 1 when b is negative.
+/// :param b_expn: b's exponent.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_divide")]
+routine c_real_divide(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, b_sign: U64, b_expn: S64,
+    b_len: U64, b_tab: @U64, prec: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_atan2.
+/// :param y_sign: 1 when y is negative.
+/// :param y_expn: y's exponent.
+/// :param y_len: y's limbs.
+/// :param y_tab: y's first limb.
+/// :param x_sign: 1 when x is negative.
+/// :param x_expn: x's exponent.
+/// :param x_len: x's limbs.
+/// :param x_tab: x's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_atan2")]
+routine c_real_atan2(y_sign: U64, y_expn: S64, y_len: U64, y_tab: @U64, x_sign: U64, x_expn: S64,
+    x_len: U64, x_tab: @U64, prec: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_hypot.
+/// :param x_sign: 1 when x is negative.
+/// :param x_expn: x's exponent.
+/// :param x_len: x's limbs.
+/// :param x_tab: x's first limb.
+/// :param y_sign: 1 when y is negative.
+/// :param y_expn: y's exponent.
+/// :param y_len: y's limbs.
+/// :param y_tab: y's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_hypot")]
+routine c_real_hypot(x_sign: U64, x_expn: S64, x_len: U64, x_tab: @U64, y_sign: U64, y_expn: S64,
+    y_len: U64, y_tab: @U64, prec: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_pow.
+/// :param x_sign: 1 when x is negative.
+/// :param x_expn: x's exponent.
+/// :param x_len: x's limbs.
+/// :param x_tab: x's first limb.
+/// :param y_sign: 1 when y is negative.
+/// :param y_expn: y's exponent.
+/// :param y_len: y's limbs.
+/// :param y_tab: y's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_pow")]
+routine c_real_pow(x_sign: U64, x_expn: S64, x_len: U64, x_tab: @U64, y_sign: U64, y_expn: S64,
+    y_len: U64, y_tab: @U64, prec: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_function.
+/// :param op: The function's number.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_function")]
+routine c_real_function(op: U64, a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, prec: U64,
+    out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_compare.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param b_sign: 1 when b is negative.
+/// :param b_expn: b's exponent.
+/// :param b_len: b's limbs.
+/// :param b_tab: b's first limb.
+/// :returns: -1, 0 or 1, or 2 for a NaN.
+#[external("c"), symbol("ingrid_real_compare")]
+routine c_real_compare(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, b_sign: U64, b_expn: S64,
+    b_len: U64, b_tab: @U64) -> S64
+
+/// ingrid_real_from_s64.
+/// :param v: The value.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_from_s64")]
+routine c_real_from_s64(v: S64, out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_from_b64.
+/// :param bits: The B64's bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the result's length, sign and exponent.
+#[external("c"), symbol("ingrid_real_from_b64")]
+routine c_real_from_b64(bits: U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_to_b64.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the B64's bits.
+#[external("c"), symbol("ingrid_real_to_b64")]
+routine c_real_to_b64(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+
+/// ingrid_real_to_text.
+/// :param a_sign: 1 when a is negative.
+/// :param a_expn: a's exponent.
+/// :param a_len: a's limbs.
+/// :param a_tab: a's first limb.
+/// :param prec: The precision in bits.
+/// :param out: The characters.
+/// :param out_cap: Their room.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the character count.
+#[external("c"), symbol("ingrid_real_to_text")]
+routine c_real_to_text(a_sign: U64, a_expn: S64, a_len: U64, a_tab: @U64, prec: U64, out: @U32,
+    out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+
+/// ingrid_real_parse.
+/// :param chars: The characters.
+/// :param count: How many.
+/// :param radix: The radix.
+/// :param prec: The precision in bits.
+/// :param out: The result buffer.
+/// :param out_cap: Its limbs.
+/// :param scratch: The scratch.
+/// :param scratch_cap: Its limbs.
+/// :returns: The status and the value's length, sign (bit 1 set when malformed) and exponent.
+#[external("c"), symbol("ingrid_real_parse")]
+routine c_real_parse(chars: @U32, count: U64, radix: U64, prec: U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+
+/// The next word of the generator, as RazorForge's C::ingrid_splitmix64 steps it.
+/// :returns: The next word.
+routine draw() -> U64
+    block entry()
+        next : U64 = splitmix64(STATE.load())
+        next.store_into(STATE)
+        return(next)
+
+/// A random limb: zero, all ones, one bit, or random bits, as the kind drawn first says.
+/// :returns: The limb.
+routine draw_limb() -> U64
+    shared kind  : U64 = draw().bitand(7)
+    shared value : U64 = draw()
+
+    block entry()
+        when kind
+            0    -> return(0)
+            1    -> return(0xFFFFFFFFFFFFFFFF)
+            2    -> return(U64.shl(1, value.bitand(63)))
+            else -> return(value)
+
+/// Fills `count` random limbs at `tab`.
+/// :param tab: The first limb.
+/// :param count: How many.
+routine fill_limbs(tab: @U64, count: U64) -> Void
+    block entry()
+        jump next(0)
+
+    block next(i: U64)
+        branch i.ge(count)
+            ? return()
+            : continue
+        tab.stride(i.to<USize>()).store(draw_limb())
+        jump next(i.add(1))
+
+/// A random integer at `tab`: 0 to 9 limbs, or 0 to 159 one time in eight, the top one nonzero, with a random sign.
+/// :param tab: Where its limbs go.
+/// :returns: Its length and sign word (1 when negative).
+routine draw_integer(tab: @U64) -> (U64, U64)
+    block entry()
+        wide : Bool = draw().mod(8).eq(0)
+        branch wide
+            ? sized(draw().mod(160))
+            : sized(draw().mod(10))
+
+    block sized(len: U64)
+        fill_limbs(tab, len)
+        branch len.eq(0)
+            ? sign(len)
+            : continue
+        top : @U64 = tab.stride(len.sub(1).to<USize>())
+        branch top.load().eq(0)
+            ? fix(len, top)
+            : sign(len)
+
+    block fix(len: U64, top: @U64)
+        draw().bitor(1).store_into(top)
+        jump sign(len)
+
+    block sign(len: U64)
+        neg : U64 = draw().bitand(1)
+        return({ len, neg })
+
+/// A random real at `tab`: 1 to 6 limbs, normalized (the top bit set, the bottom limb nonzero), an exponent from
+/// `low` to `low + span - 1`, a random sign.
+/// :param tab: Where its limbs go.
+/// :param low: The smallest exponent.
+/// :param span: How many exponents.
+/// :returns: Its length, sign word and exponent.
+routine draw_real(tab: @U64, low: S64, span: U64) -> (U64, U64, S64)
+    shared len : U64  = draw().mod(6).add(1)
+    shared top : @U64 = tab.stride(len.sub(1).to<USize>())
+
+    block entry()
+        fill_limbs(tab, len)
+        top.load().bitor(0x8000000000000000).store_into(top)
+        branch tab.load().eq(0)
+            ? fix()
+            : finish()
+
+    block fix()
+        bit : U64 = draw().bitand(63)
+        U64.shl(1, bit).store_into(tab)
+        jump finish()
+
+    block finish()
+        offset : S64 = draw().mod(span).to<S64>()
+        expn   : S64 = low.add(offset)
+        neg    : U64 = draw().bitand(1)
+        return({ len, neg, expn })
+
+/// A mix of `count` limbs at `tab`.
+/// :param tab: The first limb.
+/// :param count: How many.
+/// :returns: The mix.
+routine mix(tab: @U64, count: U64) -> U64
+    shared h : @U64 <- 0x243F6A8885A308D3
+
+    block entry()
+        jump next(0)
+
+    block next(i: U64)
+        branch i.ge(count)
+            ? return(h.load())
+            : continue
+        limb  : U64 = tab.stride(i.to<USize>()).load()
+        mixed : U64 = h.load().bitxor(limb).mul_wrap(0x100000001B3)
+        mixed.bitxor(mixed.shr(29)).store_into(h)
+        jump next(i.add(1))
+
+/// A mix of `count` code points at `chars`.
+/// :param chars: The first.
+/// :param count: How many.
+/// :returns: The mix.
+routine mix_text(chars: @U32, count: U64) -> U64
+    shared h : @U64 <- 0x243F6A8885A308D3
+
+    block entry()
+        jump next(0)
+
+    block next(i: U64)
+        branch i.ge(count)
+            ? return(h.load())
+            : continue
+        point : U64 = chars.stride(i.to<USize>()).load().to<U64>()
+        mixed : U64 = h.load().bitxor(point).mul_wrap(0x100000001B3)
+        mixed.bitxor(mixed.shr(29)).store_into(h)
+        jump next(i.add(1))
+
+/// Prints an integer result: ` label status/sign/length:mix`.
+/// :param label: What it is.
+/// :param words: What the call returned.
+/// :param tab: Its limbs.
+routine show_integer(label: Bytes, words: Words, tab: @U64) -> Void
+    block entry()
+        h : U64 = mix(tab, words.w1)
+        Out.write(" {label} {words.w0}/{words.w2}/{words.w1}:{h}")
+        return()
+
+/// Prints a real result: ` label status/sign/exponent/length:mix`.
+/// :param label: What it is.
+/// :param words: What the call returned.
+/// :param tab: Its limbs.
+routine show_real(label: Bytes, words: Words, tab: @U64) -> Void
+    block entry()
+        h    : U64 = mix(tab, words.w1)
+        expn : S64 = words.w3.to_wrap<S64>()
+        sign : U64 = words.w2.bitand(1)
+        Out.write(" {label} {words.w0}/{sign}/{expn}/{words.w1}:{h}")
+        return()
+
+/// One pair of integers through every Integer export.
+/// :param i: The pair's number.
+routine integer_pair(i: U64) -> Void
+    shared a     : (U64, U64) = draw_integer(A.to<@U64>())
+    shared b     : (U64, U64) = draw_integer(B.to<@U64>())
+    shared a_tab : @U64       = A.to<@U64>()
+    shared b_tab : @U64       = B.to<@U64>()
+    shared out   : @U64       = OUT.to<@U64>()
+    shared out2  : @U64       = OUT2.to<@U64>()
+    shared room  : @U64       = SCRATCH.to<@U64>()
+    shared text  : @U32       = TEXT.to<@U32>()
+    shared shift : U64        = draw().mod(200)
+    shared expo  : U64        = draw().mod(20)
+    shared radix : U64        = Array<U64, 5> { 2, 10, 16, 36, 64 }.getitem(i.mod(5).to<USize>())
+
+    block entry()
+        ha : U64 = mix(a_tab, a.item0)
+        hb : U64 = mix(b_tab, b.item0)
+        Out.write("int {i} a {a.item1}/{a.item0}:{ha} b {b.item1}/{b.item0}:{hb}\n")
+        sum : Words = c_integer_add(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out, OUT_ROOM)
+        show_integer("add", sum, out)
+        product : Words = c_integer_mul(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out,
+            OUT_ROOM, room, SCRATCH_ROOM)
+        show_integer("mul", product, out)
+        Out.write("\n")
+        branch b.item0.eq(0)
+            ? shifts()
+            : continue
+        qr : Words = c_integer_divmod(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out,
+            OUT_ROOM, out2, OUT_ROOM, room, SCRATCH_ROOM)
+        hq : U64   = mix(out, qr.w1)
+        hr : U64   = mix(out2, qr.w3)
+        Out.write(" divmod {qr.w0}/{qr.w2}/{qr.w1}:{hq} {qr.w3}:{hr}\n")
+        jump shifts()
+
+    block shifts()
+        left : Words = c_integer_shift_left(a.item1, a.item0, a_tab, shift, out, OUT_ROOM)
+        show_integer("shl", left, out)
+        right : Words = c_integer_shift_right(a.item1, a.item0, a_tab, shift, out, OUT_ROOM)
+        show_integer("shr", right, out)
+        both : Words = c_integer_and(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out,
+            OUT_ROOM)
+        show_integer("and", both, out)
+        either : Words = c_integer_or(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out,
+            OUT_ROOM)
+        show_integer("or", either, out)
+        one : Words = c_integer_xor(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab, out, OUT_ROOM)
+        show_integer("xor", one, out)
+        order : S64 = c_integer_compare(a.item1, a.item0, a_tab, b.item1, b.item0, b_tab)
+        Out.write(" cmp {order}\n")
+        divisor : Words = c_integer_gcd(a.item0, a_tab, b.item0, b_tab, out, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        show_integer("gcd", divisor, out)
+        multiple : Words = c_integer_lcm(a.item0, a_tab, b.item0, b_tab, out, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        show_integer("lcm", multiple, out)
+        root : Words = c_integer_sqrtrem(a.item0, a_tab, out, OUT_ROOM, out2, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        hs   : U64   = mix(out, root.w1)
+        hm   : U64   = mix(out2, root.w3)
+        Out.write(" sqrtrem {root.w0}/{root.w1}:{hs} {root.w3}:{hm}\n")
+        branch a.item0.gt(2)
+            ? digits()
+            : continue
+        power : Words = c_integer_pow(a.item1, a.item0, a_tab, expo, out, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        show_integer("pow", power, out)
+        Out.write("\n")
+        jump digits()
+
+    block digits()
+        written : Words = c_integer_to_text(a.item1, a.item0, a_tab, radix, text, TEXT_ROOM, room,
+            SCRATCH_ROOM)
+        ht      : U64   = mix_text(text, written.w1)
+        back    : Words = c_integer_parse(text, written.w1, radix, out, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        Out.write(" text {radix} {written.w0}/{written.w1}:{ht} parse {back.w3}")
+        show_integer("=", back, out)
+        Out.write("\n")
+        return()
+
+/// One real function of `a` at `prec` bits: ` label status/sign/exponent/length:mix`.
+/// :param label: What it is.
+/// :param op: The function's number.
+/// :param a: The argument's length, sign word and exponent.
+/// :param tab: Its limbs.
+/// :param prec: The precision in bits.
+routine real_function(label: Bytes, op: U64, a: (U64, U64, S64), tab: @U64, prec: U64) -> Void
+    block entry()
+        out    : @U64  = OUT.to<@U64>()
+        result : Words = c_real_function(op, a.item1, a.item2, a.item0, tab, prec, out, OUT_ROOM,
+            SCRATCH.to<@U64>(), SCRATCH_ROOM)
+        show_real(label, result, out)
+        return()
+
+/// One real through every Real export, at a precision of 32, 82, 348 or 1024 bits.
+/// :param i: The real's number.
+routine real_value(i: U64) -> Void
+    shared x     : (U64, U64, S64) = draw_real(A.to<@U64>(), -20, 40)
+    shared y     : (U64, U64, S64) = draw_real(B.to<@U64>(), -20, 40)
+    shared z     : (U64, U64, S64) = draw_real(Z.to<@U64>(), -10, 11)
+    shared x_tab : @U64            = A.to<@U64>()
+    shared y_tab : @U64            = B.to<@U64>()
+    shared z_tab : @U64            = Z.to<@U64>()
+    shared out   : @U64            = OUT.to<@U64>()
+    shared room  : @U64            = SCRATCH.to<@U64>()
+    shared text  : @U32            = TEXT.to<@U32>()
+    shared prec  : U64             = Array<U64, 4> { 32, 82, 348,
+        1024 }.getitem(i.mod(4).to<USize>())
+    shared m     : (U64, U64, S64) = { x.item0, 0, x.item2 }
+    shared u     : (U64, U64, S64) = { z.item0, 0, z.item2 }
+    shared whole : U64             = draw()
+    shared bits  : U64             = draw().bitand(0xFFEFFFFFFFFFFFFF)
+
+    block entry()
+        hx : U64 = mix(x_tab, x.item0)
+        hy : U64 = mix(y_tab, y.item0)
+        hz : U64 = mix(z_tab, z.item0)
+        Out.write("real {i} p {prec} x {x.item1}/{x.item2}/{x.item0}:{hx} y {y.item1}/{y.item2}/{y.item0}:{hy}")
+        Out.write(" z {z.item1}/{z.item2}/{z.item0}:{hz}\n")
+        sum : Words = c_real_add(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0, y_tab,
+            out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("add", sum, out)
+        difference : Words = c_real_sub(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0,
+            y_tab, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("sub", difference, out)
+        product : Words = c_real_mul(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0,
+            y_tab, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("mul", product, out)
+        quotient : Words = c_real_divide(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2,
+            y.item0, y_tab, prec, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("div", quotient, out)
+        Out.write("\n")
+        angle : Words = c_real_atan2(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0,
+            y_tab, prec, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("atan2", angle, out)
+        length : Words = c_real_hypot(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0,
+            y_tab, prec, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("hypot", length, out)
+        power : Words = c_real_pow(0, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0, y_tab,
+            prec, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("pow", power, out)
+        order : S64 = c_real_compare(x.item1, x.item2, x.item0, x_tab, y.item1, y.item2, y.item0,
+            y_tab)
+        Out.write(" cmp {order}\n")
+        real_function("sqrt", 0, m, x_tab, prec)
+        real_function("exp", 1, x, x_tab, prec)
+        real_function("log", 2, m, x_tab, prec)
+        real_function("sin", 3, x, x_tab, prec)
+        real_function("cos", 4, x, x_tab, prec)
+        real_function("tan", 5, x, x_tab, prec)
+        Out.write("\n")
+        real_function("asin", 6, z, z_tab, prec)
+        real_function("acos", 7, z, z_tab, prec)
+        real_function("atan", 8, x, x_tab, prec)
+        real_function("sinh", 9, x, x_tab, prec)
+        real_function("cosh", 10, x, x_tab, prec)
+        real_function("tanh", 11, x, x_tab, prec)
+        Out.write("\n")
+        real_function("asinh", 12, x, x_tab, prec)
+        branch x.item2.lt(1)
+            ? inverse()
+            : continue
+        real_function("acosh", 13, m, x_tab, prec)
+        jump inverse()
+
+    block inverse()
+        real_function("atanh", 14, z, z_tab, prec)
+        real_function("log2", 15, m, x_tab, prec)
+        real_function("log10", 16, m, x_tab, prec)
+        real_function("cbrt", 17, x, x_tab, prec)
+        real_function("asin_u", 6, u, z_tab, prec)
+        Out.write("\n")
+        real_function("rint", 18, x, x_tab, prec)
+        real_function("floor", 19, x, x_tab, prec)
+        real_function("ceil", 20, x, x_tab, prec)
+        real_function("trunc", 21, x, x_tab, prec)
+        real_function("round", 22, x, x_tab, prec)
+        Out.write("\n")
+        double : Words = c_real_to_b64(x.item1, x.item2, x.item0, x_tab, room, SCRATCH_ROOM)
+        Out.write(" b64 {double.w0}/{double.w1}")
+        signed : S64   = whole.to_wrap<S64>()
+        from_w : Words = c_real_from_s64(signed, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("s64", from_w, out)
+        from_d : Words = c_real_from_b64(bits, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("from_b64", from_d, out)
+        Out.write("\n")
+        written : Words = c_real_to_text(x.item1, x.item2, x.item0, x_tab, 1024, text, TEXT_ROOM,
+            room, SCRATCH_ROOM)
+        ht      : U64   = mix_text(text, written.w1)
+        back    : Words = c_real_parse(text, written.w1, 10, 1024, out, OUT_ROOM, room,
+            SCRATCH_ROOM)
+        Out.write(" text {written.w0}/{written.w1}:{ht}")
+        show_real("parse", back, out)
+        Out.write("\n")
+        return()
+
+/// The call protocol: a call with too little scratch, or too small a result buffer, says what it needs, and the
+/// retry with that much gives the same result.
+routine protocol() -> Void
+    shared a_tab : @U64 = A.to<@U64>()
+    shared b_tab : @U64 = B.to<@U64>()
+    shared out   : @U64 = OUT.to<@U64>()
+    shared room  : @U64 = SCRATCH.to<@U64>()
+
+    block entry()
+        fill_limbs(a_tab, 150)
+        fill_limbs(b_tab, 140)
+        a_tab.stride(149).store(1)
+        b_tab.stride(139).store(1)
+        size  : U64   = c_integer_mul_scratch_size(150, 140)
+        empty : Words = c_integer_mul(0, 150, a_tab, 1, 140, b_tab, out, OUT_ROOM, room, 0)
+        Out.write("protocol mul scratch 0: status {empty.w0}, needs some {empty.w1.gt(0)}, the size covers it ")
+        Out.write("{size.ge(empty.w1)}\n")
+        retry : Words = c_integer_mul(0, 150, a_tab, 1, 140, b_tab, out, OUT_ROOM, room, empty.w1)
+        Out.write("protocol mul retry with what it needed: status {retry.w0}\n")
+        short : Words = c_integer_mul(0, 150, a_tab, 1, 140, b_tab, out, 10, room, SCRATCH_ROOM)
+        Out.write("protocol mul out 10: status {short.w0}, needs {short.w1}\n")
+        fit : Words = c_integer_mul(0, 150, a_tab, 1, 140, b_tab, out, short.w1, room, SCRATCH_ROOM)
+        show_integer("protocol mul out fits:", fit, out)
+        Out.write("\n")
+        exp0 : Words = c_real_function(1, 0, 3, 2, a_tab, 1024, out, OUT_ROOM, room, 0)
+        Out.write("protocol exp scratch 0: status {exp0.w0}, needs some {exp0.w1.gt(0)}\n")
+        retried : Words = exp_retried(a_tab, out, room, exp0.w1)
+        show_real("protocol exp retried until done:", retried, out)
+        Out.write("\n")
+        exp2 : Words = c_real_function(1, 0, 3, 2, a_tab, 1024, out, OUT_ROOM, room, SCRATCH_ROOM)
+        show_real("protocol exp with room:", exp2, out)
+        Out.write("\n")
+        return()
+
+/// exp of the protocol's argument at 1024 bits, retried the way RazorForge retries: after each status 1, the call
+/// is made again with half as much again as it said it needs at least, until it is done.
+/// :param a_tab: The argument's limbs.
+/// :param out: The result buffer.
+/// :param room: The scratch.
+/// :param need: The scratch the call with none said it needs at least.
+/// :returns: The words of the call that was done.
+routine exp_retried(a_tab: @U64, out: @U64, room: @U64, need: U64) -> Words
+    block entry()
+        jump again(need)
+
+    block again(at_least: U64)
+        more : U64   = at_least.add(at_least.div(2))
+        w    : Words = c_real_function(1, 0, 3, 2, a_tab, 1024, out, OUT_ROOM, room, more)
+        branch w.w0.eq(1)
+            ? again(w.w1)
+            : done(w)
+
+    block done(result: Words)
+        return(result)
+
+/// Runs every integer pair, then every real value, then the call protocol.
+routine start() -> Void
+    block entry()
+        jump integers(0)
+
+    block integers(i: U64)
+        branch i.ge(INTEGERS)
+            ? reals(0)
+            : continue
+        integer_pair(i)
+        jump integers(i.add(1))
+
+    block reals(i: U64)
+        branch i.ge(REALS)
+            ? last()
+            : continue
+        real_value(i)
+        jump reals(i.add(1))
+
+    block last()
+        protocol()
+        return()

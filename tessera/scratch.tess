@@ -1,0 +1,127 @@
+// The scratch arena of the arbitrary-precision engines, Integer and Real (generated/integer.tess and
+// generated/real.tess, written from RazorForge's engines by `RazorForge export-ingrid`). The engines never allocate:
+// each call gets a buffer of 64-bit limbs from its caller, and every temporary the engine needs is taken from it.
+//
+// Before an operation takes limbs it asks the arena to admit the most it can take (`ingrid_scratch_admit`). When
+// that doesn't fit, the call is exhausted: every later admission fails too, operations hand back a placeholder
+// instead of computing, loops whose end depends on a value stop, and the call reports how much it needed. The
+// caller then retries with a larger buffer. Taking more than was admitted is a wrong bound in the engine and
+// crashes.
+//
+// The arena is the running thread's, one call at a time: an engine call doesn't start another one.
+
+/// This thread's arena.
+#threadlocal
+global ARENA: @Arena
+
+/// The arena of the call running on this thread: the buffer its caller handed over and how much is taken.
+private record Arena
+    /// The buffer's first limb.
+    base : @U64
+    /// How many limbs are taken.
+    top : U64
+    /// How many limbs the buffer has.
+    cap : U64
+    /// The most an admission that failed would have needed in all: what a retry hands over at least.
+    need : U64
+    /// True once an admission failed: every later one fails too.
+    exhausted : Bool
+    /// The most limbs taken at once during the call.
+    peak : U64
+
+/// Starts a call's arena on a buffer of `limbs` limbs at `base`, with nothing taken.
+/// :param base: The buffer the caller hands over (anything when `limbs` is 0).
+/// :param limbs: How many limbs the buffer has.
+#export("ingrid_scratch_open")
+routine scratch_open(base: @U64, limbs: U64) -> Void
+    block entry()
+        ARENA.base.store(base)
+        ARENA.top.store(0)
+        ARENA.cap.store(limbs)
+        ARENA.need.store(0)
+        ARENA.exhausted.store(false)
+        ARENA.peak.store(0)
+        return()
+
+/// Ends the call's arena: nothing can be taken from it until the next call opens one.
+/// :returns: 0 when every admission fit, else the limbs the call needs at least, what its retry hands over.
+#export("ingrid_scratch_close")
+routine scratch_close() -> U64
+    block entry()
+        exhausted : Bool = ARENA.exhausted.load()
+        need      : U64  = ARENA.need.load()
+        ARENA.top.store(0)
+        ARENA.cap.store(0)
+        branch exhausted
+            ? return(need.max(1))
+            : return(0)
+
+/// Says whether `limbs` more limbs fit, before an operation takes them. A refusal exhausts the call: every later
+/// admission is refused too, and the call reports what it needed.
+/// :param limbs: The most the operation takes.
+/// :returns: True when they fit and the call isn't exhausted.
+#export("ingrid_scratch_admit")
+routine scratch_admit(limbs: U64) -> Bool
+    block entry()
+        branch ARENA.exhausted.load()
+            ? return(false)
+            : continue
+        top  : U64 = ARENA.top.load()
+        room : U64 = ARENA.cap.load().sub(top)
+        branch limbs.le(room)
+            ? return(true)
+            : continue
+        ARENA.exhausted.store(true)
+        ARENA.need.store(top.add_clamp(limbs))
+        return(false)
+
+/// True once an admission of this call was refused: the result is a placeholder, and loops that wait for a value
+/// stop.
+/// :returns: Whether the call is exhausted.
+#export("ingrid_scratch_exhausted")
+routine scratch_exhausted() -> Bool
+    block entry()
+        return(ARENA.exhausted.load())
+
+/// Takes `limbs` zeroed limbs from the arena, which an admission has made room for.
+/// :param limbs: How many limbs.
+/// :returns: The first of them.
+/// :throws: Crashes with `MemoryError` when they don't fit: the engine admitted less than it takes.
+#export("ingrid_scratch_take")
+routine scratch_take(limbs: U64) -> @U64
+    block entry()
+        top  : U64  = ARENA.top.load()
+        room : U64  = ARENA.cap.load().sub(top)
+        fits : Bool = limbs.le(room)
+        branch fits
+            ? continue
+            : crash("MemoryError",
+                "The arbitrary-precision engine took more scratch than it admitted.")
+        first : @U64 = ARENA.base.load().stride(top.to<USize>())
+        first.zeroinit(limbs.to<USize>())
+        next : U64 = top.add(limbs)
+        ARENA.top.store(next)
+        next.max(ARENA.peak.load()).store_into(ARENA.peak)
+        return(first)
+
+/// The arena's top, to give back everything taken after it with `ingrid_scratch_release`.
+/// :returns: How many limbs are taken.
+#export("ingrid_scratch_mark")
+routine scratch_mark() -> U64
+    block entry()
+        return(ARENA.top.load())
+
+/// Gives back every limb taken since `mark`.
+/// :param mark: A top from `ingrid_scratch_mark` of this call.
+#export("ingrid_scratch_release")
+routine scratch_release(mark: U64) -> Void
+    block entry()
+        ARENA.top.store(mark)
+        return()
+
+/// The most limbs the last call on this thread had taken at once, also after it closed: what its buffer had to hold.
+/// :returns: The call's high-water mark, in limbs.
+#export("ingrid_scratch_peak")
+routine scratch_peak() -> U64
+    block entry()
+        return(ARENA.peak.load())
