@@ -78,7 +78,7 @@ routine print_stack_for_mode() -> Void
         return()
 
     block platform()
-        print_platform_stack()
+        print_platform_stack(0)
         return()
 
 /// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status. Standard
@@ -132,6 +132,29 @@ routine c_get_current_process() -> Addr
 #[external("c"), symbol("SymInitialize"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
 
+/// IMAGEHLP_LINE64's size, and where its LineNumber and FileName are.
+preset IMAGEHLP_LINE64_SIZE: U32   = 40
+preset LINE_NUMBER:          USize = 16
+preset LINE_FILE_NAME:       USize = 24
+/// SYMOPT_UNDNAME, SYMOPT_DEFERRED_LOADS, and SYMOPT_LOAD_LINES: plain names, symbols loaded when first asked for, and
+/// the line tables loaded with them.
+preset SYM_OPTIONS: U32 = 0x16
+
+/// DbgHelp's `SymSetOptions`: what the symbol handler loads and how it shows names.
+/// :param options: The SYMOPT_ flags.
+/// :returns: The options now set.
+#[external("c"), symbol("SymSetOptions"), callconv("stdcall"), target(os: "windows")]
+routine c_sym_set_options(options: U32) -> U32
+
+/// DbgHelp's `SymGetLineFromAddr64`: the source file and line of an address.
+/// :param process: The process.
+/// :param address: The address to look up.
+/// :param displacement: Where the offset into the line goes.
+/// :param line: The IMAGEHLP_LINE64 the file and line are written into.
+/// :returns: Nonzero when a line was found.
+#[external("c"), symbol("SymGetLineFromAddr64"), callconv("stdcall"), target(os: "windows")]
+routine c_sym_get_line_from_addr64(process: Addr, address: U64, displacement: @U32, line: @Byte) -> CInt
+
 /// DbgHelp's `SymFromAddr`: the symbol at an address.
 /// :param process: The process.
 /// :param address: The address to look up.
@@ -141,13 +164,24 @@ routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
 #[external("c"), symbol("SymFromAddr"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
 
-/// Writes the calling thread's native stack on stderr (up to 64 frames), each frame by its symbol name or else its
-/// address.
+/// Where SYMBOL_INFO's Address (the symbol's start) is.
+preset SYMBOL_INFO_ADDRESS: USize = 56
+/// Where EXCEPTION_RECORD's ExceptionAddress is.
+preset EXCEPTION_ADDRESS: USize = 16
+
+/// Writes the calling thread's native stack on stderr (up to 64 frames), each frame by its symbol name, with its
+/// source file and line when the program's PDB has them, or else by its address.
+/// :param fault: The faulting instruction's address, or 0. A fault's trace starts at the routine that faulted, so
+///     the exception handler and the system's dispatch frames above it are left out.
 #target(os: "windows")
-routine print_platform_stack() -> Void
+routine print_platform_stack(fault: U64) -> Void
     // SYMBOL_INFO and room for its name, 8-aligned
     shared buffer       : @Array<U64, 262> <- uninit
     shared sym          : @Byte            = buffer.to<@Byte>()
+    // IMAGEHLP_LINE64
+    shared line_buffer  : @Array<U64, 5>   <- uninit
+    shared line         : @Byte            = line_buffer.to<@Byte>()
+    shared line_offset  : @U32             <- 0
     shared stack_buffer : @Array<Addr, 64> <- uninit
     // skip this helper's frame
     shared captured : U16   = c_capture_stack_back_trace(1, 64, stack_buffer.to<@Addr>(), null)
@@ -156,31 +190,64 @@ routine print_platform_stack() -> Void
     shared frames   : U32   = captured.to<U32>()
 
     block entry()
+        c_sym_set_options(SYM_OPTIONS)
         c_sym_initialize(process, null, 1)
         sym.to<@U32>().store(SYMBOL_INFO_SIZE)
         max_name_field : @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to<@U32>()
         max_name_field.store(MAX_SYM_NAME)
         Err.write("Stack trace:\n")
-        jump frame(0)
+        branch fault.eq(0)
+            ? frame(0, 0)
+            : continue
+        branch c_sym_from_addr(process, fault, null, sym).eq(0)
+            ? frame(0, 0)
+            : continue
+        start : U64 = sym.stride(SYMBOL_INFO_ADDRESS).to<@U64>().load()
+        jump seek(0, start)
 
-    block frame(i: U32)
+    // the first frame in the routine that faulted, or every frame when none is
+    block seek(i: U32, start: U64)
+        branch i.eq(frames)
+            ? frame(0, 0)
+            : continue
+        address : U64 = ptrtoint<Addr, U64>(stack.stride(i.to<USize>()).load())
+        branch c_sym_from_addr(process, address, null, sym).eq(0)
+            ? seek(i.add(1), start)
+            : continue
+        branch sym.stride(SYMBOL_INFO_ADDRESS).to<@U64>().load().eq(start)
+            ? frame(i, 0)
+            : seek(i.add(1), start)
+
+    // frame i of the capture, written as the n-th of the trace
+    block frame(i: U32, n: U32)
         branch i.eq(frames)
             ? return()
             : continue
         address : U64 = ptrtoint<Addr, U64>(stack.stride(i.to<USize>()).load())
         branch c_sym_from_addr(process, address, null, sym).ne(0)
-            ? named(i)
+            ? named(i, n, address)
             : continue
-        Err.write("  {i}: at 0x")
+        Err.write("  {n}: at 0x")
         write_hex(address, 16, false)
         Err.write("\n")
-        jump frame(i.add(1))
+        jump frame(i.add(1), n.add(1))
 
-    block named(i: U32)
+    block named(i: U32, n: U32, address: U64)
         symbol_name : @Byte = sym.stride(SYMBOL_INFO_NAME)
         name        : Bytes = symbol_name.to<CStr>().to<Bytes>()
-        Err.write("  {i}: at {name}\n")
-        jump frame(i.add(1))
+        line.to<@U32>().store(IMAGEHLP_LINE64_SIZE)
+        // a return address points past its call: one byte back is the call's own line
+        branch c_sym_get_line_from_addr64(process, address.sub(1), line_offset, line).ne(0)
+            ? with_line(i, n, name)
+            : continue
+        Err.write("  {n}: at {name}\n")
+        jump frame(i.add(1), n.add(1))
+
+    block with_line(i: U32, n: U32, name: Bytes)
+        file_name   : Bytes = line.stride(LINE_FILE_NAME).to<@@Byte>().load().to<CStr>().to<Bytes>()
+        line_number : U32   = line.stride(LINE_NUMBER).to<@U32>().load()
+        Err.write("  {n}: at {name} ({file_name}:{line_number})\n")
+        jump frame(i.add(1), n.add(1))
 
 // -- the platform stack: POSIX -------------------------------------------------------
 
@@ -200,8 +267,9 @@ routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
 
 /// Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
 /// Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
+/// :param fault: Unused here: the two frames left out are already the handler's.
 #target(os: not "windows")
-routine print_platform_stack() -> Void
+routine print_platform_stack(fault: U64) -> Void
     shared stack_buffer : @Array<Addr, 64> <- uninit
     shared frames       : CInt             = c_backtrace(stack_buffer.to<@Addr>(), 64)
     shared symbols      : @@Byte           = c_backtrace_symbols(stack_buffer.to<@Addr>(), frames)
@@ -305,7 +373,8 @@ routine exception_handler(pointers: @Addr) -> CInt
         Err.write("\x1B[91m\n{name} (code 0x")
         write_hex(code.to<U64>(), 8, true)
         Err.write(")\n\x1B[0m")
-        print_platform_stack()
+        fault : U64 = exception.to<@Byte>().stride(EXCEPTION_ADDRESS).to<@U64>().load()
+        print_platform_stack(fault)
         return(0)
 
     block overflow()
@@ -387,7 +456,7 @@ routine fault_handler(signo: CInt) -> Void
             : continue
         name : Bytes = signal_name(signo).to<Bytes>()
         Err.write("\x1B[91m\n{name}\n\x1B[0m")
-        print_platform_stack()
+        print_platform_stack(0)
         jump reraise()
 
     block reraise()
