@@ -64,63 +64,192 @@ routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Vo
         Err.write("\x1B[0m")
         rf_crash_exit()
 
-/// A stack overflow, reported like any crash (exit status 82): how deep the routine calls went (the trace's depth,
-/// when the build keeps a trace), the size of the stack they used up and so about how much each call took, then the
-/// trace. The runtime's fault handler calls it on the faulting thread, in the stack the system keeps back for it.
-/// :param stack_size: The size of the stack the calls used up, in bytes.
+/// A stack overflow, reported like any crash (exit status 82): which routines kept calling, then the trace (which
+/// says how deep the calls went). The runtime's fault handler calls it on the faulting thread, in the stack the
+/// system keeps back for it.
+/// :param stack_size: The size of the stack the calls used up, in bytes. The report does not show it: the size of the
+///     stack says nothing about the program's mistake.
 #[export("tessera_stack_overflow_report"), noreturn]
 routine stack_overflow_report(stack_size: U64) -> Void
     block entry()
         rf_flush_output()
-        depth : S32  = trace_depth()
-        known : Bool = depth.gt(0)
-        branch known
-            ? deep(depth)
-            : unknown()
-
-    block deep(depth: S32)
-        per : U64 = stack_size.div(depth.to<U64>())
-        Err.write("\x1B[91mStackOverflowError: the routine calls went {depth} deep and used up the stack ")
-        Err.write("({stack_size} bytes), about {per} bytes a call. Make the recursion shallower, or turn it into a loop.\n")
-        jump report()
-
-    block unknown()
-        Err.write("\x1B[91mStackOverflowError: the routine calls used up the stack ({stack_size} bytes). ")
-        Err.write("Make the recursion shallower, or turn it into a loop.\n")
-        jump report()
-
-    block report()
+        Err.write("\x1B[91mStackOverflowError: ")
+        write_deep_calls()
         write_trace()
         Err.write("\x1B[0m")
         rf_crash_exit()
 
-/// Suflae's report for the same event: Suflae has no "stack" in its vocabulary (the routine calls run in memory, and
-/// running out of it is the one memory wall), so it is an OutOfMemoryError that says how deep the calls went.
-/// :param memory_size: The size of the memory the calls used up, in bytes.
+/// Suflae's report for the same event: Suflae has no "stack" in its vocabulary, so it is an OutOfMemoryError that
+/// says which routines kept calling.
+/// :param memory_size: The size of the memory the calls used up, in bytes. Not shown, like the stack's size.
 #[export("tessera_deep_calls_report"), noreturn]
 routine deep_calls_report(memory_size: U64) -> Void
     block entry()
         rf_flush_output()
-        depth : S32  = trace_depth()
-        known : Bool = depth.gt(0)
-        branch known
-            ? deep(depth)
-            : unknown()
-
-    block deep(depth: S32)
-        Err.write("\x1B[91mOutOfMemoryError: the routine calls went {depth} deep and used up the memory they run in ")
-        Err.write("({memory_size} bytes). Make the recursion shallower, or turn it into a loop.\n")
-        jump report()
-
-    block unknown()
-        Err.write("\x1B[91mOutOfMemoryError: the routine calls used up the memory they run in ({memory_size} bytes). ")
-        Err.write("Make the recursion shallower, or turn it into a loop.\n")
-        jump report()
-
-    block report()
+        Err.write("\x1B[91mOutOfMemoryError: ")
+        write_deep_calls()
         write_trace()
         Err.write("\x1B[0m")
         rf_crash_exit()
+
+/// How many of the most recent frames may come before the repeating calls (the routine the stack ran out in, such as
+/// an add the recursive routine called), and the longest repeating run of calls looked for.
+preset CYCLE_MAX_START:  S32 = 4
+preset CYCLE_MAX_PERIOD: S32 = 12
+
+/// The sentence of a call-depth crash: the routine that called itself too many times before returning, or the
+/// routines that called each other, found as the run of calls that repeats at the top of the crash trace. Without a
+/// trace, or without a repeating run, it says the calls went too deep.
+routine write_deep_calls() -> Void
+    shared depth : S32 = trace_depth()
+    shared shown : S32 = depth.min(32)
+
+    block entry()
+        jump start_at(0)
+
+    // the repeating run may start a few frames below the most recent one
+    block start_at(start: S32)
+        branch start.gt(CYCLE_MAX_START)
+            ? unknown()
+            : continue
+        period : S32 = cycle_period(depth, shown, start)
+        branch period.gt(0)
+            ? found(start, period)
+            : start_at(start.add(1))
+
+    block found(start: S32, period: S32)
+        branch one_routine(depth, start, period)
+            ? itself(start)
+            : each_other(start, period)
+
+    block itself(start: S32)
+        name : Bytes = frame_name(depth, start)
+        Err.write("{name} called itself too many times before returning. ")
+        jump advice()
+
+    block each_other(start: S32, period: S32)
+        last : S32 = start.add(period).sub(1)
+        jump name(start, last)
+
+    // the names in the run, most recent first: "a and b", "a, b and c"
+    block name(k: S32, last: S32)
+        n : Bytes = frame_name(depth, k)
+        branch k.eq(last)
+            ? final_name(n)
+            : continue
+        branch k.add(1).eq(last)
+            ? before_last(k, last, n)
+            : continue
+        Err.write("{n}, ")
+        jump name(k.add(1), last)
+
+    block before_last(k: S32, last: S32, n: Bytes)
+        Err.write("{n} and ")
+        jump name(k.add(1), last)
+
+    block final_name(n: Bytes)
+        Err.write("{n} called each other too many times before returning. ")
+        jump advice()
+
+    block unknown()
+        Err.write("the routine calls went too deep before returning. ")
+        jump advice()
+
+    block advice()
+        Err.write("Make the recursion shallower, or turn it into a loop.\n")
+        return()
+
+/// The k-th most recent frame of the calling thread's crash trace (0 is the most recent, below 32).
+/// :param depth: The trace's depth.
+/// :param k: How far back the frame is.
+/// :returns: The frame.
+routine recent_frame(depth: S32, k: S32) -> @TraceFrame
+    block entry()
+        back : S32         = depth.sub_wrap(1).sub_wrap(k)
+        slot : USize       = back.bitand(31).to<USize>()
+        at   : @TraceFrame = trace_frames().stride(slot)
+        return(at)
+
+/// Whether two frames are the same call: the same routine, stopped at the same line.
+/// :param a: One frame.
+/// :param b: The other.
+/// :returns: True for the same call.
+routine same_call(a: @TraceFrame, b: @TraceFrame) -> Bool
+    block entry()
+        a_routine    : U64  = ptrtoint<Addr, U64>(a.routine_name.load())
+        b_routine    : U64  = ptrtoint<Addr, U64>(b.routine_name.load())
+        same_routine : Bool = a_routine.eq(b_routine)
+        same_line    : Bool = a.line.load().eq(b.line.load())
+        return(same_routine.bitand(same_line))
+
+/// The shortest run of calls that repeats from frame `start` down through every frame the trace kept, at least twice
+/// over, or 0 when none does.
+/// :param depth: The trace's depth.
+/// :param shown: How many frames the trace kept.
+/// :param start: The most recent frame of the run.
+/// :returns: The run's length, or 0.
+routine cycle_period(depth: S32, shown: S32, start: S32) -> S32
+    block entry()
+        jump try_period(1)
+
+    block try_period(period: S32)
+        branch period.gt(CYCLE_MAX_PERIOD)
+            ? return(0)
+            : continue
+        // the frames compared against the run must hold it at least twice
+        branch shown.sub(start).lt(period.mul(3))
+            ? return(0)
+            : continue
+        jump compare(period, start)
+
+    block compare(period: S32, k: S32)
+        branch k.add(period).ge(shown)
+            ? return(period)
+            : continue
+        branch same_call(recent_frame(depth, k), recent_frame(depth, k.add(period)))
+            ? compare(period, k.add(1))
+            : try_period(period.add(1))
+
+/// Whether every call in the run is the same routine (a routine that calls itself from two places, such as a tree
+/// walk's two halves).
+/// :param depth: The trace's depth.
+/// :param start: The most recent frame of the run.
+/// :param period: The run's length.
+/// :returns: True when the run has one routine.
+routine one_routine(depth: S32, start: S32, period: S32) -> Bool
+    shared first : U64 = ptrtoint<Addr, U64>(recent_frame(depth, start).routine_name.load())
+
+    block entry()
+        jump check(start.add(1))
+
+    block check(k: S32)
+        branch k.ge(start.add(period))
+            ? return(true)
+            : continue
+        routine_address : U64 = ptrtoint<Addr, U64>(recent_frame(depth, k).routine_name.load())
+        branch routine_address.eq(first)
+            ? check(k.add(1))
+            : return(false)
+
+/// A frame's routine name without its parameter list: `OverflowRf.dive(Core.S64)` is `OverflowRf.dive`.
+/// :param depth: The trace's depth.
+/// :param k: How far back the frame is.
+/// :returns: The name.
+routine frame_name(depth: S32, k: S32) -> Bytes
+    shared routine_ptr : @CChar = recent_frame(depth, k).routine_name.load().to<@CChar>()
+    shared name        : Bytes  = routine_ptr.to<CStr>().to<Bytes>()
+
+    block entry()
+        jump scan(0)
+
+    block scan(i: USize)
+        branch i.eq(name.count())
+            ? return(name)
+            : continue
+        // '('
+        branch name.byte_at(i).eq(40)
+            ? return(name.slice(0, i))
+            : scan(i.add(1))
 
 /// The calling thread's crash trace, most recent frame first: the last 32 frames, and how many there were in all when
 /// there were more. Nothing for a build that keeps no trace.
