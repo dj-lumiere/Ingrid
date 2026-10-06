@@ -149,6 +149,47 @@ routine roam_unhold(header: @RoamHeader) -> Void
         world_leave()
         return()
 
+/// Takes the entity out of its only handle: frees the header and hands back the entity's address, so a new handle
+/// can own it. Only an entity nothing else reaches can leave, one strong handle and no weak observer. Anything more
+/// and the entity stays where it is and 0 comes back, for the caller to report.
+/// :param header: The entity's header.
+/// :returns: The entity's address, or 0 when another handle or an observer still reaches it.
+#[export("ingrid_roam_release_inner")]
+routine roam_release_inner(header: @RoamHeader) -> Addr
+    block entry()
+        world_enter()
+        escaped : Bool = header.escaped.atomic_load().eq(1)
+        count   : U64  = escaped
+            ? header.count.atomic_load()
+            : header.count.load()
+        weak    : U64  = escaped
+            ? header.weak.atomic_load()
+            : header.weak.load()
+        alone   : Bool = count.eq(1).bitand(weak.eq(0))
+        branch alone
+            ? release()
+            : shared()
+
+    block release()
+        data : Addr = header.data.load()
+        branch header.buffered.load()
+            ? unbuffer(data)
+            : free(data)
+
+    block unbuffer(data: Addr)
+        remove_candidate(header)
+        jump free(data)
+
+    block free(data: Addr)
+        free_header_memory(header)
+        world_leave()
+        return(data)
+
+    block shared()
+        world_leave()
+        none : Addr = inttoptr<USize, Addr>(0)
+        return(none)
+
 /// Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
 /// trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
 /// :param header: The entity's header.
