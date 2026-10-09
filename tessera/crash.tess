@@ -8,6 +8,12 @@
 import Standard::Format
 import Standard::Os
 
+/// How many of the most recent frames may come before the repeating calls (the routine the stack ran out in, such as
+/// an add the recursive routine called), and the longest repeating run of calls looked for.
+preset CYCLE_MAX_START:  S32 = 4
+
+preset CYCLE_MAX_PERIOD: S32 = 12
+
 /// One frame of the crash trace, laid out as the builder keeps it: the routine's name and the source file as C
 /// strings, and the line and column the routine has reached.
 private record TraceFrame
@@ -44,7 +50,9 @@ private routine trace_frames() -> @TraceFrame
 routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Void
     block entry()
         rf_flush_output()
-        Err.write("\x1B[91m{name}: {message}")
+        Err.write("\x1B[91m")
+        write_title(name)
+        Err.write(": {message}")
         jump where()
 
     block where()
@@ -64,6 +72,39 @@ routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Vo
         Err.write("\x1B[0m")
         rf_crash_exit()
 
+/// Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
+/// "Integer overflow error" (a space before each capital after the first, which becomes lowercase). One byte at a
+/// time, with nothing allocated: it runs because something crashed, possibly out of memory.
+/// :param name: The crash's name.
+routine write_title(name: Bytes) -> Void
+    shared one : @U8 <- 0
+
+    block entry()
+        jump next(0)
+
+    block next(i: USize)
+        branch i.lt(name.count)
+            ? letter(i)
+            : return()
+
+    block letter(i: USize)
+        c        : U8   = name.byte_at(i)
+        capital  : Bool = c.ge(65).bitand(c.le(90))
+        new_word : Bool = capital.bitand(i.gt(0))
+        branch new_word
+            ? word(i, c)
+            : put(i, c)
+
+    block word(i: USize, c: U8)
+        one.store(32)
+        Err.writer().write_bytes(one.to<@Byte>(), 1)
+        jump put(i, c.add(32))
+
+    block put(i: USize, c: U8)
+        one.store(c)
+        Err.writer().write_bytes(one.to<@Byte>(), 1)
+        jump next(i.add(1))
+
 /// A stack overflow, reported like any crash (exit status 82): which routines kept calling, then the trace (which
 /// says how deep the calls went). The runtime's fault handler calls it on the faulting thread, in the stack the
 /// system keeps back for it.
@@ -73,29 +114,24 @@ routine crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Vo
 routine stack_overflow_report(stack_size: U64) -> Void
     block entry()
         rf_flush_output()
-        Err.write("\x1B[91mStackOverflowError: ")
+        Err.write("\x1B[91mStack overflow error: ")
         write_deep_calls()
         write_trace()
         Err.write("\x1B[0m")
         rf_crash_exit()
 
-/// Suflae's report for the same event: Suflae has no "stack" in its vocabulary, so it is an OutOfMemoryError that
+/// Suflae's report for the same event: Suflae has no "stack" in its vocabulary, so it is an out of memory error that
 /// says which routines kept calling.
 /// :param memory_size: The size of the memory the calls used up, in bytes. Not shown, like the stack's size.
 #[export("tessera_deep_calls_report"), noreturn]
 routine deep_calls_report(memory_size: U64) -> Void
     block entry()
         rf_flush_output()
-        Err.write("\x1B[91mOutOfMemoryError: ")
+        Err.write("\x1B[91mOut of memory error: ")
         write_deep_calls()
         write_trace()
         Err.write("\x1B[0m")
         rf_crash_exit()
-
-/// How many of the most recent frames may come before the repeating calls (the routine the stack ran out in, such as
-/// an add the recursive routine called), and the longest repeating run of calls looked for.
-preset CYCLE_MAX_START:  S32 = 4
-preset CYCLE_MAX_PERIOD: S32 = 12
 
 /// The sentence of a call-depth crash: the routine that called itself too many times before returning, or the
 /// routines that called each other, found as the run of calls that repeats at the top of the crash trace. Without a

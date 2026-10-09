@@ -81,6 +81,39 @@ routine print_stack_for_mode() -> Void
         print_platform_stack(0)
         return()
 
+/// Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
+/// "Integer overflow error" (a space before each capital after the first, which becomes lowercase). One byte at a
+/// time, with nothing allocated: it runs because something crashed, possibly out of memory.
+/// :param name: The crash's name.
+routine write_error_title(name: Bytes) -> Void
+    shared one : @U8 <- 0
+
+    block entry()
+        jump next(0)
+
+    block next(i: USize)
+        branch i.lt(name.count)
+            ? letter(i)
+            : return()
+
+    block letter(i: USize)
+        c        : U8   = name.byte_at(i)
+        capital  : Bool = c.ge(65).bitand(c.le(90))
+        new_word : Bool = capital.bitand(i.gt(0))
+        branch new_word
+            ? word(i, c)
+            : put(i, c)
+
+    block word(i: USize, c: U8)
+        one.store(32)
+        Err.writer().write_bytes(one.to<@Byte>(), 1)
+        jump put(i, c.add(32))
+
+    block put(i: USize, c: U8)
+        one.store(c)
+        Err.writer().write_bytes(one.to<@Byte>(), 1)
+        jump next(i.add(1))
+
 /// A runtime error: the type and the message on stderr, the trace for the mode, and the crash status. Standard
 /// output is flushed first.
 /// :param error_type: The error's type name, or null for `Error`.
@@ -97,7 +130,9 @@ routine rf_throw(error_type: CStr, message: CStr) -> Void
             : message
         k : Bytes = kind.to<Bytes>()
         m : Bytes = text.to<Bytes>()
-        Err.write("\x1B[91m\n{k}: {m}\n")
+        Err.write("\x1B[91m\n")
+        write_error_title(k)
+        Err.write(": {m}\n")
         print_stack_for_mode()
         Err.write("\x1B[0m\n")
         exit(CRASH_STATUS)
@@ -109,6 +144,19 @@ preset SYMBOL_INFO_SIZE:     U32   = 88
 preset SYMBOL_INFO_MAX_NAME: USize = 80
 preset SYMBOL_INFO_NAME:     USize = 84
 preset MAX_SYM_NAME:         U32   = 2000
+/// IMAGEHLP_LINE64's size, and where its LineNumber and FileName are.
+preset IMAGEHLP_LINE64_SIZE: U32   = 40
+preset LINE_NUMBER:          USize = 16
+preset LINE_FILE_NAME:       USize = 24
+
+/// SYMOPT_UNDNAME, SYMOPT_DEFERRED_LOADS, and SYMOPT_LOAD_LINES: plain names, symbols loaded when first asked for, and
+/// the line tables loaded with them.
+preset SYM_OPTIONS: U32 = 0x16
+
+/// Where SYMBOL_INFO's Address (the symbol's start) is.
+preset SYMBOL_INFO_ADDRESS: USize = 56
+/// Where EXCEPTION_RECORD's ExceptionAddress is.
+preset EXCEPTION_ADDRESS: USize = 16
 
 /// Win32's `RtlCaptureStackBackTrace`: the return addresses of the calling thread's frames.
 /// :param skip: The frames to skip from the top.
@@ -132,14 +180,6 @@ routine c_get_current_process() -> Addr
 #[external("c"), symbol("SymInitialize"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
 
-/// IMAGEHLP_LINE64's size, and where its LineNumber and FileName are.
-preset IMAGEHLP_LINE64_SIZE: U32   = 40
-preset LINE_NUMBER:          USize = 16
-preset LINE_FILE_NAME:       USize = 24
-/// SYMOPT_UNDNAME, SYMOPT_DEFERRED_LOADS, and SYMOPT_LOAD_LINES: plain names, symbols loaded when first asked for, and
-/// the line tables loaded with them.
-preset SYM_OPTIONS: U32 = 0x16
-
 /// DbgHelp's `SymSetOptions`: what the symbol handler loads and how it shows names.
 /// :param options: The SYMOPT_ flags.
 /// :returns: The options now set.
@@ -153,7 +193,8 @@ routine c_sym_set_options(options: U32) -> U32
 /// :param line: The IMAGEHLP_LINE64 the file and line are written into.
 /// :returns: Nonzero when a line was found.
 #[external("c"), symbol("SymGetLineFromAddr64"), callconv("stdcall"), target(os: "windows")]
-routine c_sym_get_line_from_addr64(process: Addr, address: U64, displacement: @U32, line: @Byte) -> CInt
+routine c_sym_get_line_from_addr64(process: Addr, address: U64, displacement: @U32,
+    line: @Byte) -> CInt
 
 /// DbgHelp's `SymFromAddr`: the symbol at an address.
 /// :param process: The process.
@@ -164,11 +205,6 @@ routine c_sym_get_line_from_addr64(process: Addr, address: U64, displacement: @U
 #[external("c"), symbol("SymFromAddr"), callconv("stdcall"), target(os: "windows")]
 routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
 
-/// Where SYMBOL_INFO's Address (the symbol's start) is.
-preset SYMBOL_INFO_ADDRESS: USize = 56
-/// Where EXCEPTION_RECORD's ExceptionAddress is.
-preset EXCEPTION_ADDRESS: USize = 16
-
 /// Writes the calling thread's native stack on stderr (up to 64 frames), each frame by its symbol name, with its
 /// source file and line when the program's PDB has them, or else by its address.
 /// :param fault: The faulting instruction's address, or 0. A fault's trace starts at the routine that faulted, so
@@ -176,8 +212,8 @@ preset EXCEPTION_ADDRESS: USize = 16
 #target(os: "windows")
 routine print_platform_stack(fault: U64) -> Void
     // SYMBOL_INFO and room for its name, 8-aligned
-    shared buffer       : @Array<U64, 262> <- uninit
-    shared sym          : @Byte            = buffer.to<@Byte>()
+    shared buffer : @Array<U64, 262> <- uninit
+    shared sym    : @Byte            = buffer.to<@Byte>()
     // IMAGEHLP_LINE64
     shared line_buffer  : @Array<U64, 5>   <- uninit
     shared line         : @Byte            = line_buffer.to<@Byte>()
