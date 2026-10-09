@@ -21,17 +21,32 @@ global REAP : @HeaderBuffer
 
 /// Guards ROOTS, which two mutators holding the world lock shared can append to at once.
 global ROOTS_LOCK : @Mutex
-/// The world lock: the WRITER bit while a pass runs, else the number of mutators inside.
+/// The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
+/// cache. Which mutators are inside is kept per thread, in SLOTS.
 global WORLD : @U32
+/// Every thread's slot, a list that only grows (a thread's slot stays after the thread ends). A pass waits on each.
+global SLOTS : @Addr
+/// This thread's slot, null until its first share or release.
+#threadlocal
+global MY_SLOT : @Addr
 /// Whether this thread is running a pass (and so already holds the world lock exclusive).
 #threadlocal
 global IN_COLLECTOR : @Bool
 
 preset WRITER: U32 = 0x80000000
+/// Set in a thread's slot by a pass waiting for that thread to leave, so only then does leaving make the wake call.
+preset WAITING: U32 = 0x40000000
 preset LIVE: S32 = 0
 preset SCANNING: S32 = 1
 preset GARBAGE: S32 = 2
 preset SUSPECTED: S32 = 3
+
+/// One thread's part of the world lock: how deep the thread is inside (a share or release can run another one inside
+/// it, through a destroy routine), with the WAITING bit while a pass waits for it. Only its own thread changes the
+/// depth, so the cache line is not shared with other mutators.
+record WorldSlot
+    inside : U32
+    next   : Addr
 
 /// A growable list of header addresses: the possible roots, one trace's children, or the garbage to free.
 record HeaderBuffer
@@ -41,63 +56,138 @@ record HeaderBuffer
 
 // ── The world lock ─────────────────────────────────────────────────────────
 
-/// Enters the world as a mutator. Many mutators may be inside at once. A pass waits for them all to leave.
+/// This thread's slot, made and added to SLOTS the first time.
+/// :returns: The slot.
+/// :throws: Crashes with `MemoryAllocationError` when the slot can't be allocated.
+routine my_slot() -> @WorldSlot
+    block entry()
+        mine : Addr = MY_SLOT.load()
+        branch mine.to<@Byte>().is_null()
+            ? make()
+            : return(mine.to<@WorldSlot>())
+
+    block make()
+        claim alloc : @Allocator <- make_c_heap_allocator()
+        slot : @WorldSlot = allocate<WorldSlot>(1, alloc)
+        slot.store(WorldSlot { inside: 0, next: null })
+        MY_SLOT.store(slot)
+        jump link(slot)
+
+    block link(slot: @WorldSlot)
+        head : Addr = SLOTS.atomic_load()
+        slot.next.store(head)
+        added : Result<Addr, Addr> = SLOTS.atomic_compare_exchange(head, slot)
+        when added
+            .Success -> return(slot)
+            .Failure -> link(slot)
+
+/// Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
+/// its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
+/// reads WRITER, so one of them always sees the other (both are sequentially consistent).
 routine world_enter() -> Void
     block entry()
         branch IN_COLLECTOR.load()
             ? return()
             : continue
-        jump attempt()
+        slot : @WorldSlot = my_slot()
+        jump attempt(slot)
 
-    block attempt()
+    block attempt(slot: @WorldSlot)
+        previous : U32  = slot.inside.atomic_fetch_add(1)
+        nested   : Bool = previous.bitand(WAITING.bitnot()).ne(0)
+        branch nested
+            ? return()
+            : check(slot)
+
+    block check(slot: @WorldSlot)
         state : U32 = WORLD.atomic_load()
         branch state.bitand(WRITER).eq(0)
-            ? join(state)
-            : park(state)
+            ? return()
+            : back_off(slot, state)
 
-    block join(state: U32)
-        joined : Result<U32, U32> = WORLD.atomic_compare_exchange(state, state.add(1))
-        when joined
-            .Success -> return()
-            .Failure -> attempt()
-
-    block park(state: U32)
+    // A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
+    block back_off(slot: @WorldSlot, state: U32)
+        step_out(slot)
         wait_on(WORLD, state)
-        jump attempt()
+        jump attempt(slot)
 
-/// Leaves the world as a mutator. The last one out wakes a waiting pass.
+/// Leaves the world as a mutator: one step shallower in this thread's slot.
 routine world_leave() -> Void
     block entry()
         branch IN_COLLECTOR.load()
             ? return()
             : continue
-        previous : U32 = WORLD.atomic_fetch_sub(1)
-        branch previous.eq(1)
+        step_out(MY_SLOT.load().to<@WorldSlot>())
+        return()
+
+/// One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
+/// wakes nobody, so sharing and releasing an entity make no system call.
+/// :param slot: This thread's slot.
+routine step_out(slot: @WorldSlot) -> Void
+    block entry()
+        previous : U32 = slot.inside.atomic_fetch_sub(1)
+        branch previous.eq(WAITING.bitor(1))
             ? wake()
             : return()
 
     block wake()
-        wake_all(WORLD)
+        before : U32 = slot.inside.atomic_fetch_and(WAITING.bitnot())
+        wake_all(slot.inside)
         return()
 
-/// Stops the world for a pass: waits until no mutator is inside, then holds it alone.
+/// Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
+/// thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
 routine world_stop() -> Void
     block entry()
         jump attempt()
 
     block attempt()
-        taken : Result<U32, U32> = WORLD.atomic_compare_exchange(0, WRITER)
+        state : U32 = WORLD.atomic_load()
+        branch state.bitand(WRITER).eq(0)
+            ? take(state)
+            : behind(state)
+
+    block take(state: U32)
+        taken : Result<U32, U32> = WORLD.atomic_compare_exchange(state, WRITER)
         when taken
-            .Success        -> marked()
-            .Failure(found) -> continue
-        wait_on(WORLD, found)
+            .Success -> marked()
+            .Failure -> attempt()
+
+    // Another pass runs. Its restart wakes everyone waiting on WORLD.
+    block behind(state: U32)
+        wait_on(WORLD, state)
         jump attempt()
 
     block marked()
         true.store_into(IN_COLLECTOR)
-        return()
+        jump each_slot(SLOTS.atomic_load())
 
-/// Restarts the world after a pass and wakes every mutator waiting for it.
+    block each_slot(at: Addr)
+        branch at.to<@Byte>().is_null()
+            ? return()
+            : drain(at.to<@WorldSlot>())
+
+    block drain(slot: @WorldSlot)
+        inside : U32 = slot.inside.atomic_load()
+        branch inside.bitand(WAITING.bitnot()).eq(0)
+            ? next(slot)
+            : announce(slot, inside)
+
+    block announce(slot: @WorldSlot, inside: U32)
+        waiting : U32              = inside.bitor(WAITING)
+        set     : Result<U32, U32> = slot.inside.atomic_compare_exchange(inside, waiting)
+        when set
+            .Success -> sleep(slot, waiting)
+            .Failure -> drain(slot)
+
+    block sleep(slot: @WorldSlot, waiting: U32)
+        wait_on(slot.inside, waiting)
+        jump drain(slot)
+
+    block next(slot: @WorldSlot)
+        jump each_slot(slot.next.load())
+
+/// Restarts the world after a pass and wakes every mutator and pass waiting for it.
 routine world_restart() -> Void
     block entry()
         false.store_into(IN_COLLECTOR)
