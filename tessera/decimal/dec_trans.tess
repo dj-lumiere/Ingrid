@@ -1,6 +1,6 @@
 // The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
 //
-// D32 and D64 first try a binary float, F64 and F128 with a proven bound on the error (dec_trans_fast.tess), which
+// D32 and D64 first try a binary float, B64 and B128 with a proven bound on the error (dec_trans_fast.tess), which
 // settles nearly every argument. Next, and first for D128, the function is evaluated once at 192 bits on a float of
 // five words (dec_trans_wide.tess), and only then in binary multiprecision (dec_mp.tess), from 256 bits for D32 and
 // D64 and 384 for D128. Each evaluation comes with a proven bound on its error. When every value within the bound
@@ -67,9 +67,9 @@ routine me_const(i: USize, n: USize) -> MpApprox
 routine me_plus_abs(s: MpApprox, e: S64, n: USize) -> MpApprox
     block entry()
         bits  : S64 = n.to<S64>().mul(64)
-        units : F64 = f64_pow2(e.sub(s.v.exp).add(1).add(bits))
+        units : B64 = b64_pow2(e.sub(s.v.exp).add(1).add(bits))
         branch s.v.is_zero(n)
-            ? return({ v: s.v, err: F64.from_bits(0x7FF0000000000000) })
+            ? return({ v: s.v, err: B64.from_bits(0x7FF0000000000000) })
             : return(s.widen(units))
 
 /// Whether a series term no longer matters: below 2^-(64n + 8) of the sum.
@@ -119,8 +119,8 @@ routine me_narrow(x: MpApprox, from: USize, to: USize) -> MpApprox
     block seal()
         x.v.neg.store_into(dst.neg)
         x.v.exp.store_into(dst.exp)
-        scale : F64 = f64_pow2(skip.to<S64>().mul(-64))
-        err   : F64 = x.err.mul(scale).add(2.0).mul(MP_UP)
+        scale : B64 = b64_pow2(skip.to<S64>().mul(-64))
+        err   : B64 = x.err.mul(scale).add(2.0).mul(MP_UP)
         return({ v: dst.load(), err: err })
 
 // ── exp, ln ───────────────────────────────────────────────────────────────────────────────────────
@@ -131,7 +131,7 @@ routine me_narrow(x: MpApprox, from: USize, to: USize) -> MpApprox
 /// :param n: The precision in limbs.
 /// :returns: e^x for |x| < 2^16.
 routine me_exp(x: MpApprox, n: USize) -> MpApprox
-    shared kf    : F64      = x.v.to_f64(n).mul(1.4426950408889634)
+    shared kf    : B64      = x.v.to_b64(n).mul(1.4426950408889634)
     shared k     : S64      = kf.round().to<S64>()
     shared s     : S64      = n.to<S64>().mul(2).add(4)
     shared ln2k  : MpApprox = me_mul_u64(me_const(DEC_LN2, n), k.abs_diff(0), n).with_sign(k.lt(0))
@@ -193,18 +193,18 @@ routine me_ln1p_series(t: MpApprox, n: USize) -> MpApprox
             ? return(me_plus_abs(sum, term.v.exp.add(1), n))
             : series(next_power, me_add(sum, signed, n), i.add(1))
 
-/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the F64 logarithm of m, and ln m = y0 + ln(1 + t) with
+/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the B64 logarithm of m, and ln m = y0 + ln(1 + t) with
 /// t = m e^-y0 - 1, which is below 2^-50, so its series ends after a few terms.
 /// :param x: The operand.
 /// :param n: The precision in limbs.
 /// :returns: ln x for x > 0.
 routine me_ln(x: MpApprox, n: USize) -> MpApprox
-    shared top : F64      = x.v.magnitude().top_f64(n)
+    shared top : B64      = x.v.magnitude().top_b64(n)
     shared low : Bool     = top.lt(0.75)
     shared e   : S64      = x.v.exp.sub(low.to<S64>())
     shared m   : MpApprox = x.ldexp(e.neg(), n)
-    shared y0  : F64      = m.v.to_f64(n).ln()
-    shared y0m : MpApprox = me_exact(mp_of_f64(y0, n))
+    shared y0  : B64      = m.v.to_b64(n).ln()
+    shared y0m : MpApprox = me_exact(mp_of_b64(y0, n))
     shared one : MpApprox = me_int(1, n)
 
     block entry()
@@ -289,7 +289,7 @@ routine me_atan_series(d: MpApprox, n: USize) -> MpApprox
             ? return(me_plus_abs(sum, term.v.exp, n))
             : series(next_power, me_add(sum, signed, n), i.add(2))
 
-/// atan x: below 2^-8 its series; above 1 in magnitude pi/2 - atan(1/x); else from y0, the F64 arctangent:
+/// atan x: below 2^-8 its series; above 1 in magnitude pi/2 - atan(1/x); else from y0, the B64 arctangent:
 /// tan(y0 - atan x) = (sin y0 - x cos y0) / (cos y0 + x sin y0) = d is below 2^-50, and atan x = y0 - atan d.
 /// :param x: The operand.
 /// :param n: The precision in limbs.
@@ -311,8 +311,8 @@ routine me_atan(x: MpApprox, n: USize) -> MpApprox
         return(r.with_sign(x.v.neg))
 
     block newton()
-        y0  : F64      = x.v.to_f64(n).atan()
-        y0m : MpApprox = me_exact(mp_of_f64(y0, n))
+        y0  : B64      = x.v.to_b64(n).atan()
+        y0m : MpApprox = me_exact(mp_of_b64(y0, n))
         sc  : MePair   = me_sincos(y0m, n)
         num : MpApprox = me_sub(sc.a, me_mul(x, sc.b, n), n)
         den : MpApprox = me_add(sc.b, me_mul(x, sc.a, n), n)
@@ -411,8 +411,8 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
     shared p   : S64      = f.digits
 
     block entry()
-        top : F64 = ay.v.top_f64(n)
-        lg  : F64 = top.log10().add(y.v.exp.to<F64>().mul(0.30102999566398120))
+        top : B64 = ay.v.top_b64(n)
+        lg  : B64 = top.log10().add(y.v.exp.to<B64>().mul(0.30102999566398120))
         a   : S64 = lg.floor().to<S64>()
         jump at(a.sub(p).add(1).max(f.qmin), 0)
 
@@ -441,9 +441,9 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
     block decide(q: S64, z: MpApprox, int: U128)
         frac  : Mp   = mp_sub(z.v, mp_of_u128(int, 0, n), n)
         half  : Mp   = mp_of_u128(1, -1, n)
-        d     : F64  = mp_sub(frac, half, n).to_f64(n)
-        zf    : F64  = z.v.to_f64(n)
-        band  : F64  = zf.mul(z.relative(n)).mul(2.0)
+        d     : B64  = mp_sub(frac, half, n).to_b64(n)
+        zf    : B64  = z.v.to_b64(n)
+        band  : B64  = zf.mul(z.relative(n)).mul(2.0)
         clear : Bool = d.abs().gt(band).bitand(band.lt(0.25))
         up    : Bool = d.gt(0.0)
         tie   : Bool = tie_rule.ne(0).bitand(clear.bitnot())
@@ -776,7 +776,7 @@ routine me_erf_positive(ax: MpApprox, n: USize) -> MpApprox
     // the next term is term × 2x^2 / i
     block series(term: MpApprox, sum: MpApprox, i: U64)
         next  : MpApprox = me_div_u64(me_mul(term, two, n), i, n)
-        ratio : F64      = two.v.to_f64(n).div(i.add(2).to<F64>())
+        ratio : B64      = two.v.to_b64(n).div(i.add(2).to<B64>())
         done  : Bool     = me_is_negligible(next, sum, n).bitand(ratio.lt(0.5))
         branch done
             ? scale(me_plus_abs(sum, next.v.exp.add(1), n))
@@ -839,12 +839,12 @@ routine dec_eval_erf(x: Dec, n: USize, complement: Bool) -> MpApprox
             else                -> tail()
 
     block tail()
-        xf     : F64   = ax.v.to_f64(n)
-        lost   : F64   = xf.mul(xf).mul(1.4426950408889634).add(4.0)
+        xf     : B64   = ax.v.to_b64(n)
+        lost   : B64   = xf.mul(xf).mul(1.4426950408889634).add(4.0)
         limbs  : U64   = lost.div(64.0).floor().to<U64>()
         extra  : USize = limbs.to<USize>().add(1)
         wide   : USize = n.add(extra)
-        enough : Bool  = lost.gt(n.to<F64>().mul(64.0).add(16.0))
+        enough : Bool  = lost.gt(n.to<B64>().mul(64.0).add(16.0))
         fits   : Bool  = wide.le(MP_TOP)
         when
             enough -> return(me_erfc_asymptotic(ax, n))
@@ -898,9 +898,9 @@ routine dec_stirling_coefficient(k: USize, n: USize) -> MpApprox
 /// B_200 / (200 199 z^199), is about 2^700.8 z^-199.
 /// :param n: The precision in limbs.
 /// :returns: Where Stirling's series with its 100 terms is accurate to 64n + 20 bits.
-routine dec_stirling_floor(n: USize) -> F64
+routine dec_stirling_floor(n: USize) -> B64
     block entry()
-        bits : F64 = n.to<F64>().mul(64.0).add(741.0)
+        bits : B64 = n.to<B64>().mul(64.0).add(741.0)
         return(bits.div(199.0).exp2())
 
 /// Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
@@ -954,8 +954,8 @@ routine me_sin_of_pi_times(r: MpApprox, n: USize) -> MpApprox
 /// :param log: Whether the logarithm is wanted.
 /// :returns: Γ(z) or ln Γ(z) for z > 0.
 routine dec_gamma_positive(z: MpApprox, n: USize, log: Bool) -> MpApprox
-    shared floor : F64 = dec_stirling_floor(n)
-    shared zf    : F64 = z.v.to_f64(n)
+    shared floor : B64 = dec_stirling_floor(n)
+    shared zf    : B64 = z.v.to_b64(n)
 
     block entry()
         short : Bool = zf.lt(floor)
@@ -1505,22 +1505,22 @@ routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
 
     // e^z with z = y ln|x|: far past the range the result is an infinity or a zero
     block general()
-        z    : F64  = dec_pow_size(x, y)
+        z    : B64  = dec_pow_size(x, y)
         rneg : Bool = x.neg.bitand(yodd)
         when
             z.gt(16000.0)  -> return(dec_inf(rneg))
             z.lt(-16000.0) -> return(dec_num(rneg, 0, f.qmin))
             else           -> return(dec_ziv(DEC_POW, x, y, f))
 
-/// y ln|x| in F64, for dec_pow's test against ±16000 (e^15000 is past every format's range both ways, so an error
+/// y ln|x| in B64, for dec_pow's test against ±16000 (e^15000 is past every format's range both ways, so an error
 /// of far less than 1000 there is harmless): ln|x| within 1/2 of 1 is ln_1p of x - 1, exact in decimal (a relative
 /// error near 2^-52 however close x is to 1), elsewhere ln of the coefficient plus the exponent times ln 10 (|ln|x||
-/// at least 0.4, the error near 2^-40 at worst); y is its coefficient times a power of ten, infinite past F64's range,
+/// at least 0.4, the error near 2^-40 at worst); y is its coefficient times a power of ten, infinite past B64's range,
 /// where the product is then an infinity of the right sign.
 /// :param x: The base (finite, nonzero, not ±1).
 /// :param y: The exponent (finite, nonzero).
-/// :returns: y ln|x| in F64.
-routine dec_pow_size(x: Dec, y: Dec) -> F64
+/// :returns: y ln|x| in B64.
+routine dec_pow_size(x: Dec, y: Dec) -> B64
     shared ax : Dec = dec_num(false, x.coeff, x.exp)
 
     block entry()
@@ -1531,19 +1531,19 @@ routine dec_pow_size(x: Dec, y: Dec) -> F64
 
     block close()
         t  : Dec = dec_plus_int(ax, -1)
-        tf : F64 = t.coeff.to<F64>().mul(t.exp.to<F64>().exp10())
-        st : F64 = t.neg
+        tf : B64 = t.coeff.to<B64>().mul(t.exp.to<B64>().exp10())
+        st : B64 = t.neg
             ? tf.neg()
             : tf
         jump scaled(st.ln_1p())
 
     block far()
-        lc : F64 = ax.coeff.to<F64>().ln()
-        jump scaled(lc.add(x.exp.to<F64>().mul(2.302585092994046)))
+        lc : B64 = ax.coeff.to<B64>().ln()
+        jump scaled(lc.add(x.exp.to<B64>().mul(2.302585092994046)))
 
-    block scaled(l: F64)
-        yf : F64 = y.coeff.to<F64>().mul(y.exp.to<F64>().exp10())
-        sy : F64 = y.neg
+    block scaled(l: B64)
+        yf : B64 = y.coeff.to<B64>().mul(y.exp.to<B64>().exp10())
+        sy : B64 = y.neg
             ? yf.neg()
             : yf
         return(sy.mul(l))
@@ -1604,11 +1604,11 @@ routine Dec.as_result(me: Me) -> Me
 
 /// How far z must move up to reach the Stirling floor, as a whole number of steps.
 /// :param floor: The Stirling floor.
-/// :param zf: z as an F64.
+/// :param zf: z as a B64.
 /// :returns: The steps.
-routine dec_gamma_shift(floor: F64, zf: F64) -> U64
+routine dec_gamma_shift(floor: B64, zf: B64) -> U64
     block entry()
-        gap : F64 = floor.sub(zf.min(floor))
+        gap : B64 = floor.sub(zf.min(floor))
         return(gap.floor().to<U64>().add(1))
 
 /// What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).

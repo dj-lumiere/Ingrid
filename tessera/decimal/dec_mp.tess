@@ -4,7 +4,7 @@
 // An Mp has n 64-bit limbs, n chosen per call (the precision; at most MP_TOP). Every operation truncates its exact
 // result to n limbs, which is off by less than one unit in the last place: a relative error below 2^(1 - 64n). An
 // MpApprox is an Mp with a bound on how far the value it stands for can be from it, relative to it and counted in
-// units of 2^-64n (the "ulp" of the precision), so a bound of 2 is one truncation. The bounds are F64s rounded upward
+// units of 2^-64n (the "ulp" of the precision), so a bound of 2 is one truncation. The bounds are B64s rounded upward
 // by a small factor at every step, so they stay upper bounds. A transcendental computed this way comes with a proven
 // band around it; when the whole band rounds to one decimal, that decimal is the correctly rounded result
 // (dec_trans.tess), otherwise the computation is repeated with more limbs.
@@ -34,7 +34,7 @@ record Mp
 /// the computation).
 record MpApprox
     v   : Mp
-    err : F64
+    err : B64
 
 /// A number in a working buffer before it is packed into an Mp: (-1)^neg × limbs[0 .. len) × 2^scale.
 record MpUnpacked
@@ -199,11 +199,11 @@ routine mp_of_u128(v: U128, scale: S64, n: USize) -> Mp
         buf.setitem(1, v.shr(64).to_wrap<U64>())
         return(mp_pack(MpUnpacked { neg: false, limbs: buf, len: 2, scale: scale }, n))
 
-/// An F64 exactly (finite).
+/// A B64 exactly (finite).
 /// :param x: The float (finite).
 /// :param n: The precision in limbs.
-/// :returns: An F64 exactly (finite).
-routine mp_of_f64(x: F64, n: USize) -> Mp
+/// :returns: A B64 exactly (finite).
+routine mp_of_b64(x: B64, n: USize) -> Mp
     shared bits   : U64 = x.bits()
     shared biased : S64 = bits.shr(52).bitand(0x7FF).to<S64>()
 
@@ -246,45 +246,45 @@ routine mp_const(table: @U64, at: USize, exp: S64, n: USize) -> Mp
         exp.store_into(r.exp)
         return(r.load())
 
-/// 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
+/// 2^k as a B64 for any k (0 below the smallest normal, infinity above the largest).
 /// :param k: The power.
-/// :returns: 2^k as an F64 for any k (0 below the smallest normal, infinity above the largest).
+/// :returns: 2^k as a B64 for any k (0 below the smallest normal, infinity above the largest).
 #inline
-routine f64_pow2(k: S64) -> F64
+routine b64_pow2(k: S64) -> B64
     block entry()
         when
-            k.gt(1023)  -> return(F64.from_bits(0x7FF0000000000000))
+            k.gt(1023)  -> return(B64.from_bits(0x7FF0000000000000))
             k.lt(-1022) -> return(0.0)
-            else        -> return(F64.from_bits(k.add(1023).to<U64>().shl(52)))
+            else        -> return(B64.from_bits(k.add(1023).to<U64>().shl(52)))
 
-/// The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero): the top 53 bits.
+/// The value as a B64 times 2^-exp, in [0.5, 1) (0 for zero): the top 53 bits.
 /// :param n: The precision in limbs.
-/// :returns: The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero).
-routine Mp.top_f64(me: Me, n: USize) -> F64
+/// :returns: The value as a B64 times 2^-exp, in [0.5, 1) (0 for zero).
+routine Mp.top_b64(me: Me, n: USize) -> B64
     shared slot : @Me <- me
 
     block entry()
         top  : U64 = slot.m.getitem(n.sub(1))
-        frac : F64 = top.shr(11).to<F64>().mul(f64_pow2(-53))
+        frac : B64 = top.shr(11).to<B64>().mul(b64_pow2(-53))
         branch me.neg
             ? return(frac.neg())
             : return(frac)
 
-/// The value as an F64 (0 or an infinity outside F64's range).
+/// The value as a B64 (0 or an infinity outside B64's range).
 /// :param n: The precision in limbs.
-/// :returns: The value as an F64 (0 or an infinity outside F64's range).
-routine Mp.to_f64(me: Me, n: USize) -> F64
+/// :returns: The value as a B64 (0 or an infinity outside B64's range).
+routine Mp.to_b64(me: Me, n: USize) -> B64
     block entry()
         when
             me.is_zero(n)    -> return(0.0)
             me.exp.gt(1023)  -> huge()
             me.exp.lt(-1000) -> return(0.0)
-            else             -> return(me.top_f64(n).mul(f64_pow2(me.exp)))
+            else             -> return(me.top_b64(n).mul(b64_pow2(me.exp)))
 
     block huge()
         branch me.neg
-            ? return(F64.from_bits(0xFFF0000000000000))
-            : return(F64.from_bits(0x7FF0000000000000))
+            ? return(B64.from_bits(0xFFF0000000000000))
+            : return(B64.from_bits(0x7FF0000000000000))
 
 // ── comparing ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -596,8 +596,8 @@ routine mp_sub(a: Mp, b: Mp, n: USize) -> Mp
 
 // ── values with error bounds ──────────────────────────────────────────────────────────────────────
 
-/// The factor every new bound is multiplied by, so the F64 roundings of the bound arithmetic only make it larger.
-preset MP_UP: F64 = 1.0000000001
+/// The factor every new bound is multiplied by, so the B64 roundings of the bound arithmetic only make it larger.
+preset MP_UP: B64 = 1.0000000001
 
 /// An exact value (its bound 0).
 /// :param v: The value.
@@ -612,7 +612,7 @@ routine me_exact(v: Mp) -> MpApprox
 /// :param err: Its bound, in units of 2^-64n.
 /// :returns: The bounded value.
 #inline
-routine me_of(v: Mp, err: F64) -> MpApprox
+routine me_of(v: Mp, err: B64) -> MpApprox
     block entry()
         return({ v: v, err: err })
 
@@ -643,28 +643,28 @@ routine MpApprox.ldexp(me: Me, k: S64, n: USize) -> Me
 /// :param more: The units to add.
 /// :returns: The bound widened by more units.
 #inline
-routine MpApprox.widen(me: Me, more: F64) -> Me
+routine MpApprox.widen(me: Me, more: B64) -> Me
     block entry()
         return({ v: me.v, err: me.err.add(more).mul(MP_UP) })
 
-/// The relative error as an F64 (not in units), for an n-limb value. The unit 2^-64n is applied in two halves:
-/// at 16 limbs it is 2^-1024, below the smallest normal F64, where f64_pow2 gives 0.
+/// The relative error as a B64 (not in units), for an n-limb value. The unit 2^-64n is applied in two halves:
+/// at 16 limbs it is 2^-1024, below the smallest normal B64, where b64_pow2 gives 0.
 /// :param n: The precision in limbs.
-/// :returns: The relative error as an F64 (not in units), for an n-limb value.
-routine MpApprox.relative(me: Me, n: USize) -> F64
+/// :returns: The relative error as a B64 (not in units), for an n-limb value.
+routine MpApprox.relative(me: Me, n: USize) -> B64
     block entry()
         half : S64 = n.to<S64>().mul(32)
-        unit : F64 = f64_pow2(half.neg())
+        unit : B64 = b64_pow2(half.neg())
         return(me.err.mul(unit).mul(unit))
 
-/// A bound for an F64 relative error r, in units of 2^-64n.
+/// A bound for a B64 relative error r, in units of 2^-64n.
 /// :param r: The argument.
 /// :param n: The precision in limbs.
-/// :returns: A bound for an F64 relative error r, in units of 2^-64n.
-routine me_units(r: F64, n: USize) -> F64
+/// :returns: A bound for a B64 relative error r, in units of 2^-64n.
+routine me_units(r: B64, n: USize) -> B64
     block entry()
         bits : S64 = n.to<S64>().mul(64)
-        return(r.mul(f64_pow2(bits)).mul(MP_UP))
+        return(r.mul(b64_pow2(bits)).mul(MP_UP))
 
 /// a × b: the relative errors add (with their product) and the truncation adds 2.
 /// :param a: The first operand.
@@ -674,9 +674,9 @@ routine me_units(r: F64, n: USize) -> F64
 routine me_mul(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         v     : Mp  = mp_mul(a.v, b.v, n)
-        unit  : F64 = f64_pow2(n.to<S64>().mul(-64))
-        cross : F64 = a.err.mul(b.err).mul(unit)
-        err   : F64 = a.err.add(b.err).add(cross).add(2.0)
+        unit  : B64 = b64_pow2(n.to<S64>().mul(-64))
+        cross : B64 = a.err.mul(b.err).mul(unit)
+        err   : B64 = a.err.add(b.err).add(cross).add(2.0)
         return({ v: v, err: err.mul(MP_UP) })
 
 /// a × k for a small exact k.
@@ -714,30 +714,30 @@ routine me_add(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
             za               -> return(b)
             zb               -> return(a)
             zr.bitand(exact) -> return({ v: v, err: 0.0 })
-            zr               -> return({ v: v, err: F64.from_bits(0x7FF0000000000000) })
+            zr               -> return({ v: v, err: B64.from_bits(0x7FF0000000000000) })
             else             -> bound(v)
 
     block bound(v: Mp)
         er      : S64 = v.exp
         big     : S64 = a.v.exp.max(b.v.exp)
-        rt      : F64 = v.top_f64(n).abs()
-        from_a  : F64 = a.err.mul(me_ratio(a.v, rt, er, n))
-        from_b  : F64 = b.err.mul(me_ratio(b.v, rt, er, n))
-        dropped : F64 = f64_pow2(big.sub(er).sub(63))
-        err     : F64 = from_a.add(from_b).add(dropped).add(2.0)
+        rt      : B64 = v.top_b64(n).abs()
+        from_a  : B64 = a.err.mul(me_ratio(a.v, rt, er, n))
+        from_b  : B64 = b.err.mul(me_ratio(b.v, rt, er, n))
+        dropped : B64 = b64_pow2(big.sub(er).sub(63))
+        err     : B64 = from_a.add(from_b).add(dropped).add(2.0)
         return({ v: v, err: err.mul(MP_UP) })
 
 /// An upper bound of |x| / |r| for a nonzero r: |x| <= (t_x + 2^-53) 2^e_x and |r| >= t_r 2^e_r, with t the top 53
-/// bits as an F64 in [1/2, 1).
+/// bits as a B64 in [1/2, 1).
 /// :param x: The operand.
-/// :param rt: |r|'s top bits as an F64.
+/// :param rt: |r|'s top bits as a B64.
 /// :param er: r's exponent.
 /// :param n: The precision in limbs.
 /// :returns: The bound.
-routine me_ratio(x: Mp, rt: F64, er: S64, n: USize) -> F64
+routine me_ratio(x: Mp, rt: B64, er: S64, n: USize) -> B64
     block entry()
-        xt : F64 = x.top_f64(n).abs().add(f64_pow2(-53))
-        return(xt.div(rt).mul(f64_pow2(x.exp.sub(er))).mul(MP_UP))
+        xt : B64 = x.top_b64(n).abs().add(b64_pow2(-53))
+        return(xt.div(rt).mul(b64_pow2(x.exp.sub(er))).mul(MP_UP))
 
 /// a - b.
 /// :param a: The minuend.
@@ -749,19 +749,19 @@ routine me_sub(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         return(me_add(a, b.negate(), n))
 
-/// 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from an F64 start, at full precision: each step squares
+/// 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from a B64 start, at full precision: each step squares
 /// the relative error and adds a few truncations, so after enough steps it is within 16 units. The error of b
 /// passes through as its own size (1 / (b (1 + e)) = (1 - e + e^2 ...) / b).
 /// :param b: The second operand.
 /// :param n: The precision in limbs.
-/// :returns: 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from an F64 start, at full precision.
+/// :returns: 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from a B64 start, at full precision.
 routine me_recip(b: MpApprox, n: USize) -> MpApprox
     shared one   : Mp  = mp_of_u128(1, 0, n)
-    shared seed  : F64 = 1.0.div(b.v.top_f64(n))
+    shared seed  : B64 = 1.0.div(b.v.top_b64(n))
     shared steps : S64 = mp_newton_steps(n)
 
     block entry()
-        y0 : Mp = mp_of_f64(seed, n).ldexp(b.v.exp.neg(), n)
+        y0 : Mp = mp_of_b64(seed, n).ldexp(b.v.exp.neg(), n)
         jump step(y0, 0)
 
     block step(y: Mp, k: S64)
@@ -798,7 +798,7 @@ routine me_div(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
     block entry()
         return(me_mul(a, me_recip(b, n), n))
 
-/// sqrt(a) for a > 0: z = 1/sqrt(a) by Newton steps z + z (1 - a z^2) / 2 from an F64 start, then a z. a's error
+/// sqrt(a) for a > 0: z = 1/sqrt(a) by Newton steps z + z (1 - a z^2) / 2 from a B64 start, then a z. a's error
 /// enters halved.
 /// :param a: The first operand.
 /// :param n: The precision in limbs.
@@ -816,9 +816,9 @@ routine me_sqrt(a: MpApprox, n: USize) -> MpApprox
 
     // a = t 2^exp with t in [0.5, 1): 1/sqrt(a) = 2^(-exp/2) / sqrt(t 2^(exp - 2 half))
     block start()
-        t    : F64 = a.v.top_f64(n).mul(f64_pow2(a.v.exp.sub(half.mul(2))))
-        seed : F64 = 1.0.div(t.sqrt())
-        z0   : Mp  = mp_of_f64(seed, n).ldexp(half.neg(), n)
+        t    : B64 = a.v.top_b64(n).mul(b64_pow2(a.v.exp.sub(half.mul(2))))
+        seed : B64 = 1.0.div(t.sqrt())
+        z0   : Mp  = mp_of_b64(seed, n).ldexp(half.neg(), n)
         jump step(z0, 0)
 
     block step(z: Mp, k: S64)

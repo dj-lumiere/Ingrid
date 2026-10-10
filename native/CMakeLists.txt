@@ -31,7 +31,7 @@ file(GLOB INGRID_RUNTIME_TESSERA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/
 file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/Standard/*.tess")
 set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
 set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
-# The standard library's exports come along: the F16 and BF16 conversions LLVM calls on Windows, which the
+# The standard library's exports come along: the B16 and BF16 conversions LLVM calls on Windows, which the
 # JIT resolves from this library. Its default crash handler gives way to the runtime's own. Tessera's crash trace
 # stays out (--no-trace): RazorForge keeps its own, which the runtime's crash handler reads.
 add_custom_command(

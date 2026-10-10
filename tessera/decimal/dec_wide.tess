@@ -19,7 +19,7 @@ record W
 /// A W and a bound on its error: the value it stands for is within err × 2^-192 × |v| of v.
 record We
     v   : W
-    err : F64
+    err : B64
 
 /// Five limbs of an exact intermediate sum or product, least significant last.
 record WLimbs
@@ -93,10 +93,10 @@ routine w_of_u128(v: U128, scale: S64) -> W
         e   : S64  = scale.add(128).sub(lz.to<S64>())
         return({ neg: false, exp: e, h: top.shr(64).to_wrap<U64>(), m: top.to_wrap<U64>(), l: 0 })
 
-/// An F64 exactly (finite).
+/// A B64 exactly (finite).
 /// :param x: The float.
 /// :returns: x as a W.
-routine w_of_f64(x: F64) -> W
+routine w_of_b64(x: B64) -> W
     shared bits   : U64 = x.bits()
     shared biased : S64 = bits.shr(52).bitand(0x7FF).to<S64>()
 
@@ -109,10 +109,10 @@ routine w_of_f64(x: F64) -> W
         w : W   = w_of_u128(frac.bitor(hidden).to<U128>(), e)
         return(w.with_sign(bits.shr(63).eq(1)))
 
-/// An F128 exactly (finite).
+/// A B128 exactly (finite).
 /// :param x: The float.
 /// :returns: x as a W.
-routine w_of_f128(x: F128) -> W
+routine w_of_b128(x: B128) -> W
     shared bits   : U128 = x.bits()
     shared biased : S64  = bits.shr(112).bitand(0x7FFF).to_wrap<S64>()
 
@@ -125,36 +125,36 @@ routine w_of_f128(x: F128) -> W
         w : W   = w_of_u128(frac.bitor(hidden), e)
         return(w.with_sign(bits.shr(127).eq(1)))
 
-/// The value as an F64 times 2^-exp, in [0.5, 1) (0 for zero), signed: the top 53 bits.
+/// The value as a B64 times 2^-exp, in [0.5, 1) (0 for zero), signed: the top 53 bits.
 /// :returns: The scaled top bits.
-routine W.top_f64(me: Me) -> F64
+routine W.top_b64(me: Me) -> B64
     block entry()
-        frac : F64 = me.h.shr(11).to<F64>().mul(f64_pow2(-53))
+        frac : B64 = me.h.shr(11).to<B64>().mul(b64_pow2(-53))
         branch me.neg
             ? return(frac.neg())
             : return(frac)
 
-/// The value as an F64 (0 or an infinity outside F64's range).
-/// :returns: The value as an F64.
-routine W.to_f64(me: Me) -> F64
+/// The value as a B64 (0 or an infinity outside B64's range).
+/// :returns: The value as a B64.
+routine W.to_b64(me: Me) -> B64
     block entry()
         when
             me.is_zero()     -> return(0.0)
             me.exp.gt(1023)  -> huge()
             me.exp.lt(-1000) -> return(0.0)
-            else             -> return(me.top_f64().mul(f64_pow2(me.exp)))
+            else             -> return(me.top_b64().mul(b64_pow2(me.exp)))
 
     block huge()
         branch me.neg
-            ? return(F64.from_bits(0xFFF0000000000000))
-            : return(F64.from_bits(0x7FF0000000000000))
+            ? return(B64.from_bits(0xFFF0000000000000))
+            : return(B64.from_bits(0x7FF0000000000000))
 
-/// The value rounded toward zero to an F128 (exponent within F128's normal range).
-/// :returns: The value as an F128.
-routine W.to_f128(me: Me) -> F128
+/// The value rounded toward zero to a B128 (exponent within B128's normal range).
+/// :returns: The value as a B128.
+routine W.to_b128(me: Me) -> B128
     block entry()
         branch me.is_zero()
-            ? return(F64.to<F128>(0.0))
+            ? return(B64.to<B128>(0.0))
             : pack()
 
     // the top 113 bits: h's 64 and m's top 49
@@ -163,7 +163,7 @@ routine W.to_f128(me: Me) -> F128
         frac   : U128 = mant.bitand(U128.shl(1, 112).sub(1))
         biased : U128 = me.exp.add(16382).to<U128>()
         sign   : U128 = me.neg.to<U128>().shl(127)
-        return(F128.from_bits(sign.bitor(biased.shl(112)).bitor(frac)))
+        return(B128.from_bits(sign.bitor(biased.shl(112)).bitor(frac)))
 
 // ── comparing ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -469,15 +469,15 @@ routine We.ldexp(me: Me, k: S64) -> Me
 /// :param more: The units to add.
 /// :returns: The bound widened by more units.
 #inline
-routine We.widen(me: Me, more: F64) -> Me
+routine We.widen(me: Me, more: B64) -> Me
     block entry()
         return({ v: me.v, err: me.err.add(more).mul(MP_UP) })
 
-/// The relative error as an F64 (not in units): err × 2^-192, applied in two halves.
+/// The relative error as a B64 (not in units): err × 2^-192, applied in two halves.
 /// :returns: The relative error.
-routine We.relative(me: Me) -> F64
+routine We.relative(me: Me) -> B64
     block entry()
-        unit : F64 = f64_pow2(-96)
+        unit : B64 = b64_pow2(-96)
         return(me.err.mul(unit).mul(unit))
 
 /// a × b: the relative errors add (with their product) and the truncation adds 2.
@@ -487,9 +487,9 @@ routine We.relative(me: Me) -> F64
 routine we_mul(a: We, b: We) -> We
     block entry()
         v     : W   = w_mul(a.v, b.v)
-        unit  : F64 = f64_pow2(-192)
-        cross : F64 = a.err.mul(b.err).mul(unit)
-        err   : F64 = a.err.add(b.err).add(cross).add(2.0)
+        unit  : B64 = b64_pow2(-192)
+        cross : B64 = a.err.mul(b.err).mul(unit)
+        err   : B64 = a.err.add(b.err).add(cross).add(2.0)
         return({ v: v, err: err.mul(MP_UP) })
 
 /// a × k for a small exact k.
@@ -524,30 +524,30 @@ routine we_add(a: We, b: We) -> We
             za               -> return(b)
             zb               -> return(a)
             zr.bitand(exact) -> return({ v: v, err: 0.0 })
-            zr               -> return({ v: v, err: F64.from_bits(0x7FF0000000000000) })
+            zr               -> return({ v: v, err: B64.from_bits(0x7FF0000000000000) })
             else             -> bound(v)
 
     // each operand's error scaled by |operand| / |result|, bounded from the top 53 bits: |x| <= (t_x + 2^-53) 2^e_x
-    // and |r| >= t_r 2^e_r, with t the top bits as an F64 in [1/2, 1)
+    // and |r| >= t_r 2^e_r, with t the top bits as a B64 in [1/2, 1)
     block bound(v: W)
         er      : S64 = v.exp
         big     : S64 = a.v.exp.max(b.v.exp)
-        rt      : F64 = v.top_f64().abs()
-        from_a  : F64 = a.err.mul(we_ratio(a.v, rt, er))
-        from_b  : F64 = b.err.mul(we_ratio(b.v, rt, er))
-        dropped : F64 = f64_pow2(big.sub(er).sub(63))
-        err     : F64 = from_a.add(from_b).add(dropped).add(2.0)
+        rt      : B64 = v.top_b64().abs()
+        from_a  : B64 = a.err.mul(we_ratio(a.v, rt, er))
+        from_b  : B64 = b.err.mul(we_ratio(b.v, rt, er))
+        dropped : B64 = b64_pow2(big.sub(er).sub(63))
+        err     : B64 = from_a.add(from_b).add(dropped).add(2.0)
         return({ v: v, err: err.mul(MP_UP) })
 
 /// An upper bound of |x| / |r| for a nonzero r whose top bits are rt (in [1/2, 1)) and exponent er.
 /// :param x: The operand.
-/// :param rt: |r|'s top 53 bits as an F64.
+/// :param rt: |r|'s top 53 bits as a B64.
 /// :param er: r's exponent.
 /// :returns: The bound.
-routine we_ratio(x: W, rt: F64, er: S64) -> F64
+routine we_ratio(x: W, rt: B64, er: S64) -> B64
     block entry()
-        xt : F64 = x.top_f64().abs().add(f64_pow2(-53))
-        return(xt.div(rt).mul(f64_pow2(x.exp.sub(er))).mul(MP_UP))
+        xt : B64 = x.top_b64().abs().add(b64_pow2(-53))
+        return(xt.div(rt).mul(b64_pow2(x.exp.sub(er))).mul(MP_UP))
 
 /// a - b.
 /// :param a: The minuend.
@@ -558,20 +558,20 @@ routine we_sub(a: We, b: We) -> We
     block entry()
         return(we_add(a, b.negate()))
 
-/// 1 / b for a nonzero b, by two Newton steps y + y (1 - b y) from an F64 start (50 bits, doubled twice past 200):
+/// 1 / b for a nonzero b, by two Newton steps y + y (1 - b y) from a B64 start (50 bits, doubled twice past 200):
 /// within 16 units, plus b's own error (me_recip at three limbs).
 /// :param b: The divisor.
 /// :returns: 1 / b.
 routine we_recip(b: We) -> We
     shared one  : W   = w_of_u128(1, 0)
-    shared seed : F64 = 1.0.div(b.v.top_f64())
+    shared seed : B64 = 1.0.div(b.v.top_b64())
 
     // a zero divisor gives an unbounded result, which no rounding accepts
     block entry()
         branch b.v.is_zero()
-            ? return({ v: one, err: F64.from_bits(0x7FF0000000000000) })
+            ? return({ v: one, err: B64.from_bits(0x7FF0000000000000) })
             : continue
-        y0 : W = w_of_f64(seed).ldexp(b.v.exp.neg())
+        y0 : W = w_of_b64(seed).ldexp(b.v.exp.neg())
         jump step(y0, 0)
 
     block step(y: W, k: S64)
@@ -592,7 +592,7 @@ routine we_div(a: We, b: We) -> We
     block entry()
         return(we_mul(a, we_recip(b)))
 
-/// sqrt(a) for a >= 0: z = 1/sqrt(a) by two Newton steps z + z (1 - a z^2) / 2 from an F64 start, then a z; a's
+/// sqrt(a) for a >= 0: z = 1/sqrt(a) by two Newton steps z + z (1 - a z^2) / 2 from a B64 start, then a z; a's
 /// error enters halved (me_sqrt at three limbs).
 /// :param a: The operand.
 /// :returns: sqrt(a).
@@ -606,9 +606,9 @@ routine we_sqrt(a: We) -> We
             : start()
 
     block start()
-        t    : F64 = a.v.top_f64().mul(f64_pow2(a.v.exp.sub(half.mul(2))))
-        seed : F64 = 1.0.div(t.sqrt())
-        jump step(w_of_f64(seed).ldexp(half.neg()), 0)
+        t    : B64 = a.v.top_b64().mul(b64_pow2(a.v.exp.sub(half.mul(2))))
+        seed : B64 = 1.0.div(t.sqrt())
+        jump step(w_of_b64(seed).ldexp(half.neg()), 0)
 
     block step(z: W, k: S64)
         done : Bool = k.ge(2)
@@ -755,9 +755,9 @@ routine me_of_we(x: We) -> MpApprox
 /// :returns: s with the wider bound.
 routine we_plus_abs(s: We, e: S64) -> We
     block entry()
-        units : F64 = f64_pow2(e.sub(s.v.exp).add(1).add(192))
+        units : B64 = b64_pow2(e.sub(s.v.exp).add(1).add(192))
         branch s.v.is_zero()
-            ? return({ v: s.v, err: F64.from_bits(0x7FF0000000000000) })
+            ? return({ v: s.v, err: B64.from_bits(0x7FF0000000000000) })
             : return(s.widen(units))
 
 /// Whether a series term no longer matters: below 2^-200 of the sum (me_is_negligible at three limbs).
