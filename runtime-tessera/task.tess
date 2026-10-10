@@ -12,6 +12,9 @@ import Standard/Alloc
 import Standard/Os
 
 global NEXT_TASK_ID: @U64 <- 1
+/// Agents made and not finished yet (coroutines and threads), from creation to completion or to being freed
+/// unfinished. A thread waiting on a channel when none is left knows that no one else can ever wake it.
+global LIVE_TASKS: @U64
 /// The threaded task running on this thread, or null.
 #threadlocal
 global CURRENT_TASK: @@Task
@@ -66,6 +69,7 @@ record Task
     coro_waiter: @Coro
     race_sched: @Sched  // the scheduler of a race! over a set that has it
     race_waiter: @Coro  // that race!'s coroutine, or null for a thread racer
+    counted: U32  // 1 while it counts in LIVE_TASKS
 
 /// What a task's thread starts with, freed by the thread.
 record ThreadedStart
@@ -321,12 +325,25 @@ routine rf_task_create(kind: U32) -> @Task
         task.kind.poke(kind)
         task.completion_seq.poke(U64.MAX)
         task.task_id.poke(NEXT_TASK_ID.atomic_fetch_add(1))
+        task.counted.poke(1)
+        LIVE_TASKS.atomic_fetch_add(1)
         return(task)
+
+/// Takes the task out of LIVE_TASKS, once: at its completion, or when it is freed without having completed.
+routine Task.uncount(me: @Me) -> Void
+    block entry()
+        was: U32 = me.counted.atomic_swap(0)
+        branch was.eq(1)
+            ? continue
+            : return()
+        LIVE_TASKS.atomic_fetch_sub(1)
+        return()
 
 /// Frees the task with a result nobody took (a deadline give-up, a race! loser) and the dependents list. The error
 /// payload is not freed.
 routine Task.free(me: @Me) -> Void
     block entry()
+        me.uncount()
         payload: Addr = me.value_payload.peek()
         branch payload.is_null()
             ? nodes(me.dependents_head.peek())
@@ -654,6 +671,7 @@ routine rf_task_mark_parked(task: @Task) -> Void
 /// :param error: The error payload, or null.
 routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> Void
     block entry()
+        me.uncount()
         me.stamp()
         me.completion.poke(how)
         me.value_payload.poke(value)
