@@ -129,7 +129,7 @@ routine Task.signal_completion(me: @Me) -> Void
         branch waiter.is_null()
             ? race(race_sched, race_waiter)
             : continue
-        rf_sched_wake(sched, waiter)
+        rf_sched_wake(s: sched, c: waiter)
         jump race(race_sched, race_waiter)
 
     // Left registered, so a later spurious wake is harmless, and race! clears it when it is over.
@@ -140,7 +140,7 @@ routine Task.signal_completion(me: @Me) -> Void
         branch race_waiter.is_null()
             ? signal(race_sched)
             : continue
-        rf_sched_wake(race_sched, race_waiter)
+        rf_sched_wake(s: race_sched, c: race_waiter)
         jump threads()
 
     block signal(race_sched: @Sched)
@@ -185,7 +185,7 @@ routine rf_task_await_coro(task: @Task) -> U32
         branch sched.is_null().bitor(this_coro.is_null())
             ? return(1)
             : continue
-        return(task.register_waiter(sched, this_coro))
+        return(task.register_waiter(sched, waiter: this_coro))
 
 /// rf_task_await_coro bounded by timeout_ns: 1 completed, 0 timed out, 2 not in a scheduler-driven coroutine (the
 /// caller waits blocking with the deadline). On a timeout the registration is taken back, so a later completion
@@ -208,12 +208,12 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
         jump register(sched, this_coro, deadline)
 
     block register(sched: @Sched, this_coro: @Coro, deadline: U64)
-        branch task.register_waiter(sched, this_coro).eq(1)
+        branch task.register_waiter(sched, waiter: this_coro).eq(1)
             ? return(1)
             : continue
         now: U64 = monotonic_ns()
         branch now.ge(deadline)
-            ? return(task.withdraw_waiter(sched, this_coro))
+            ? return(task.withdraw_waiter(sched, waiter: this_coro))
             : continue
         rf_sched_park_deadline(deadline.sub(now))
         jump register(sched, this_coro, deadline)
@@ -317,7 +317,7 @@ routine rf_task_completion_name(kind: U32) -> CStr
 #export("rf_task_create")
 routine rf_task_create(kind: U32) -> @Task
     block entry()
-        task: @Task = zeroed[Task](1, "Failed to allocate task")
+        task: @Task = zeroed[Task](count: 1, what: "Failed to allocate task")
         task.kind.poke(kind)
         task.completion_seq.poke(U64.MAX)
         task.task_id.poke(NEXT_TASK_ID.atomic_fetch_add(1))
@@ -482,7 +482,7 @@ routine rf_task_wait(task: @Task) -> U32
         branch here_has_live()
             ? here()
             : continue
-        wait_on(task.done, 0)
+        wait_on(at: task.done, expected: 0)
         jump wait()
 
     // This thread's start_here() jobs go on while it waits for the thread.
@@ -490,7 +490,7 @@ routine rf_task_wait(task: @Task) -> U32
         branch run_here_ready()
             ? wait()
             : continue
-        wait_on_for(task.done, 0, HERE_POLL_NS)
+        wait_on_for(at: task.done, expected: 0, timeout_ns: HERE_POLL_NS)
         jump wait()
 
     block report()
@@ -523,7 +523,7 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         branch now.ge(deadline)
             ? return(COMPLETION_TIMEOUT)
             : continue
-        wait_on_for(task.done, 0, deadline.sub(now))
+        wait_on_for(at: task.done, expected: 0, timeout_ns: deadline.sub(now))
         jump wait(deadline)
 
     block report()
@@ -602,10 +602,12 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], user
         branch task.status.peek_atomic().eq(TASK_NEW)
             ? continue
             : started()
-        start: @ThreadedStart = zeroed[ThreadedStart](1, "Failed to allocate thread start data")
+        start: @ThreadedStart = zeroed[ThreadedStart](count: 1,
+            what: "Failed to allocate thread start data")
         start.poke(ThreadedStart(task: task, entry: entry, userdata: userdata))
         task.status.poke_atomic(TASK_READY)
-        Thread.spawn(threaded_task_main.to[Callable](), start, runtime_heap()).detach()
+        Thread.spawn(entry: threaded_task_main.to[Callable](), arg: start,
+            alloc: runtime_heap()).detach()
         return(1)
 
     block started()
@@ -675,7 +677,7 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
         branch free
             ? detached()
             : continue
-        task.complete(COMPLETION_VALUE, result_payload, null)
+        task.complete(how: COMPLETION_VALUE, value: result_payload, error: null)
         return()
 
     block detached()
@@ -747,7 +749,7 @@ routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
         branch task.is_null()
             ? return()
             : continue
-        task.complete(COMPLETION_ERROR, null, error_payload)
+        task.complete(how: COMPLETION_ERROR, value: null, error: error_payload)
         return()
 
 /// Completes a task as cancelled and wakes its waiters. A null `task` does nothing.
@@ -758,7 +760,7 @@ routine rf_task_complete_cancelled(task: @Task) -> Void
         branch task.is_null()
             ? return()
             : continue
-        task.complete(COMPLETION_CANCELLED, null, null)
+        task.complete(how: COMPLETION_CANCELLED, value: null, error: null)
         return()
 
 /// Completes a task as timed out and wakes its waiters. A null `task` does nothing.
@@ -769,7 +771,7 @@ routine rf_task_complete_timeout(task: @Task) -> Void
         branch task.is_null()
             ? return()
             : continue
-        task.complete(COMPLETION_TIMEOUT, null, null)
+        task.complete(how: COMPLETION_TIMEOUT, value: null, error: null)
         return()
 
 /// Asks a task to stop: a flag its routine reads with rf_cancel_requested. A null `task` does nothing.
@@ -898,7 +900,7 @@ routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
         branch task.is_null().bitor(dependent.is_null())
             ? return()
             : continue
-        node: @TaskNode = zeroed[TaskNode](1, "Failed to allocate task queue node")
+        node: @TaskNode = zeroed[TaskNode](count: 1, what: "Failed to allocate task queue node")
         node.task.poke(dependent)
         tail: @TaskNode = task.dependents_tail.peek()
         branch tail.is_null()

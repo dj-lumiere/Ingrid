@@ -28,7 +28,7 @@ routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
     block entry()
         bits: S64 = f.digits.mul(4).add(40)
         v: We = wide_eval(fn, x, y, bits)
-        return(wide_round(v, f))
+        return(wide_round(y: v, f))
 
 /// e^x for |x| < 2^40: x = k ln 2 + r with |r| < 1/2 (its bound from the subtraction), then r = j1/32 + j2/2048 + s
 /// exactly in fixed point (|s| <= 2^-12), e^s by its Taylor series to s^13 in fixed point, and e^x = 2^k e^(j1/32)
@@ -44,10 +44,10 @@ routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
 routine we_exp(x: We) -> We
     local kf: B64 = x.v.to_b64().mul(1.4426950408889634)
     local k: S64 = kf.round().to_clamp[S64]()
-    local ln2k: We = we_mul_u64(we_const(DEC_LN2), k.abs_diff(0)).with_sign(k.lt(0))
-    local r: We = we_sub(x, ln2k)
+    local ln2k: We = we_mul_u64(a: we_const(DEC_LN2), k: k.abs_diff(0)).with_sign(k.lt(0))
+    local r: We = we_sub(a: x, b: ln2k)
     local neg: Bool = r.v.neg
-    local big: X = x_of_w(r.v, 190)
+    local big: X = x_of_w(r: r.v, scale: 190)
 
     block entry()
         wild: Bool = r.v.exp.gt(-1).bitand(r.v.is_zero().bitnot())
@@ -61,8 +61,8 @@ routine we_exp(x: We) -> We
         hj: X = (h: j1.shl(57), m: 0, l: 0)
         above: Bool = big.h.ge(hj.h)
         s1: X = above
-            ? x_sub(big, hj)
-            : x_sub(hj, big)
+            ? x_sub(a: big, b: hj)
+            : x_sub(a: hj, b: big)
         jump low(j1, s1, neg.bitxor(above.bitnot()))
 
     // j2 = round(|s1| 2048) from the bits above 2^179 (bit 51), and s = |s1| - j2/2048
@@ -71,24 +71,24 @@ routine we_exp(x: We) -> We
         hj: X = (h: j2.shl(51), m: 0, l: 0)
         above: Bool = s1.h.ge(hj.h)
         s: X = above
-            ? x_sub(s1, hj)
-            : x_sub(hj, s1)
+            ? x_sub(a: s1, b: hj)
+            : x_sub(a: hj, b: s1)
         i1: S64 = neg
             ? U64.to[S64](11).sub(j1.to[S64]())
             : U64.to[S64](11).add(j1.to[S64]())
         i2: S64 = s1_neg
             ? U64.to[S64](32).sub(j2.to[S64]())
             : U64.to[S64](32).add(j2.to[S64]())
-        jump series(i1, i2, x_shl(s, 12), s1_neg.bitxor(above.bitnot()), 12,
-            x_entry(WIDE_INV_FACT.to[@U64](), 13))
+        jump series(i1, i2, x_shl(x: s, k: 12), s1_neg.bitxor(above.bitnot()), 12,
+            x_entry(table: WIDE_INV_FACT.to[@U64](), i: 13))
 
     // acc = 1/n! + s acc from n = 12 down to the constant term, s scaled by 2^202 and acc by 2^190
     block series(i1: S64, i2: S64, s: X, s_neg: Bool, n: S64, acc: X)
-        c: X = x_entry(WIDE_INV_FACT.to[@U64](), n.to[USize]())
-        p: X = x_mul_shift(acc, s, 202)
+        c: X = x_entry(table: WIDE_INV_FACT.to[@U64](), i: n.to[USize]())
+        p: X = x_mul_shift(a: acc, b: s, shift: 202)
         next: X = s_neg
-            ? x_sub(c, p)
-            : x_add(c, p)
+            ? x_sub(a: c, b: p)
+            : x_add(a: c, b: p)
         done: Bool = n.eq(0)
         branch done
             ? combine(i1, i2, next)
@@ -96,10 +96,10 @@ routine we_exp(x: We) -> We
 
     block combine(i1: S64, i2: S64, sum: X)
         units: B64 = r.err.mul(b64_pow2(r.v.exp)).add(16.2).mul(MP_UP)
-        es: We = (v: w_of_x(sum, 190, false), err: units)
-        t1: We = we_entry(WIDE_EXP_HIGH.to[@U64](), i1.to[USize]())
-        t2: We = we_entry(WIDE_EXP_LOW.to[@U64](), i2.to[USize]())
-        e: We = we_mul(we_mul(t1, t2), es)
+        es: We = (v: w_of_x(x: sum, scale: 190, neg: false), err: units)
+        t1: We = we_entry(table: WIDE_EXP_HIGH.to[@U64](), i: i1.to[USize]())
+        t2: We = we_entry(table: WIDE_EXP_LOW.to[@U64](), i: i2.to[USize]())
+        e: We = we_mul(a: we_mul(a: t1, b: t2), b: es)
         return(e.ldexp(k))
 
 /// e^x - 1: below 2^-24 its own series x + x^2/2 + ..., else e^x - 1 (the cancellation costs at most 24 bits).
@@ -110,14 +110,14 @@ routine we_expm1(x: We) -> We
         small: Bool = x.v.exp.le(-24)
         branch small
             ? series(x, x, 2)
-            : return(we_sub(we_exp(x), we_int(1)))
+            : return(we_sub(a: we_exp(x), b: we_int(1)))
 
     block series(term: We, sum: We, i: U64)
-        next: We = we_div_u64(we_mul(term, x), i)
-        done: Bool = we_is_negligible(next, sum)
+        next: We = we_div_u64(a: we_mul(a: term, b: x), k: i)
+        done: Bool = we_is_negligible(term: next, sum)
         branch done
-            ? return(we_plus_abs(sum, next.v.exp.add(1)))
-            : series(next, we_add(sum, next), i.add(1))
+            ? return(we_plus_abs(s: sum, e: next.v.exp.add(1)))
+            : series(next, we_add(a: sum, b: next), i.add(1))
 
 /// ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
 /// :param t: The argument, below 1/32 in magnitude.
@@ -128,16 +128,16 @@ routine we_ln1p_series(t: We) -> We
 
     // power = t^(i - 1)
     block series(power: We, sum: We, i: U64)
-        next_power: We = we_mul(power, t)
-        term: We = we_div_u64(next_power, i)
+        next_power: We = we_mul(a: power, b: t)
+        term: We = we_div_u64(a: next_power, k: i)
         odd: Bool = i.bitand(1).eq(1)
         signed: We = odd
             ? term
             : term.negate()
         done: Bool = we_is_negligible(term, sum)
         branch done
-            ? return(we_plus_abs(sum, term.v.exp.add(1)))
-            : series(next_power, we_add(sum, signed), i.add(1))
+            ? return(we_plus_abs(s: sum, e: term.v.exp.add(1)))
+            : series(next_power, we_add(a: sum, b: signed), i.add(1))
 
 /// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), ln x = E ln 2 + ln m (we_ln_reduced).
 /// :param x: The operand.
@@ -149,10 +149,10 @@ routine we_ln(x: We) -> We
 
     block entry()
         lnm: We = we_ln_reduced(x.ldexp(e.neg()))
-        part: We = we_mul_u64(we_const(DEC_LN2), e.abs_diff(0)).with_sign(e.lt(0))
+        part: We = we_mul_u64(a: we_const(DEC_LN2), k: e.abs_diff(0)).with_sign(e.lt(0))
         branch e.eq(0)
             ? return(lnm)
-            : return(we_add(part, lnm))
+            : return(we_add(a: part, b: lnm))
 
 /// a + b for signed fixed-point numbers (no carry out of 192 bits).
 /// :param a: The first term.
@@ -161,14 +161,14 @@ routine we_ln(x: We) -> We
 routine xs_add(a: XS, b: XS) -> XS
     block entry()
         branch a.neg.eq(b.neg)
-            ? return((neg: a.neg, mag: x_add(a.mag, b.mag)))
+            ? return((neg: a.neg, mag: x_add(a: a.mag, b: b.mag)))
             : differ()
 
     block differ()
-        a_big: Bool = x_compare(a.mag, b.mag).ge(0)
+        a_big: Bool = x_compare(a: a.mag, b: b.mag).ge(0)
         branch a_big
-            ? return((neg: a.neg, mag: x_sub(a.mag, b.mag)))
-            : return((neg: b.neg, mag: x_sub(b.mag, a.mag)))
+            ? return((neg: a.neg, mag: x_sub(a: a.mag, b: b.mag)))
+            : return((neg: b.neg, mag: x_sub(a: b.mag, b: a.mag)))
 
 /// x × k for k < 2^64 as five limbs, exactly.
 /// :param x: The number.
@@ -178,8 +178,8 @@ routine xs_add(a: XS, b: XS) -> XS
 routine x_mul_u64(x: X, k: U64) -> WLimbs
     block entry()
         x0: U128 = x.l.mul_wide(k)
-        x1: U128 = w_fma(x.m, k, x0.shr(64).to_wrap[U64](), 0)
-        x2: U128 = w_fma(x.h, k, x1.shr(64).to_wrap[U64](), 0)
+        x1: U128 = w_fma(x: x.m, y: k, p: x0.shr(64).to_wrap[U64](), q: 0)
+        x2: U128 = w_fma(x: x.h, y: k, p: x1.shr(64).to_wrap[U64](), q: 0)
         return((l4: 0, l3: x2.shr(64).to_wrap[U64](), l2: x2.to_wrap[U64](), l1: x1.to_wrap[U64](), l0: x0.to_wrap[U64]()))
 
 /// The bits at .. at + 191 of five limbs as a fixed-point number.
@@ -203,22 +203,22 @@ routine x_of_limbs(r: WLimbs, at: S64) -> X
 /// :param m: The operand, in [0.75, 1.5).
 /// :returns: ln m.
 routine we_ln_reduced(m: We) -> We
-    local big: X = x_of_w(m.v, 191)
+    local big: X = x_of_w(r: m.v, scale: 191)
     local i: U64 = big.h.add(U64.shl(1, 55)).shr(56)
     local r1: U64 = U64.add(131072, i.shr(1)).div(i)
 
     // t1 2^201 = M r1 - 2^201, kept at 2^199
     block entry()
-        p: WLimbs = x_mul_u64(big, r1)
+        p: WLimbs = x_mul_u64(x: big, k: r1)
         above: Bool = p.l3.ge(U64.shl(1, 9))
         jump t1_from(p, above)
 
     block t1_from(p: WLimbs, above: Bool)
         two: WLimbs = (l4: 0, l3: U64.shl(1, 9), l2: 0, l1: 0, l0: 0)
         d: WLimbs = above
-            ? w_limbs_sub(p, two)
-            : w_limbs_sub(two, p)
-        t1: XS = (neg: above.bitnot(), mag: x_of_limbs(d, 2))
+            ? w_limbs_sub(a: p, b: two)
+            : w_limbs_sub(a: two, b: p)
+        t1: XS = (neg: above.bitnot(), mag: x_of_limbs(r: d, at: 2))
         jump second(t1)
 
     // a = (r2 - 1) 2^28 = -j 2^14 + j^2, |a| < 2^21
@@ -230,23 +230,25 @@ routine we_ln_reduced(m: We) -> We
         a: S64 = js.mul(js).sub(js.mul(16384))
         am: U64 = a.abs_diff(0)
         term: XS = (neg: a.lt(0), mag: (h: am.shl(43), m: 0, l: 0))
-        prod: XS = (neg: t1.neg.bitxor(a.lt(0)), mag: x_of_limbs(x_mul_u64(t1.mag, am), 28))
-        t2: XS = xs_add(xs_add(t1, term), prod)
+        prod: XS = (neg: t1.neg.bitxor(a.lt(0)), mag: x_of_limbs(r: x_mul_u64(x: t1.mag, k: am), at: 28))
+        t2: XS = xs_add(a: xs_add(a: t1, b: term), b: prod)
         jump series(js, t2)
 
     block series(js: S64, t2: XS)
-        u: X = x_shl(t2.mag, 5)
-        p: X = we_poly_signed(WIDE_INV_INT.to[@U64](), u, 14, t2.neg)
-        t2w: W = w_of_x(t2.mag, 199, t2.neg)
-        lt: We = we_mul(we_exact(t2w), (v: w_of_x(p, 190, false), err: 8.3))
-        l1: We = we_entry(WIDE_LN_R1.to[@U64](), i.sub(96).to[USize]()).with_sign(r1.gt(1024))
-        l2: We = we_entry(WIDE_LN_R2.to[@U64](), js.add(100).to[USize]()).with_sign(js.lt(0))
-        sum: We = we_add(we_add(l1, l2), lt)
+        u: X = x_shl(x: t2.mag, k: 5)
+        p: X = we_poly_signed(table: WIDE_INV_INT.to[@U64](), u, top: 14, negative: t2.neg)
+        t2w: W = w_of_x(x: t2.mag, scale: 199, neg: t2.neg)
+        lt: We = we_mul(a: we_exact(t2w), b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.3))
+        l1: We = we_entry(table: WIDE_LN_R1.to[@U64](),
+            i: i.sub(96).to[USize]()).with_sign(r1.gt(1024))
+        l2: We = we_entry(table: WIDE_LN_R2.to[@U64](),
+            i: js.add(100).to[USize]()).with_sign(js.lt(0))
+        sum: We = we_add(a: we_add(a: l1, b: l2), b: lt)
         jump finish(sum)
 
     block finish(sum: We)
         delta: B64 = m.err.add(3.0)
-        return(we_widen_abs(sum, delta))
+        return(we_widen_abs(s: sum, delta))
 
 /// a - b for five-limb numbers, a >= b.
 /// :param a: The minuend.
@@ -257,11 +259,11 @@ routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
         d0: U64 = a.l0.sub_wrap(b.l0)
         c0: U64 = a.l0.lt(b.l0).to[U64]()
         d1: U64 = a.l1.sub_wrap(b.l1).sub_wrap(c0)
-        c1: U64 = w_borrow(a.l1, b.l1, c0)
+        c1: U64 = w_borrow(x: a.l1, y: b.l1, borrow: c0)
         d2: U64 = a.l2.sub_wrap(b.l2).sub_wrap(c1)
-        c2: U64 = w_borrow(a.l2, b.l2, c1)
+        c2: U64 = w_borrow(x: a.l2, y: b.l2, borrow: c1)
         d3: U64 = a.l3.sub_wrap(b.l3).sub_wrap(c2)
-        c3: U64 = w_borrow(a.l3, b.l3, c2)
+        c3: U64 = w_borrow(x: a.l3, y: b.l3, borrow: c2)
         d4: U64 = a.l4.sub_wrap(b.l4).sub_wrap(c3)
         return((l4: d4, l3: d3, l2: d2, l1: d1, l0: d0))
 
@@ -274,7 +276,7 @@ routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
 /// :returns: The sum, scaled by 2^190.
 routine we_poly_signed(table: @U64, u: X, top: USize, negative: Bool) -> X
     block entry()
-        jump step(top, x_entry(table, top))
+        jump step(top, x_entry(table, i: top))
 
     block step(k: USize, acc: X)
         done: Bool = k.eq(0)
@@ -283,11 +285,11 @@ routine we_poly_signed(table: @U64, u: X, top: USize, negative: Bool) -> X
             : next(k.sub(1), acc)
 
     block next(k: USize, acc: X)
-        c: X = x_entry(table, k)
-        p: X = x_mul_shift(acc, u, 204)
+        c: X = x_entry(table, i: k)
+        p: X = x_mul_shift(a: acc, b: u, shift: 204)
         branch negative
-            ? step(k, x_add(c, p))
-            : step(k, x_sub(c, p))
+            ? step(k, x_add(a: c, b: p))
+            : step(k, x_sub(a: c, b: p))
 
 /// ln(1 + t): its series below 2^-24, else ln of the sum (the cancellation costs at most 24 bits).
 /// :param t: The argument.
@@ -297,14 +299,14 @@ routine we_ln1p(t: We) -> We
         small: Bool = t.v.exp.le(-24)
         branch small
             ? return(we_ln1p_series(t))
-            : return(we_ln(we_add(we_int(1), t)))
+            : return(we_ln(we_add(a: we_int(1), b: t)))
 
 /// sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below
 /// the first term left out).
 /// :param r: The argument.
 /// :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
 routine we_sincos_series(r: We) -> WePair
-    local r2: We = we_mul(r, r)
+    local r2: We = we_mul(a: r, b: r)
     local one: We = we_int(1)
 
     block entry()
@@ -313,19 +315,19 @@ routine we_sincos_series(r: We) -> WePair
     // term = r^(2i - 1) / (2i - 1)!, signs alternating
     block sine(term: We, sum: We, i: U64)
         div: U64 = i.mul(2).mul(i.mul(2).add(1))
-        next: We = we_div_u64(we_mul(term, r2), div).negate()
-        done: Bool = we_is_negligible(next, sum)
+        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
+        done: Bool = we_is_negligible(term: next, sum)
         branch done
-            ? cosine(we_plus_abs(sum, next.v.exp), one, one, 1)
-            : sine(next, we_add(sum, next), i.add(1))
+            ? cosine(we_plus_abs(s: sum, e: next.v.exp), one, one, 1)
+            : sine(next, we_add(a: sum, b: next), i.add(1))
 
     block cosine(s: We, term: We, sum: We, i: U64)
         div: U64 = i.mul(2).sub(1).mul(i.mul(2))
-        next: We = we_div_u64(we_mul(term, r2), div).negate()
-        done: Bool = we_is_negligible(next, sum)
+        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
+        done: Bool = we_is_negligible(term: next, sum)
         branch done
-            ? return((a: s, b: we_plus_abs(sum, next.v.exp)))
-            : cosine(s, next, we_add(sum, next), i.add(1))
+            ? return((a: s, b: we_plus_abs(s: sum, e: next.v.exp)))
+            : cosine(s, next, we_add(a: sum, b: next), i.add(1))
 
 /// sin r and cos r for |r| <= 0.8: r = c + s with c = j/64 and |s| <= 1/128, exactly in fixed point, sin s = s P(s^2)
 /// and cos s = Q(s^2) by Horner's scheme in fixed point, then sin r = sin c cos s + cos c sin s and cos r = cos c cos s
@@ -338,7 +340,7 @@ routine we_sincos_series(r: We) -> WePair
 /// :param r: The argument.
 /// :returns: sin r and cos r.
 routine we_sincos(r: We) -> WePair
-    local big: X = x_of_w(r.v, 190)
+    local big: X = x_of_w(r: r.v, scale: 190)
 
     block entry()
         wide: Bool = r.v.exp.gt(0)
@@ -358,36 +360,36 @@ routine we_sincos(r: We) -> WePair
     // |r| < 1/128: r^2 from |r| 2^197 (below 2^190), its cut and r's own cut moving P and Q by under 2^-203; sin r
     // carries r's bound, cos r (1 - r^2/2 ...) at most that too
     block small()
-        d: X = x_of_w(r.v, 197)
-        u: X = x_mul_shift(d, d, 190)
-        p: X = we_poly(WIDE_INV_FACT_ODD.to[@U64](), u, 10)
-        q: X = we_poly(WIDE_INV_FACT_EVEN.to[@U64](), u, 10)
-        sine: We = we_mul(r, (v: w_of_x(p, 190, false), err: 8.3))
-        cosine: We = (v: w_of_x(q, 190, false), err: r.err.add(8.3).mul(MP_UP))
+        d: X = x_of_w(r: r.v, scale: 197)
+        u: X = x_mul_shift(a: d, b: d, shift: 190)
+        p: X = we_poly(table: WIDE_INV_FACT_ODD.to[@U64](), u, top: 10)
+        q: X = we_poly(table: WIDE_INV_FACT_EVEN.to[@U64](), u, top: 10)
+        sine: We = we_mul(a: r, b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.3))
+        cosine: We = (v: w_of_x(x: q, scale: 190, neg: false), err: r.err.add(8.3).mul(MP_UP))
         return((a: sine, b: cosine))
 
     block reduce(j: U64)
         hj: X = (h: j.shl(56), m: 0, l: 0)
         above: Bool = big.h.ge(hj.h)
         s: X = above
-            ? x_sub(big, hj)
-            : x_sub(hj, big)
-        u: X = x_mul_shift(s, s, 176)
-        p: X = we_poly(WIDE_INV_FACT_ODD.to[@U64](), u, 10)
-        q: X = we_poly(WIDE_INV_FACT_EVEN.to[@U64](), u, 10)
-        sw: W = w_of_x(s, 190, above.bitnot())
-        sin_s: We = we_mul(we_exact(sw), (v: w_of_x(p, 190, false), err: 8.2))
-        cos_s: We = (v: w_of_x(q, 190, false), err: 8.2)
+            ? x_sub(a: big, b: hj)
+            : x_sub(a: hj, b: big)
+        u: X = x_mul_shift(a: s, b: s, shift: 176)
+        p: X = we_poly(table: WIDE_INV_FACT_ODD.to[@U64](), u, top: 10)
+        q: X = we_poly(table: WIDE_INV_FACT_EVEN.to[@U64](), u, top: 10)
+        sw: W = w_of_x(x: s, scale: 190, neg: above.bitnot())
+        sin_s: We = we_mul(a: we_exact(sw), b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.2))
+        cos_s: We = (v: w_of_x(x: q, scale: 190, neg: false), err: 8.2)
         jump combine(j, sin_s, cos_s)
 
     block combine(j: U64, sin_s: We, cos_s: We)
-        sc: We = we_entry(WIDE_SIN.to[@U64](), j.to[USize]())
-        cc: We = we_entry(WIDE_COS.to[@U64](), j.to[USize]())
-        sine: We = we_add(we_mul(sc, cos_s), we_mul(cc, sin_s))
-        cosine: We = we_sub(we_mul(cc, cos_s), we_mul(sc, sin_s))
+        sc: We = we_entry(table: WIDE_SIN.to[@U64](), i: j.to[USize]())
+        cc: We = we_entry(table: WIDE_COS.to[@U64](), i: j.to[USize]())
+        sine: We = we_add(a: we_mul(a: sc, b: cos_s), b: we_mul(a: cc, b: sin_s))
+        cosine: We = we_sub(a: we_mul(a: cc, b: cos_s), b: we_mul(a: sc, b: sin_s))
         delta: B64 = r.err.mul(b64_pow2(r.v.exp)).add(4.0)
-        sr: We = we_widen_abs(sine, delta)
-        jump signed(sr, we_widen_abs(cosine, delta))
+        sr: We = we_widen_abs(s: sine, delta)
+        jump signed(sr, we_widen_abs(s: cosine, delta))
 
     block signed(sr: We, cr: We)
         return((a: sr.with_sign(sr.v.neg.bitxor(r.v.neg)), b: cr))
@@ -401,7 +403,7 @@ routine we_sincos(r: We) -> WePair
 /// :returns: The sum, scaled by 2^190.
 routine we_poly(table: @U64, u: X, top: USize) -> X
     block entry()
-        jump step(top, x_entry(table, top))
+        jump step(top, x_entry(table, i: top))
 
     block step(k: USize, acc: X)
         done: Bool = k.eq(0)
@@ -410,8 +412,8 @@ routine we_poly(table: @U64, u: X, top: USize) -> X
             : next(k.sub(1), acc)
 
     block next(k: USize, acc: X)
-        c: X = x_entry(table, k)
-        jump step(k, x_sub(c, x_mul_shift(acc, u, 204)))
+        c: X = x_entry(table, i: k)
+        jump step(k, x_sub(a: c, b: x_mul_shift(a: acc, b: u, shift: 204)))
 
 /// The bound of s widened by an absolute error of delta 2^-192 (relative to |s| >= t 2^(e - 1), t its top bits).
 /// :param s: The value.
@@ -436,39 +438,40 @@ routine we_atan(x: We) -> We
     local ax: We = x.magnitude()
 
     block entry()
-        large: Bool = x.v.exp.ge(1).bitand(w_compare_magnitude(x.v, w_of_u128(1, 0)).gt(0))
+        large: Bool = x.v.exp.ge(1).bitand(w_compare_magnitude(a: x.v,
+            b: w_of_u128(v: 1, scale: 0)).gt(0))
         when
             x.v.is_zero() => return(x)
             large => reciprocal()
             else => core()
 
     block reciprocal()
-        inner: We = we_atan(we_div(we_int(1), ax))
+        inner: We = we_atan(we_div(a: we_int(1), b: ax))
         half_pi: We = we_const(DEC_PI).ldexp(-1)
-        r: We = we_sub(half_pi, inner)
+        r: We = we_sub(a: half_pi, b: inner)
         return(r.with_sign(x.v.neg))
 
     // j = round(|x| 64)
     block core()
-        big: X = x_of_w(ax.v, 190)
+        big: X = x_of_w(r: ax.v, scale: 190)
         j: U64 = big.h.add(U64.shl(1, 55)).shr(56)
         branch j.eq(0)
             ? series(j, ax)
             : divide(j)
 
     block divide(j: U64)
-        c: We = we_exact(w_of_u128(j.to[U128](), -6))
-        num: We = we_sub(ax, c)
-        den: We = we_add(we_int(1), we_mul_u64(ax, j).ldexp(-6))
-        jump series(j, we_div(num, den))
+        c: We = we_exact(w_of_u128(v: j.to[U128](), scale: -6))
+        num: We = we_sub(a: ax, b: c)
+        den: We = we_add(a: we_int(1), b: we_mul_u64(a: ax, k: j).ldexp(-6))
+        jump series(j, we_div(a: num, b: den))
 
     block series(j: U64, d: We)
-        dx: X = x_of_w(d.v, 197)
-        u: X = x_mul_shift(dx, dx, 190)
-        p: X = we_poly(WIDE_INV_ODD.to[@U64](), u, 14)
-        ad: We = we_mul(d, (v: w_of_x(p, 190, false), err: 8.3))
-        t: We = we_entry(WIDE_ATAN.to[@U64](), j.to[USize]())
-        r: We = we_add(t, ad)
+        dx: X = x_of_w(r: d.v, scale: 197)
+        u: X = x_mul_shift(a: dx, b: dx, shift: 190)
+        p: X = we_poly(table: WIDE_INV_ODD.to[@U64](), u, top: 14)
+        ad: We = we_mul(a: d, b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.3))
+        t: We = we_entry(table: WIDE_ATAN.to[@U64](), i: j.to[USize]())
+        r: We = we_add(a: t, b: ad)
         return(r.with_sign(x.v.neg))
 
 /// fn(x, y) at 192 bits (x, y finite, the special cases settled by the caller).
@@ -482,12 +485,12 @@ routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
         when fn
             0 => return(we_exp(we_of_dec(x)))
             1 => return(we_expm1(we_of_dec(x)))
-            2 => return(we_exp(we_mul(we_of_dec(x), we_const(DEC_LN2))))
-            3 => return(we_exp(we_mul(we_of_dec(x), we_const(DEC_LN10))))
+            2 => return(we_exp(we_mul(a: we_of_dec(x), b: we_const(DEC_LN2))))
+            3 => return(we_exp(we_mul(a: we_of_dec(x), b: we_const(DEC_LN10))))
             4 => return(wide_eval_ln(x))
             5 => return(wide_eval_ln1p(x))
-            6 => return(we_mul(wide_eval_ln(x), we_entry(WIDE_CONST.to[@U64](), 0)))
-            7 => return(we_mul(wide_eval_ln(x), we_entry(WIDE_CONST.to[@U64](), 1)))
+            6 => return(we_mul(a: wide_eval_ln(x), b: we_entry(table: WIDE_CONST.to[@U64](), i: 0)))
+            7 => return(we_mul(a: wide_eval_ln(x), b: we_entry(table: WIDE_CONST.to[@U64](), i: 1)))
             8 => return(wide_eval_asin(x))
             9 => return(wide_eval_acos(x))
             10 => return(wide_eval_atan(x))
@@ -497,25 +500,26 @@ routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
             14 => return(wide_eval_asinh(x))
             15 => return(wide_eval_acosh(x))
             16 => return(wide_eval_atanh(x))
-            17 => return(wide_eval_erf(x, false, bits))
-            18 => return(wide_eval_erf(x, true, bits))
-            19 => return(wide_eval_gamma(x, false, bits))
-            20 => return(wide_eval_gamma(x, true, bits))
-            21 => return(wide_eval_trig(x, 0))
-            22 => return(wide_eval_trig(x, 1))
-            23 => return(wide_eval_trig(x, 2))
+            17 => return(wide_eval_erf(x, complement: false, bits))
+            18 => return(wide_eval_erf(x, complement: true, bits))
+            19 => return(wide_eval_gamma(x, log: false, bits))
+            20 => return(wide_eval_gamma(x, log: true, bits))
+            21 => return(wide_eval_trig(x, which: 0))
+            22 => return(wide_eval_trig(x, which: 1))
+            23 => return(wide_eval_trig(x, which: 2))
             24 => return(wide_eval_cbrt(x))
             25 => return(wide_eval_pow(x, y))
-            else => return(wide_eval_atan2(x, y))
+            else => return(wide_eval_atan2(y: x, x: y))
 
 /// ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
 /// :param x: The operand.
 /// :returns: ln x of a finite x > 0.
 routine wide_eval_ln(x: Dec) -> We
     block entry()
-        near: Bool = dec_compare_abs(x, 5, -1).gt(0).bitand(dec_compare_abs(x, 15, -1).lt(0))
+        near: Bool = dec_compare_abs(x, c: 5,
+            q: -1).gt(0).bitand(dec_compare_abs(x, c: 15, q: -1).lt(0))
         branch near
-            ? return(we_ln1p(we_of_dec(dec_plus_int(x, -1))))
+            ? return(we_ln1p(we_of_dec(dec_plus_int(x, k: -1))))
             : return(we_ln(we_of_dec(x)))
 
 /// ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
@@ -523,22 +527,22 @@ routine wide_eval_ln(x: Dec) -> We
 /// :returns: ln(1 + x) of a finite x > -1.
 routine wide_eval_ln1p(x: Dec) -> We
     block entry()
-        low: Bool = x.neg.bitand(dec_compare_abs(x, 5, -1).gt(0))
+        low: Bool = x.neg.bitand(dec_compare_abs(x, c: 5, q: -1).gt(0))
         branch low
-            ? return(we_ln(we_of_dec(dec_plus_int(x, 1))))
+            ? return(we_ln(we_of_dec(dec_plus_int(x, k: 1))))
             : return(we_ln1p(we_of_dec(x)))
 
 /// 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at 192 bits.
 /// :param x: The operand.
 /// :returns: 1 - |x| for |x| <= 1.
 routine wide_one_minus_abs(x: Dec) -> We
-    local ax: Dec = dec_num(false, x.coeff, x.exp)
+    local ax: Dec = dec_num(neg: false, coeff: x.coeff, exp: x.exp)
 
     block entry()
-        high: Bool = dec_compare_abs(x, 5, -1).ge(0)
+        high: Bool = dec_compare_abs(x, c: 5, q: -1).ge(0)
         branch high
-            ? return(we_of_dec(dec_plus_int(ax, -1).negate()))
-            : return(we_sub(we_int(1), we_of_dec(ax)))
+            ? return(we_of_dec(dec_plus_int(x: ax, k: -1).negate()))
+            : return(we_sub(a: we_int(1), b: we_of_dec(ax)))
 
 /// asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
 /// :param x: The operand.
@@ -552,9 +556,9 @@ routine wide_eval_asin(x: Dec) -> We
             : general()
 
     block general()
-        opx: We = we_sub(we_int(2), omx)
-        s: We = we_sqrt(we_mul(omx, opx))
-        a: We = we_atan(we_div(we_of_dec(x).magnitude(), s))
+        opx: We = we_sub(a: we_int(2), b: omx)
+        s: We = we_sqrt(we_mul(a: omx, b: opx))
+        a: We = we_atan(we_div(a: we_of_dec(x).magnitude(), b: s))
         return(a.with_sign(x.neg))
 
 /// acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
@@ -571,14 +575,14 @@ routine wide_eval_acos(x: Dec) -> We
 
     // 1 - x and 1 + x: one of them is 1 - |x|, the other 2 - (1 - |x|)
     block general()
-        other: We = we_sub(we_int(2), omx)
+        other: We = we_sub(a: we_int(2), b: omx)
         num: We = x.neg
             ? other
             : omx
         den: We = x.neg
             ? omx
             : other
-        t: We = we_sqrt(we_div(num, den))
+        t: We = we_sqrt(we_div(a: num, b: den))
         return(we_atan(t).ldexp(1))
 
 /// atan x, ±pi/2 for an infinity.
@@ -595,7 +599,7 @@ routine wide_eval_atan(x: Dec) -> We
 /// :returns: sinh x.
 routine wide_eval_sinh(x: Dec) -> We
     local xm: We = we_of_dec(x)
-    local x2: We = we_mul(xm, xm)
+    local x2: We = we_mul(a: xm, b: xm)
 
     block entry()
         small: Bool = xm.v.exp.le(-24)
@@ -604,15 +608,15 @@ routine wide_eval_sinh(x: Dec) -> We
             : large()
 
     block series(term: We, sum: We, i: U64)
-        next: We = we_div_u64(we_mul(term, x2), i.mul(i.add(1)))
-        done: Bool = we_is_negligible(next, sum)
+        next: We = we_div_u64(a: we_mul(a: term, b: x2), k: i.mul(i.add(1)))
+        done: Bool = we_is_negligible(term: next, sum)
         branch done
-            ? return(we_plus_abs(sum, next.v.exp.add(1)))
-            : series(next, we_add(sum, next), i.add(2))
+            ? return(we_plus_abs(s: sum, e: next.v.exp.add(1)))
+            : series(next, we_add(a: sum, b: next), i.add(2))
 
     block large()
         e: We = we_exp(xm.magnitude())
-        d: We = we_sub(e, we_div(we_int(1), e))
+        d: We = we_sub(a: e, b: we_div(a: we_int(1), b: e))
         return(d.ldexp(-1).with_sign(x.neg))
 
 /// cosh x = (e^|x| + e^-|x|) / 2.
@@ -621,7 +625,7 @@ routine wide_eval_sinh(x: Dec) -> We
 routine wide_eval_cosh(x: Dec) -> We
     block entry()
         e: We = we_exp(we_of_dec(x).magnitude())
-        s: We = we_add(e, we_div(we_int(1), e))
+        s: We = we_add(a: e, b: we_div(a: we_int(1), b: e))
         return(s.ldexp(-1))
 
 /// tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
@@ -630,7 +634,7 @@ routine wide_eval_cosh(x: Dec) -> We
 routine wide_eval_tanh(x: Dec) -> We
     block entry()
         u: We = we_expm1(we_of_dec(x).magnitude().ldexp(1))
-        t: We = we_div(u, we_add(u, we_int(2)))
+        t: We = we_div(a: u, b: we_add(a: u, b: we_int(2)))
         return(t.with_sign(x.neg))
 
 /// asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
@@ -639,8 +643,8 @@ routine wide_eval_tanh(x: Dec) -> We
 routine wide_eval_asinh(x: Dec) -> We
     local ax: We = we_of_dec(x).magnitude()
     local one: We = we_int(1)
-    local x2: We = we_mul(ax, ax)
-    local rt: We = we_sqrt(we_add(x2, one))
+    local x2: We = we_mul(a: ax, b: ax)
+    local rt: We = we_sqrt(we_add(a: x2, b: one))
 
     block entry()
         small: Bool = ax.v.exp.le(-1)
@@ -649,25 +653,25 @@ routine wide_eval_asinh(x: Dec) -> We
             : far()
 
     block near()
-        t: We = we_add(ax, we_div(x2, we_add(one, rt)))
+        t: We = we_add(a: ax, b: we_div(a: x2, b: we_add(a: one, b: rt)))
         return(we_ln1p(t).with_sign(x.neg))
 
     block far()
-        return(we_ln(we_add(ax, rt)).with_sign(x.neg))
+        return(we_ln(we_add(a: ax, b: rt)).with_sign(x.neg))
 
 /// acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
 /// :param x: The operand.
 /// :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
 routine wide_eval_acosh(x: Dec) -> We
     block entry()
-        near: Bool = dec_compare_abs(x, 2, 0).lt(0)
+        near: Bool = dec_compare_abs(x, c: 2, q: 0).lt(0)
         branch near
-            ? with_t(we_of_dec(dec_plus_int(x, -1)))
-            : with_t(we_sub(we_of_dec(x), we_int(1)))
+            ? with_t(we_of_dec(dec_plus_int(x, k: -1)))
+            : with_t(we_sub(a: we_of_dec(x), b: we_int(1)))
 
     block with_t(t: We)
-        r: We = we_sqrt(we_mul(t, we_add(t, we_int(2))))
-        return(we_ln1p(we_add(t, r)))
+        r: We = we_sqrt(we_mul(a: t, b: we_add(a: t, b: we_int(2))))
+        return(we_ln1p(we_add(a: t, b: r)))
 
 /// atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
 /// :param x: The operand.
@@ -676,7 +680,7 @@ routine wide_eval_atanh(x: Dec) -> We
     block entry()
         ax: We = we_of_dec(x).magnitude()
         omx: We = wide_one_minus_abs(x)
-        q: We = we_div(ax.ldexp(1), omx)
+        q: We = we_div(a: ax.ldexp(1), b: omx)
         return(we_ln1p(q).ldexp(-1).with_sign(x.neg))
 
 /// cbrt x = e^(ln|x| / 3), signed.
@@ -684,7 +688,7 @@ routine wide_eval_atanh(x: Dec) -> We
 /// :returns: cbrt x = e^(ln|x| / 3), signed.
 routine wide_eval_cbrt(x: Dec) -> We
     block entry()
-        l: We = we_div_u64(wide_eval_ln(dec_num(false, x.coeff, x.exp)), 3)
+        l: We = we_div_u64(a: wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp)), k: 3)
         return(we_exp(l).with_sign(x.neg))
 
 /// erf |x| = 2/sqrt(pi) e^(-x^2) Σ x y^k / (1 3 5 ... (2k+1)) with y = 2x^2 (we_erf_series), or, where erfc x is
@@ -693,14 +697,14 @@ routine wide_eval_cbrt(x: Dec) -> We
 /// :param bits: The precision the result needs, in bits.
 /// :returns: erf |x|.
 routine we_erf_positive(ax: We, bits: S64) -> We
-    local x2: We = we_mul(ax, ax)
+    local x2: We = we_mul(a: ax, b: ax)
     local x2f: B64 = x2.v.to_b64()
 
     block entry()
         far: Bool = x2f.mul(2.8853900817779268).gt(bits.add(16).to[B64]())
         branch far
-            ? return(we_sub(we_int(1), we_erfc_asymptotic(ax, bits)))
-            : return(we_erf_series(ax, x2, x2.ldexp(1), bits))
+            ? return(we_sub(a: we_int(1), b: we_erfc_asymptotic(ax, bits)))
+            : return(we_erf_series(ax, x2, y: x2.ldexp(1), bits))
 
 /// The series of we_erf_positive on W values without a bound per step: term k is off by at most ax.err + k (y.err +
 /// 4) units (each step one product and one division, 2 units each), and the sum of n positive terms by the largest
@@ -718,20 +722,20 @@ routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
         jump series(ax.v, ax.v, 3, 0)
 
     block series(term: W, sum: W, i: U64, n: U64)
-        next: W = w_div_u64(w_mul(term, y.v), i)
+        next: W = w_div_u64(a: w_mul(a: term, b: y.v), k: i)
         ratio: B64 = yf.div(i.add(2).to[B64]())
         small: Bool = next.is_zero().bitor(next.exp.lt(sum.exp.sub(bits).sub(8)))
         branch small.bitand(ratio.lt(0.5))
             ? scale(sum, next, n)
-            : series(next, w_add(sum, next), i.add(2), n.add(1))
+            : series(next, w_add(a: sum, b: next), i.add(2), n.add(1))
 
     block scale(sum: W, next: W, n: U64)
         nf: B64 = n.to[B64]()
         err: B64 = ax.err.add(nf.mul(y.err.add(6.0))).mul(1.01)
-        s: We = we_plus_abs((v: sum, err: err), next.exp.add(1))
+        s: We = we_plus_abs(s: (v: sum, err: err), e: next.exp.add(1))
         g: We = we_exp(x2.negate())
         c: We = we_const(DEC_TWO_OVER_SQRT_PI)
-        return(we_mul(we_mul(s, g), c))
+        return(we_mul(a: we_mul(a: s, b: g), b: c))
 
 /// erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
 /// smallest term or where terms stop mattering. The rest is below the first term left out.
@@ -739,8 +743,8 @@ routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
 /// :param bits: The precision the result needs, in bits.
 /// :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
 routine we_erfc_asymptotic(ax: We, bits: S64) -> We
-    local x2: We = we_mul(ax, ax)
-    local inv: We = we_div(we_int(1), x2.ldexp(1))
+    local x2: We = we_mul(a: ax, b: ax)
+    local inv: We = we_div(a: we_int(1), b: x2.ldexp(1))
     local one: We = we_int(1)
 
     block entry()
@@ -748,23 +752,23 @@ routine we_erfc_asymptotic(ax: We, bits: S64) -> We
 
     // term = (2k - 1)!! / (2x^2)^k, the next one term × (2k + 1) / (2x^2)
     block series(term: We, sum: We, k: U64)
-        next: We = we_mul(we_mul_u64(term, k.mul(2).sub(1)), inv)
-        growing: Bool = w_compare_magnitude(next.v, term.v).ge(0)
-        small: Bool = we_is_below(next, sum, bits)
+        next: We = we_mul(a: we_mul_u64(a: term, k: k.mul(2).sub(1)), b: inv)
+        growing: Bool = w_compare_magnitude(a: next.v, b: term.v).ge(0)
+        small: Bool = we_is_below(term: next, sum, bits)
         odd: Bool = k.bitand(1).eq(1)
         signed: We = odd
             ? next.negate()
             : next
         when
-            growing => scale(we_plus_abs(sum, term.v.exp))
-            small => scale(we_plus_abs(sum, next.v.exp))
-            else => series(next, we_add(sum, signed), k.add(1))
+            growing => scale(we_plus_abs(s: sum, e: term.v.exp))
+            small => scale(we_plus_abs(s: sum, e: next.v.exp))
+            else => series(next, we_add(a: sum, b: signed), k.add(1))
 
     block scale(sum: We)
         g: We = we_exp(x2.negate())
         c: We = we_const(DEC_TWO_OVER_SQRT_PI).ldexp(-1)
-        d: We = we_div(we_mul(g, c), ax)
-        return(we_mul(sum, d))
+        d: We = we_div(a: we_mul(a: g, b: c), b: ax)
+        return(we_mul(a: sum, b: d))
 
 /// erf x (complement false) or erfc x: erfc of a negative x is 1 + erf|x|, below 1/2 it is 1 - erf x, above it
 /// 1 - erf x at enough extra limbs for the cancellation (x^2 log2(e) bits), or the asymptotic series once that
@@ -780,8 +784,8 @@ routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
         small: Bool = ax.v.exp.le(-1)
         when
             complement.bitnot() => return(we_erf_positive(ax, bits).with_sign(x.neg))
-            x.neg => return(we_add(we_int(1), we_erf_positive(ax, bits)))
-            small => return(we_sub(we_int(1), we_erf_positive(ax, bits.add(4))))
+            x.neg => return(we_add(a: we_int(1), b: we_erf_positive(ax, bits)))
+            small => return(we_sub(a: we_int(1), b: we_erf_positive(ax, bits: bits.add(4))))
             else => tail()
 
     // 1 - erf x loses x^2 log2(e) bits and a few: at 192 bits while the rest still holds what the format needs,
@@ -803,13 +807,14 @@ routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
             else => return(we_erfc_asymptotic(ax, bits))
 
     block direct(lost: S64)
-        e: We = we_erf_positive(ax, bits.add(lost).add(8))
-        return(we_sub(we_int(1), e))
+        e: We = we_erf_positive(ax, bits: bits.add(lost).add(8))
+        return(we_sub(a: we_int(1), b: e))
 
     block complement_at(wide: USize)
-        axw: MpApprox = me_of_dec(x, wide).magnitude()
-        e: MpApprox = me_sub(me_int(1, wide), me_erf_positive(axw, wide), wide)
-        return(we_of_me(me_narrow(e, wide, 3)))
+        axw: MpApprox = me_of_dec(x, n: wide).magnitude()
+        e: MpApprox = me_sub(a: me_int(k: 1, n: wide), b: me_erf_positive(ax: axw, n: wide),
+            n: wide)
+        return(we_of_me(me_narrow(x: e, from: wide, to: 3)))
 
 /// ln Γ(z) for z past the Stirling floor: (z - 1/2) ln z - z + ln(2 pi)/2 + (1/z) P(1/z^2), P(w) = Σ c_k w^k with
 /// c_k = B_2(k+1) / ((2k + 2)(2k + 1)) (signs alternating), whose rest is below its first term left out (z real and
@@ -822,15 +827,15 @@ routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
 /// :returns: ln Γ(z).
 routine we_lngamma_stirling(z: We, bits: S64) -> We
     local inv: We = we_recip(z)
-    local w: We = we_mul(inv, inv)
+    local w: We = we_mul(a: inv, b: inv)
     local zf: B64 = z.v.to_b64()
     local wf: B64 = w.v.to_b64().mul(1.01)
 
     block entry()
-        half: We = we_exact(w_of_u128(1, -1))
-        a: We = we_mul(we_sub(z, half), we_ln(z))
-        b: We = we_sub(a, z)
-        base: We = we_add(b, we_const(DEC_HALF_LN_2PI))
+        half: We = we_exact(w_of_u128(v: 1, scale: -1))
+        a: We = we_mul(a: we_sub(a: z, b: half), b: we_ln(z))
+        b: We = we_sub(a, b: z)
+        base: We = we_add(a: b, b: we_const(DEC_HALF_LN_2PI))
         scale: B64 = b64_pow2(bits.add(8).neg()).mul(zf)
         limit: B64 = base.v.to_b64().abs().mul(scale)
         c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
@@ -854,7 +859,7 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
         branch k.eq(0)
             ? sum(base, top, rest, total, weighted, acc)
             : step(base, top, rest, total, weighted, k.sub(1),
-                w_add(wide_stirling_coefficient(k.sub(1)).v, w_mul(w.v, acc)))
+                w_add(a: wide_stirling_coefficient(k.sub(1)).v, b: w_mul(a: w.v, b: acc)))
 
     block sum(base: We, top: USize, rest: B64, total: B64, weighted: B64, p: W)
         c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
@@ -865,14 +870,14 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
         pe: B64 = low.gt(0.0)
             ? spread.div(low).mul(1.02).add(2.0)
             : B64.from_bits(0x7FF0000000000000)
-        s: We = we_mul(inv, (v: p, err: pe))
-        r: We = we_add(base, s)
+        s: We = we_mul(a: inv, b: (v: p, err: pe))
+        r: We = we_add(a: base, b: s)
         tail: B64 = rest.div(zf).mul(1.02)
         hb: U64 = tail.bits().shr(52)
         e: S64 = hb.to[S64]().sub(1022)
         branch tail.eq(0.0)
             ? return(r)
-            : return(we_plus_abs(r, e))
+            : return(we_plus_abs(s: r, e))
 
 /// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 /// :param k: Which coefficient, from 0.
@@ -894,26 +899,26 @@ routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
     block entry()
         branch x.neg
             ? reflect()
-            : return(wide_gamma_positive(we_of_dec(x), log, bits))
+            : return(wide_gamma_positive(z: we_of_dec(x), log, bits))
 
     block reflect()
-        k: Dec = dec_round_int(x, 4, dec_format128())
-        r: Dec = dec_add(x, k.negate(), dec_format128())
+        k: Dec = dec_round_int(x, mode: 4, f: dec_format128())
+        r: Dec = dec_add(a: x, b: k.negate(), f: dec_format128())
         odd: Bool = dec_is_odd_integer(k)
         pi: We = we_const(DEC_PI)
         sinpi: We = we_sin_of_pi_times(we_of_dec(r))
-        omx: We = we_sub(we_int(1), we_of_dec(x))
-        g: We = wide_gamma_positive(omx, log, bits)
+        omx: We = we_sub(a: we_int(1), b: we_of_dec(x))
+        g: We = wide_gamma_positive(z: omx, log, bits)
         branch log
             ? log_reflect(pi, sinpi, g)
             : gamma_reflect(pi, sinpi, g, odd)
 
     block log_reflect(pi: We, sinpi: We, g: We)
-        a: We = we_sub(we_ln(pi), we_ln(sinpi.magnitude()))
-        return(we_sub(a, g))
+        a: We = we_sub(a: we_ln(pi), b: we_ln(sinpi.magnitude()))
+        return(we_sub(a, b: g))
 
     block gamma_reflect(pi: We, sinpi: We, g: We, odd: Bool)
-        v: We = we_div(pi, we_mul(sinpi, g))
+        v: We = we_div(a: pi, b: we_mul(a: sinpi, b: g))
         branch odd
             ? return(v.negate())
             : return(v)
@@ -927,11 +932,11 @@ routine we_sin_of_pi_times(r: We) -> We
         far: Bool = r.v.exp.ge(-1)
         branch far
             ? folded()
-            : return(we_sincos(we_mul(r, we_const(DEC_PI))).a)
+            : return(we_sincos(we_mul(a: r, b: we_const(DEC_PI))).a)
 
     block folded()
-        s: We = we_sub(we_exact(w_of_u128(1, -1)), r.magnitude())
-        c: We = we_sincos(we_mul(s, we_const(DEC_PI))).b
+        s: We = we_sub(a: we_exact(w_of_u128(v: 1, scale: -1)), b: r.magnitude())
+        c: We = we_sincos(we_mul(a: s, b: we_const(DEC_PI))).b
         return(c.with_sign(r.v.neg))
 
 /// x reduced modulo pi/2: below pi/4 as it is; below 10^9 by k = round(|x| 2/pi) from B64 and r = |x| - k pi/2 at
@@ -941,7 +946,7 @@ routine we_sin_of_pi_times(r: We) -> We
 /// :returns: x reduced modulo pi/2.
 routine wide_reduce(x: Dec) -> WReduced
     block entry()
-        small: Bool = dec_compare_abs(x, 785, -3).lt(0)
+        small: Bool = dec_compare_abs(x, c: 785, q: -3).lt(0)
         top: S64 = dec_digits(x.coeff).add(x.exp)
         when
             small => return((k: 0, r: we_of_dec(x)))
@@ -952,7 +957,7 @@ routine wide_reduce(x: Dec) -> WReduced
         ax: We = we_of_dec(x).magnitude()
         kf: B64 = ax.v.to_b64().mul(0.6366197723675814)
         k: U64 = kf.round().to[U64]()
-        r: We = we_sub(ax, we_mul_u64(we_const(DEC_PI).ldexp(-1), k))
+        r: We = we_sub(a: ax, b: we_mul_u64(a: we_const(DEC_PI).ldexp(-1), k))
         quarter: U64 = k.bitand(3)
         turned: U64 = U64.sub(4, quarter).bitand(3)
         branch x.neg
@@ -960,7 +965,7 @@ routine wide_reduce(x: Dec) -> WReduced
             : return((k: quarter, r: r))
 
     block far()
-        red: DecReduced = dec_reduce(x, 3)
+        red: DecReduced = dec_reduce(x, n: 3)
         return((k: red.k, r: we_of_me(red.r)))
 
 /// Γ(z) or ln Γ(z) for z > 0.
@@ -978,7 +983,7 @@ routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
         count: U64 = short
             ? dec_gamma_shift(floor, zf)
             : 0
-        jump product(w_of_u128(1, 0), 0, count)
+        jump product(w_of_u128(v: 1, scale: 0), 0, count)
 
     // prod = z (z + 1) ... (z + i - 1) without a bound per step: each factor z + i is off by z.err + 2 units (one
     // sum), each product adds 2
@@ -986,21 +991,22 @@ routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
         done: Bool = i.ge(count)
         branch done
             ? shifted(prod, count)
-            : product(w_mul(prod, w_add(z.v, w_of_u128(i.to[U128](), 0))), i.add(1), count)
+            : product(w_mul(a: prod, b: w_add(a: z.v, b: w_of_u128(v: i.to[U128](), scale: 0))),
+                i.add(1), count)
 
     block shifted(prod: W, count: U64)
         n: B64 = count.to[B64]()
         err: B64 = z.err.add(4.0).mul(n).mul(1.01)
-        jump stirling((v: prod, err: err), we_add(z, we_of_u128(count.to[U128]())), count)
+        jump stirling((v: prod, err: err), we_add(a: z, b: we_of_u128(count.to[U128]())), count)
 
     block stirling(prod: We, shifted: We, count: U64)
-        lg: We = we_lngamma_stirling(shifted, bits)
+        lg: We = we_lngamma_stirling(z: shifted, bits)
         none: Bool = count.eq(0)
         when
             log.bitand(none) => return(lg)
-            log => return(we_sub(lg, we_ln(prod)))
+            log => return(we_sub(a: lg, b: we_ln(prod)))
             none => return(we_exp(lg))
-            else => return(we_div(we_exp(lg), prod))
+            else => return(we_div(a: we_exp(lg), b: prod))
 
 /// sin (which 0), cos (1), or tan (2) of a finite x: reduced to r and a quarter turn k, then the series.
 /// :param x: The operand.
@@ -1010,12 +1016,12 @@ routine wide_eval_trig(x: Dec, which: U64) -> We
     block entry()
         red: WReduced = wide_reduce(x)
         sc: WePair = we_sincos(red.r)
-        s: We = wide_quadrant(red.k, sc)
-        c: We = wide_quadrant(red.k.add(1), sc)
+        s: We = wide_quadrant(k: red.k, sc)
+        c: We = wide_quadrant(k: red.k.add(1), sc)
         when which
             0 => return(s)
             1 => return(c)
-            else => return(we_div(s, c))
+            else => return(we_div(a: s, b: c))
 
 /// sin(r + k pi/2) from sin r and cos r: sin r, cos r, -sin r, -cos r.
 /// :param k: The quarter turns.
@@ -1037,8 +1043,8 @@ routine wide_quadrant(k: U64, sc: WePair) -> We
 /// :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
 routine wide_eval_pow(x: Dec, y: Dec) -> We
     block entry()
-        l: We = wide_eval_ln(dec_num(false, x.coeff, x.exp))
-        z: We = we_mul(we_of_dec(y), l)
+        l: We = wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp))
+        z: We = we_mul(a: we_of_dec(y), b: l)
         neg: Bool = x.neg.bitand(dec_is_odd_integer(y))
         return(we_exp(z).with_sign(neg))
 
@@ -1048,14 +1054,14 @@ routine wide_eval_pow(x: Dec, y: Dec) -> We
 /// :returns: The angle of (x, y) for finite nonzero x and y.
 routine wide_eval_atan2(y: Dec, x: Dec) -> We
     block entry()
-        a: We = we_atan(we_div(we_of_dec(y), we_of_dec(x)))
+        a: We = we_atan(we_div(a: we_of_dec(y), b: we_of_dec(x)))
         branch x.neg
             ? turn(a)
             : return(a)
 
     block turn(a: We)
         pi: We = we_const(DEC_PI).with_sign(y.neg)
-        return(we_add(a, pi))
+        return(we_add(a, b: pi))
 
 /// The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the
 /// band reaches a midpoint: y is scaled by a power of ten so that its integer part z has p digits (fewer at the bottom
@@ -1089,8 +1095,8 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
         k: S64 = q.neg()
         direct: Bool = k.ge(1).bitand(k.le(38))
         branch direct
-            ? split(q, tries, we_mul(ay, we_of_u128(dec_p10_128(k))))
-            : split(q, tries, we_scale10(ay, k))
+            ? split(q, tries, we_mul(a: ay, b: we_of_u128(dec_p10_128(k))))
+            : split(q, tries, we_scale10(x: ay, k))
 
     block split(q: S64, tries: S64, z: We)
         int: U128 = w_floor_u128(z.v)
@@ -1111,12 +1117,12 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
             : general(q, z, int)
 
     block fraction(q: S64, z: We, int: U128, s: U64)
-        frac: X = w_fraction(z.v, s)
+        frac: X = w_fraction(x: z.v, s)
         half: X = x_power(s.sub(1))
-        above: Bool = x_compare(frac, half).ge(0)
+        above: Bool = x_compare(a: frac, b: half).ge(0)
         dist: X = above
-            ? x_sub(frac, half)
-            : x_sub(half, frac)
+            ? x_sub(a: frac, b: half)
+            : x_sub(a: half, b: frac)
         band: B64 = z.err.mul(2.0).add(4.0)
         clear: Bool = x_to_b64(dist).mul(0.999).gt(band)
         branch clear
@@ -1125,9 +1131,9 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
 
     // the fraction against 1/2 in W arithmetic, with the band |z| err 2^-192
     block general(q: S64, z: We, int: U128)
-        frac: W = w_sub(z.v, w_of_u128(int, 0))
-        half: W = w_of_u128(1, -1)
-        d: B64 = w_sub(frac, half).to_b64()
+        frac: W = w_sub(a: z.v, b: w_of_u128(v: int, scale: 0))
+        half: W = w_of_u128(v: 1, scale: -1)
+        d: B64 = w_sub(a: frac, b: half).to_b64()
         zf: B64 = z.v.to_b64()
         band: B64 = zf.mul(z.relative()).mul(2.0)
         clear: Bool = d.abs().gt(band).bitand(band.lt(0.25))
@@ -1142,9 +1148,9 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
             : c
         qq: S64 = q.add(carry.to[S64]())
         when
-            cc.eq(0) => return((ok: true, d: dec_num(neg, 0, f.qmin)))
+            cc.eq(0) => return((ok: true, d: dec_num(neg, coeff: 0, exp: f.qmin)))
             qq.gt(f.qmax) => return((ok: true, d: dec_inf(neg)))
-            else => return((ok: true, d: dec_num(neg, cc, qq).reduce(f)))
+            else => return((ok: true, d: dec_num(neg, coeff: cc, exp: qq).reduce(f)))
 
 /// The low s bits of x's mantissa (64 <= s <= 191) as a fixed-point number.
 /// :param x: The value.

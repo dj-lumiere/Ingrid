@@ -70,7 +70,7 @@ routine bytes_result(s: @Byte, len: USize) -> @Byte
         c_memcpy(buf, s, len)
         terminator: @Byte = buf.to[@Byte]().stride(len)
         terminator.poke(0x00)
-        return(result(buf.to[@Byte](), len))
+        return(result(buf: buf.to[@Byte](), len))
 
 /// Text from the malloc heap (read_all and the like with heap()) made NUL-terminated in place, as the result.
 /// :param r: The text, or the failure.
@@ -81,13 +81,13 @@ routine owned_result(r: Result[Bytes, FsError]) -> @Byte
             .Success(text) => continue
             .Failure => return(no_result())
         n: USize = text.count()
-        buf: Addr = c_realloc(text.data, n.add(1))
+        buf: Addr = c_realloc(ptr: text.data, size: n.add(1))
         branch buf.is_null()
             ? lost(text)
             : continue
         terminator: @Byte = buf.to[@Byte]().stride(n)
         terminator.poke(0x00)
-        return(result(buf.to[@Byte](), n))
+        return(result(buf: buf.to[@Byte](), len: n))
 
     block lost(text: Bytes)
         c_free(text.data)
@@ -123,7 +123,7 @@ routine heap() -> MemoryManager
 /// :returns: The path.
 routine path_of(path: @Byte, len: S32) -> Bytes
     block entry()
-        return(Bytes.from_ptr(path, len.max(0).to[USize]()))
+        return(Bytes.from_ptr(data: path, count: len.max(0).to[USize]()))
 
 /// 0 for a success, -1 for a failure.
 /// :param r: The outcome.
@@ -172,7 +172,7 @@ routine ResultBuffer.room(me: @Me, n: USize) -> Bool
             : return(true)
 
     block grow(cap: USize)
-        bigger: Addr = c_realloc(me.buf.peek(), cap)
+        bigger: Addr = c_realloc(ptr: me.buf.peek(), size: cap)
         branch bigger.is_null()
             ? return(false)
             : continue
@@ -207,7 +207,7 @@ routine ResultBuffer.finish(me: @Me) -> @Byte
         n: USize = me.len.peek()
         terminator: @Byte = me.buf.peek().stride(n)
         terminator.poke(0x00)
-        return(result(me.buf.peek(), n))
+        return(result(buf: me.buf.peek(), len: n))
 
 /// Frees the buffer and records a failure.
 /// :returns: Null.
@@ -255,7 +255,7 @@ routine open_file(fd: S32) -> @OpenFile
 #export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     block entry()
-        p: Bytes = path_of(path, path_len)
+        p: Bytes = path_of(path, len: path_len)
         when mode
             0 => opened(File.at(p).open_read_result(), false)
             1 => opened(File.at(p).open_write_result(), true)
@@ -298,7 +298,7 @@ routine OpenFile.drain(me: @Me) -> Bool
             ? continue
             : return(true)
         me.end.poke(0)
-        wrote: Result[Unit, FsError] = me.file.write_all_result(me.buffer.peek(), n)
+        wrote: Result[Unit, FsError] = me.file.write_all_result(data: me.buffer.peek(), count: n)
         return(wrote.is_success())
 
 /// Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
@@ -306,7 +306,8 @@ routine OpenFile.drain(me: @Me) -> Bool
 /// :returns: True when bytes were read.
 routine OpenFile.refill(me: @Me) -> Bool
     block entry()
-        got: Result[USize, FsError] = me.file.read_bytes_result(me.buffer.peek(), FILE_BUFFER)
+        got: Result[USize, FsError] = me.file.read_bytes_result(buffer: me.buffer.peek(),
+            count: FILE_BUFFER)
         when got
             .Success(n) => filled(n)
             .Failure => filled(0)
@@ -360,7 +361,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
         branch out.room(held)
             ? continue
             : return(out.fail())
-        out.setitem(of.buffer.peek().stride(of.start.peek()), held)
+        out.setitem(data: of.buffer.peek().stride(of.start.peek()), n: held)
         of.start.poke(of.end.peek())
         jump more()
 
@@ -369,7 +370,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
             ? continue
             : return(out.fail())
         at: @Byte = out.buf.peek().stride(out.len.peek())
-        got: Result[USize, FsError] = of.file.read_bytes_result(at, FILE_BUFFER)
+        got: Result[USize, FsError] = of.file.read_bytes_result(buffer: at, count: FILE_BUFFER)
         when got
             .Success(n) => read(n)
             .Failure => read(0)
@@ -459,7 +460,7 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
     block take(wanted: USize)
         buffered: USize = of.end.peek().sub(of.start.peek())
         n: USize = buffered.min(wanted)
-        out.setitem(of.buffer.peek().stride(of.start.peek()), n)
+        out.setitem(data: of.buffer.peek().stride(of.start.peek()), n)
         next_start: USize = of.start.peek().add(n)
         next_start.poke_into(of.start)
         jump next()
@@ -489,7 +490,7 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
             : keep()
 
     block direct()
-        wrote: Result[Unit, FsError] = of.file.write_all_result(ptr, len)
+        wrote: Result[Unit, FsError] = of.file.write_all_result(data: ptr, count: len)
         branch wrote.is_success()
             ? return(len)
             : return(0)
@@ -538,7 +539,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
             .Success(text) => continue
             .Failure => return(-1)
         n: USize = text.count
-        buf: Addr = c_realloc(text.data, n.add(1))
+        buf: Addr = c_realloc(ptr: text.data, size: n.add(1))
         branch buf.is_null()
             ? lost(text)
             : continue
@@ -559,7 +560,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     block entry()
         r: Result[Unit, FsError] = File.at(cpath.to[CStr]().to[Bytes]()).write_all_result(Bytes.from_ptr(
-            data, len.max(0).to[USize]()))
+            data, count: len.max(0).to[USize]()))
         branch r.is_success()
             ? return(len.max(0))
             : return(-1)
@@ -575,8 +576,8 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 /// :returns: The joined path, or null (length 0) when the allocation fails.
 #export("rf_fs_join_path")
 routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
-    local first: Bytes = path_of(a, a_len)
-    local second: Bytes = path_of(b, b_len)
+    local first: Bytes = path_of(path: a, len: a_len)
+    local second: Bytes = path_of(path: b, len: b_len)
     local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
 
     block entry()
@@ -584,7 +585,7 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
         branch out.start(joined_count.add(2))
             ? continue
             : return(out.fail())
-        out.setitem(first.data, first.count())
+        out.setitem(data: first.data, n: first.count())
         branch first.is_empty()
             ? tail()
             : continue
@@ -595,7 +596,7 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
         jump tail()
 
     block tail()
-        out.setitem(second.data, second.count())
+        out.setitem(data: second.data, n: second.count())
         return(out.finish())
 
 /// The parent directory: "/a/b/c" gives "/a/b", "a/b" gives "a", "file.txt" gives "", and "/" stays the root.
@@ -606,7 +607,7 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
 routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
     block entry()
         p: Bytes = parent_path(path_of(path, len))
-        return(bytes_result(p.data, p.count()))
+        return(bytes_result(s: p.data, len: p.count()))
 
 /// The last component: "/a/b/file.txt" gives "file.txt".
 /// :param path: The path.
@@ -616,7 +617,7 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
 routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
     block entry()
         n: Bytes = file_name(path_of(path, len))
-        return(bytes_result(n.data, n.count()))
+        return(bytes_result(s: n.data, len: n.count()))
 
 /// The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
 /// :param path: The path.
@@ -626,7 +627,7 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
 routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
     block entry()
         s: Bytes = file_stem(path_of(path, len))
-        return(bytes_result(s.data, s.count()))
+        return(bytes_result(s: s.data, len: s.count()))
 
 /// The extension without its dot: "file.txt" gives "txt", "file" gives "".
 /// :param path: The path.
@@ -636,7 +637,7 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
 routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
     block entry()
         e: Bytes = file_extension(path_of(path, len))
-        return(bytes_result(e.data, e.count()))
+        return(bytes_result(s: e.data, len: e.count()))
 
 // -- existence, kind, permissions ------------------------------------------------------
 
@@ -762,8 +763,8 @@ routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
 #export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     block entry()
-        copied: Result[U64, FsError] = File.at(path_of(src,
-            src_len)).copy_to_result(File.at(path_of(dst, dst_len)))
+        copied: Result[U64, FsError] = File.at(path_of(path: src,
+            len: src_len)).copy_to_result(File.at(path_of(path: dst, len: dst_len)))
         branch copied.is_success()
             ? return(0)
             : return(-1)
@@ -787,8 +788,8 @@ routine move_across(a: Bytes, b: Bytes) -> S32
 /// :returns: 0, or -1 on a failure.
 #export("rf_fs_move")
 routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
-    local a: Bytes = path_of(src, src_len)
-    local b: Bytes = path_of(dst, dst_len)
+    local a: Bytes = path_of(path: src, len: src_len)
+    local b: Bytes = path_of(path: dst, len: dst_len)
 
     block entry()
         r: Result[Unit, FsError] = File.at(a).move_to_result(File.at(b))
@@ -807,8 +808,8 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 /// :returns: 0 moved, 1 the destination exists (nothing moved), -1 an error.
 #export("rf_fs_move_no_replace")
 routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
-    local a: Bytes = path_of(src, src_len)
-    local b: Bytes = path_of(dst, dst_len)
+    local a: Bytes = path_of(path: src, len: src_len)
+    local b: Bytes = path_of(path: dst, len: dst_len)
 
     block entry()
         r: Result[Unit, FsError] = File.at(a).move_to_if_absent_result(File.at(b))
@@ -870,7 +871,7 @@ routine ResultBuffer.entry(me: @Me, name: Bytes, typed: Bool, is_dir: Bool, mtim
             : stamped(0)
 
     block stamp()
-        jump stamped(decimal(mtime.max(0).to[U64](), digits))
+        jump stamped(decimal(v: mtime.max(0).to[U64](), out: digits))
 
     block stamped(dl: USize)
         sep: USize = me.len.peek().gt(0)
@@ -895,12 +896,12 @@ routine ResultBuffer.entry(me: @Me, name: Bytes, typed: Bool, is_dir: Bool, mtim
             ? continue
             : named()
         me.byte(is_dir ? b'd' : b'f')
-        me.setitem(digits, dl)
+        me.setitem(data: digits, n: dl)
         me.byte(b' ')
         jump named()
 
     block named()
-        me.setitem(name.data, name.count())
+        me.setitem(data: name.data, n: name.count())
         return(true)
 
 /// The entries, with each one's kind and modification time when typed (a link followed where the OS tells).
@@ -935,7 +936,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
             .Failure => add(d, d.kind.eq(FileKind.DIRECTORY), 0)
 
     block add(d: DirEntry, is_dir: Bool, mtime: S64)
-        branch out.entry(d.name, typed, is_dir, mtime)
+        branch out.entry(name: d.name, typed, is_dir, mtime)
             ? next()
             : finish(false)
 
@@ -954,7 +955,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
 #export("rf_fs_list_dir")
 routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte
     block entry()
-        return(list_directory(path, len, false))
+        return(list_directory(path, len, typed: false))
 
 /// `<d|f><mtime> <name>` per entry, '\n' between them.
 /// :param path: The directory's path.
@@ -963,7 +964,7 @@ routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte
 #export("rf_fs_list_dir_typed")
 routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte
     block entry()
-        return(list_directory(path, len, true))
+        return(list_directory(path, len, typed: true))
 
 // -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
 
@@ -1110,7 +1111,7 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
 /// :returns: 0, or -1 on a failure.
 #export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
-    local p: Bytes = path_of(path, path_len)
+    local p: Bytes = path_of(path, len: path_len)
 
     block entry()
         r: Result[FileHandle, FsError] = File.at(p).open_read_write_result()
@@ -1154,7 +1155,8 @@ routine advise(m: Mapping) -> Void
 routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.poke(0)
-        r: Result[Mapping, FsError] = File.at(path_of(path, len)).map_result(write, 0, USize.MAX)
+        r: Result[Mapping, FsError] = File.at(path_of(path,
+            len)).map_result(write, offset: 0, count: USize.MAX)
         when r
             .Success(m) => continue
             .Failure => return(no_result())
@@ -1164,11 +1166,11 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
         branch write
             ? continue
             : hint(m)
-        return(result(m.data(), m.count()))
+        return(result(buf: m.data(), len: m.count()))
 
     block hint(m: Mapping)
         advise(m)
-        return(result(m.data(), m.count()))
+        return(result(buf: m.data(), len: m.count()))
 
     block empty()
         RESULT_LEN.poke(0)
@@ -1185,7 +1187,8 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 routine map_window(path: Bytes, offset: USize, count: USize, write: Bool) -> @Byte
     block entry()
         MAP_DELTA.poke(0)
-        r: Result[Mapping, FsError] = File.at(path).map_result(write, offset.to[U64](), count)
+        r: Result[Mapping, FsError] = File.at(path).map_result(write, offset: offset.to[U64](),
+            count)
         when r
             .Success(m) => continue
             .Failure => return(no_result())
@@ -1196,12 +1199,12 @@ routine map_window(path: Bytes, offset: USize, count: USize, write: Bool) -> @By
             ? continue
             : hint(m)
         MAP_DELTA.poke(m.delta)
-        return(result(m.base.to[@Byte](), m.count()))
+        return(result(buf: m.base.to[@Byte](), len: m.count()))
 
     block hint(m: Mapping)
         m.advise_sequential()
         MAP_DELTA.poke(m.delta)
-        return(result(m.base.to[@Byte](), m.count()))
+        return(result(buf: m.base.to[@Byte](), len: m.count()))
 
     block empty()
         RESULT_LEN.poke(0)
@@ -1214,7 +1217,7 @@ routine map_window(path: Bytes, offset: USize, count: USize, write: Bool) -> @By
 #export("rf_file_map_path")
 routine rf_file_map_path(path: @Byte, path_len: S32) -> @Byte
     block entry()
-        return(map_whole(path, path_len, false))
+        return(map_whole(path, len: path_len, write: false))
 
 /// Maps a whole file for reading and writing.
 /// :param path: The path.
@@ -1223,7 +1226,7 @@ routine rf_file_map_path(path: @Byte, path_len: S32) -> @Byte
 #export("rf_file_map_path_rw")
 routine rf_file_map_path_rw(path: @Byte, path_len: S32) -> @Byte
     block entry()
-        return(map_whole(path, path_len, true))
+        return(map_whole(path, len: path_len, write: true))
 
 /// Maps a window of a file read-only, its offset from the base in {rf_file_map_delta}.
 /// :param path: The path.
@@ -1234,7 +1237,7 @@ routine rf_file_map_path_rw(path: @Byte, path_len: S32) -> @Byte
 #export("rf_file_map_path_range")
 routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
-        return(map_window(path_of(path, path_len), offset, count, false))
+        return(map_window(path: path_of(path, len: path_len), offset, count, write: false))
 
 /// Maps a window of a file for reading and writing, its offset from the base in {rf_file_map_delta}.
 /// :param path: The path.
@@ -1245,7 +1248,7 @@ routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count:
 #export("rf_file_map_path_range_rw")
 routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
     block entry()
-        return(map_window(path_of(path, path_len), offset, count, true))
+        return(map_window(path: path_of(path, len: path_len), offset, count, write: true))
 
 /// Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
 /// (the empty marker) does nothing.

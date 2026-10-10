@@ -109,7 +109,7 @@ routine io_do_work(req: @IoReq) -> Void
 
     block read()
         claim data: @@Byte <- null
-        got: S64 = read_whole_file(req.path.peek(), data)
+        got: S64 = read_whole_file(cpath: req.path.peek(), data)
         branch got.ge(0)
             ? continue
             : return()
@@ -118,7 +118,8 @@ routine io_do_work(req: @IoReq) -> Void
         return()
 
     block write()
-        req.result.poke(write_whole_file(req.path.peek(), req.data.peek(), req.data_len.peek()))
+        req.result.poke(write_whole_file(cpath: req.path.peek(), data: req.data.peek(),
+            len: req.data_len.peek()))
         return()
 
     block process()
@@ -158,7 +159,7 @@ routine io_thread_main(lock: @ExclusiveLock) -> Void
     block run(req: @IoReq)
         lock.unlock()
         io_do_work(req)
-        rf_sched_wake(req.sched.peek(), req.coro.peek())
+        rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
         jump entry()
 
 /// Starts the I/O threads at process startup (rf_runtime_init, on the main thread), so a later coroutine call is
@@ -180,7 +181,8 @@ routine rf_io_runtime_init() -> Void
         return()
 
     block one(i: USize)
-        Thread.spawn(io_thread_main.to[Callable](), IO_LOCK, runtime_heap()).detach()
+        Thread.spawn(entry: io_thread_main.to[Callable](), arg: IO_LOCK,
+            alloc: runtime_heap()).detach()
         jump start(i.add(1))
 
 /// Appends a request to the I/O queue and wakes one I/O thread.
@@ -239,12 +241,12 @@ routine io_run(req: @IoReq) -> Void
 /// :throws: Crashes with `OutOfMemoryError` when the request or the path copy can't be allocated.
 routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     block entry()
-        req: @IoReq = zeroed[IoReq](1, "Failed to allocate async I/O request")
+        req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate async I/O request")
         req.kind.poke(kind)
         req.result.poke(-1)
-        copy: @Byte = strdupn(path, path_len)
+        copy: @Byte = strdupn(s: path, n: path_len)
         branch copy.is_null()
-            ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O path")
+            ? rf_throw(error_type: "OutOfMemoryError", message: "Failed to allocate async I/O path")
             : continue
         req.path.poke(copy)
         return(req)
@@ -258,7 +260,7 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
 #export("rf_io_read_file_all")
 routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     block entry()
-        req: @IoReq = io_req_new(IO_READ_FILE, path, path_len)
+        req: @IoReq = io_req_new(kind: IO_READ_FILE, path, path_len)
         io_run(req)
         data: @Byte = req.data.peek()
         result: S64 = req.result.peek()
@@ -284,7 +286,7 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
 /// :throws: Crashes with `OutOfMemoryError` when the request or the copy of the payload can't be allocated.
 #export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
-    local req: @IoReq = io_req_new(IO_WRITE_FILE, path, path_len)
+    local req: @IoReq = io_req_new(kind: IO_WRITE_FILE, path, path_len)
     local len: S64 = data_len.max(0)
 
     block entry()
@@ -296,7 +298,8 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
     block copy()
         buf: Addr = c_malloc(len.to[USize]())
         branch buf.is_null()
-            ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O write buffer")
+            ? rf_throw(error_type: "OutOfMemoryError",
+                message: "Failed to allocate async I/O write buffer")
             : continue
         c_memcpy(buf, data, len.to[USize]())
         req.data.poke(buf.to[@Byte]())
@@ -335,7 +338,7 @@ routine rf_async_backend_state() -> CInt
 #export("rf_async_runtime_create")
 routine rf_async_runtime_create() -> @AsyncRuntime
     block entry()
-        return(zeroed[AsyncRuntime](1, "Failed to allocate async runtime"))
+        return(zeroed[AsyncRuntime](count: 1, what: "Failed to allocate async runtime"))
 
 /// Frees a runtime object from {rf_async_runtime_create}.
 /// :param runtime: The runtime object to free.
@@ -461,7 +464,7 @@ routine owned_copy(s: @Byte, n: S32) -> Bytes
             ? return(Bytes.empty())
             : continue
         c_memcpy(d, s, len)
-        return(Bytes.from_ptr(d.to[@Byte](), len))
+        return(Bytes.from_ptr(data: d.to[@Byte](), count: len))
 
 /// Frees the malloc'd memory of `b`.
 /// :param b: The bytes to free.
@@ -477,7 +480,7 @@ routine free_bytes(b: Bytes) -> Void
 /// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
     block entry()
-        st: @ProcState = zeroed[ProcState](1, "Failed to allocate subprocess state")
+        st: @ProcState = zeroed[ProcState](count: 1, what: "Failed to allocate subprocess state")
         st.shell.poke(shell)
         st.program.poke(program)
         st.exit_status.poke(-1)
@@ -524,7 +527,7 @@ routine terminated(b: Bytes) -> @Byte
             ? return(null)
             : continue
         n: USize = b.count()
-        buf: Addr = c_realloc(b.data, n.add(1))
+        buf: Addr = c_realloc(ptr: b.data, size: n.add(1))
         branch buf.is_null()
             ? lost()
             : continue
@@ -553,12 +556,13 @@ routine proc_run_blocking(st: @ProcState) -> Void
             env_count: st.env_count.peek(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE,
             stderr: OutputMode.CAPTURE)
         branch st.shell.peek()
-            ? ran(run_shell_result(st.program.peek(), options, alloc))
+            ? ran(run_shell_result(command: st.program.peek(), options, alloc))
             : run_args(options)
 
     block run_args(options: ProcessOptions)
-        args: Slice[Bytes] = Slice[Bytes].construct(st.args.peek(), st.arg_count.peek())
-        jump ran(run_process_result(st.program.peek(), args, options, alloc))
+        args: Slice[Bytes] = Slice[Bytes].construct(data: st.args.peek(),
+            count: st.arg_count.peek())
+        jump ran(run_process_result(program: st.program.peek(), args, options, alloc))
 
     block ran(r: Result[ProcessOutput, ProcessError])
         when r
@@ -590,7 +594,7 @@ routine proc_run_blocking(st: @ProcState) -> Void
 /// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 routine proc_exec(st: @ProcState) -> S64
     block entry()
-        req: @IoReq = zeroed[IoReq](1, "Failed to allocate subprocess request")
+        req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate subprocess request")
         req.kind.poke(IO_RUN_PROCESS)
         req.proc.poke(st)
         io_run(req)
@@ -617,7 +621,8 @@ routine proc_exec(st: @ProcState) -> S64
 #export("rf_proc_run")
 routine rf_proc_run(command: @Byte, command_len: S32) -> S64
     block entry()
-        return(proc_exec(proc_state_new(true, owned_copy(command, command_len))))
+        return(proc_exec(proc_state_new(shell: true,
+            program: owned_copy(s: command, n: command_len))))
 
 /// Starts building a subprocess: an executable and its arguments, run with no shell.
 /// :param file: The executable, looked up on PATH.
@@ -627,7 +632,7 @@ routine rf_proc_run(command: @Byte, command_len: S32) -> S64
 #export("rf_proc_begin")
 routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
     block entry()
-        return(proc_state_new(false, owned_copy(file, file_len)))
+        return(proc_state_new(shell: false, program: owned_copy(s: file, n: file_len)))
 
 /// Appends an argument to a subprocess being built. A null `b` does nothing, and when the argument list can't grow
 /// the argument is dropped.
@@ -646,7 +651,7 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
             : continue
         doubled: USize = b.arg_cap.peek().mul(2)
         cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.args.peek(), cap.mul(sizeof[Bytes]()))
+        bigger: Addr = c_realloc(ptr: b.args.peek(), size: cap.mul(sizeof[Bytes]()))
         branch bigger.is_null()
             ? return()
             : continue
@@ -656,7 +661,7 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
 
     block put(n: USize)
         slot: @Bytes = b.args.peek().stride(n)
-        slot.poke(owned_copy(arg, arg_len))
+        slot.poke(owned_copy(s: arg, n: arg_len))
         b.arg_count.poke(n.add(1))
         return()
 
@@ -672,7 +677,7 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
             ? return()
             : continue
         free_bytes(b.directory.peek())
-        b.directory.poke(owned_copy(cwd, cwd_len))
+        b.directory.poke(owned_copy(s: cwd, n: cwd_len))
         return()
 
 /// An environment override, merged into the parent's environment at launch (PATH and the rest stay). A null `b` does
@@ -694,7 +699,7 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
             : continue
         doubled: USize = b.env_cap.peek().mul(2)
         cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.env.peek(), cap.mul(sizeof[EnvVar]()))
+        bigger: Addr = c_realloc(ptr: b.env.peek(), size: cap.mul(sizeof[EnvVar]()))
         branch bigger.is_null()
             ? return()
             : continue
@@ -704,7 +709,8 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
 
     block put(n: USize)
         slot: @EnvVar = b.env.peek().stride(n)
-        slot.poke(EnvVar(name: owned_copy(key, key_len), value: owned_copy(val, val_len)))
+        slot.poke(EnvVar(name: owned_copy(s: key, n: key_len),
+            value: owned_copy(s: val, n: val_len)))
         b.env_count.poke(n.add(1))
         return()
 
@@ -727,7 +733,7 @@ routine rf_proc_run_built(b: @ProcState) -> S64
 #export("rf_blocking_call")
 routine rf_blocking_call(body: Callable[(Addr), Void], arg: Addr) -> Void
     block entry()
-        req: @IoReq = zeroed[IoReq](1, "Failed to allocate a blocking call request")
+        req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate a blocking call request")
         req.kind.poke(IO_CALL)
         req.call.poke(body)
         req.call_arg.poke(arg)

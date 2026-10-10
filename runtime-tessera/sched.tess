@@ -108,7 +108,7 @@ routine worker_id() -> SSize
 routine Deque.init(me: @Me) -> Void
     block entry()
         me.cap.poke(64)
-        me.buf.poke(zeroed[@Coro](64, "Failed to allocate worker run deque"))
+        me.buf.poke(zeroed[@Coro](count: 64, what: "Failed to allocate worker run deque"))
         me.bottom.poke(0)
         me.top.poke(0)
         me.lock.poke(ExclusiveLock.construct())
@@ -136,7 +136,7 @@ routine Deque.push_bottom(me: @Me, c: @Coro) -> Void
 
     block grow()
         n: USize = me.cap.peek()
-        nb: @@Coro = zeroed[@Coro](n.mul(2), "Failed to grow worker run deque")
+        nb: @@Coro = zeroed[@Coro](count: n.mul(2), what: "Failed to grow worker run deque")
         jump copy(n, nb, 0)
 
     block copy(n: USize, nb: @@Coro, i: USize)
@@ -331,8 +331,8 @@ routine Sched.timer_swap(me: @Me, i: SSize, j: SSize) -> Void
     block entry()
         a: @Coro = me.timer_at(i)
         b: @Coro = me.timer_at(j)
-        me.timer_put(i, b)
-        me.timer_put(j, a)
+        me.timer_put(i, c: b)
+        me.timer_put(i: j, c: a)
         return()
 
 /// Moves the coroutine at `i` up the timer heap while it wakes earlier than its parent.
@@ -347,7 +347,7 @@ routine Sched.timer_sift_up(me: @Me, i: SSize) -> Void
         branch parent_wake.le(me.timer_at(i).wake_ns.peek())
             ? return()
             : continue
-        me.timer_swap(i, parent)
+        me.timer_swap(i, j: parent)
         jump entry2(parent)
 
     block entry2(node: SSize)
@@ -386,7 +386,7 @@ routine Sched.timer_sift_down(me: @Me, i: SSize) -> Void
         branch m.eq(i)
             ? return()
             : continue
-        me.timer_swap(i, m)
+        me.timer_swap(i, j: m)
         me.timer_sift_down(m)
         return()
 
@@ -405,9 +405,11 @@ routine Sched.insert_timer(me: @Me, c: @Coro) -> Void
         ncap: SSize = cap.eq(0)
             ? 16
             : cap.mul(2)
-        heap: Addr = c_realloc(me.timer_heap.peek(), ncap.to[USize]().mul(sizeof[@Coro]()))
+        heap: Addr = c_realloc(ptr: me.timer_heap.peek(),
+            size: ncap.to[USize]().mul(sizeof[@Coro]()))
         branch heap.is_null()
-            ? rf_throw("OutOfMemoryError", "Failed to grow scheduler timer heap")
+            ? rf_throw(error_type: "OutOfMemoryError",
+                message: "Failed to grow scheduler timer heap")
             : continue
         me.timer_heap.poke(heap.to[@@Coro]())
         me.timer_cap.poke(ncap)
@@ -438,7 +440,7 @@ routine Sched.timer_pop_min(me: @Me) -> @Coro
         return(top)
 
     block refill(top: @Coro, last: SSize)
-        me.timer_put(0, me.timer_at(last))
+        me.timer_put(i: 0, c: me.timer_at(last))
         vacated: @@Coro = me.timer_heap.peek().stride(last)
         vacated.poke(null)
         me.timer_sift_down(0)
@@ -462,7 +464,7 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> Void
             ? at_end(last)
             : continue
         moved: @Coro = me.timer_at(last)
-        me.timer_put(i, moved)
+        me.timer_put(i, c: moved)
         vacated: @@Coro = me.timer_heap.peek().stride(last)
         vacated.poke(null)
         me.timer_sift_up(i)
@@ -511,7 +513,7 @@ routine Sched.make_ready(me: @Me, c: @Coro) -> Void
 #export("rf_sched_create")
 routine rf_sched_create() -> @Sched
     block entry()
-        s: @Sched = zeroed[Sched](1, "Failed to allocate coroutine scheduler")
+        s: @Sched = zeroed[Sched](count: 1, what: "Failed to allocate coroutine scheduler")
         s.workers_total.poke(1)
         return(s)
 
@@ -776,7 +778,7 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
         branch away.is_null()
             ? release(free_now)
             : continue
-        rf_sched_wake(away.home.peek(), away)
+        rf_sched_wake(s: away.home.peek(), c: away)
         jump release(free_now)
 
     block release(free_now: Bool)
@@ -917,7 +919,7 @@ routine Sched.step(me: @Me) -> Bool
             : fire()
         more_idle: SSize = me.workers_idle.peek().add(1)
         more_idle.poke_into(me.workers_idle)
-        me.cond.wait_until(me.lock, deadline)
+        me.cond.wait_until(mutex: me.lock, deadline_ns: deadline)
         fewer_idle: SSize = me.workers_idle.peek().sub(1)
         fewer_idle.poke_into(me.workers_idle)
         jump fire()
@@ -958,15 +960,15 @@ routine Sched.step(me: @Me) -> Bool
             : continue
         more_idle: SSize = me.workers_idle.peek().add(1)
         more_idle.poke_into(me.workers_idle)
-        me.cond.wait_for(me.lock, DEADLOCK_GRACE_NS)
+        me.cond.wait_for(mutex: me.lock, timeout_ns: DEADLOCK_GRACE_NS)
         fewer_idle: SSize = me.workers_idle.peek().sub(1)
         fewer_idle.poke_into(me.workers_idle)
         jump unlock()
 
     block deadlock()
         me.lock.unlock()
-        rf_throw("DeadlockError",
-            "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
+        rf_throw(error_type: "DeadlockError",
+            message: "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
 
     block wait()
         more_idle: SSize = me.workers_idle.peek().add(1)
@@ -1122,7 +1124,8 @@ routine pool_start() -> @Sched
 
     block entry()
         s.workers_total.poke(n)
-        deques: @Deque = zeroed[Deque](n.to[USize](), "Failed to allocate worker run deques")
+        deques: @Deque = zeroed[Deque](count: n.to[USize](),
+            what: "Failed to allocate worker run deques")
         s.deques.poke(deques)
         jump init(deques, 0)
 
@@ -1138,10 +1141,10 @@ routine pool_start() -> @Sched
         branch i.eq(n)
             ? return(s)
             : continue
-        start: @WorkerStart = zeroed[WorkerStart](1,
-            "Failed to allocate pool worker startup argument")
+        start: @WorkerStart = zeroed[WorkerStart](count: 1,
+            what: "Failed to allocate pool worker startup argument")
         start.poke(WorkerStart(sched: s, index: i))
-        Thread.spawn(worker_main.to[Callable](), start, POOL_ALLOC).detach()
+        Thread.spawn(entry: worker_main.to[Callable](), arg: start, alloc: POOL_ALLOC).detach()
         jump spawn(i.add(1))
 
 /// The process pool, made (and its workers started) on first use, once even when several threads ask at once.
@@ -1154,7 +1157,7 @@ routine rf_sched_thread_default() -> @Sched
             ? return(POOL.peek_atomic())
             : continue
         claim seen: @U32 <- 0
-        mine: Bool = POOL_STATE.atomic_compare_exchange_raw(0, 1, seen)
+        mine: Bool = POOL_STATE.atomic_compare_exchange_raw(expected: 0, new: 1, previous: seen)
         branch mine
             ? make()
             : wait()
@@ -1170,7 +1173,7 @@ routine rf_sched_thread_default() -> @Sched
         branch POOL_STATE.peek_atomic().eq(2)
             ? return(POOL.peek_atomic())
             : continue
-        wait_on(POOL_STATE, 1)
+        wait_on(at: POOL_STATE, expected: 1)
         jump wait()
 
 /// The scheduler start_here() runs a job on: this thread's own, made on first use. A job started with start_now()
@@ -1254,7 +1257,7 @@ routine Sched.block_wait(me: @Me) -> Void
         branch ran
             ? return()
             : continue
-        me.block_cond.wait_for(me.lock, HERE_POLL_NS)
+        me.block_cond.wait_for(mutex: me.lock, timeout_ns: HERE_POLL_NS)
         return()
 
     block plain()
@@ -1267,7 +1270,7 @@ routine Sched.block_wait(me: @Me) -> Void
 #export("rf_sched_spawn_default")
 routine rf_sched_spawn_default(c: @Coro) -> Void
     block entry()
-        rf_sched_spawn(rf_sched_thread_default(), c)
+        rf_sched_spawn(s: rf_sched_thread_default(), c)
         return()
 
 /// retrieve!: waits for target to finish, on the scheduler it was spawned on. Inside a coroutine it parks (that

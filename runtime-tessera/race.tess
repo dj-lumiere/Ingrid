@@ -20,7 +20,7 @@ record Race
 #export("rf_race_begin")
 routine rf_race_begin() -> @Race
     block entry()
-        r: @Race = zeroed[Race](1, "Failed to allocate race competitor set")
+        r: @Race = zeroed[Race](count: 1, what: "Failed to allocate race competitor set")
         return(r)
 
 /// Appends a competitor, doubling the storage (from 4) when it is full. A null `me` does nothing.
@@ -39,10 +39,11 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> Void
         cap: SSize = n.eq(0)
             ? 4
             : n.mul(2)
-        handles: Addr = c_realloc(me.handles.peek(), cap.to[USize]().mul(sizeof[Addr]()))
-        kinds: Addr = c_realloc(me.kinds.peek(), cap.to[USize]())
+        handles: Addr = c_realloc(ptr: me.handles.peek(), size: cap.to[USize]().mul(sizeof[Addr]()))
+        kinds: Addr = c_realloc(ptr: me.kinds.peek(), size: cap.to[USize]())
         branch handles.is_null().bitor(kinds.is_null())
-            ? rf_throw("OutOfMemoryError", "Failed to grow race competitor set")
+            ? rf_throw(error_type: "OutOfMemoryError",
+                message: "Failed to grow race competitor set")
             : continue
         me.handles.poke(handles.to[@Addr]())
         me.kinds.poke(kinds.to[@U8]())
@@ -64,7 +65,7 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> Void
 #export("rf_race_add_coro")
 routine rf_race_add_coro(r: @Race, c: @Coro) -> Void
     block entry()
-        r.add_last(c, 0)
+        r.add_last(handle: c, kind: 0)
         return()
 
 /// Adds a threaded-task competitor to the race.
@@ -74,7 +75,7 @@ routine rf_race_add_coro(r: @Race, c: @Coro) -> Void
 #export("rf_race_add_task")
 routine rf_race_add_task(r: @Race, t: @Task) -> Void
     block entry()
-        r.add_last(t, 1)
+        r.add_last(handle: t, kind: 1)
         return()
 
 /// The handle of competitor `i`, unchecked.
@@ -120,7 +121,7 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> Void
         jump next(i.add(1))
 
     block disarm(i: SSize, task: @Task)
-        rf_task_race_register(task, null, null)
+        rf_task_race_register(task, s: null, coro: null)
         rf_sched_disarm_cross_waker(s)
         jump next(i.add(1))
 
@@ -214,14 +215,14 @@ private routine wait_for_winner(r: @Race) -> SSize
     local this_coro: @Coro = current_coro()
 
     block entry()
-        r.register(s, this_coro, true)
+        r.register(s, coro: this_coro, on: true)
         s.lock.lock()
         next_waiters: SSize = s.waiters.peek().add(1)
         next_waiters.poke_into(s.waiters)
         branch this_coro.is_null()
             ? poll()
             : continue
-        r.await_coros(this_coro, true)
+        r.await_coros(awaiter: this_coro, set: true)
         jump poll()
 
     block poll()
@@ -249,14 +250,14 @@ private routine wait_for_winner(r: @Race) -> SSize
         jump finish(winner)
 
     block clear(winner: SSize)
-        r.await_coros(this_coro, false)
+        r.await_coros(awaiter: this_coro, set: false)
         jump finish(winner)
 
     block finish(winner: SSize)
         remaining_waiters: SSize = s.waiters.peek().sub(1)
         remaining_waiters.poke_into(s.waiters)
         s.lock.unlock()
-        r.register(s, null, false)
+        r.register(s, coro: null, on: false)
         return(winner)
 
 /// Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.

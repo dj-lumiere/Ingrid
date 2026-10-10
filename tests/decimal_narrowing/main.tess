@@ -42,10 +42,10 @@ routine dec_op(a: Dec, b: Dec, op: U32, f: DecFormat) -> Dec
     block entry()
         when op
             0 => return(dec_add(a, b, f))
-            1 => return(dec_add(a, b.negate(), f))
+            1 => return(dec_add(a, b: b.negate(), f))
             2 => return(dec_mul(a, b, f))
             3 => return(dec_div(a, b, f))
-            else => return(dec_sqrt(a, f))
+            else => return(dec_sqrt(x: a, f))
 
 /// Whether two decimals are the same encoding (kind, sign, exponent, coefficient).
 /// :param x: One decimal.
@@ -64,13 +64,13 @@ routine dec_is_same(x: Dec, y: Dec) -> Bool
 /// :param f: The narrow format.
 routine compare(a: Dec, b: Dec, op: U32, f: DecFormat) -> Void
     block entry()
-        narrow: Dec = dec_op(a, b, op, dec_format128()).narrow(f)
+        narrow: Dec = dec_op(a, b, op, f: dec_format128()).narrow(f)
         root: Bool = op.eq(4)
         twice: Dec = root
             ? narrow.reduce(f)
             : narrow
         COUNT.peek().add(1).poke_into(COUNT)
-        branch dec_is_same(dec_op(a, b, op, f), twice)
+        branch dec_is_same(x: dec_op(a, b, op, f), y: twice)
             ? return()
             : differ()
 
@@ -84,11 +84,11 @@ routine compare(a: Dec, b: Dec, op: U32, f: DecFormat) -> Void
 /// :param f: The narrow format.
 routine compare_all(a: Dec, b: Dec, f: DecFormat) -> Void
     block entry()
-        compare(a, b, 0, f)
-        compare(a, b, 1, f)
-        compare(a, b, 2, f)
-        compare(a, b, 3, f)
-        compare(a, b, 4, f)
+        compare(a, b, op: 0, f)
+        compare(a, b, op: 1, f)
+        compare(a, b, op: 2, f)
+        compare(a, b, op: 3, f)
+        compare(a, b, op: 4, f)
         return()
 
 /// D32: coefficients across the whole 7-digit range against second operands that put results near halfway
@@ -115,8 +115,8 @@ routine d32_sample() -> Void
             : r.mod(9999999).add(1)
         gap: S64 = r.shr(32).mod(10).to[S64]()
         neg: Bool = r.shr(40).bitand(1).eq(1)
-        compare_all(dec_num(false, c.to[U128](), 0), dec_num(neg, bc.to[U128](), gap.neg()),
-            dec_format32())
+        compare_all(a: dec_num(neg: false, coeff: c.to[U128](), exp: 0),
+            b: dec_num(neg, coeff: bc.to[U128](), exp: gap.neg()), f: dec_format32())
         jump seconds(c, j.add(1))
 
 /// A 16-digit coefficient, sometimes one next to a halfway point of fewer digits.
@@ -149,10 +149,11 @@ routine d64_sample(count: U64) -> Void
 
     block one(i: U64)
         r: U64 = draw()
-        a: Dec = dec_num(false, d64_coefficient(), r.mod(41).to[S64]().sub(20))
+        a: Dec = dec_num(neg: false, coeff: d64_coefficient(), exp: r.mod(41).to[S64]().sub(20))
         gap: S64 = r.shr(8).mod(36).to[S64]()
         neg: Bool = r.shr(20).bitand(1).eq(1)
-        compare_all(a, dec_num(neg, d64_coefficient(), a.exp.sub(gap)), dec_format64())
+        compare_all(a, b: dec_num(neg, coeff: d64_coefficient(), exp: a.exp.sub(gap)),
+            f: dec_format64())
         jump loop(i.add(1))
 
 /// Writes a decimal as coefficient e exponent.
@@ -168,18 +169,18 @@ routine counterexamples() -> Void
     block entry()
         f: DecFormat = dec_format64()
         wide: DecFormat = dec_format128()
-        a: Dec = dec_num(false, 2000000000000001, 0)
-        b: Dec = dec_num(false, 5, 0)
-        tiny: Dec = dec_num(false, 1, -20)
+        a: Dec = dec_num(neg: false, coeff: 2000000000000001, exp: 0)
+        b: Dec = dec_num(neg: false, coeff: 5, exp: 0)
+        tiny: Dec = dec_num(neg: false, coeff: 1, exp: -20)
         // 2000000000000001 * 5 + 10^-20: D128 drops the 10^-20 and leaves the D64 midpoint 10000000000000005
         Out.write("fma 2000000000000001 * 5 + 1e-20 (exactly 10000000000000005.00000000000000000001)\n")
-        show("once at D64", dec_fma(a, b, tiny, f))
-        show("through D128", dec_fma(a, b, tiny, wide).narrow(f))
+        show(label: "once at D64", x: dec_fma(a, b, c: tiny, f))
+        show(label: "through D128", x: dec_fma(a, b, c: tiny, f: wide).narrow(f))
         // a D64 encoding whose coefficient 10000000000000005 has 17 digits, read at its face value
-        wide_face: Dec = dec_num(false, 10000000000000005, 0)
+        wide_face: Dec = dec_num(neg: false, coeff: 10000000000000005, exp: 0)
         Out.write("add 10000000000000005 (17 digits, non-canonical) + 1e-20\n")
-        show("once at D64", dec_add(wide_face, tiny, f))
-        show("through D128", dec_add(wide_face, tiny, wide).narrow(f))
+        show(label: "once at D64", x: dec_add(a: wide_face, b: tiny, f))
+        show(label: "through D128", x: dec_add(a: wide_face, b: tiny, f: wide).narrow(f))
         return()
 
 /// Runs the samples and the counterexamples.

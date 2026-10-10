@@ -86,7 +86,7 @@ routine coro_trampoline() -> Void
         body.call(this_coro.userdata.peek())
         this_coro.completion_seq.poke_atomic(next_completion_seq())
         this_coro.status.poke_atomic(CORO_COMPLETED)
-        switch_stack(this_coro.sp, this_coro.resumer_sp.peek())
+        switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
         unreachable
 
 /// Reserves a coroutine stack from Standard/Fiber's stack allocator.
@@ -121,7 +121,7 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
         branch entry.addr().is_null()
             ? return(null)
             : continue
-        coro: @Coro = zeroed[Coro](1, "Failed to allocate coroutine control block")
+        coro: @Coro = zeroed[Coro](count: 1, what: "Failed to allocate coroutine control block")
         coro.entry.poke(entry)
         coro.userdata.poke(userdata)
         coro.timer_idx.poke(-1)
@@ -134,13 +134,14 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
             ? no_stack(coro)
             : continue
         coro.stack.poke(stack)
-        coro.sp.poke(initial_stack(stack.to[@Byte](), reserve, coro_trampoline.addr()))
+        coro.sp.poke(initial_stack(stack: stack.to[@Byte](), size: reserve,
+            entry: coro_trampoline.addr()))
         return(coro)
 
     block no_stack(coro: @Coro)
         c_free(coro)
-        rf_throw("OutOfMemoryError",
-            "Failed to reserve coroutine stack (out of address space or commit limit)")
+        rf_throw(error_type: "OutOfMemoryError",
+            message: "Failed to reserve coroutine stack (out of address space or commit limit)")
 
 /// Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
 /// :param coro: The coroutine to run.
@@ -157,7 +158,7 @@ routine rf_coro_resume(coro: @Coro) -> U32
         prev: @Coro = current_coro()
         CURRENT_CORO.poke(coro)
         coro.status.poke_atomic(CORO_RUNNING)
-        switch_stack(coro.resumer_sp, coro.sp.peek())
+        switch_stack(from: coro.resumer_sp, to: coro.sp.peek())
         CURRENT_CORO.poke(prev)
         return(coro.status.peek_atomic())
 
@@ -169,7 +170,7 @@ routine coro_switch_out() -> Void
             ? return()
             : continue
         this_coro.status.poke_atomic(CORO_PARKED)
-        switch_stack(this_coro.sp, this_coro.resumer_sp.peek())
+        switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
         return()
 
 /// A coroutine's status, a `CORO_` value.

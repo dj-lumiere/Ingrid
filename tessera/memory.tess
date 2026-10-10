@@ -63,7 +63,7 @@ private routine rf_throw(error_type: CStr, message: CStr) -> Void
 private routine out_of_memory(what: Bytes, bytes: U64) -> Void
     block entry()
         claim buffer: @Array[Byte, 128] <- .hollow()
-        claim out: @SliceWriter <- SliceWriter.construct(buffer.to[@Byte](), 127)
+        claim out: @SliceWriter <- SliceWriter.construct(data: buffer.to[@Byte](), capacity: 127)
         out.write("Failed to {what} {bytes} bytes")
         text: Bytes = out.to[Bytes]()
         terminator: @Byte = buffer.to[@Byte]().stride(text.count)
@@ -81,7 +81,7 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
     block entry()
         p: Addr = c_calloc(bytes.to[USize](), 1)
         branch p.is_null()
-            ? out_of_memory("allocate", bytes)
+            ? out_of_memory(what: "allocate", bytes)
             : return(p)
 
 /// Allocates `bytes` bytes from the C heap, not zeroed: the caller writes them before reading.
@@ -95,7 +95,7 @@ routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
     block entry()
         p: Addr = c_malloc(bytes.to[USize]())
         branch p.is_null()
-            ? out_of_memory("allocate", bytes)
+            ? out_of_memory(what: "allocate", bytes)
             : return(p)
 
 /// Frees a block. Null is fine.
@@ -118,9 +118,9 @@ routine rf_invalidate(ptr: Addr) -> Void
 #expensive("reallocates heap memory")
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
     block entry()
-        p: Addr = c_realloc(ptr, bytes.to[USize]())
+        p: Addr = c_realloc(ptr: ptr, size: bytes.to[USize]())
         branch p.is_null().bitand(bytes.ne(0))
-            ? out_of_memory("reallocate to", bytes)
+            ? out_of_memory(what: "reallocate to", bytes)
             : return(p)
 
 /// Copies `bytes` bytes from `src_address` to `dst_address`. The regions may overlap. A null address or no bytes
@@ -182,7 +182,7 @@ routine rf_region_alloc(bytes: U64) -> Addr
     block entry()
         p: Addr = c_calloc(1, sizeof[RegionBlock]().add(bytes.to[USize]()))
         branch p.is_null()
-            ? out_of_memory("allocate scratch", bytes)
+            ? out_of_memory(what: "allocate scratch", bytes)
             : continue
         node: @RegionBlock = p.to[@RegionBlock]()
         node.prev.poke(REGION_TOP.peek())
