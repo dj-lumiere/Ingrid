@@ -34,6 +34,9 @@ global WORKER_ID: @SSize <- -1
 /// This worker's xorshift state for picking a steal victim.
 #threadlocal
 global STEAL_RNG: @U32
+/// This thread's start_here() scheduler, made on first use and driven by this thread whenever it waits.
+#threadlocal
+global HERE_SCHED: @@Sched
 /// The process pool: 0 none, 1 being made, 2 made.
 global POOL_STATE: @U32
 global POOL: @@Sched
@@ -544,6 +547,7 @@ routine Sched.spawn(me: @Me, c: @Coro) -> Void
             ? finish()
             : continue
         c.initial_spawned.store(true)
+        c.home.store(me)
         me.enqueue_ready(c)
         next_live : SSize = me.live.load().add(1)
         next_live.store_into(me.live)
@@ -746,21 +750,34 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
         remaining_live.store_into(me.live)
         jump awaiter()
 
-    // Whoever waits for this coroutine goes on. A top-level waiter re-checks on block_cond.
+    // Whoever waits for this coroutine goes on. A top-level waiter re-checks on block_cond. A waiter spawned on
+    // another scheduler is woken there, after this lock is released, so it never moves to this scheduler.
     block awaiter()
         w : @Coro = c.awaiter.load()
         branch w.is_null()
-            ? signal()
+            ? signal(null)
             : continue
         c.awaiter.store(null)
+        home  : @Sched = w.home.load()
+        local : Bool   = home.is_null().bitor(home.ptr_eq(me))
+        branch local
+            ? continue
+            : signal(w)
         me.make_ready(w)
-        jump signal()
+        jump signal(null)
 
-    block signal()
+    block signal(away: @Coro)
         free_now : Bool = c.owner_released.load().bitor(c.detached.load())
         me.cond.wake_one()
         me.block_cond.wake_all()
         me.lock.unlock()
+        branch away.is_null()
+            ? release(free_now)
+            : continue
+        rf_sched_wake(away.home.load(), away)
+        jump release(free_now)
+
+    block release(free_now: Bool)
         branch free_now
             ? continue
             : return()
@@ -947,7 +964,7 @@ routine Sched.step(me: @Me) -> Bool
     block deadlock()
         me.lock.unlock()
         rf_throw("DeadlockError",
-            "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Launch background feeders with `.execute()` and await the rest with `.retrieve()`/`.gather()`.")
+            "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
 
     block wait()
         more_idle : SSize = me.workers_idle.load().add(1)
@@ -1151,7 +1168,98 @@ routine rf_sched_thread_default() -> @Sched
         wait_on(POOL_STATE, 1)
         jump wait()
 
-/// Spawns a new coroutine onto the process pool (at a suspended routine's call site).
+/// The scheduler start_here() runs a job on: this thread's own, made on first use. A job started with start_now()
+/// can move between threads, so it has no thread of its own to run a job beside.
+/// :returns: The scheduler, or null inside a start_now() job.
+/// :throws: Crashes with `OutOfMemoryError` when the scheduler can't be allocated.
+#export("rf_sched_here")
+routine rf_sched_here() -> @Sched
+    block entry()
+        s : @Sched = HERE_SCHED.load()
+        branch s.is_null()
+            ? continue
+            : return(s)
+        branch current_coro().is_null()
+            ? continue
+            : return(null)
+        made : @Sched = rf_sched_create()
+        HERE_SCHED.store(made)
+        return(made)
+
+/// How long a plain thread that waits on something else sleeps between turns of its start_here() jobs.
+preset HERE_POLL_NS: U64 = 1000000
+
+/// Whether this thread has start_here() jobs that have not finished.
+/// :returns: True when some are live.
+routine here_has_live() -> Bool
+    block entry()
+        here : @Sched = HERE_SCHED.load()
+        branch here.is_null()
+            ? return(false)
+            : continue
+        here.lock.lock()
+        live : Bool = here.live.load().gt(0)
+        here.lock.unlock()
+        return(live)
+
+/// Runs one of this thread's start_here() jobs that is ready now, after moving its due timers, without waiting:
+/// what a plain thread does between polls while it waits on something else (a pool job, a thread, a race).
+/// :returns: True when a job ran.
+/// :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
+routine run_here_ready() -> Bool
+    shared here : @Sched = HERE_SCHED.load()
+
+    block entry()
+        branch here.is_null()
+            ? return(false)
+            : continue
+        here.lock.lock()
+        jump due(monotonic_ns())
+
+    block due(now: U64)
+        branch here.timer_count.load().gt(0)
+            ? continue
+            : take()
+        earliest_wake : U64 = here.timer_at(0).wake_ns.load()
+        branch earliest_wake.le(now)
+            ? continue
+            : take()
+        here.push_injector(here.timer_pop_min())
+        jump due(now)
+
+    block take()
+        c : @Coro = here.pop_injector()
+        here.lock.unlock()
+        branch c.is_null()
+            ? return(false)
+            : continue
+        prev : @Sched = current_sched()
+        CURRENT_SCHED.store(here)
+        here.run_coro(c)
+        CURRENT_SCHED.store(prev)
+        return(true)
+
+/// Waits on a pool's block_cond with its lock held. With start_here() jobs live on this thread, it runs one that is
+/// ready, or sleeps at most HERE_POLL_NS, so those jobs go on while this thread waits on something else.
+routine Sched.block_wait(me: @Me) -> Void
+    block entry()
+        branch here_has_live()
+            ? continue
+            : plain()
+        me.lock.unlock()
+        ran : Bool = run_here_ready()
+        me.lock.lock()
+        branch ran
+            ? return()
+            : continue
+        me.block_cond.wait_for(me.lock, HERE_POLL_NS)
+        return()
+
+    block plain()
+        me.block_cond.wait(me.lock)
+        return()
+
+/// Spawns a new coroutine onto the process pool (start_now()).
 /// :param c: The coroutine.
 /// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_spawn_default")
@@ -1160,8 +1268,10 @@ routine rf_sched_spawn_default(c: @Coro) -> Void
         rf_sched_spawn(rf_sched_thread_default(), c)
         return()
 
-/// retrieve!: waits for target to finish. Inside a coroutine it parks (the workers drive target and wake it).
-/// On a plain thread it blocks on block_cond. A null `target` returns at once.
+/// retrieve!: waits for target to finish, on the scheduler it was spawned on. Inside a coroutine it parks (that
+/// scheduler drives target and wakes it). On a plain thread it blocks on block_cond, or, when target is a
+/// start_here() job, drives this thread's scheduler until target finishes, running its other jobs meanwhile. A null
+/// `target` returns at once.
 /// :param target: The coroutine to wait for.
 /// :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 #export("rf_sched_run_until_default")
@@ -1170,7 +1280,10 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
         branch target.is_null()
             ? return()
             : continue
-        s         : @Sched = rf_sched_thread_default()
+        home      : @Sched = target.home.load()
+        s         : @Sched = home.is_null()
+            ? rf_sched_thread_default()
+            : home
         this_coro : @Coro  = current_coro()
         s.lock.lock()
         next_waiters : SSize = s.waiters.load().add(1)
@@ -1185,7 +1298,21 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
             : continue
         target.awaiter.store(this_coro)
         s.lock.unlock()
+        home : @Sched = this_coro.home.load()
+        away : Bool   = home.is_not_null().bitand(home.ptr_eq(s).bitnot())
+        branch away
+            ? park_away(s, this_coro, home)
+            : continue
         rf_sched_park_external()
+        s.lock.lock()
+        jump park(s, this_coro)
+
+    // A coroutine of another scheduler (a start_here() job) waits on the pool: the pool's completion wakes it, so
+    // its own scheduler is promised a wake from another thread while it is parked.
+    block park_away(s: @Sched, this_coro: @Coro, home: @Sched)
+        rf_sched_arm_cross_waker(home)
+        rf_sched_park_external()
+        rf_sched_disarm_cross_waker(home)
         s.lock.lock()
         jump park(s, this_coro)
 
@@ -1197,8 +1324,18 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
         branch is_finished(target)
             ? done(s)
             : continue
-        s.block_cond.wait(s.lock)
+        branch s.deques.load().is_null()
+            ? drive(s)
+            : continue
+        s.block_wait()
         jump blocking(s)
+
+    // A directly driven scheduler has no worker of its own: the waiting thread is its worker.
+    block drive(s: @Sched)
+        s.lock.unlock()
+        rf_sched_run_until(s, target)
+        s.lock.lock()
+        jump done(s)
 
     block done(s: @Sched)
         remaining_waiters : SSize = s.waiters.load().sub(1)
@@ -1279,14 +1416,18 @@ routine Sched.remove_locked(me: @Me, c: @Coro) -> Bool
         remaining_live.store_into(me.live)
         return(true)
 
-/// Takes c off the process pool before rf_coro_abandon frees a coroutine spawned and never retrieved.
+/// Takes c off the scheduler it was spawned on (the process pool when it was never spawned) before rf_coro_abandon
+/// frees a coroutine spawned and never retrieved.
 /// :param c: The coroutine.
-/// :returns: 1 when it was queued or on a timer, 0 otherwise or with no pool.
+/// :returns: 1 when it was queued or on a timer, 0 otherwise or with no scheduler.
 #export("rf_sched_unschedule_default")
 routine rf_sched_unschedule_default(c: @Coro) -> U32
     block entry()
-        s : @Sched = POOL.atomic_load()
-        branch s.is_null().bitor(c.is_null())
+        branch c.is_null()
+            ? return(0)
+            : continue
+        s : @Sched = home_of(c)
+        branch s.is_null()
             ? return(0)
             : continue
         s.lock.lock()
@@ -1306,11 +1447,21 @@ routine rf_sched_dispose_default(c: @Coro) -> U32
         branch c.is_null()
             ? return(0)
             : continue
-        s : @Sched = POOL.atomic_load()
+        s : @Sched = home_of(c)
         branch s.is_null()
             ? return(1)
             : continue
         return(s.dispose(c))
+
+/// The scheduler a coroutine was spawned on, or the process pool (null when there is none) when it never was.
+/// :param c: The coroutine.
+/// :returns: The scheduler, or null.
+routine home_of(c: @Coro) -> @Sched
+    block entry()
+        home : @Sched = c.home.load()
+        branch home.is_null()
+            ? return(POOL.atomic_load())
+            : return(home)
 
 /// rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
 /// holds it.
