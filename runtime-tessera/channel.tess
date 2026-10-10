@@ -15,24 +15,24 @@ import Standard/Os
 
 /// A parked coroutine, in a node on its own stack while it is linked.
 record ChannelWaiter
-    sched : @Sched
-    coro  : @Coro
-    next  : @ChannelWaiter
+    sched: @Sched
+    coro: @Coro
+    next: @ChannelWaiter
 
 /// rf_channel.
 record Channel
-    lock           : Mutex
-    cond           : Condition  // threads waiting for room or for an item
-    slots          : @Addr
-    capacity       : U64  // buffered items; 0 is a rendezvous
-    slot_cap       : U64  // max(capacity, 1)
-    head           : U64
-    count          : U64
-    producer_refs  : U32
-    consumer_refs  : U32
-    closed         : Bool
-    not_full_head  : @ChannelWaiter  // producers parked for room
-    not_empty_head : @ChannelWaiter  // consumers parked for an item
+    lock: Mutex
+    cond: Condition  // threads waiting for room or for an item
+    slots: @Addr
+    capacity: U64  // buffered items; 0 is a rendezvous
+    slot_cap: U64  // max(capacity, 1)
+    head: U64
+    count: U64
+    producer_refs: U32
+    consumer_refs: U32
+    closed: Bool
+    not_full_head: @ChannelWaiter  // producers parked for room
+    not_empty_head: @ChannelWaiter  // consumers parked for an item
 
 /// Wakes every coroutine on list and every waiting thread. Each checks again and unlinks itself. The caller holds
 /// the lock.
@@ -59,13 +59,13 @@ routine Channel.wake_all(me: @Me, list: @ChannelWaiter) -> Void
 #export("rf_channel_create")
 routine rf_channel_create(capacity: U64) -> @Channel
     block entry()
-        slot_cap : U64 = capacity.eq(0)
+        slot_cap: U64 = capacity.eq(0)
             ? 1
             : capacity
         branch slot_cap.gt(USize.MAX.to[U64]().div(sizeof[Addr]().to[U64]()))
             ? rf_throw("OutOfMemoryError", "channel capacity too large to allocate")
             : continue
-        chan : @Channel = zeroed[Channel](1, "failed to allocate channel")
+        chan: @Channel = zeroed[Channel](1, "failed to allocate channel")
         chan.slots.store(zeroed[Addr](slot_cap.to[USize](), "failed to allocate channel buffer"))
         chan.capacity.store(capacity)
         chan.slot_cap.store(slot_cap)
@@ -79,9 +79,9 @@ routine rf_channel_create(capacity: U64) -> @Channel
 /// :returns: Whether the channel is to be freed once the lock is given back.
 routine Channel.is_last_drop(me: @Me, refs: U32) -> Bool
     block entry()
-        dropped_last : Bool = refs.eq(1)
-        no_producers : Bool = me.producer_refs.load().eq(0)
-        none_left    : Bool = no_producers.bitand(me.consumer_refs.load().eq(0))
+        dropped_last: Bool = refs.eq(1)
+        no_producers: Bool = me.producer_refs.load().eq(0)
+        none_left: Bool = no_producers.bitand(me.consumer_refs.load().eq(0))
         return(dropped_last.bitand(none_left))
 
 /// Frees the channel when the drop decided so under the lock. The caller has given the lock back, and no handle is
@@ -105,7 +105,7 @@ routine rf_channel_add_feeder(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        next_producer_refs : U32 = chan.producer_refs.load().add(1)
+        next_producer_refs: U32 = chan.producer_refs.load().add(1)
         next_producer_refs.store_into(chan.producer_refs)
         chan.lock.unlock()
         return()
@@ -119,7 +119,7 @@ routine rf_channel_add_consumer(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        next_consumer_refs : U32 = chan.consumer_refs.load().add(1)
+        next_consumer_refs: U32 = chan.consumer_refs.load().add(1)
         next_consumer_refs.store_into(chan.consumer_refs)
         chan.lock.unlock()
         return()
@@ -134,10 +134,10 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        refs : U32 = chan.producer_refs.load()
-        left : U32 = refs.sub_clamp(1)
+        refs: U32 = chan.producer_refs.load()
+        left: U32 = refs.sub_clamp(1)
         chan.producer_refs.store(left)
-        last : Bool = chan.is_last_drop(refs)
+        last: Bool = chan.is_last_drop(refs)
         branch left.eq(0).bitand(chan.closed.load().bitnot())
             ? continue
             : done(last)
@@ -160,10 +160,10 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        refs : U32 = chan.consumer_refs.load()
-        left : U32 = refs.sub_clamp(1)
+        refs: U32 = chan.consumer_refs.load()
+        left: U32 = refs.sub_clamp(1)
         chan.consumer_refs.store(left)
-        last : Bool = chan.is_last_drop(refs)
+        last: Bool = chan.is_last_drop(refs)
         branch left.eq(0)
             ? continue
             : done(last)
@@ -201,12 +201,12 @@ routine rf_channel_close(chan: @Channel) -> Void
 /// :param list: The list of parked coroutines to join.
 routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> Void
     block entry()
-        sched : @Sched = rf_sched_current()
-        coro  : @Coro  = current_coro()
+        sched: @Sched = rf_sched_current()
+        coro: @Coro = current_coro()
         branch sched.is_null().bitor(coro.is_null())
             ? thread()
             : continue
-        claim node : @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: list.load())
+        claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: list.load())
         list.store(node)
         me.lock.unlock()
         rf_sched_park_external()
@@ -226,7 +226,7 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
         jump look(list)
 
     block look(at: @@ChannelWaiter)
-        w : @ChannelWaiter = at.load()
+        w: @ChannelWaiter = at.load()
         branch w.is_null()
             ? return()
             : continue
@@ -260,9 +260,9 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
         jump room()
 
     block room()
-        full       : Bool = me.count.load().eq(me.slot_cap.load())
-        not_closed : Bool = me.closed.load().bitnot()
-        open       : Bool = not_closed.bitand(me.consumer_refs.load().gt(0))
+        full: Bool = me.count.load().eq(me.slot_cap.load())
+        not_closed: Bool = me.closed.load().bitnot()
+        open: Bool = not_closed.bitand(me.consumer_refs.load().gt(0))
         branch full.bitand(open)
             ? continue
             : put()
@@ -276,12 +276,12 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
         branch me.closed.load().bitor(me.consumer_refs.load().eq(0))
             ? finish(0)
             : continue
-        cap         : U64   = me.slot_cap.load()
-        linear_tail : U64   = me.head.load().add(me.count.load())
-        tail        : U64   = linear_tail.mod(cap)
-        tail_slot   : @Addr = me.slots.load().stride(tail.to[USize]())
+        cap: U64 = me.slot_cap.load()
+        linear_tail: U64 = me.head.load().add(me.count.load())
+        tail: U64 = linear_tail.mod(cap)
+        tail_slot: @Addr = me.slots.load().stride(tail.to[USize]())
         tail_slot.store(payload)
-        next_count : U64 = me.count.load().add(1)
+        next_count: U64 = me.count.load().add(1)
         next_count.store_into(me.count)
         me.wake_all(me.not_empty_head.load())
         branch me.capacity.load().eq(0)
@@ -290,9 +290,9 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
 
     // A rendezvous: not over until this item was taken.
     block taken()
-        has_items : Bool = me.count.load().gt(0)
-        pending   : Bool = has_items.bitand(me.closed.load().bitnot())
-        waiting   : Bool = pending.bitand(me.consumer_refs.load().gt(0))
+        has_items: Bool = me.count.load().gt(0)
+        pending: Bool = has_items.bitand(me.closed.load().bitnot())
+        waiting: Bool = pending.bitand(me.consumer_refs.load().gt(0))
         branch waiting
             ? continue
             : finish(1)
@@ -332,12 +332,12 @@ routine Channel.offer(me: @Me, payload: Addr) -> U32
         branch me.count.load().eq(me.slot_cap.load())
             ? finish(2)
             : continue
-        cap         : U64   = me.slot_cap.load()
-        linear_tail : U64   = me.head.load().add(me.count.load())
-        tail        : U64   = linear_tail.mod(cap)
-        tail_slot   : @Addr = me.slots.load().stride(tail.to[USize]())
+        cap: U64 = me.slot_cap.load()
+        linear_tail: U64 = me.head.load().add(me.count.load())
+        tail: U64 = linear_tail.mod(cap)
+        tail_slot: @Addr = me.slots.load().stride(tail.to[USize]())
         tail_slot.store(payload)
-        next_count : U64 = me.count.load().add(1)
+        next_count: U64 = me.count.load().add(1)
         next_count.store_into(me.count)
         me.wake_all(me.not_empty_head.load())
         jump finish(1)
@@ -366,7 +366,7 @@ routine Channel.next(me: @Me) -> Addr
         jump item()
 
     block item()
-        empty : Bool = me.count.load().eq(0)
+        empty: Bool = me.count.load().eq(0)
         branch empty.bitand(me.closed.load().bitnot())
             ? continue
             : take()
@@ -380,12 +380,12 @@ routine Channel.next(me: @Me) -> Addr
         branch me.count.load().eq(0)
             ? finish(null)
             : continue
-        head    : U64   = me.head.load()
-        slot    : @Addr = me.slots.load().stride(head.to[USize]())
-        payload : Addr  = slot.load()
+        head: U64 = me.head.load()
+        slot: @Addr = me.slots.load().stride(head.to[USize]())
+        payload: Addr = slot.load()
         slot.store(null)
         me.head.store(head.add(1).mod(me.slot_cap.load()))
-        remaining_count : U64 = me.count.load().sub(1)
+        remaining_count: U64 = me.count.load().sub(1)
         remaining_count.store_into(me.count)
         me.wake_all(me.not_full_head.load())
         jump finish(payload)
@@ -404,7 +404,7 @@ routine rf_channel_count(chan: @Channel) -> U64
             ? return(0)
             : continue
         chan.lock.lock()
-        n : U64 = chan.count.load()
+        n: U64 = chan.count.load()
         chan.lock.unlock()
         return(n)
 
@@ -418,7 +418,7 @@ routine rf_channel_is_closed(chan: @Channel) -> U32
             ? return(1)
             : continue
         chan.lock.lock()
-        closed : Bool = chan.closed.load()
+        closed: Bool = chan.closed.load()
         chan.lock.unlock()
         branch closed
             ? return(1)

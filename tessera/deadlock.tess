@@ -8,19 +8,19 @@
 import Standard/Format
 import Standard/Os
 
-global WAITS : @Array[DeadlockWait, 256]
+global WAITS: @Array[DeadlockWait, 256]
 /// Guards WAITS.
-global WAITS_LOCK : @Mutex
+global WAITS_LOCK: @Mutex
 /// 0 before the environment is read, 1 off, 2 on.
-global DETECTOR : @U8
+global DETECTOR: @U8
 
 preset WAIT_SLOTS: USize = 256
 
 /// One task waiting for a lock: who waits, and the task holding the lock.
 record DeadlockWait
-    task   : U64
-    holder : U64
-    used   : Bool
+    task: U64
+    holder: U64
+    used: Bool
 
 /// C's getenv: the value of the environment variable `name`.
 /// :param name: The variable's name.
@@ -37,22 +37,22 @@ private routine rf_crash_exit() -> Void
 /// :returns: True when the detector is on.
 routine is_detector_on() -> Bool
     block entry()
-        state : U8 = DETECTOR.atomic_load()
+        state: U8 = DETECTOR.atomic_load()
         branch state.eq(0)
             ? read()
             : return(state.eq(2))
 
     block read()
-        value : @Byte = c_getenv("RF_DEADLOCK_DETECT")
+        value: @Byte = c_getenv("RF_DEADLOCK_DETECT")
         branch value.is_null()
             ? decided(false)
             : continue
-        first : Byte = value.load()
-        off   : Bool = first.eq(0x00).bitor(first.eq(b'0'))
+        first: Byte = value.load()
+        off: Bool = first.eq(0x00).bitor(first.eq(b'0'))
         jump decided(off.bitnot())
 
     block decided(on: Bool)
-        state : U8 = on
+        state: U8 = on
             ? 2
             : 1
         DETECTOR.atomic_store(state)
@@ -69,8 +69,8 @@ routine slot_of(task: U64) -> USize
         branch i.ge(WAIT_SLOTS)
             ? return(WAIT_SLOTS)
             : continue
-        slot : @DeadlockWait = WAITS.at(i)
-        here : Bool          = slot.used.load().bitand(slot.task.load().eq(task))
+        slot: @DeadlockWait = WAITS.at(i)
+        here: Bool = slot.used.load().bitand(slot.task.load().eq(task))
         branch here
             ? return(i)
             : look(i.add(1))
@@ -104,8 +104,8 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             ? return()
             : continue
         WAITS_LOCK.lock()
-        existing : USize = slot_of(waiter)
-        slot     : USize = existing.lt(WAIT_SLOTS)
+        existing: USize = slot_of(waiter)
+        slot: USize = existing.lt(WAIT_SLOTS)
             ? existing
             : free_slot()
         branch slot.ge(WAIT_SLOTS)
@@ -113,7 +113,7 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             : record(slot)
 
     block record(slot: USize)
-        entry : @DeadlockWait = WAITS.at(slot)
+        entry: @DeadlockWait = WAITS.at(slot)
         waiter.store_into(entry.task)
         holder.store_into(entry.holder)
         true.store_into(entry.used)
@@ -123,11 +123,11 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
         branch steps.ge(WAIT_SLOTS)
             ? done()
             : continue
-        at : USize = slot_of(current)
+        at: USize = slot_of(current)
         branch at.ge(WAIT_SLOTS)
             ? done()
             : continue
-        next : U64 = WAITS.at(at).holder.load()
+        next: U64 = WAITS.at(at).holder.load()
         branch next.eq(waiter)
             ? deadlock(current)
             : follow(next, steps.add(1))
@@ -149,7 +149,7 @@ routine deadlock_wait_end(waiter: U64) -> Void
             ? continue
             : return()
         WAITS_LOCK.lock()
-        slot : USize = slot_of(waiter)
+        slot: USize = slot_of(waiter)
         branch slot.lt(WAIT_SLOTS)
             ? clear(slot)
             : done()

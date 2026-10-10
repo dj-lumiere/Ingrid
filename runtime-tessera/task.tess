@@ -36,42 +36,42 @@ preset COMPLETION_CANCELLED: U32 = 3
 preset COMPLETION_TIMEOUT:   U32 = 4
 
 record TaskNode
-    next : @TaskNode
-    task : @Task
+    next: @TaskNode
+    task: @Task
 
 /// rf_task.
 record Task
-    kind                    : U32
-    status                  : U32  // read across threads
-    completion_seq          : U64  // in completion order, U64.MAX until it completes
-    completion              : U32
-    value_payload           : Addr
-    error_payload           : Addr
-    cancel_requested        : U32
-    result_consumed         : Bool
-    detached                : Bool
-    worker_exited           : Bool  // the thread's final act ran (threaded)
-    consumer_released       : Bool  // the consuming retrieve! is done with it (threaded)
-    reaped                  : Bool  // one of the two freed it
-    done                    : U32  // 1 once completed: a thread waiting in rf_task_wait waits on it
-    execution_backend       : Addr
-    wait_backend            : Addr
-    dependents_head         : @TaskNode
-    dependents_tail         : @TaskNode
-    prerequisite_count      : U32
-    prerequisites_remaining : U32
-    task_id                 : U64
-    coro_lock               : Mutex  // the fields below, and the reap flags
-    coro_sched              : @Sched  // the scheduler of a coroutine waiting for it
-    coro_waiter             : @Coro
-    race_sched              : @Sched  // the scheduler of a race! over a set that has it
-    race_waiter             : @Coro  // that race!'s coroutine, or null for a thread racer
+    kind: U32
+    status: U32  // read across threads
+    completion_seq: U64  // in completion order, U64.MAX until it completes
+    completion: U32
+    value_payload: Addr
+    error_payload: Addr
+    cancel_requested: U32
+    result_consumed: Bool
+    detached: Bool
+    worker_exited: Bool  // the thread's final act ran (threaded)
+    consumer_released: Bool  // the consuming retrieve! is done with it (threaded)
+    reaped: Bool  // one of the two freed it
+    done: U32  // 1 once completed: a thread waiting in rf_task_wait waits on it
+    execution_backend: Addr
+    wait_backend: Addr
+    dependents_head: @TaskNode
+    dependents_tail: @TaskNode
+    prerequisite_count: U32
+    prerequisites_remaining: U32
+    task_id: U64
+    coro_lock: Mutex  // the fields below, and the reap flags
+    coro_sched: @Sched  // the scheduler of a coroutine waiting for it
+    coro_waiter: @Coro
+    race_sched: @Sched  // the scheduler of a race! over a set that has it
+    race_waiter: @Coro  // that race!'s coroutine, or null for a thread racer
 
 /// What a task's thread starts with, freed by the thread.
 record ThreadedStart
-    task     : @Task
-    entry    : Callable[(Addr,), Void]
-    userdata : Addr
+    task: @Task
+    entry: Callable[(Addr,), Void]
+    userdata: Addr
 
 /// The heap allocator the runtime's threads start with, made on first use.
 /// :returns: The C heap allocator, in a global that lives as long as the process.
@@ -89,14 +89,14 @@ routine runtime_heap() -> @Allocator
 #noinline
 routine current_task() -> @Task
     block entry()
-        t : @Task = CURRENT_TASK.load()
+        t: @Task = CURRENT_TASK.load()
         return(t)
 
 /// Whether the task has completed: its status is `TASK_COMPLETED` and its completion is in.
 /// :returns: True once completed.
 routine Task.is_completed(me: @Me) -> Bool
     block entry()
-        done : Bool = me.status.atomic_load().eq(TASK_COMPLETED)
+        done: Bool = me.status.atomic_load().eq(TASK_COMPLETED)
         return(done.bitand(me.completion.load().ne(COMPLETION_PENDING)))
 
 /// Stamps the completion order once, before the status says COMPLETED, so a racer that sees COMPLETED sees the
@@ -114,10 +114,10 @@ routine Task.stamp(me: @Me) -> Void
 routine Task.signal_completion(me: @Me) -> Void
     block entry()
         me.coro_lock.lock()
-        sched       : @Sched = me.coro_sched.load()
-        waiter      : @Coro  = me.coro_waiter.load()
-        race_sched  : @Sched = me.race_sched.load()
-        race_waiter : @Coro  = me.race_waiter.load()
+        sched: @Sched = me.coro_sched.load()
+        waiter: @Coro = me.coro_waiter.load()
+        race_sched: @Sched = me.race_sched.load()
+        race_waiter: @Coro = me.race_waiter.load()
         me.coro_sched.store(null)
         me.coro_waiter.store(null)
         me.coro_lock.unlock()
@@ -180,8 +180,8 @@ routine rf_task_await_coro(task: @Task) -> U32
         branch task.is_null()
             ? return(1)
             : continue
-        sched     : @Sched = rf_sched_current()
-        this_coro : @Coro  = current_coro()
+        sched: @Sched = rf_sched_current()
+        this_coro: @Coro = current_coro()
         branch sched.is_null().bitor(this_coro.is_null())
             ? return(1)
             : continue
@@ -199,19 +199,19 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
         branch task.is_null()
             ? return(1)
             : continue
-        sched     : @Sched = rf_sched_current()
-        this_coro : @Coro  = current_coro()
+        sched: @Sched = rf_sched_current()
+        this_coro: @Coro = current_coro()
         branch sched.is_null().bitor(this_coro.is_null())
             ? return(2)
             : continue
-        deadline : U64 = monotonic_ns().add_clamp(timeout_ns)
+        deadline: U64 = monotonic_ns().add_clamp(timeout_ns)
         jump register(sched, this_coro, deadline)
 
     block register(sched: @Sched, this_coro: @Coro, deadline: U64)
         branch task.register_waiter(sched, this_coro).eq(1)
             ? return(1)
             : continue
-        now : U64 = monotonic_ns()
+        now: U64 = monotonic_ns()
         branch now.ge(deadline)
             ? return(task.withdraw_waiter(sched, this_coro))
             : continue
@@ -230,7 +230,7 @@ routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
         branch me.is_completed()
             ? finish(1, false)
             : continue
-        arm : Bool = me.coro_sched.load().is_null()
+        arm: Bool = me.coro_sched.load().is_null()
         me.coro_sched.store(sched)
         me.coro_waiter.store(waiter)
         jump finish(0, arm)
@@ -254,8 +254,8 @@ routine Task.withdraw_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
         branch me.is_completed()
             ? finish(1, false)
             : continue
-        mine   : Bool = me.coro_waiter.load().ptr_eq(waiter)
-        disarm : Bool = mine.bitand(me.coro_sched.load().is_not_null())
+        mine: Bool = me.coro_waiter.load().ptr_eq(waiter)
+        disarm: Bool = mine.bitand(me.coro_sched.load().is_not_null())
         branch mine
             ? continue
             : finish(0, disarm)
@@ -279,8 +279,8 @@ routine rf_task_kind_name(kind: U32) -> CStr
     block entry()
         when
             kind.eq(TASK_SUSPENDED) => return("suspended")
-            kind.eq(TASK_THREADED)  => return("threaded")
-            else                    => return("unknown")
+            kind.eq(TASK_THREADED) => return("threaded")
+            else => return("unknown")
 
 /// The name of a task status.
 /// :param status: A `TASK_` status value.
@@ -289,12 +289,12 @@ routine rf_task_kind_name(kind: U32) -> CStr
 routine rf_task_status_name(status: U32) -> CStr
     block entry()
         when
-            status.eq(TASK_NEW)       => return("new")
-            status.eq(TASK_READY)     => return("ready")
-            status.eq(TASK_RUNNING)   => return("running")
-            status.eq(TASK_PARKED)    => return("parked")
+            status.eq(TASK_NEW) => return("new")
+            status.eq(TASK_READY) => return("ready")
+            status.eq(TASK_RUNNING) => return("running")
+            status.eq(TASK_PARKED) => return("parked")
             status.eq(TASK_COMPLETED) => return("completed")
-            else                      => return("unknown")
+            else => return("unknown")
 
 /// The name of a completion kind.
 /// :param kind: A `COMPLETION_` value.
@@ -303,12 +303,12 @@ routine rf_task_status_name(status: U32) -> CStr
 routine rf_task_completion_name(kind: U32) -> CStr
     block entry()
         when
-            kind.eq(COMPLETION_PENDING)   => return("pending")
-            kind.eq(COMPLETION_VALUE)     => return("value")
-            kind.eq(COMPLETION_ERROR)     => return("error")
+            kind.eq(COMPLETION_PENDING) => return("pending")
+            kind.eq(COMPLETION_VALUE) => return("value")
+            kind.eq(COMPLETION_ERROR) => return("error")
             kind.eq(COMPLETION_CANCELLED) => return("cancelled")
-            kind.eq(COMPLETION_TIMEOUT)   => return("timeout")
-            else                          => return("unknown")
+            kind.eq(COMPLETION_TIMEOUT) => return("timeout")
+            else => return("unknown")
 
 /// Creates a new task with the next task id.
 /// :param kind: `TASK_SUSPENDED` (a coroutine) or `TASK_THREADED`.
@@ -317,7 +317,7 @@ routine rf_task_completion_name(kind: U32) -> CStr
 #export("rf_task_create")
 routine rf_task_create(kind: U32) -> @Task
     block entry()
-        task : @Task = zeroed[Task](1, "Failed to allocate task")
+        task: @Task = zeroed[Task](1, "Failed to allocate task")
         task.kind.store(kind)
         task.completion_seq.store(U64.MAX)
         task.task_id.store(NEXT_TASK_ID.atomic_fetch_add(1))
@@ -327,7 +327,7 @@ routine rf_task_create(kind: U32) -> @Task
 /// payload is not freed.
 routine Task.free(me: @Me) -> Void
     block entry()
-        payload : Addr = me.value_payload.load()
+        payload: Addr = me.value_payload.load()
         branch payload.is_null()
             ? nodes(me.dependents_head.load())
             : continue
@@ -339,7 +339,7 @@ routine Task.free(me: @Me) -> Void
         branch node.is_null()
             ? done()
             : continue
-        next : @TaskNode = node.next.load()
+        next: @TaskNode = node.next.load()
         c_free(node)
         jump nodes(next)
 
@@ -372,7 +372,7 @@ routine rf_task_release(task: @Task) -> Void
             : free()
         task.coro_lock.lock()
         task.consumer_released.store(true)
-        reap : Bool = task.worker_exited.load().bitand(task.reaped.load().bitnot())
+        reap: Bool = task.worker_exited.load().bitand(task.reaped.load().bitnot())
         branch reap
             ? continue
             : unlocked(false)
@@ -448,7 +448,7 @@ routine rf_task_result_payload(task: @Task) -> Addr
         branch task.is_null()
             ? return(null)
             : continue
-        payload : Addr = task.value_payload.load()
+        payload: Addr = task.value_payload.load()
         task.value_payload.store(null)
         return(payload)
 
@@ -510,16 +510,16 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         branch task.is_completed().bitor(task.kind.load().ne(TASK_THREADED))
             ? report()
             : continue
-        secs     : U64 = timeout_seconds.max(0).to[U64]()
-        span     : U64 = secs.mul_clamp(1000000000).add_clamp(timeout_nanoseconds.to[U64]())
-        deadline : U64 = monotonic_ns().add_clamp(span)
+        secs: U64 = timeout_seconds.max(0).to[U64]()
+        span: U64 = secs.mul_clamp(1000000000).add_clamp(timeout_nanoseconds.to[U64]())
+        deadline: U64 = monotonic_ns().add_clamp(span)
         jump wait(deadline)
 
     block wait(deadline: U64)
         branch task.is_completed()
             ? report()
             : continue
-        now : U64 = monotonic_ns()
+        now: U64 = monotonic_ns()
         branch now.ge(deadline)
             ? return(COMPLETION_TIMEOUT)
             : continue
@@ -535,9 +535,9 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
 routine threaded_task_main(start: @ThreadedStart) -> Void
     block entry()
         rf_thread_stack_guarantee()
-        task     : @Task                   = start.task.load()
-        body     : Callable[(Addr,), Void] = start.entry.load()
-        userdata : Addr                    = start.userdata.load()
+        task: @Task = start.task.load()
+        body: Callable[(Addr,), Void] = start.entry.load()
+        userdata: Addr = start.userdata.load()
         c_free(start)
         task.status.atomic_store(TASK_RUNNING)
         CURRENT_TASK.store(task)
@@ -550,13 +550,13 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
     block reap(task: @Task)
         task.coro_lock.lock()
         task.worker_exited.store(true)
-        owner : Bool = task.consumer_released.load().bitor(task.detached.load())
-        reap  : Bool = owner.bitand(task.reaped.load().bitnot())
+        owner: Bool = task.consumer_released.load().bitor(task.detached.load())
+        reap: Bool = owner.bitand(task.reaped.load().bitnot())
         branch reap
             ? continue
             : unlocked(task, false, null)
         task.reaped.store(true)
-        box : Addr = task.detached.load()
+        box: Addr = task.detached.load()
             ? task.value_payload.load()
             : null
         branch box.is_null()
@@ -602,7 +602,7 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], user
         branch task.status.atomic_load().eq(TASK_NEW)
             ? continue
             : started()
-        start : @ThreadedStart = zeroed[ThreadedStart](1, "Failed to allocate thread start data")
+        start: @ThreadedStart = zeroed[ThreadedStart](1, "Failed to allocate thread start data")
         start.store(ThreadedStart(task: task, entry: entry, userdata: userdata))
         task.status.atomic_store(TASK_READY)
         Thread.spawn(threaded_task_main.to[Callable](), start, runtime_heap()).detach()
@@ -671,7 +671,7 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
         branch task.is_null()
             ? return()
             : continue
-        free : Bool = task.detached.load().bitand(task.kind.load().eq(TASK_SUSPENDED))
+        free: Bool = task.detached.load().bitand(task.kind.load().eq(TASK_SUSPENDED))
         branch free
             ? detached()
             : continue
@@ -701,15 +701,15 @@ routine rf_task_set_detached(task: @Task) -> Void
             : continue
         task.coro_lock.lock()
         task.detached.store(true)
-        threaded : Bool = task.kind.load().eq(TASK_THREADED)
-        exited   : Bool = threaded.bitand(task.worker_exited.load())
-        reap     : Bool = exited.bitand(task.reaped.load().bitnot())
+        threaded: Bool = task.kind.load().eq(TASK_THREADED)
+        exited: Bool = threaded.bitand(task.worker_exited.load())
+        reap: Bool = exited.bitand(task.reaped.load().bitnot())
         branch reap
             ? continue
             : unlock()
         task.reaped.store(true)
         task.coro_lock.unlock()
-        payload : Addr = task.value_payload.load()
+        payload: Addr = task.value_payload.load()
         task.value_payload.store(null)
         branch payload.is_null()
             ? free()
@@ -798,13 +798,13 @@ routine rf_task_is_cancel_requested(task: @Task) -> Bool
 #export("rf_cancel_requested")
 routine rf_cancel_requested() -> U32
     block entry()
-        this_coro : @Coro = current_coro()
+        this_coro: @Coro = current_coro()
         branch this_coro.is_null()
             ? thread()
             : return(rf_coro_is_cancel_requested(this_coro))
 
     block thread()
-        task : @Task = current_task()
+        task: @Task = current_task()
         branch task.is_null()
             ? return(0)
             : return(task.cancel_requested.atomic_load())
@@ -882,9 +882,9 @@ routine rf_task_add_prerequisite(task: @Task) -> Void
         branch task.is_null()
             ? return()
             : continue
-        next_prerequisite_count : U32 = task.prerequisite_count.load().add(1)
+        next_prerequisite_count: U32 = task.prerequisite_count.load().add(1)
         next_prerequisite_count.store_into(task.prerequisite_count)
-        next_prerequisites_remaining : U32 = task.prerequisites_remaining.load().add(1)
+        next_prerequisites_remaining: U32 = task.prerequisites_remaining.load().add(1)
         next_prerequisites_remaining.store_into(task.prerequisites_remaining)
         return()
 
@@ -898,9 +898,9 @@ routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
         branch task.is_null().bitor(dependent.is_null())
             ? return()
             : continue
-        node : @TaskNode = zeroed[TaskNode](1, "Failed to allocate task queue node")
+        node: @TaskNode = zeroed[TaskNode](1, "Failed to allocate task queue node")
         node.task.store(dependent)
-        tail : @TaskNode = task.dependents_tail.load()
+        tail: @TaskNode = task.dependents_tail.load()
         branch tail.is_null()
             ? first(node)
             : continue
@@ -947,8 +947,8 @@ routine rf_task_prerequisite_complete(task: @Task, success: Bool) -> Bool
         branch success
             ? continue
             : failed()
-        remaining : U32 = task.prerequisites_remaining.load()
-        left      : U32 = remaining.sub_clamp(1)
+        remaining: U32 = task.prerequisites_remaining.load()
+        left: U32 = remaining.sub_clamp(1)
         task.prerequisites_remaining.store(left)
         branch left.eq(0)
             ? continue

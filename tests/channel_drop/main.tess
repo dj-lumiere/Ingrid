@@ -18,23 +18,23 @@ preset ROUNDS: U32 = 100000
 
 /// The scheduler a coroutine runs on: not used, every wait here is on a plain thread.
 record Sched
-    id : U32
+    id: U32
 
 /// A coroutine: not used.
 record Coro
-    id : U32
+    id: U32
 
 /// What the main thread and the two droppers share: the channel of the current round, the round the droppers may
 /// start, and how many drops are done.
 record Race
-    chan  : @Channel
-    round : U32
-    done  : U32
+    chan: @Channel
+    round: U32
+    done: U32
 
 /// One dropper: its side of the channel and the race.
 record Dropper
-    race     : @Race
-    producer : Bool
+    race: @Race
+    producer: Bool
 
 // -- what channel.tess calls in the rest of the runtime library ----------------------
 
@@ -47,14 +47,14 @@ routine c_free(ptr: Addr) -> Void
         branch ptr.is_null()
             ? return()
             : continue
-        discard_previous : U64 = FREES.atomic_fetch_add(1)
+        discard_previous: U64 = FREES.atomic_fetch_add(1)
         return()
 
 /// count zeroed Ts.
 routine zeroed[T](count: USize, what: CStr) -> @T
 require T: typename
     block entry()
-        p : Addr = c_calloc(count, sizeof[T]())
+        p: Addr = c_calloc(count, sizeof[T]())
         return(p.to[@T]())
 
 #[external("c"), symbol("exit"), noreturn]
@@ -90,21 +90,21 @@ routine rf_cancel_requested() -> U32
 
 /// Drops one side of each round's channel as soon as the round starts.
 routine drop_each_round(dropper: @Dropper) -> Void
-    local race : @Race = dropper.race.load()
+    local race: @Race = dropper.race.load()
 
     block entry()
         jump wait(1)
 
     block wait(round: U32)
-        past : Bool = round.gt(ROUNDS)
+        past: Bool = round.gt(ROUNDS)
         branch past
             ? return()
             : continue
-        started : Bool = race.round.atomic_load().ge(round)
+        started: Bool = race.round.atomic_load().ge(round)
         branch started
             ? continue
             : wait(round)
-        chan : @Channel = race.chan.atomic_load()
+        chan: @Channel = race.chan.atomic_load()
         branch dropper.producer.load()
             ? feeder(round, chan)
             : consumer(round, chan)
@@ -118,31 +118,31 @@ routine drop_each_round(dropper: @Dropper) -> Void
         jump dropped(round)
 
     block dropped(round: U32)
-        discard_previous : U32 = race.done.atomic_fetch_add(1)
+        discard_previous: U32 = race.done.atomic_fetch_add(1)
         jump wait(round.add(1))
 
 routine start() -> Void
-    local race     : @Race    <- Race(chan: null, round: 0, done: 0)
-    local producer : @Dropper <- Dropper(race: race, producer: true)
-    local consumer : @Dropper <- Dropper(race: race, producer: false)
-    local a        : Thread   = Thread.spawn(drop_each_round.to[Callable](), producer)
-    local b        : Thread   = Thread.spawn(drop_each_round.to[Callable](), consumer)
+    local race: @Race <- Race(chan: null, round: 0, done: 0)
+    local producer: @Dropper <- Dropper(race: race, producer: true)
+    local consumer: @Dropper <- Dropper(race: race, producer: false)
+    local a: Thread = Thread.spawn(drop_each_round.to[Callable](), producer)
+    local b: Thread = Thread.spawn(drop_each_round.to[Callable](), consumer)
 
     block entry()
         jump round(1)
 
     block round(n: U32)
-        past : Bool = n.gt(ROUNDS)
+        past: Bool = n.gt(ROUNDS)
         branch past
             ? report()
             : continue
-        chan : @Channel = rf_channel_create(1)
+        chan: @Channel = rf_channel_create(1)
         race.chan.atomic_store(chan)
         race.round.atomic_store(n)
         jump wait(n)
 
     block wait(n: U32)
-        both_done : Bool = race.done.atomic_load().eq(n.mul(2))
+        both_done: Bool = race.done.atomic_load().eq(n.mul(2))
         branch both_done
             ? round(n.add(1))
             : wait(n)
@@ -150,7 +150,7 @@ routine start() -> Void
     block report()
         a.join()
         b.join()
-        expected : U64 = ROUNDS.to[U64]().mul(2)
-        frees    : U64 = FREES.atomic_load()
+        expected: U64 = ROUNDS.to[U64]().mul(2)
+        frees: U64 = FREES.atomic_load()
         Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
         return()

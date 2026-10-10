@@ -22,15 +22,15 @@ global EMUTLS_NEXT: @USize
 /// compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
 /// initial value or null for zeros.
 record EmutlsControl
-    size  : USize
-    align : USize
-    index : USize
-    value : Addr
+    size: USize
+    align: USize
+    index: USize
+    value: Addr
 
 /// One thread's objects, by slot.
 record EmutlsArray
-    size : USize
-    data : @Addr
+    size: USize
+    data: @Addr
 
 /// The C runtime's `_aligned_malloc` on Windows: `size` bytes aligned to `align`.
 /// :param size: The size in bytes.
@@ -71,7 +71,7 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 #target(os: not "windows")
 routine aligned_alloc(size: USize, align: USize) -> Addr
     block entry()
-        claim p : @Addr <- null
+        claim p: @Addr <- null
         branch c_posix_memalign(p, align.max(sizeof[Addr]()), size).eq(0)
             ? return(p.load())
             : return(null)
@@ -85,18 +85,18 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 #export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
     block entry()
-        index : USize = control.index.atomic_load()
+        index: USize = control.index.atomic_load()
         branch index.eq(0)
             ? assign()
             : array(index)
 
     block assign()
         EMUTLS_LOCK.lock()
-        current : USize = control.index.load()
+        current: USize = control.index.load()
         branch current.eq(0)
             ? continue
             : assigned(current)
-        next : USize = EMUTLS_NEXT.load().add(1)
+        next: USize = EMUTLS_NEXT.load().add(1)
         EMUTLS_NEXT.store(next)
         control.index.atomic_store(next)
         jump assigned(next)
@@ -106,22 +106,22 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
         jump array(index)
 
     block array(index: USize)
-        arr : @EmutlsArray = EMUTLS.load()
+        arr: @EmutlsArray = EMUTLS.load()
         branch arr.is_null()
             ? fresh(index)
             : sized(arr, index)
 
     block fresh(index: USize)
-        made : @EmutlsArray = zeroed[EmutlsArray](1, "Failed to allocate thread-local storage")
+        made: @EmutlsArray = zeroed[EmutlsArray](1, "Failed to allocate thread-local storage")
         EMUTLS.store(made)
         jump sized(made, index)
 
     block sized(arr: @EmutlsArray, index: USize)
-        have : USize = arr.size.load()
+        have: USize = arr.size.load()
         branch have.lt(index)
             ? continue
             : object(arr, index)
-        grown : Addr = c_realloc(arr.data.load(), index.mul(sizeof[Addr]()))
+        grown: Addr = c_realloc(arr.data.load(), index.mul(sizeof[Addr]()))
         branch grown.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to grow thread-local storage")
             : continue
@@ -132,19 +132,19 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
         jump object(arr, index)
 
     block object(arr: @EmutlsArray, index: USize)
-        slot : @Addr = arr.data.load().stride(index.sub(1))
-        obj  : Addr  = slot.load()
+        slot: @Addr = arr.data.load().stride(index.sub(1))
+        obj: Addr = slot.load()
         branch obj.is_null()
             ? make(slot)
             : return(obj)
 
     block make(slot: @Addr)
-        size : USize = control.size.load()
-        made : Addr  = aligned_alloc(size, control.align.load())
+        size: USize = control.size.load()
+        made: Addr = aligned_alloc(size, control.align.load())
         branch made.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to allocate a thread-local variable")
             : continue
-        init : Addr = control.value.load()
+        init: Addr = control.value.load()
         branch init.is_null()
             ? zero(slot, made, size)
             : continue

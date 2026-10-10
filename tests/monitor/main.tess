@@ -26,26 +26,26 @@ preset GATE_THREADS: USize = 3
 
 /// The scheduler a coroutine runs on: the test's stand-in, a number.
 record Sched
-    id : U32
+    id: U32
 
 /// A coroutine: the test's stand-in, a number.
 record Coro
-    id : U32
+    id: U32
 
 /// A parked coroutine, in a node on its own stack while it is linked (as in channel.tess).
 record ChannelWaiter
-    sched : @Sched
-    coro  : @Coro
-    next  : @ChannelWaiter
+    sched: @Sched
+    coro: @Coro
+    next: @ChannelWaiter
 
 /// Threads at a gate: they wait for a token (cast_one) or for the gate to open (cast_all), and the main thread waits
 /// for them on the same SignalCaster.
 record Gate
-    sig     : @Monitor
-    arrived : USize
-    tokens  : USize
-    passed  : USize
-    open    : Bool
+    sig: @Monitor
+    arrived: USize
+    tokens: USize
+    passed: USize
+    open: Bool
 
 // -- what monitor.tess calls in the rest of the runtime library ----------------------
 
@@ -59,7 +59,7 @@ routine c_free(ptr: Addr) -> Void
 routine zeroed[T](count: USize, what: CStr) -> @T
 require T: typename
     block entry()
-        p : Addr = c_calloc(count, sizeof[T]())
+        p: Addr = c_calloc(count, sizeof[T]())
         return(p.to[@T]())
 
 /// Takes node off list (as in channel.tess).
@@ -68,7 +68,7 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
         jump look(list)
 
     block look(at: @@ChannelWaiter)
-        w : @ChannelWaiter = at.load()
+        w: @ChannelWaiter = at.load()
         branch w.is_null()
             ? return()
             : continue
@@ -105,7 +105,7 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
 /// The coroutine is off its thread: another agent casts meanwhile, if CAST_DURING_PARK says so.
 routine rf_sched_park_external() -> Void
     block entry()
-        sig : @Monitor = CAST_DURING_PARK.load()
+        sig: @Monitor = CAST_DURING_PARK.load()
         Out.write("  parked, {count_waiters(sig)} on the wait list\n")
         rf_signal_cast_one(sig)
         return()
@@ -113,7 +113,7 @@ routine rf_sched_park_external() -> Void
 /// As rf_sched_park_external, until a cast or the delay has passed.
 routine rf_sched_park_deadline(delay_ns: U64) -> Void
     block entry()
-        sig : @Monitor = CAST_DURING_PARK.load()
+        sig: @Monitor = CAST_DURING_PARK.load()
         branch sig.is_null()
             ? time_out()
             : continue
@@ -130,14 +130,14 @@ routine rf_sched_park_deadline(delay_ns: U64) -> Void
 
 /// Sleeps the thread until `deadline`, in monotonic_ns.
 routine sleep_until(deadline: U64) -> Void
-    local never : @U32 <- 0
+    local never: @U32 <- 0
 
     block entry()
         jump look()
 
     block look()
-        now  : U64  = monotonic_ns()
-        done : Bool = now.ge(deadline)
+        now: U64 = monotonic_ns()
+        done: Bool = now.ge(deadline)
         branch done
             ? return()
             : continue
@@ -146,7 +146,7 @@ routine sleep_until(deadline: U64) -> Void
 
 /// The coroutines on the SignalCaster's wait list.
 routine count_waiters(sig: @Monitor) -> USize
-    local found : @USize <- 0
+    local found: @USize <- 0
 
     block entry()
         jump next(sig.waiters.load())
@@ -162,14 +162,14 @@ routine count_waiters(sig: @Monitor) -> USize
 /// may return without a cast).
 /// :returns: The last wait's result, 0 once the time is up.
 routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
-    local deadline : U64 = monotonic_ns().add(timeout_ns)
+    local deadline: U64 = monotonic_ns().add(timeout_ns)
 
     block entry()
         jump again()
 
     block again()
-        left   : U64 = deadline.sub_clamp(monotonic_ns())
-        result : U32 = rf_signal_wait_deadline(sig, left)
+        left: U64 = deadline.sub_clamp(monotonic_ns())
+        result: U32 = rf_signal_wait_deadline(sig, left)
         branch result.eq(1)
             ? again()
             : return(result)
@@ -180,7 +180,7 @@ routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
 /// itself, so it comes between an unlock and a lock.
 routine arrive(gate: @Gate) -> Void
     block entry()
-        arrived : USize = gate.arrived.load().add(1)
+        arrived: USize = gate.arrived.load().add(1)
         arrived.store_into(gate.arrived)
         rf_signal_unlock(gate.sig.load())
         rf_signal_cast_all(gate.sig.load())
@@ -190,7 +190,7 @@ routine arrive(gate: @Gate) -> Void
 /// Counts the calling thread through, holding the SignalCaster, releases it, and wakes the main thread.
 routine pass(gate: @Gate) -> Void
     block entry()
-        through : USize = gate.passed.load().add(1)
+        through: USize = gate.passed.load().add(1)
         through.store_into(gate.passed)
         rf_signal_unlock(gate.sig.load())
         rf_signal_cast_all(gate.sig.load())
@@ -204,7 +204,7 @@ routine take_token(gate: @Gate) -> Void
         jump look()
 
     block look()
-        left : USize = gate.tokens.load()
+        left: USize = gate.tokens.load()
         branch left.gt(0)
             ? take(left)
             : wait()
@@ -226,7 +226,7 @@ routine pass_open(gate: @Gate) -> Void
         jump look()
 
     block look()
-        open : Bool = gate.open.load()
+        open: Bool = gate.open.load()
         branch open
             ? through()
             : wait()
@@ -246,7 +246,7 @@ routine await_arrived(gate: @Gate, count: USize) -> Void
         jump look()
 
     block look()
-        arrived : USize = gate.arrived.load()
+        arrived: USize = gate.arrived.load()
         branch arrived.ge(count)
             ? return()
             : wait()
@@ -261,7 +261,7 @@ routine await_passed(gate: @Gate, count: USize) -> Void
         jump look()
 
     block look()
-        through : USize = gate.passed.load()
+        through: USize = gate.passed.load()
         branch through.ge(count)
             ? return()
             : wait()
@@ -273,7 +273,7 @@ routine await_passed(gate: @Gate, count: USize) -> Void
 /// Gives the waiting gate threads one token at a time, each with one cast_one, and waits for one to go through.
 /// :returns: Whether each token let exactly one through.
 routine hand_tokens(gate: @Gate) -> Bool
-    local exact : @Bool <- true
+    local exact: @Bool <- true
 
     block entry()
         rf_signal_lock(gate.sig.load())
@@ -289,8 +289,8 @@ routine hand_tokens(gate: @Gate) -> Bool
         rf_signal_cast_one(gate.sig.load())
         rf_signal_lock(gate.sig.load())
         await_passed(gate, round)
-        through : USize = gate.passed.load()
-        one     : Bool  = through.eq(round).bitand(gate.tokens.load().eq(0))
+        through: USize = gate.passed.load()
+        one: Bool = through.eq(round).bitand(gate.tokens.load().eq(0))
         exact.load().bitand(one).store_into(exact)
         jump give(round.add(1))
 
@@ -321,8 +321,8 @@ routine coroutines(sig: @Monitor) -> Void
         Out.write("after add_ref: {sig.refcount.load()}\n")
         rf_signal_drop(sig)
         Out.write("after drop: {sig.refcount.load()}\n")
-        claim sched : @Sched <- Sched(id: 1)
-        claim coro  : @Coro  <- Coro(id: 7)
+        claim sched: @Sched <- Sched(id: 1)
+        claim coro: @Coro <- Coro(id: 7)
         CURRENT_SCHED.store(sched)
         CURRENT_CORO.store(coro)
         CAST_DURING_PARK.store(sig)
@@ -331,16 +331,16 @@ routine coroutines(sig: @Monitor) -> Void
         rf_signal_wait(sig)
         Out.write("  back, {count_waiters(sig)} on the wait list\n")
         Out.write("a coroutine waits with a deadline:\n")
-        cast : U32 = rf_signal_wait_deadline(sig, 1000000000)
+        cast: U32 = rf_signal_wait_deadline(sig, 1000000000)
         Out.write("  result {cast}, {count_waiters(sig)} on the wait list\n")
         CAST_DURING_PARK.store(null)
-        late : U32 = rf_signal_wait_deadline(sig, 2000000)
+        late: U32 = rf_signal_wait_deadline(sig, 2000000)
         Out.write("  result {late}, {count_waiters(sig)} on the wait list\n")
         rf_signal_unlock(sig)
-        claim older  : @Coro          <- Coro(id: 1)
-        claim newer  : @Coro          <- Coro(id: 2)
-        claim first  : @ChannelWaiter <- ChannelWaiter(sched: sched, coro: older, next: null)
-        claim second : @ChannelWaiter <- ChannelWaiter(sched: sched, coro: newer, next: first)
+        claim older: @Coro <- Coro(id: 1)
+        claim newer: @Coro <- Coro(id: 2)
+        claim first: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: older, next: null)
+        claim second: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: newer, next: first)
         sig.waiters.store(second)
         Out.write("two coroutines parked, cast_one:\n")
         rf_signal_cast_one(sig)
@@ -353,28 +353,28 @@ routine coroutines(sig: @Monitor) -> Void
 
 routine start() -> Void
     block entry()
-        claim alloc : @Allocator <- make_c_heap_allocator()
-        sig : @Monitor = rf_signal_create()
+        claim alloc: @Allocator <- make_c_heap_allocator()
+        sig: @Monitor = rf_signal_create()
         coroutines(sig)
         rf_signal_lock(sig)
-        start  : U64 = monotonic_ns()
-        result : U32 = wait_out(sig, 2000000)
-        waited : U64 = monotonic_ns().sub(start)
+        start: U64 = monotonic_ns()
+        result: U32 = wait_out(sig, 2000000)
+        waited: U64 = monotonic_ns().sub(start)
         rf_signal_unlock(sig)
         Out.write("a thread waits with a deadline: result {result}, waited it out {waited.ge(2000000)}\n")
-        claim tokens : @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
-        t1    : Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
-        t2    : Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
-        t3    : Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
-        exact : Bool   = hand_tokens(tokens)
+        claim tokens: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
+        t1: Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
+        t2: Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
+        t3: Thread = Thread.spawn(take_token.to[Callable](), tokens, alloc)
+        exact: Bool = hand_tokens(tokens)
         t1.join()
         t2.join()
         t3.join()
         Out.write("cast_one: {GATE_THREADS} tokens, one thread through for each: {exact}\n")
-        claim gate : @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
-        u1 : Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
-        u2 : Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
-        u3 : Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
+        claim gate: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
+        u1: Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
+        u2: Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
+        u3: Thread = Thread.spawn(pass_open.to[Callable](), gate, alloc)
         open_gate(gate)
         u1.join()
         u2.join()

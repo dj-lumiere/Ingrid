@@ -34,46 +34,46 @@ preset DEFAULT_STACK: USize = 1048576
 
 /// rf_cancel_frame: one live owned value of a coroutine, in a node that lives in the scope owning the value.
 record CancelFrame
-    value_ptr  : Addr
-    destroy_fn : Callable[(Addr,), Void]
-    prev       : @CancelFrame
+    value_ptr: Addr
+    destroy_fn: Callable[(Addr,), Void]
+    prev: @CancelFrame
 
 /// rf_coro.
 record Coro
-    entry            : Callable[(Addr,), Void]
-    userdata         : Addr
-    status           : U32  // a CORO_ value; read across threads
-    cf_top           : @CancelFrame  // the cancellation shadow stack's top
-    sched_next       : @Coro  // the injector's link
-    wake_ns          : U64  // the deadline it is parked until
-    timer_idx        : SSize  // its slot in the scheduler's timer heap, or -1
-    sched_state      : U32  // a SCHED_ value (sched.tess)
-    park_intent      : U32  // a PARK_ value, recorded by a park and applied by the worker
-    counted_done     : Bool  // its completion has been taken off the scheduler's live count
-    owner_released   : Bool  // its Agent let go while a worker held it: the worker frees it
-    cancel_requested : U32
-    initial_spawned  : Bool  // spawned once: a second spawn does nothing
-    detached         : Bool  // execute(): the worker that completes it frees it
-    awaiter          : @Coro  // a coroutine waiting for this one to finish
-    home             : @Sched  // the scheduler it was spawned on, where its wakes go
-    completion_seq   : U64  // when it finished, in completion order (race! picks the first); U64.MAX until then
-    stack            : Addr  // the bottom of its stack
-    sp               : Addr  // its stack pointer while it isn't running
-    resumer_sp       : Addr  // the resumer's stack pointer while it runs: where a yield goes back to
+    entry: Callable[(Addr,), Void]
+    userdata: Addr
+    status: U32  // a CORO_ value; read across threads
+    cf_top: @CancelFrame  // the cancellation shadow stack's top
+    sched_next: @Coro  // the injector's link
+    wake_ns: U64  // the deadline it is parked until
+    timer_idx: SSize  // its slot in the scheduler's timer heap, or -1
+    sched_state: U32  // a SCHED_ value (sched.tess)
+    park_intent: U32  // a PARK_ value, recorded by a park and applied by the worker
+    counted_done: Bool  // its completion has been taken off the scheduler's live count
+    owner_released: Bool  // its Agent let go while a worker held it: the worker frees it
+    cancel_requested: U32
+    initial_spawned: Bool  // spawned once: a second spawn does nothing
+    detached: Bool  // execute(): the worker that completes it frees it
+    awaiter: @Coro  // a coroutine waiting for this one to finish
+    home: @Sched  // the scheduler it was spawned on, where its wakes go
+    completion_seq: U64  // when it finished, in completion order (race! picks the first); U64.MAX until then
+    stack: Addr  // the bottom of its stack
+    sp: Addr  // its stack pointer while it isn't running
+    resumer_sp: Addr  // the resumer's stack pointer while it runs: where a yield goes back to
 
 /// The coroutine running on this thread. Read again at every call: after a switch the thread may be another one.
 /// :returns: The running coroutine, or null on a plain thread.
 #noinline
 routine current_coro() -> @Coro
     block entry()
-        c : @Coro = CURRENT_CORO.load()
+        c: @Coro = CURRENT_CORO.load()
         return(c)
 
 /// Takes the next completion stamp, shared by coroutines and threaded tasks.
 /// :returns: The stamp, starting at 1.
 routine next_completion_seq() -> U64
     block entry()
-        seq : U64 = COMPLETION_SEQ.atomic_fetch_add(1)
+        seq: U64 = COMPLETION_SEQ.atomic_fetch_add(1)
         return(seq)
 
 /// A new coroutine's first frame: runs its routine, marks it completed, and goes back to its resumer for the last
@@ -81,8 +81,8 @@ routine next_completion_seq() -> U64
 #noreturn
 routine coro_trampoline() -> Void
     block entry()
-        this_coro : @Coro                   = current_coro()
-        body      : Callable[(Addr,), Void] = this_coro.entry.load()
+        this_coro: @Coro = current_coro()
+        body: Callable[(Addr,), Void] = this_coro.entry.load()
         body.call(this_coro.userdata.load())
         this_coro.completion_seq.atomic_store(next_completion_seq())
         this_coro.status.atomic_store(CORO_COMPLETED)
@@ -94,17 +94,17 @@ routine coro_trampoline() -> Void
 /// :returns: The stack's bottom, or null when it can't be reserved.
 routine stack_alloc(size: USize) -> Addr
     block entry()
-        stacks : Allocator                     = make_stack_allocator()
-        alloc  : Callable[(Addr, USize), Addr] = stacks.alloc_fn
-        stack  : Addr                          = alloc.call(stacks.state, size)
+        stacks: Allocator = make_stack_allocator()
+        alloc: Callable[(Addr, USize), Addr] = stacks.alloc_fn
+        stack: Addr = alloc.call(stacks.state, size)
         return(stack)
 
 /// Gives a coroutine stack back to Standard/Fiber's stack allocator.
 /// :param stack: The stack's bottom, from {stack_alloc}.
 routine stack_free(stack: Addr) -> Void
     block entry()
-        stacks : Allocator                    = make_stack_allocator()
-        free   : Callable[(Addr, Addr), Void] = stacks.free_fn
+        stacks: Allocator = make_stack_allocator()
+        free: Callable[(Addr, Addr), Void] = stacks.free_fn
         free.call(stacks.state, stack)
         return()
 
@@ -121,15 +121,15 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
         branch entry.addr().is_null()
             ? return(null)
             : continue
-        coro : @Coro = zeroed[Coro](1, "Failed to allocate coroutine control block")
+        coro: @Coro = zeroed[Coro](1, "Failed to allocate coroutine control block")
         coro.entry.store(entry)
         coro.userdata.store(userdata)
         coro.timer_idx.store(-1)
         coro.completion_seq.store(U64.MAX)
-        reserve : USize = stack_size.eq(0)
+        reserve: USize = stack_size.eq(0)
             ? DEFAULT_STACK
             : stack_size
-        stack : Addr = stack_alloc(reserve)
+        stack: Addr = stack_alloc(reserve)
         branch stack.is_null()
             ? no_stack(coro)
             : continue
@@ -154,7 +154,7 @@ routine rf_coro_resume(coro: @Coro) -> U32
         branch coro.status.atomic_load().eq(CORO_COMPLETED)
             ? return(CORO_COMPLETED)
             : continue
-        prev : @Coro = current_coro()
+        prev: @Coro = current_coro()
         CURRENT_CORO.store(coro)
         coro.status.atomic_store(CORO_RUNNING)
         switch_stack(coro.resumer_sp, coro.sp.load())
@@ -164,7 +164,7 @@ routine rf_coro_resume(coro: @Coro) -> U32
 /// The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
 routine coro_switch_out() -> Void
     block entry()
-        this_coro : @Coro = current_coro()
+        this_coro: @Coro = current_coro()
         branch this_coro.is_null()
             ? return()
             : continue
@@ -195,7 +195,7 @@ routine rf_coro_current() -> @Coro
 #export("rf_current_task_id")
 routine rf_current_task_id() -> U64
     block entry()
-        this_coro : @Coro = current_coro()
+        this_coro: @Coro = current_coro()
         branch this_coro.is_null()
             ? return(rf_current_thread_id())
             : return(ptrtoint[Addr, U64](this_coro))
@@ -231,7 +231,7 @@ routine rf_coro_delete(coro: @Coro) -> Void
         branch coro.is_null()
             ? return()
             : continue
-        stack : Addr = coro.stack.load()
+        stack: Addr = coro.stack.load()
         branch stack.is_null()
             ? free()
             : continue
@@ -263,7 +263,7 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
 routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
     destroy_fn: Callable[(Addr,), Void]) -> Void
     block entry()
-        this_coro : @Coro = current_coro()
+        this_coro: @Coro = current_coro()
         branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
@@ -279,7 +279,7 @@ routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
 #export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
     block entry()
-        this_coro : @Coro = current_coro()
+        this_coro: @Coro = current_coro()
         branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
@@ -319,8 +319,8 @@ routine rf_coro_abandon(coro: @Coro) -> Void
         branch f.is_null()
             ? done()
             : continue
-        prev    : @CancelFrame            = f.prev.load()
-        destroy : Callable[(Addr,), Void] = f.destroy_fn.load()
+        prev: @CancelFrame = f.prev.load()
+        destroy: Callable[(Addr,), Void] = f.destroy_fn.load()
         branch destroy.addr().is_null()
             ? frame(prev)
             : continue
