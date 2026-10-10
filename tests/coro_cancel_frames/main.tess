@@ -3,12 +3,16 @@
 // it is, and a pop of a null frame (which push never links) on the empty stack does nothing. It used to read the
 // null frame's link, since the empty stack's top is null too.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Format
-import Standard::Os
+import Standard/Format
+import Standard/Os
 
 // -- what coro.tess calls in the rest of the runtime library -------------------------
+
+/// The scheduler a coroutine was spawned on (sched.tess): only named here, through the control block's `home`.
+record Sched
+    id : U64
 
 #[external("c"), symbol("calloc")]
 routine c_calloc(count: USize, size: USize) -> Addr
@@ -17,11 +21,11 @@ routine c_calloc(count: USize, size: USize) -> Addr
 routine c_free(ptr: Addr) -> Void
 
 /// count zeroed Ts.
-routine zeroed<T>(count: USize, what: CStr) -> @T
+routine zeroed[T](count: USize, what: CStr) -> @T
 require T: typename
     block entry()
-        p : Addr = c_calloc(count, sizeof<T>())
-        return(p.to<@T>())
+        p : Addr = c_calloc(count, sizeof[T]())
+        return(p.to[@T]())
 
 #[external("c"), symbol("exit"), noreturn]
 routine exit(status: CInt) -> Void
@@ -40,7 +44,7 @@ routine rf_current_thread_id() -> U64
 
 /// The depth of the running coroutine's shadow stack.
 routine depth(coro: @Coro) -> USize
-    shared found : @USize <- 0
+    local found : @USize <- 0
 
     block entry()
         jump next(coro.cf_top.load())
@@ -58,16 +62,16 @@ routine keep(value: Addr) -> Void
         return()
 
 routine start() -> Void
-    shared coro   : @Coro        = zeroed<Coro>(1, "coroutine")
-    shared first  : @CancelFrame <- uninit
-    shared second : @CancelFrame <- uninit
+    local coro   : @Coro        = zeroed[Coro](1, "coroutine")
+    local first  : @CancelFrame <- .hollow()
+    local second : @CancelFrame <- .hollow()
 
     block entry()
         CURRENT_CORO.store(coro)
         rf_coro_cf_pop(null)
         Out.write("pop of null on the empty stack: depth {depth(coro)}\n")
-        rf_coro_cf_push(first, null, keep.to<Callable>())
-        rf_coro_cf_push(second, null, keep.to<Callable>())
+        rf_coro_cf_push(first, null, keep.to[Callable]())
+        rf_coro_cf_push(second, null, keep.to[Callable]())
         Out.write("after two pushes: depth {depth(coro)}\n")
         rf_coro_cf_pop(first)
         Out.write("after an unbalanced pop: depth {depth(coro)}\n")

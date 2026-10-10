@@ -19,11 +19,11 @@
 // of them in retrieve!/race!, and no wake promised from another thread, nothing can ever run again, and after a
 // short grace that confirms it the program stops with a DeadlockError.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Alloc
-import Standard::Fiber
-import Standard::Os
+import Standard/Alloc
+import Standard/Fiber
+import Standard/Os
 
 /// The scheduler driving this thread, or null.
 #threadlocal
@@ -34,9 +34,11 @@ global WORKER_ID: @SSize <- -1
 /// This worker's xorshift state for picking a steal victim.
 #threadlocal
 global STEAL_RNG: @U32
+
 /// This thread's start_here() scheduler, made on first use and driven by this thread whenever it waits.
 #threadlocal
 global HERE_SCHED: @@Sched
+
 /// The process pool: 0 none, 1 being made, 2 made.
 global POOL_STATE: @U32
 global POOL: @@Sched
@@ -106,7 +108,7 @@ routine worker_id() -> SSize
 routine Deque.init(me: @Me) -> Void
     block entry()
         me.cap.store(64)
-        me.buf.store(zeroed<@Coro>(64, "Failed to allocate worker run deque"))
+        me.buf.store(zeroed[@Coro](64, "Failed to allocate worker run deque"))
         me.bottom.store(0)
         me.top.store(0)
         me.lock.store(Mutex.construct())
@@ -134,7 +136,7 @@ routine Deque.push_bottom(me: @Me, c: @Coro) -> Void
 
     block grow()
         n  : USize  = me.cap.load()
-        nb : @@Coro = zeroed<@Coro>(n.mul(2), "Failed to grow worker run deque")
+        nb : @@Coro = zeroed[@Coro](n.mul(2), "Failed to grow worker run deque")
         jump copy(n, nb, 0)
 
     block copy(n: USize, nb: @@Coro, i: USize)
@@ -262,7 +264,7 @@ routine Sched.push_injector(me: @Me, c: @Coro) -> Void
 /// The injector's head, now RUNNING, or null. The caller holds the scheduler lock.
 /// :returns: The coroutine, or null when the injector is empty.
 routine Sched.pop_injector(me: @Me) -> @Coro
-    shared c : @Coro = me.injector_head.load()
+    local c : @Coro = me.injector_head.load()
 
     block entry()
         branch c.is_null()
@@ -287,8 +289,8 @@ routine Sched.pop_injector(me: @Me) -> @Coro
 /// :param c: The coroutine.
 /// :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
 routine Sched.enqueue_ready(me: @Me, c: @Coro) -> Void
-    shared id     : SSize  = worker_id()
-    shared deques : @Deque = me.deques.load()
+    local id     : SSize  = worker_id()
+    local deques : @Deque = me.deques.load()
 
     block entry()
         branch id.ge(0).bitand(deques.is_not_null())
@@ -355,9 +357,9 @@ routine Sched.timer_sift_up(me: @Me, i: SSize) -> Void
 /// Moves the coroutine at `i` down the timer heap while a child wakes earlier.
 /// :param i: The position.
 routine Sched.timer_sift_down(me: @Me, i: SSize) -> Void
-    shared n : SSize = me.timer_count.load()
-    shared l : SSize = i.mul(2).add(1)
-    shared r : SSize = l.add(1)
+    local n : SSize = me.timer_count.load()
+    local l : SSize = i.mul(2).add(1)
+    local r : SSize = l.add(1)
 
     block entry()
         jump left()
@@ -403,11 +405,11 @@ routine Sched.insert_timer(me: @Me, c: @Coro) -> Void
         ncap : SSize = cap.eq(0)
             ? 16
             : cap.mul(2)
-        heap : Addr = c_realloc(me.timer_heap.load(), ncap.to<USize>().mul(sizeof<@Coro>()))
+        heap : Addr = c_realloc(me.timer_heap.load(), ncap.to[USize]().mul(sizeof[@Coro]()))
         branch heap.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to grow scheduler timer heap")
             : continue
-        me.timer_heap.store(heap.to<@@Coro>())
+        me.timer_heap.store(heap.to[@@Coro]())
         me.timer_cap.store(ncap)
         jump put()
 
@@ -488,9 +490,9 @@ routine Sched.make_ready(me: @Me, c: @Coro) -> Void
             : continue
         state : U32 = c.sched_state.atomic_load()
         when
-            state.eq(SCHED_IDLE)    -> idle()
-            state.eq(SCHED_RUNNING) -> running()
-            else                    -> return()
+            state.eq(SCHED_IDLE)    => idle()
+            state.eq(SCHED_RUNNING) => running()
+            else                    => return()
 
     block idle()
         me.unlink_timer(c)
@@ -509,7 +511,7 @@ routine Sched.make_ready(me: @Me, c: @Coro) -> Void
 #export("rf_sched_create")
 routine rf_sched_create() -> @Sched
     block entry()
-        s : @Sched = zeroed<Sched>(1, "Failed to allocate coroutine scheduler")
+        s : @Sched = zeroed[Sched](1, "Failed to allocate coroutine scheduler")
         s.workers_total.store(1)
         return(s)
 
@@ -686,7 +688,7 @@ routine steal_rand() -> U32
 
     block seed()
         worker_ordinal : SSize = worker_id().add(1)
-        s              : U32   = worker_ordinal.to_wrap<U32>().mul_wrap(2654435761)
+        s              : U32   = worker_ordinal.to_wrap[U32]().mul_wrap(2654435761)
         branch s.eq(0)
             ? step(0x9E3779B9)
             : step(s)
@@ -702,7 +704,7 @@ routine steal_rand() -> U32
 /// random one.
 /// :returns: The coroutine, or null when there is nothing to steal.
 routine Sched.try_steal(me: @Me) -> @Coro
-    shared n : SSize = me.workers_total.load()
+    local n : SSize = me.workers_total.load()
 
     block entry()
         no_deques : Bool = me.deques.load().is_null()
@@ -716,8 +718,8 @@ routine Sched.try_steal(me: @Me) -> @Coro
         branch i.eq(n)
             ? return(null)
             : continue
-        offset : U64   = r.to<U64>().add(i.to<U64>())
-        v      : SSize = offset.mod(n.to<U64>()).to<SSize>()
+        offset : U64   = r.to[U64]().add(i.to[U64]())
+        v      : SSize = offset.mod(n.to[U64]()).to[SSize]()
         branch v.eq(worker_id())
             ? look(r, i.add(1))
             : continue
@@ -758,9 +760,9 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
             ? signal(null)
             : continue
         c.awaiter.store(null)
-        home  : @Sched = w.home.load()
-        local : Bool   = home.is_null().bitor(home.ptr_eq(me))
-        branch local
+        home     : @Me  = w.home.load()
+        is_local : Bool = home.is_null().bitor(home.ptr_eq(me))
+        branch is_local
             ? continue
             : signal(w)
         me.make_ready(w)
@@ -806,10 +808,10 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
     block slow(intent: U32)
         me.lock.lock()
         when
-            c.sched_state.atomic_load().eq(SCHED_NOTIFIED) -> ready()
-            intent.eq(PARK_TIMER)                          -> timer()
-            intent.eq(PARK_YIELD)                          -> ready()
-            else                                           -> idle()
+            c.sched_state.atomic_load().eq(SCHED_NOTIFIED) => ready()
+            intent.eq(PARK_TIMER)                          => timer()
+            intent.eq(PARK_YIELD)                          => ready()
+            else                                           => idle()
 
     block ready()
         me.enqueue_ready(c)
@@ -858,7 +860,7 @@ routine Sched.claim_work(me: @Me) -> @Coro
 /// :throws: Crashes with `DeadlockError` when every worker is idle, coroutines are awaited, and no wake can come,
 ///     confirmed `DEADLOCK_CONFIRMS` times in a row.
 routine Sched.step(me: @Me) -> Bool
-    shared c : @Coro = me.claim_work()
+    local c : @Coro = me.claim_work()
 
     block entry()
         branch c.is_null()
@@ -1077,6 +1079,9 @@ routine rf_sched_current() -> @Sched
 /// The allocator the pool's threads start with, made once.
 global POOL_ALLOC: @Allocator
 
+/// How long a plain thread that waits on something else sleeps between turns of its start_here() jobs.
+preset HERE_POLL_NS: U64 = 1000000
+
 /// A worker's start: its scheduler and index, freed by the worker.
 record WorkerStart
     sched : @Sched
@@ -1104,20 +1109,20 @@ routine pool_worker_count() -> SSize
     block entry()
         env : U64 = env_positive("RF_WORKERS")
         branch env.eq(0)
-            ? return(cpu_count().to<SSize>())
-            : return(env.min(WORKERS_MAX).to<SSize>())
+            ? return(cpu_count().to[SSize]())
+            : return(env.min(WORKERS_MAX).to[SSize]())
 
 /// Makes the process pool's scheduler with a deque per worker, and starts the workers.
 /// :returns: The pool's scheduler.
 /// :throws: Crashes with `OutOfMemoryError` when an allocation fails, and with `TaskSpawnError` when a worker can't
 ///     be started.
 routine pool_start() -> @Sched
-    shared s : @Sched = rf_sched_create()
-    shared n : SSize  = pool_worker_count()
+    local s : @Sched = rf_sched_create()
+    local n : SSize  = pool_worker_count()
 
     block entry()
         s.workers_total.store(n)
-        deques : @Deque = zeroed<Deque>(n.to<USize>(), "Failed to allocate worker run deques")
+        deques : @Deque = zeroed[Deque](n.to[USize](), "Failed to allocate worker run deques")
         s.deques.store(deques)
         jump init(deques, 0)
 
@@ -1133,10 +1138,10 @@ routine pool_start() -> @Sched
         branch i.eq(n)
             ? return(s)
             : continue
-        start : @WorkerStart = zeroed<WorkerStart>(1,
+        start : @WorkerStart = zeroed[WorkerStart](1,
             "Failed to allocate pool worker startup argument")
         start.store(WorkerStart { sched: s, index: i })
-        Thread.spawn(worker_main.to<Callable>(), start, POOL_ALLOC).detach()
+        Thread.spawn(worker_main.to[Callable](), start, POOL_ALLOC).detach()
         jump spawn(i.add(1))
 
 /// The process pool, made (and its workers started) on first use, once even when several threads ask at once.
@@ -1186,9 +1191,6 @@ routine rf_sched_here() -> @Sched
         HERE_SCHED.store(made)
         return(made)
 
-/// How long a plain thread that waits on something else sleeps between turns of its start_here() jobs.
-preset HERE_POLL_NS: U64 = 1000000
-
 /// Whether this thread has start_here() jobs that have not finished.
 /// :returns: True when some are live.
 routine here_has_live() -> Bool
@@ -1207,7 +1209,7 @@ routine here_has_live() -> Bool
 /// :returns: True when a job ran.
 /// :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
 routine run_here_ready() -> Bool
-    shared here : @Sched = HERE_SCHED.load()
+    local here : @Sched = HERE_SCHED.load()
 
     block entry()
         branch here.is_null()
@@ -1280,11 +1282,11 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
         branch target.is_null()
             ? return()
             : continue
-        home      : @Sched = target.home.load()
-        s         : @Sched = home.is_null()
+        home : @Sched = target.home.load()
+        s    : @Sched = home.is_null()
             ? rf_sched_thread_default()
             : home
-        this_coro : @Coro  = current_coro()
+        this_coro : @Coro = current_coro()
         s.lock.lock()
         next_waiters : SSize = s.waiters.load().add(1)
         next_waiters.store_into(s.waiters)
@@ -1492,4 +1494,4 @@ routine Sched.dispose(me: @Me, c: @Coro) -> U32
 routine rf_sched_worker_count() -> U64
     block entry()
         s : @Sched = rf_sched_thread_default()
-        return(s.workers_total.load().to<U64>())
+        return(s.workers_total.load().to[U64]())

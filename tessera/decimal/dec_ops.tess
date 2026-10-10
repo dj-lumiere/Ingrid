@@ -14,25 +14,25 @@
 /// :param c: The third operand.
 /// :returns: a × b + c exactly up to a sticky digit, as (neg, coefficient, exponent, preferred exponent) for one rounding, the preferred exponent the smaller of the product's and c's.
 routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
-    shared pneg   : Bool     = a.neg.bitxor(b.neg)
-    shared pc     : U256     = a.coeff.mul_wide(b.coeff)
-    shared pe     : S64      = a.exp.add(b.exp)
-    shared cc     : U256     = c.coeff.to<U256>()
-    shared c_high : Bool     = c.exp.gt(pe)
-    shared h      : DecExact = c_high
+    local pneg   : Bool     = a.neg.bitxor(b.neg)
+    local pc     : U256     = a.coeff.mul_wide(b.coeff)
+    local pe     : S64      = a.exp.add(b.exp)
+    local cc     : U256     = c.coeff.to[U256]()
+    local c_high : Bool     = c.exp.gt(pe)
+    local h      : DecExact = c_high
         ? DecExact { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
         : DecExact { neg: pneg, coeff: pc, exp: pe, pref: 0 }
-    shared l : DecExact = c_high
+    local l : DecExact = c_high
         ? DecExact { neg: pneg, coeff: pc, exp: pe, pref: 0 }
         : DecExact { neg: c.neg, coeff: cc, exp: c.exp, pref: 0 }
 
     block entry()
         both_zero : Bool = pc.eq(0).bitand(cc.eq(0))
         when
-            both_zero -> zero()
-            cc.eq(0)  -> return({ neg: pneg, coeff: pc, exp: pe, pref: pe })
-            pc.eq(0)  -> return({ neg: c.neg, coeff: cc, exp: c.exp, pref: c.exp })
-            else      -> order()
+            both_zero => zero()
+            cc.eq(0)  => return({ neg: pneg, coeff: pc, exp: pe, pref: pe })
+            pc.eq(0)  => return({ neg: c.neg, coeff: cc, exp: c.exp, pref: c.exp })
+            else      => order()
 
     // (+0) + (+0) and (-0) + (-0) keep their sign, mixed signs give +0
     block zero()
@@ -65,16 +65,16 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
         same : Bool = h.neg.eq(l.neg)
         down : Bool = hc.ge(lc)
         when
-            same -> result(hc.add(lc), h.neg, sticky, e, l.exp, false)
-            down -> result(hc.sub(lc), h.neg, sticky, e, l.exp, true)
-            else -> result(lc.sub(hc), l.neg, sticky, e, l.exp, true)
+            same => result(hc.add(lc), h.neg, sticky, e, l.exp, false)
+            down => result(hc.sub(lc), h.neg, sticky, e, l.exp, true)
+            else => result(lc.sub(hc), l.neg, sticky, e, l.exp, true)
 
     block result(r: U256, neg: Bool, sticky: Bool, e: S64, pref: S64, minus: Bool)
         exact_zero : Bool = r.eq(0).bitand(sticky.bitnot())
         when
-            exact_zero -> return({ neg: false, coeff: 0, exp: e, pref: pref })
-            sticky     -> with_sticky(r, neg, e, pref, minus)
-            else       -> return({ neg: neg, coeff: r, exp: e, pref: pref })
+            exact_zero => return({ neg: false, coeff: 0, exp: e, pref: pref })
+            sticky     => with_sticky(r, neg, e, pref, minus)
+            else       => return({ neg: neg, coeff: r, exp: e, pref: pref })
 
     block with_sticky(r: U256, neg: Bool, e: S64, pref: S64, minus: Bool)
         less : U256 = minus
@@ -90,24 +90,24 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
 /// :param f: The format the result rounds to.
 /// :returns: a × b + c rounded once to f.
 routine dec_fma(a: Dec, b: Dec, c: Dec, f: DecFormat) -> Dec
-    shared pneg : Bool = a.neg.bitxor(b.neg)
+    local pneg : Bool = a.neg.bitxor(b.neg)
 
     block entry()
         nan    : Bool = a.is_nan().bitor(b.is_nan()).bitor(c.is_nan())
         inf_ab : Bool = a.is_inf().bitor(b.is_inf())
         when
-            nan        -> return(dec_nan())
-            inf_ab     -> infinite_product()
-            c.is_inf() -> return(dec_inf(c.neg))
-            else       -> finite()
+            nan        => return(dec_nan())
+            inf_ab     => infinite_product()
+            c.is_inf() => return(dec_inf(c.neg))
+            else       => finite()
 
     block infinite_product()
         times_zero : Bool = a.is_zero().bitor(b.is_zero())
         opposite   : Bool = c.is_inf().bitand(c.neg.ne(pneg))
         when
-            times_zero -> return(dec_nan())
-            opposite   -> return(dec_nan())
-            else       -> return(dec_inf(pneg))
+            times_zero => return(dec_nan())
+            opposite   => return(dec_nan())
+            else       => return(dec_inf(pneg))
 
     block finite()
         s : DecExact = dec_fma_exact(a, b, c)
@@ -127,16 +127,16 @@ record DecTerm
 /// :param f: The format the result rounds to.
 /// :returns: sqrt(c × 10^q) of a finite positive x, correctly rounded to f's p digits and reduced.
 routine dec_sqrt_positive(x: Dec, f: DecFormat) -> Dec
-    shared p : S64 = f.digits
+    local p : S64 = f.digits
 
     block entry()
         t0  : S64  = p.mul(2).sub(1).sub(dec_digits(x.coeff))
         odd : Bool = x.exp.sub(t0).bitand(1).eq(1)
-        t   : S64  = t0.add(odd.to<S64>())
-        cc  : U256 = x.coeff.to<U256>().mul(dec_p10(t))
+        t   : S64  = t0.add(odd.to[S64]())
+        cc  : U256 = x.coeff.to[U256]().mul(dec_p10(t))
         s   : U256 = cc.isqrt()
         up  : Bool = cc.sub(s.mul(s)).gt(s)
-        jump settle(s.add(up.to<U64>().to<U256>()), x.exp.sub(t).shr(1))
+        jump settle(s.add(up.to[U64]().to[U256]()), x.exp.sub(t).shr(1))
 
     // rounding up 99...9 gives 10^p
     block settle(s: U256, e: S64)
@@ -145,7 +145,7 @@ routine dec_sqrt_positive(x: Dec, f: DecFormat) -> Dec
             ? dec_p10(p.sub(1))
             : s
         return(dec_finish(
-            DecExact { neg: false, coeff: root, exp: e.add(carry.to<S64>()), pref: f.qmax }, f))
+            DecExact { neg: false, coeff: root, exp: e.add(carry.to[S64]()), pref: f.qmax }, f))
 
 /// The square root rounded to f: a NaN or a negative nonzero value gives a NaN, a zero or +infinity is itself.
 /// :param x: The operand.
@@ -155,11 +155,11 @@ routine dec_sqrt(x: Dec, f: DecFormat) -> Dec
     block entry()
         negative : Bool = x.neg.bitand(x.is_zero().bitnot())
         when
-            x.is_nan()  -> return(dec_nan())
-            negative    -> return(dec_nan())
-            x.is_inf()  -> return(x)
-            x.is_zero() -> return(x)
-            else        -> return(dec_sqrt_positive(x, f))
+            x.is_nan()  => return(dec_nan())
+            negative    => return(dec_nan())
+            x.is_inf()  => return(x)
+            x.is_zero() => return(x)
+            else        => return(dec_sqrt_positive(x, f))
 
 /// sqrt(x^2 + y^2 + z^2) of finite values rounded to f and reduced (like every function result): the squares
 /// c^2 10^(2q) scaled to a common even exponent B where the largest has 2p + 2 or 2p + 3 digits (the smaller ones
@@ -171,7 +171,7 @@ routine dec_sqrt(x: Dec, f: DecFormat) -> Dec
 /// :param f: The format the result rounds to.
 /// :returns: sqrt(x^2 + y^2 + z^2) of finite values rounded to f and reduced (like every function result).
 routine dec_hypot_finite(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
-    shared lead : S64 = f.digits.mul(2).add(2)
+    local lead : S64 = f.digits.mul(2).add(2)
 
     block entry()
         tx   : S64  = dec_square_top(x)
@@ -192,7 +192,7 @@ routine dec_hypot_finite(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
         s    : U256    = all.isqrt()
         rest : Bool    = s.mul(s).ne(all)
         st   : Bool    = sx.sticky.bitor(sy.sticky).bitor(sz.sticky).bitor(rest)
-        coef : U256    = s.mul(10).add(st.to<U64>().to<U256>())
+        coef : U256    = s.mul(10).add(st.to[U64]().to[U256]())
         r    : Dec     = dec_finish(
             DecExact { neg: false, coeff: coef, exp: b.shr(1).sub(1), pref: f.qmax }, f)
         return(r.reduce(f))
@@ -216,15 +216,15 @@ routine dec_square_top(v: Dec) -> S64
 /// :param b: The second operand.
 /// :returns: c^2 10^(2q - b), floored, and whether the floor dropped anything.
 routine dec_scaled_square(v: Dec, b: S64) -> DecTerm
-    shared sq : U256 = v.coeff.mul_wide(v.coeff)
+    local sq : U256 = v.coeff.mul_wide(v.coeff)
 
     block entry()
         shift : S64 = v.exp.mul(2).sub(b)
         when
-            v.coeff.eq(0) -> return({ value: 0, sticky: false })
-            shift.ge(0)   -> return({ value: sq.mul(dec_p10(shift)), sticky: false })
-            shift.ge(-76) -> floor(shift.neg())
-            else          -> return({ value: 0, sticky: true })
+            v.coeff.eq(0) => return({ value: 0, sticky: false })
+            shift.ge(0)   => return({ value: sq.mul(dec_p10(shift)), sticky: false })
+            shift.ge(-76) => floor(shift.neg())
+            else          => return({ value: 0, sticky: true })
 
     block floor(k: S64)
         q : U256 = dec_div_p10_256(sq, k)
@@ -241,9 +241,9 @@ routine dec_hypot(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
         inf : Bool = x.is_inf().bitor(y.is_inf()).bitor(z.is_inf())
         nan : Bool = x.is_nan().bitor(y.is_nan()).bitor(z.is_nan())
         when
-            inf  -> return(dec_inf(false))
-            nan  -> return(dec_nan())
-            else -> return(dec_hypot_finite(x, y, z, f))
+            inf  => return(dec_inf(false))
+            nan  => return(dec_nan())
+            else => return(dec_hypot_finite(x, y, z, f))
 
 // ── rounding to an integer, quantize ──────────────────────────────────────────────────────────────
 
@@ -271,7 +271,7 @@ routine dec_is_integral_as_is(x: Dec) -> Bool
 /// :param f: The format the result rounds to.
 /// :returns: x rounded to an integral value with exponent 0, for an x with a fraction (dec_is_integral_as_is false).
 routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
-    shared drop : S64 = x.exp.neg()
+    local drop : S64 = x.exp.neg()
 
     block entry()
         within : Bool = drop.le(f.digits)
@@ -292,7 +292,7 @@ routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
         even : Bool               = above.bitor(half.bitand(odd))
         cut  : DecDroppedFraction = { rest: rest, nearest: near, even: even }
         up   : Bool               = dec_is_rounded_up(mode, x.neg, cut)
-        return(dec_num(x.neg, q.add(up.to<U128>()), 0))
+        return(dec_num(x.neg, q.add(up.to[U128]()), 0))
 
 /// Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
 /// :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
@@ -302,11 +302,11 @@ routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
 routine dec_is_rounded_up(mode: U32, neg: Bool, cut: DecDroppedFraction) -> Bool
     block entry()
         when mode
-            1    -> return(neg.bitand(cut.rest))
-            2    -> return(neg.bitnot().bitand(cut.rest))
-            3    -> return(cut.nearest)
-            4    -> return(cut.even)
-            else -> return(false)
+            1    => return(neg.bitand(cut.rest))
+            2    => return(neg.bitnot().bitand(cut.rest))
+            3    => return(cut.nearest)
+            4    => return(cut.even)
+            else => return(false)
 
 /// Whether quantize returns a unchanged: neither is a NaN, and both are infinities or their exponents match.
 /// :param a: The first operand.
@@ -326,21 +326,21 @@ routine dec_is_quantize_identity(a: Dec, b: Dec) -> Bool
 /// :param f: The format the result rounds to.
 /// :returns: a with b's exponent (when dec_is_quantize_identity is false).
 routine dec_quantize(a: Dec, b: Dec, f: DecFormat) -> Dec
-    shared target : S64 = b.exp
+    local target : S64 = b.exp
 
     block entry()
         bad : Bool = a.is_finite().bitand(b.is_finite()).bitnot()
         when
-            bad              -> return(dec_nan())
-            a.exp.gt(target) -> scale_up(a.exp.sub(target))
-            else             -> scale_down(target.sub(a.exp))
+            bad              => return(dec_nan())
+            a.exp.gt(target) => scale_up(a.exp.sub(target))
+            else             => scale_down(target.sub(a.exp))
 
     block scale_up(shift: S64)
         long : Bool = dec_digits(a.coeff).add(shift).gt(f.digits)
         when
-            a.coeff.eq(0) -> return(dec_num(a.neg, 0, target))
-            long          -> return(dec_nan())
-            else          -> return(dec_num(a.neg, a.coeff.mul(dec_p10_128(shift)), target))
+            a.coeff.eq(0) => return(dec_num(a.neg, 0, target))
+            long          => return(dec_nan())
+            else          => return(dec_num(a.neg, a.coeff.mul(dec_p10_128(shift)), target))
 
     block scale_down(drop: S64)
         all : Bool = drop.gt(f.digits)
@@ -355,7 +355,7 @@ routine dec_quantize(a: Dec, b: Dec, f: DecFormat) -> Dec
         twice : U128 = r.shl(1)
         odd   : Bool = q.bitand(1).eq(1)
         up    : Bool = twice.gt(unit).bitor(twice.eq(unit).bitand(odd))
-        return(dec_num(a.neg, q.add(up.to<U128>()), target))
+        return(dec_num(a.neg, q.add(up.to[U128]()), target))
 
 // ── remainders ────────────────────────────────────────────────────────────────────────────────────
 
@@ -370,11 +370,11 @@ routine dec_quantize(a: Dec, b: Dec, f: DecFormat) -> Dec
 /// :param near: Whether it is the IEEE remainder (nearest quotient) rather than fmod (truncated).
 /// :returns: The exact remainder of x = cx 10^ex by y = cy 10^ey (cy nonzero) at exponent e = min(ex, ey).
 routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
-    shared mul : U256 = near.to<U64>().add(1).to<U256>()
+    local mul : U256 = near.to[U64]().add(1).to[U256]()
 
     block entry()
         branch x.exp.ge(y.exp)
-            ? down(y.coeff.to<U256>().mul(mul), x.coeff.to<U256>().mod(y.coeff.to<U256>().mul(mul)),
+            ? down(y.coeff.to[U256]().mul(mul), x.coeff.to[U256]().mod(y.coeff.to[U256]().mul(mul)),
                 x.exp.sub(y.exp))
             : up()
 
@@ -383,7 +383,7 @@ routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
         k    : S64  = d.min(38)
         done : Bool = d.le(0)
         branch done
-            ? settle(r, y.coeff.to<U256>(), y.exp)
+            ? settle(r, y.coeff.to[U256](), y.exp)
             : down(m, r.mul(dec_p10(k)).mod(m), d.sub(k))
 
     block up()
@@ -391,11 +391,11 @@ routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
         far : Bool = d.gt(38)
         branch far
             ? return(dec_num(x.neg, x.coeff, x.exp))
-            : aligned(y.coeff.to<U256>().mul(dec_p10(d)))
+            : aligned(y.coeff.to[U256]().mul(dec_p10(d)))
 
     block aligned(yy: U256)
         m  : U256 = yy.mul(mul)
-        xx : U256 = x.coeff.to<U256>()
+        xx : U256 = x.coeff.to[U256]()
         r  : U256 = xx.ge(m)
             ? xx.mod(m)
             : xx
@@ -404,7 +404,7 @@ routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
     block settle(r: U256, yy: U256, e: S64)
         branch near
             ? nearest(r, yy, e)
-            : return(dec_num(x.neg, r.to<U128>(), e))
+            : return(dec_num(x.neg, r.to[U128](), e))
 
     // r is X mod 2Y: past Y the quotient is odd
     block nearest(r: U256, yy: U256, e: S64)
@@ -415,8 +415,8 @@ routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
         twice : U256 = rr.shl(1)
         flip  : Bool = twice.gt(yy).bitor(twice.eq(yy).bitand(odd))
         branch flip
-            ? return(dec_num(x.neg.bitnot(), yy.sub(rr).to<U128>(), e))
-            : return(dec_num(x.neg, rr.to<U128>(), e))
+            ? return(dec_num(x.neg.bitnot(), yy.sub(rr).to[U128](), e))
+            : return(dec_num(x.neg, rr.to[U128](), e))
 
 /// Whether fmod or the remainder of x by y is a NaN: a NaN in, an infinite x, or a zero y.
 /// :param x: The operand.
@@ -456,9 +456,9 @@ routine dec_mod(x: Dec, y: Dec, near: Bool) -> Dec
 routine dec_normalize(x: Dec, f: DecFormat) -> Dec
     block entry()
         when
-            x.is_finite().bitnot() -> return(x)
-            x.coeff.eq(0)          -> return(dec_num(x.neg, 0, 0))
-            else                   -> return(x.reduce(f))
+            x.is_finite().bitnot() => return(x)
+            x.coeff.eq(0)          => return(dec_num(x.neg, 0, 0))
+            else                   => return(x.reduce(f))
 
 /// x × 10^n by its exponent alone: above the range an infinity, below it a zero with exponent 0. A special or a zero
 /// stays.
@@ -470,11 +470,11 @@ routine dec_scaleb(x: Dec, n: S64, f: DecFormat) -> Dec
     block entry()
         e : S64 = x.exp.add(n)
         when
-            x.is_finite().bitnot() -> return(x)
-            x.coeff.eq(0)          -> return(x)
-            e.gt(f.qmax)           -> return(dec_inf(x.neg))
-            e.lt(f.qmin)           -> return(dec_num(x.neg, 0, 0))
-            else                   -> return(dec_num(x.neg, x.coeff, e))
+            x.is_finite().bitnot() => return(x)
+            x.coeff.eq(0)          => return(x)
+            e.gt(f.qmax)           => return(dec_inf(x.neg))
+            e.lt(f.qmin)           => return(dec_num(x.neg, 0, 0))
+            else                   => return(dec_num(x.neg, x.coeff, e))
 
 /// The exponent e with 10^e <= |x| < 10^(e + 1), as a decimal: NaN for a NaN, +infinity for an infinity,
 /// -infinity for a zero.
@@ -484,10 +484,10 @@ routine dec_scaleb(x: Dec, n: S64, f: DecFormat) -> Dec
 routine dec_logb(x: Dec, f: DecFormat) -> Dec
     block entry()
         when
-            x.is_nan()    -> return(dec_nan())
-            x.is_inf()    -> return(dec_inf(false))
-            x.coeff.eq(0) -> return(dec_inf(true))
-            else          -> exponent()
+            x.is_nan()    => return(dec_nan())
+            x.is_inf()    => return(dec_inf(false))
+            x.coeff.eq(0) => return(dec_inf(true))
+            else          => exponent()
 
     block exponent()
         e : S64 = x.exp.add(dec_digits(x.coeff)).sub(1)
@@ -499,7 +499,7 @@ routine dec_logb(x: Dec, f: DecFormat) -> Dec
 /// :returns: An integer as a decimal with exponent 0, rounded to f.
 routine dec_from_s64(n: S64, f: DecFormat) -> Dec
     block entry()
-        magnitude : U256 = n.abs_diff(0).to<U256>()
+        magnitude : U256 = n.abs_diff(0).to[U256]()
         return(dec_finish(DecExact { neg: n.lt(0), coeff: magnitude, exp: 0, pref: 0 }, f))
 
 // ── DPD ───────────────────────────────────────────────────────────────────────────────────────────
@@ -510,9 +510,9 @@ routine dec_from_s64(n: S64, f: DecFormat) -> Dec
 routine dec_dpd_continuation(width: U32) -> U128
     block entry()
         when width
-            32   -> return(6)
-            64   -> return(8)
-            else -> return(12)
+            32   => return(6)
+            64   => return(8)
+            else => return(12)
 
 /// The exponent bias of the decimal format of `width` bits.
 /// :param width: The width in bits: 32, 64, or 128.
@@ -520,9 +520,9 @@ routine dec_dpd_continuation(width: U32) -> U128
 routine dec_bias(width: U32) -> S64
     block entry()
         when width
-            32   -> return(101)
-            64   -> return(398)
-            else -> return(6176)
+            32   => return(101)
+            64   => return(398)
+            else => return(6176)
 
 /// The DPD interchange form of the decimal of `width` bits (32, 64, or 128) whose BID form decodes to x: the sign, a
 /// 5-bit combination field (the exponent's top two bits and the leading digit, 8 and 9 folded in as 11 0 and 11 1;
@@ -533,22 +533,22 @@ routine dec_bias(width: U32) -> S64
 /// :param width: The width in bits: 32, 64, or 128.
 /// :returns: The DPD interchange form of the decimal of `width` bits (32, 64, or 128) whose BID form decodes to x.
 routine dec_to_dpd(x: Dec, width: U32) -> U128
-    shared top     : U128 = width.to<U128>()
-    shared sign    : U128 = x.neg.to<U128>().shl(top.sub(1))
-    shared cont    : U128 = dec_dpd_continuation(width)
-    shared declets : U128 = top.sub(cont).sub(6).div(10)
+    local top     : U128 = width.to[U128]()
+    local sign    : U128 = x.neg.to[U128]().shl(top.sub(1))
+    local cont    : U128 = dec_dpd_continuation(width)
+    local declets : U128 = top.sub(cont).sub(6).div(10)
 
     block entry()
         kind : U8 = x.kind
         when kind
-            0    -> finite()
-            1    -> return(sign.bitor(U128.shl(0x1E, top.sub(6))))
-            2    -> return(sign.bitor(U128.shl(0x1F, top.sub(6))))
-            else -> return(sign.bitor(U128.shl(0x3F, top.sub(7))))
+            0    => finite()
+            1    => return(sign.bitor(U128.shl(0x1E, top.sub(6))))
+            2    => return(sign.bitor(U128.shl(0x1F, top.sub(6))))
+            else => return(sign.bitor(U128.shl(0x3F, top.sub(7))))
 
     block finite()
         bias : S64  = dec_bias(width)
-        e    : U128 = x.exp.add(bias).to_wrap<U128>()
+        e    : U128 = x.exp.add(bias).to_wrap[U128]()
         jump trailing(0, x.coeff, 0, e)
 
     // the declets, lowest first
@@ -560,7 +560,7 @@ routine dec_to_dpd(x: Dec, width: U32) -> U128
 
     block declet(i: U128, c: U128, field: U128, e: U128)
         group : U128 = c.mod(1000)
-        code  : U128 = DEC_BIN_TO_DPD.getitem(group.to<USize>()).to<U128>()
+        code  : U128 = DEC_BIN_TO_DPD.getitem(group.to[USize]()).to[U128]()
         jump trailing(i.add(1), c.div(1000), field.bitor(code.shl(i.mul(10))), e)
 
     block combine(msd: U128, field: U128, e: U128)
@@ -579,11 +579,11 @@ routine dec_to_dpd(x: Dec, width: U32) -> U128
 /// :param width: The width in bits: 32, 64, or 128.
 /// :returns: The decimal whose DPD interchange form of `width` bits is `bits` (decoded as dec_to_dpd encodes).
 routine dec_from_dpd(bits: U128, width: U32) -> Dec
-    shared top     : U128 = width.to<U128>()
-    shared neg     : Bool = bits.shr(top.sub(1)).bitand(1).eq(1)
-    shared cont    : U128 = dec_dpd_continuation(width)
-    shared declets : U128 = top.sub(cont).sub(6).div(10)
-    shared combo   : U128 = bits.shr(top.sub(6)).bitand(0x1F)
+    local top     : U128 = width.to[U128]()
+    local neg     : Bool = bits.shr(top.sub(1)).bitand(1).eq(1)
+    local cont    : U128 = dec_dpd_continuation(width)
+    local declets : U128 = top.sub(cont).sub(6).div(10)
+    local combo   : U128 = bits.shr(top.sub(6)).bitand(0x1F)
 
     block entry()
         signaling : Bool = bits.shr(top.sub(7)).bitand(1).eq(1)
@@ -591,16 +591,16 @@ routine dec_from_dpd(bits: U128, width: U32) -> Dec
             ? DEC_SNAN
             : DEC_QNAN
         when
-            combo.eq(0x1E) -> return(dec_inf(neg))
-            combo.eq(0x1F) -> return({ neg: neg, kind: kind, exp: 0, coeff: 0 })
-            combo.lt(0x18) -> lead(combo.shr(3), combo.bitand(7))
-            else           -> lead(combo.shr(1).bitand(3), combo.bitand(1).add(8))
+            combo.eq(0x1E) => return(dec_inf(neg))
+            combo.eq(0x1F) => return({ neg: neg, kind: kind, exp: 0, coeff: 0 })
+            combo.lt(0x18) => lead(combo.shr(3), combo.bitand(7))
+            else           => lead(combo.shr(1).bitand(3), combo.bitand(1).add(8))
 
     block lead(ehi: U128, msd: U128)
         elo  : U128 = bits.shr(top.sub(6).sub(cont)).bitand(U128.shl(1, cont).sub(1))
         e    : U128 = ehi.shl(cont).bitor(elo)
         bias : S64  = dec_bias(width)
-        jump digits(declets, msd, e.to<S64>().sub(bias))
+        jump digits(declets, msd, e.to[S64]().sub(bias))
 
     // the declets, highest first
     block digits(left: U128, c: U128, exp: S64)
@@ -611,5 +611,5 @@ routine dec_from_dpd(bits: U128, width: U32) -> Dec
 
     block one(i: U128, c: U128, exp: S64)
         code  : U128 = bits.shr(i.mul(10)).bitand(0x3FF)
-        group : U128 = DEC_DPD_TO_BIN.getitem(code.to<USize>()).to<U128>()
+        group : U128 = DEC_DPD_TO_BIN.getitem(code.to[USize]()).to[U128]()
         jump digits(i, c.mul(1000).add(group), exp)

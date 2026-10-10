@@ -10,9 +10,9 @@
 // for a context handler the context, the raw pointer of a Roamed or Guarded handle). Registration lasts the
 // process's life, so the boxes are never freed.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Os
+import Standard/Os
 
 global INTERRUPT_HANDLERS: @HandlerList
 global TERMINATE_HANDLERS: @HandlerList
@@ -41,18 +41,18 @@ routine invoke(e: HandlerEntry) -> Void
         branch e.box.is_null()
             ? return()
             : continue
-        fn : Addr = e.box.to<@Addr>().load()
+        fn : Addr = e.box.to[@Addr]().load()
         branch e.has_ctx
             ? with_ctx(fn)
             : continue
         claim plain : @Addr <- fn
-        call : Callable<(Addr,), Void> = plain.to<@Callable<(Addr,), Void>>().load()
+        call : Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().load()
         call.call(e.box)
         return()
 
     block with_ctx(fn: Addr)
         claim slot : @Addr <- fn
-        call : Callable<(Addr, Addr), Void> = slot.to<@Callable<(Addr, Addr), Void>>().load()
+        call : Callable[(Addr, Addr), Void] = slot.to[@Callable[(Addr, Addr), Void]]().load()
         call.call(e.box, e.ctx)
         return()
 
@@ -66,14 +66,14 @@ routine dispatch(list: @HandlerList) -> Void
         branch n.eq(0)
             ? none()
             : continue
-        bytes    : USize = n.mul(sizeof<HandlerEntry>())
+        bytes    : USize = n.mul(sizeof[HandlerEntry]())
         snapshot : Addr  = c_malloc(bytes)
         branch snapshot.is_null()
             ? none()
             : continue
         c_memcpy(snapshot, list.items.load(), bytes)
         SIGNALS_LOCK.unlock()
-        jump run(snapshot.to<@HandlerEntry>(), n, 0)
+        jump run(snapshot.to[@HandlerEntry](), n, 0)
 
     block none()
         SIGNALS_LOCK.unlock()
@@ -104,7 +104,7 @@ routine dispatch_which(which: S32) -> Void
 /// dropped.
 /// :param entry: The handler to add.
 routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
-    shared n : USize = me.count.load()
+    local n : USize = me.count.load()
 
     block entry()
         branch n.eq(me.cap.load())
@@ -114,12 +114,12 @@ routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
         ncap : USize = cap.eq(0)
             ? 4
             : cap.mul(2)
-        grown : Addr = c_realloc(me.items.load(), ncap.mul(sizeof<HandlerEntry>()))
+        grown : Addr = c_realloc(me.items.load(), ncap.mul(sizeof[HandlerEntry]()))
         // out of memory: the registration is dropped, as registration is best-effort
         branch grown.is_null()
             ? return()
             : continue
-        me.items.store(grown.to<@HandlerEntry>())
+        me.items.store(grown.to[@HandlerEntry]())
         me.cap.store(ncap)
         jump put()
 
@@ -178,7 +178,7 @@ routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> 
 /// :param add: Nonzero to add, 0 to remove.
 /// :returns: Nonzero on success.
 #[external("c"), symbol("SetConsoleCtrlHandler"), callconv("stdcall"), target(os: "windows")]
-routine c_set_console_ctrl_handler(handler: Callable<#callconv("stdcall"), (U32,), CInt>,
+routine c_set_console_ctrl_handler(handler: Callable[#callconv("stdcall"), (U32,), CInt],
     add: CInt) -> CInt
 
 /// On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
@@ -191,9 +191,9 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
         // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
         closing : Bool = ctrl_type.eq(2).bitor(ctrl_type.eq(5))
         when
-            ctrl_type.le(1)                -> interrupt()
-            closing.bitor(ctrl_type.eq(6)) -> terminate()
-            else                           -> return(0)
+            ctrl_type.le(1)                => interrupt()
+            closing.bitor(ctrl_type.eq(6)) => terminate()
+            else                           => return(0)
 
     block interrupt()
         dispatch_which(SIG_INTERRUPT)
@@ -207,14 +207,14 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
 #target(os: "windows")
 routine install_signal_dispatch() -> Void
     block entry()
-        c_set_console_ctrl_handler(console_ctrl_handler.to<Callable>(), 1)
+        c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
         SIGNALS_INSTALLED.store(true)
         return()
 
 // -- POSIX: the self-pipe ------------------------------------------------------------
 
 /// [0] read by the dispatch thread, [1] written by the signal handler.
-global SELF_PIPE: @Array<CInt, 2> <- { -1, -1 }
+global SELF_PIPE: @Array[CInt, 2] <- { -1, -1 }
 
 preset SIGINT:  CInt = 2
 preset SIGTERM: CInt = 15
@@ -223,14 +223,14 @@ preset SIGTERM: CInt = 15
 /// macOS: handler, mask (4 bytes), flags.
 #target(os: "linux")
 record SigAction
-    handler  : Callable<(CInt,), Void>
-    mask     : Array<U64, 16>
+    handler  : Callable[(CInt,), Void]
+    mask     : Array[U64, 16]
     flags    : CInt
     restorer : Addr
 
 #target(os: "macos")
 record SigAction
-    handler : Callable<(CInt,), Void>
+    handler : Callable[(CInt,), Void]
     mask    : U32
     flags   : CInt
 
@@ -289,17 +289,17 @@ private routine errno() -> CInt
 /// :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
-    shared code : U8 = signo.eq(SIGTERM)
+    local code : U8 = signo.eq(SIGTERM)
         ? 1
         : 0
-    shared byte : @U8 <- code
+    local byte : @U8 <- code
 
     block entry()
         jump write()
 
     block write()
-        write_end : @CInt = SELF_PIPE.to<@CInt>().stride(1)
-        rc        : SSize = c_write(write_end.load(), byte.to<@Byte>(), 1)
+        write_end : @CInt = SELF_PIPE.to[@CInt]().stride(1)
+        rc        : SSize = c_write(write_end.load(), byte.to[@Byte](), 1)
         branch rc.lt(0).bitand(errno().eq(4))
             ? write()
             : return()
@@ -307,15 +307,15 @@ routine posix_signal_handler(signo: CInt) -> Void
 /// Reads which-codes from the pipe and runs the handlers.
 /// :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 #target(os: not "windows")
-routine signal_dispatch_main(pipe: @Array<CInt, 2>) -> Void
-    shared code : @U8 <- 0
+routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
+    local code : @U8 <- 0
 
     block entry()
         rf_thread_stack_guarantee()
         jump read()
 
     block read()
-        rc : SSize = c_read(pipe.getitem(0), code.to<@Byte>(), 1)
+        rc : SSize = c_read(pipe.getitem(0), code.to[@Byte](), 1)
         branch rc.eq(1)
             ? got()
             : continue
@@ -324,7 +324,7 @@ routine signal_dispatch_main(pipe: @Array<CInt, 2>) -> Void
             : return()
 
     block got()
-        dispatch_which(code.load().to<S32>())
+        dispatch_which(code.load().to[S32]())
         jump read()
 
 /// Makes the self-pipe, starts the dispatch thread, and sets the handler for SIGINT and SIGTERM. Called with the lock
@@ -333,14 +333,14 @@ routine signal_dispatch_main(pipe: @Array<CInt, 2>) -> Void
 #target(os: not "windows")
 routine install_signal_dispatch() -> Void
     block entry()
-        fds : @CInt = SELF_PIPE.to<@CInt>()
+        fds : @CInt = SELF_PIPE.to[@CInt]()
         branch c_pipe(fds).ne(0)
             ? return()
             : continue
-        Thread.spawn(signal_dispatch_main.to<Callable>(), SELF_PIPE, runtime_heap()).detach()
-        claim sa : @SigAction <- uninit
-        c_memset(sa, 0, sizeof<SigAction>())
-        sa.handler.store(posix_signal_handler.to<Callable>())
+        Thread.spawn(signal_dispatch_main.to[Callable](), SELF_PIPE, runtime_heap()).detach()
+        claim sa : @SigAction <- .hollow()
+        c_memset(sa, 0, sizeof[SigAction]())
+        sa.handler.store(posix_signal_handler.to[Callable]())
         c_sigemptyset(sa.mask)
         sa.flags.store(sa_restart())
         c_sigaction(SIGINT, sa, null)

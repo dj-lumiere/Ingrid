@@ -1,5 +1,5 @@
 // The console for RazorForge and Suflae (show, alert, ask), the OS side of the crash report (writing to stderr,
-// flushing, exiting with the crash status), process start-up, and C-string helpers, over Tessera's Standard::Os In,
+// flushing, exiting with the crash status), process start-up, and C-string helpers, over Tessera's Standard/Os In,
 // Out, and Err.
 //
 // What is RazorForge's here is the policy. Standard output is buffered, and flushed after every show when it is an
@@ -9,10 +9,10 @@
 // RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
 // a crash. alert writes to stderr in magenta. ask_line skips empty lines.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Alloc
-import Standard::Os
+import Standard/Alloc
+import Standard/Os
 
 /// C's `strcpy`: copies the NUL-terminated string at `src`, terminator included, to `dest`.
 /// :param dest: Where the copy goes, large enough for it.
@@ -32,7 +32,7 @@ routine c_strcmp(a: @Byte, b: @Byte) -> CInt
 /// :param at_exit: The routine to run.
 /// :returns: 0 on success.
 #[external("c"), symbol("atexit")]
-routine c_atexit(at_exit: Callable<(), Void>) -> CInt
+routine c_atexit(at_exit: Callable[(), Void]) -> CInt
 
 // -- standard output -----------------------------------------------------------------
 
@@ -47,7 +47,7 @@ preset OUTPUT_BUFFER: USize = 8192
 /// What show has written and Out hasn't been given yet, behind a lock (shows come from every thread).
 record OutputBuffer
     lock  : Mutex
-    bytes : Array<Byte, OUTPUT_BUFFER>
+    bytes : Array[Byte, OUTPUT_BUFFER]
     count : USize
 
 /// Whether standard output is flushed after every show: true when RF_FLUSH_STDOUT starts with `1` or stdout is a
@@ -81,7 +81,7 @@ routine OutputBuffer.drain(me: @Me) -> Void
         branch n.eq(0)
             ? return()
             : continue
-        Out.write_all_result(me.bytes.to<@Byte>(), n)
+        Out.write_all_result(me.bytes.to[@Byte](), n)
         me.count.store(0)
         return()
 
@@ -92,7 +92,7 @@ routine OutputBuffer.drain(me: @Me) -> Void
 /// :param count: The number of bytes.
 #export("rf_console_show")
 routine rf_console_show(ptr: @Byte, count: USize) -> Void
-    shared out : @OutputBuffer = STDOUT
+    local out : @OutputBuffer = STDOUT
 
     block entry()
         out.lock.lock()
@@ -111,7 +111,7 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
         jump done()
 
     block keep()
-        out.bytes.to<@Byte>().stride(out.count.load()).copy(ptr, count)
+        out.bytes.to[@Byte]().stride(out.count.load()).copy(ptr, count)
         next_count : USize = out.count.load().add(count)
         next_count.store_into(out.count)
         jump done()
@@ -165,9 +165,9 @@ routine terminated_text(text: Bytes) -> @Byte
         branch buf.is_null()
             ? lost()
             : continue
-        terminator : @Byte = buf.to<@Byte>().stride(n)
+        terminator : @Byte = buf.to[@Byte]().stride(n)
         terminator.store(0x00)
-        return(buf.to<@Byte>())
+        return(buf.to[@Byte]())
 
     block lost()
         c_free(text.data)
@@ -176,18 +176,18 @@ routine terminated_text(text: Bytes) -> @Byte
 /// {terminated_text} of the text when there is one.
 /// :param text: The text read, or absent at the end of the input.
 /// :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
-routine terminated_option(text: Option<Bytes>) -> @Byte
+routine terminated_option(text: Option[Bytes]) -> @Byte
     block entry()
         when text
-            .Present(t) -> return(terminated_text(t))
-            .Absent     -> return(null)
+            .Present(t) => return(terminated_text(t))
+            .Absent     => return(null)
 
 /// The next non-empty line from stdin, without its end, or null at the end of the input. Standard output is flushed
 /// first.
 /// :returns: The line as a NUL-terminated string the caller frees, or null.
 #export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
-    shared alloc : @Allocator <- uninit
+    local alloc : @Allocator <- .hollow()
 
     block entry()
         rf_console_flush()
@@ -195,10 +195,10 @@ routine rf_console_ask_line() -> @Byte
         jump next()
 
     block next()
-        line : Option<Bytes> = In.read_line_checked(alloc)
+        line : Option[Bytes] = In.read_line_checked(alloc)
         when line
-            .Present(t) -> continue
-            .Absent     -> return(null)
+            .Present(t) => continue
+            .Absent     => return(null)
         branch t.count.eq(0)
             ? skip(t)
             : return(terminated_text(t))
@@ -271,12 +271,12 @@ routine rf_crash_exit() -> Void
 routine rf_runtime_init() -> Void
     block entry()
         rf_io_runtime_init()
-        c_atexit(rf_console_flush.to<Callable>())
+        c_atexit(rf_console_flush.to[Callable]())
         Err.enable_colors()
         return()
 
 /// Sets the exit status the program ends with when its `start` returns: RazorForge's and Suflae's `set_exit_code`.
-/// The last store wins (Standard::Os keeps it in one atomic value).
+/// The last store wins (Standard/Os keeps it in one atomic value).
 /// :param code: The exit status, 0 for success.
 #export("rf_set_exit_code")
 routine rf_set_exit_code(code: S32) -> Void

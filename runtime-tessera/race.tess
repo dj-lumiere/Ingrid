@@ -5,7 +5,7 @@
 // plain thread it waits on the pool's block_cond. The first to finish is the smallest completion stamp among the
 // finished ones, not the lowest index, so a late scan that finds several finished still picks the right one.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
 /// rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
 record Race
@@ -20,7 +20,7 @@ record Race
 #export("rf_race_begin")
 routine rf_race_begin() -> @Race
     block entry()
-        r : @Race = zeroed<Race>(1, "Failed to allocate race competitor set")
+        r : @Race = zeroed[Race](1, "Failed to allocate race competitor set")
         return(r)
 
 /// Appends a competitor, doubling the storage (from 4) when it is full. A null `me` does nothing.
@@ -39,13 +39,13 @@ routine Race.push(me: @Me, handle: Addr, kind: U8) -> Void
         cap : SSize = n.eq(0)
             ? 4
             : n.mul(2)
-        handles : Addr = c_realloc(me.handles.load(), cap.to<USize>().mul(sizeof<Addr>()))
-        kinds   : Addr = c_realloc(me.kinds.load(), cap.to<USize>())
+        handles : Addr = c_realloc(me.handles.load(), cap.to[USize]().mul(sizeof[Addr]()))
+        kinds   : Addr = c_realloc(me.kinds.load(), cap.to[USize]())
         branch handles.is_null().bitor(kinds.is_null())
             ? rf_throw("OutOfMemoryError", "Failed to grow race competitor set")
             : continue
-        me.handles.store(handles.to<@Addr>())
-        me.kinds.store(kinds.to<@U8>())
+        me.handles.store(handles.to[@Addr]())
+        me.kinds.store(kinds.to[@U8]())
         me.cap.store(cap)
         jump put(n)
 
@@ -109,7 +109,7 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> Void
         branch me.is_task(i)
             ? continue
             : next(i.add(1))
-        task : @Task = me.handle(i).to<@Task>()
+        task : @Task = me.handle(i).to[@Task]()
         branch on
             ? arm(i, task)
             : disarm(i, task)
@@ -139,7 +139,7 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> Void
         branch me.is_task(i).bitor(me.handle(i).is_null())
             ? next(i.add(1))
             : continue
-        c : @Coro = me.handle(i).to<@Coro>()
+        c : @Coro = me.handle(i).to[@Coro]()
         branch set
             ? point(i, c)
             : clear(i, c)
@@ -171,7 +171,7 @@ routine Race.winner(me: @Me) -> SSize
             : coro(i, best, best_seq)
 
     block coro(i: SSize, best: SSize, best_seq: U64)
-        c : @Coro = me.handle(i).to<@Coro>()
+        c : @Coro = me.handle(i).to[@Coro]()
         branch c.is_null()
             ? next(i.add(1), best, best_seq)
             : continue
@@ -180,7 +180,7 @@ routine Race.winner(me: @Me) -> SSize
             : next(i.add(1), best, best_seq)
 
     block task(i: SSize, best: SSize, best_seq: U64)
-        t : @Task = me.handle(i).to<@Task>()
+        t : @Task = me.handle(i).to[@Task]()
         branch rf_task_status_get(t).eq(TASK_COMPLETED)
             ? consider(i, best, best_seq, rf_task_completion_seq(t))
             : next(i.add(1), best, best_seq)
@@ -210,8 +210,8 @@ routine rf_race_wait(r: @Race) -> SSize
 /// :param r: The race, with at least one competitor.
 /// :returns: The winner's index.
 private routine wait_for_winner(r: @Race) -> SSize
-    shared s         : @Sched = rf_sched_thread_default()
-    shared this_coro : @Coro  = current_coro()
+    local s         : @Sched = rf_sched_thread_default()
+    local this_coro : @Coro  = current_coro()
 
     block entry()
         r.register(s, this_coro, true)

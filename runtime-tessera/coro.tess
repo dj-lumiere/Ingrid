@@ -1,5 +1,5 @@
 // RazorForge's stackful coroutine: create / resume / yield / delete, the cancellation shadow stack, and
-// abandonment. The stack and the context switch are Standard::Fiber's (switch_stack, initial_stack, and the stack
+// abandonment. The stack and the context switch are Standard/Fiber's (switch_stack, initial_stack, and the stack
 // allocator: pages reserved, committed as the stack grows, a no-access page at the bottom), the same on every
 // operating system.
 //
@@ -7,11 +7,11 @@
 // primitives) or finishes, with its status. The coroutine running on a thread is a thread-local, read again after
 // every switch, since a parked coroutine may go on on another thread.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Alloc
-import Standard::Fiber
-import Standard::Os
+import Standard/Alloc
+import Standard/Fiber
+import Standard/Os
 
 /// The coroutine running on this thread, or null.
 #threadlocal
@@ -35,12 +35,12 @@ preset DEFAULT_STACK: USize = 1048576
 /// rf_cancel_frame: one live owned value of a coroutine, in a node that lives in the scope owning the value.
 record CancelFrame
     value_ptr  : Addr
-    destroy_fn : Callable<(Addr,), Void>
+    destroy_fn : Callable[(Addr,), Void]
     prev       : @CancelFrame
 
 /// rf_coro.
 record Coro
-    entry            : Callable<(Addr,), Void>
+    entry            : Callable[(Addr,), Void]
     userdata         : Addr
     status           : U32  // a CORO_ value; read across threads
     cf_top           : @CancelFrame  // the cancellation shadow stack's top
@@ -82,29 +82,29 @@ routine next_completion_seq() -> U64
 routine coro_trampoline() -> Void
     block entry()
         this_coro : @Coro                   = current_coro()
-        body      : Callable<(Addr,), Void> = this_coro.entry.load()
+        body      : Callable[(Addr,), Void] = this_coro.entry.load()
         body.call(this_coro.userdata.load())
         this_coro.completion_seq.atomic_store(next_completion_seq())
         this_coro.status.atomic_store(CORO_COMPLETED)
         switch_stack(this_coro.sp, this_coro.resumer_sp.load())
         unreachable
 
-/// Reserves a coroutine stack from Standard::Fiber's stack allocator.
+/// Reserves a coroutine stack from Standard/Fiber's stack allocator.
 /// :param size: The stack's reserve in bytes.
 /// :returns: The stack's bottom, or null when it can't be reserved.
 routine stack_alloc(size: USize) -> Addr
     block entry()
         stacks : Allocator                     = make_stack_allocator()
-        alloc  : Callable<(Addr, USize), Addr> = stacks.alloc_fn
+        alloc  : Callable[(Addr, USize), Addr] = stacks.alloc_fn
         stack  : Addr                          = alloc.call(stacks.state, size)
         return(stack)
 
-/// Gives a coroutine stack back to Standard::Fiber's stack allocator.
+/// Gives a coroutine stack back to Standard/Fiber's stack allocator.
 /// :param stack: The stack's bottom, from {stack_alloc}.
 routine stack_free(stack: Addr) -> Void
     block entry()
         stacks : Allocator                    = make_stack_allocator()
-        free   : Callable<(Addr, Addr), Void> = stacks.free_fn
+        free   : Callable[(Addr, Addr), Void] = stacks.free_fn
         free.call(stacks.state, stack)
         return()
 
@@ -116,12 +116,12 @@ routine stack_free(stack: Addr) -> Void
 /// :returns: The new coroutine, or null when `entry` is null.
 /// :throws: Crashes with `OutOfMemoryError` when the control block or the stack can't be allocated.
 #export("rf_coro_create")
-routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_size: USize) -> @Coro
+routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_size: USize) -> @Coro
     block entry()
         branch entry.addr().is_null()
             ? return(null)
             : continue
-        coro : @Coro = zeroed<Coro>(1, "Failed to allocate coroutine control block")
+        coro : @Coro = zeroed[Coro](1, "Failed to allocate coroutine control block")
         coro.entry.store(entry)
         coro.userdata.store(userdata)
         coro.timer_idx.store(-1)
@@ -134,7 +134,7 @@ routine rf_coro_create(entry: Callable<(Addr,), Void>, userdata: Addr, stack_siz
             ? no_stack(coro)
             : continue
         coro.stack.store(stack)
-        coro.sp.store(initial_stack(stack.to<@Byte>(), reserve, coro_trampoline.addr()))
+        coro.sp.store(initial_stack(stack.to[@Byte](), reserve, coro_trampoline.addr()))
         return(coro)
 
     block no_stack(coro: @Coro)
@@ -198,7 +198,7 @@ routine rf_current_task_id() -> U64
         this_coro : @Coro = current_coro()
         branch this_coro.is_null()
             ? return(rf_current_thread_id())
-            : return(ptrtoint<Addr, U64>(this_coro))
+            : return(ptrtoint[Addr, U64](this_coro))
 
 /// Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
 /// null `coro` does nothing.
@@ -261,7 +261,7 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
 /// :param destroy_fn: What destroys the value if the coroutine is abandoned.
 #export("rf_coro_cf_push")
 routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
-    destroy_fn: Callable<(Addr,), Void>) -> Void
+    destroy_fn: Callable[(Addr,), Void]) -> Void
     block entry()
         this_coro : @Coro = current_coro()
         branch frame.is_null().bitor(this_coro.is_null())
@@ -320,7 +320,7 @@ routine rf_coro_abandon(coro: @Coro) -> Void
             ? done()
             : continue
         prev    : @CancelFrame            = f.prev.load()
-        destroy : Callable<(Addr,), Void> = f.destroy_fn.load()
+        destroy : Callable[(Addr,), Void] = f.destroy_fn.load()
         branch destroy.addr().is_null()
             ? frame(prev)
             : continue

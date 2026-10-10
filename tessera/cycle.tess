@@ -7,9 +7,9 @@
 // thread running a pass releases objects itself (a freed entity drops its other handles), and those releases must not
 // take the lock it already holds, so the collector thread is marked.
 
-import Standard::Alloc
-import Standard::Collections
-import Standard::Os
+import Standard/Alloc
+import Standard/Collections
+import Standard/Os
 
 /// Possible cycle roots, reported by strong releases.
 global ROOTS : @HeaderBuffer
@@ -62,13 +62,13 @@ record HeaderBuffer
 routine my_slot() -> @WorldSlot
     block entry()
         mine : Addr = MY_SLOT.load()
-        branch mine.to<@Byte>().is_null()
+        branch mine.to[@Byte]().is_null()
             ? make()
-            : return(mine.to<@WorldSlot>())
+            : return(mine.to[@WorldSlot]())
 
     block make()
         claim alloc : @Allocator <- make_c_heap_allocator()
-        slot : @WorldSlot = allocate<WorldSlot>(1, alloc)
+        slot : @WorldSlot = allocate[WorldSlot](1, alloc)
         slot.store(WorldSlot { inside: 0, next: null })
         MY_SLOT.store(slot)
         jump link(slot)
@@ -76,10 +76,10 @@ routine my_slot() -> @WorldSlot
     block link(slot: @WorldSlot)
         head : Addr = SLOTS.atomic_load()
         slot.next.store(head)
-        added : Result<Addr, Addr> = SLOTS.atomic_compare_exchange(head, slot)
+        added : Result[Addr, Addr] = SLOTS.atomic_compare_exchange(head, slot)
         when added
-            .Success -> return(slot)
-            .Failure -> link(slot)
+            .Success => return(slot)
+            .Failure => link(slot)
 
 /// Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
 /// its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
@@ -117,7 +117,7 @@ routine world_leave() -> Void
         branch IN_COLLECTOR.load()
             ? return()
             : continue
-        step_out(MY_SLOT.load().to<@WorldSlot>())
+        step_out(MY_SLOT.load().to[@WorldSlot]())
         return()
 
 /// One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
@@ -148,10 +148,10 @@ routine world_stop() -> Void
             : behind(state)
 
     block take(state: U32)
-        taken : Result<U32, U32> = WORLD.atomic_compare_exchange(state, WRITER)
+        taken : Result[U32, U32] = WORLD.atomic_compare_exchange(state, WRITER)
         when taken
-            .Success -> marked()
-            .Failure -> attempt()
+            .Success => marked()
+            .Failure => attempt()
 
     // Another pass runs. Its restart wakes everyone waiting on WORLD.
     block behind(state: U32)
@@ -163,9 +163,9 @@ routine world_stop() -> Void
         jump each_slot(SLOTS.atomic_load())
 
     block each_slot(at: Addr)
-        branch at.to<@Byte>().is_null()
+        branch at.to[@Byte]().is_null()
             ? return()
-            : drain(at.to<@WorldSlot>())
+            : drain(at.to[@WorldSlot]())
 
     block drain(slot: @WorldSlot)
         inside : U32 = slot.inside.atomic_load()
@@ -175,10 +175,10 @@ routine world_stop() -> Void
 
     block announce(slot: @WorldSlot, inside: U32)
         waiting : U32              = inside.bitor(WAITING)
-        set     : Result<U32, U32> = slot.inside.atomic_compare_exchange(inside, waiting)
+        set     : Result[U32, U32] = slot.inside.atomic_compare_exchange(inside, waiting)
         when set
-            .Success -> sleep(slot, waiting)
-            .Failure -> drain(slot)
+            .Success => sleep(slot, waiting)
+            .Failure => drain(slot)
 
     block sleep(slot: @WorldSlot, waiting: U32)
         wait_on(slot.inside, waiting)
@@ -202,8 +202,8 @@ routine world_restart() -> Void
 /// :param item: The header address to append.
 /// :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
 routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
-    shared count    : U64 = buffer.count.load()
-    shared capacity : U64 = buffer.capacity.load()
+    local count    : U64 = buffer.count.load()
+    local capacity : U64 = buffer.capacity.load()
 
     block entry()
         full : Bool = count.eq(capacity)
@@ -216,7 +216,7 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
             ? 16
             : capacity.mul(2)
         claim alloc : @Allocator <- make_c_heap_allocator()
-        grown : @Addr = reallocate<Addr>(buffer.items.load(), larger.to<USize>(), alloc)
+        grown : @Addr = reallocate[Addr](buffer.items.load(), larger.to[USize](), alloc)
         branch grown.is_null()
             ? crash_allocation()
             : continue
@@ -225,7 +225,7 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
         jump put()
 
     block put()
-        slot : @Addr = buffer.items.load().stride(count.to<USize>())
+        slot : @Addr = buffer.items.load().stride(count.to[USize]())
         slot.store(item)
         count.add(1).store_into(buffer.count)
         return()
@@ -243,9 +243,9 @@ routine buffer_clear(buffer: @HeaderBuffer) -> Void
 /// :returns: The header stored there.
 routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
     block entry()
-        slot : @Addr = buffer.items.load().stride(i.to<USize>())
+        slot : @Addr = buffer.items.load().stride(i.to[USize]())
         item : Addr  = slot.load()
-        return(item.to<@RoamHeader>())
+        return(item.to[@RoamHeader]())
 
 /// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
 /// only from its own thread, with no mutator running).
@@ -311,9 +311,9 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
 
     block remove(i: U64, n: U64)
         last      : U64   = n.sub(1)
-        last_slot : @Addr = buffer.items.load().stride(last.to<USize>())
+        last_slot : @Addr = buffer.items.load().stride(last.to[USize]())
         moved     : Addr  = last_slot.load()
-        hole      : @Addr = buffer.items.load().stride(i.to<USize>())
+        hole      : @Addr = buffer.items.load().stride(i.to[USize]())
         hole.store(moved)
         last.store_into(buffer.count)
         return()
@@ -332,11 +332,11 @@ routine visit_child(child: Addr) -> Void
 /// :param node: The entity whose children to list.
 /// :param kids: The list that receives the children's headers.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine children(node: @RoamHeader, kids: @List<Addr>) -> Void
+routine children(node: @RoamHeader, kids: @List[Addr]) -> Void
     block entry()
         kids.clear()
         trace : Addr = node.trace_hook.load()
-        branch trace.to<@Byte>().is_null()
+        branch trace.to[@Byte]().is_null()
             ? return()
             : continue
         buffer_clear(SCRATCH)
@@ -358,8 +358,8 @@ routine children(node: @RoamHeader, kids: @List<Addr>) -> Void
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
-    shared work : @List<Addr> <- .construct(alloc)
-    shared kids : @List<Addr> <- .construct(alloc)
+    local work : @List[Addr] <- .construct(alloc)
+    local kids : @List[Addr] <- .construct(alloc)
 
     block entry()
         branch root.state.load().eq(SCANNING)
@@ -373,7 +373,7 @@ routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
         branch work.is_empty()
             ? finish()
             : continue
-        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        node : @RoamHeader = work.pop().to[@RoamHeader]()
         children(node, kids)
         jump edges(0, kids.count())
 
@@ -382,7 +382,7 @@ routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
             ? next()
             : continue
         kid_address : Addr        = kids.getitem(i)
-        kid         : @RoamHeader = kid_address.to<@RoamHeader>()
+        kid         : @RoamHeader = kid_address.to[@RoamHeader]()
         kid_count   : U64         = kid.count.load().sub(1)
         kid_count.store_into(kid.count)
         branch kid.state.load().eq(SCANNING)
@@ -403,8 +403,8 @@ routine mark_scanning(root: @RoamHeader, alloc: @Allocator) -> Void
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
-    shared work : @List<Addr> <- .construct(alloc)
-    shared kids : @List<Addr> <- .construct(alloc)
+    local work : @List[Addr] <- .construct(alloc)
+    local kids : @List[Addr] <- .construct(alloc)
 
     block entry()
         work.push(root)
@@ -414,7 +414,7 @@ routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
         branch work.is_empty()
             ? finish()
             : continue
-        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        node : @RoamHeader = work.pop().to[@RoamHeader]()
         branch node.state.load().eq(SCANNING)
             ? continue
             : next()
@@ -446,8 +446,8 @@ routine scan(root: @RoamHeader, alloc: @Allocator) -> Void
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
-    shared work : @List<Addr> <- .construct(alloc)
-    shared kids : @List<Addr> <- .construct(alloc)
+    local work : @List[Addr] <- .construct(alloc)
+    local kids : @List[Addr] <- .construct(alloc)
 
     block entry()
         LIVE.store_into(root.state)
@@ -458,7 +458,7 @@ routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
         branch work.is_empty()
             ? finish()
             : continue
-        node : @RoamHeader = work.pop().to<@RoamHeader>()
+        node : @RoamHeader = work.pop().to[@RoamHeader]()
         children(node, kids)
         jump edges(0, kids.count())
 
@@ -467,7 +467,7 @@ routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
             ? next()
             : continue
         kid_address : Addr        = kids.getitem(i)
-        kid         : @RoamHeader = kid_address.to<@RoamHeader>()
+        kid         : @RoamHeader = kid_address.to[@RoamHeader]()
         kid_count   : U64         = kid.count.load().add(1)
         kid_count.store_into(kid.count)
         branch kid.state.load().eq(LIVE)
@@ -488,8 +488,8 @@ routine scan_live(root: @RoamHeader, alloc: @Allocator) -> Void
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
-    shared work : @List<Addr> <- .construct(alloc)
-    shared kids : @List<Addr> <- .construct(alloc)
+    local work : @List[Addr] <- .construct(alloc)
+    local kids : @List[Addr] <- .construct(alloc)
 
     block entry()
         work.push(root)
@@ -499,7 +499,7 @@ routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
         branch work.is_empty()
             ? finish()
             : continue
-        node     : @RoamHeader = work.pop().to<@RoamHeader>()
+        node     : @RoamHeader = work.pop().to[@RoamHeader]()
         garbage  : Bool        = node.state.load().eq(GARBAGE)
         buffered : Bool        = node.buffered.load()
         branch garbage.bitand(buffered.bitnot())
@@ -527,8 +527,8 @@ routine collect_garbage(root: @RoamHeader, alloc: @Allocator) -> Void
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 #[export("ingrid_cyclic_collect")]
 routine collect() -> U64
-    shared alloc : @Allocator  <- uninit
-    shared roots : @List<Addr> <- uninit
+    local alloc : @Allocator  <- .hollow()
+    local roots : @List[Addr] <- .hollow()
 
     block entry()
         world_stop()
@@ -563,7 +563,7 @@ routine collect() -> U64
             ? gather()
             : continue
         root_address : Addr = roots.getitem(i)
-        scan(root_address.to<@RoamHeader>(), alloc)
+        scan(root_address.to[@RoamHeader](), alloc)
         jump scanning(i.add(1), n)
 
     block gather()
@@ -575,7 +575,7 @@ routine collect() -> U64
             ? reap(0, REAP.count.load())
             : continue
         root_address : Addr        = roots.getitem(i)
-        root         : @RoamHeader = root_address.to<@RoamHeader>()
+        root         : @RoamHeader = root_address.to[@RoamHeader]()
         false.store_into(root.buffered)
         collect_garbage(root, alloc)
         jump gathering(i.add(1), n)
@@ -614,9 +614,9 @@ routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
         branch k.ge(remaining)
             ? shifted(remaining)
             : continue
-        from_slot : @Addr = buffer.items.load().stride(n.add(k).to<USize>())
+        from_slot : @Addr = buffer.items.load().stride(n.add(k).to[USize]())
         moved     : Addr  = from_slot.load()
-        to_slot   : @Addr = buffer.items.load().stride(k.to<USize>())
+        to_slot   : @Addr = buffer.items.load().stride(k.to[USize]())
         to_slot.store(moved)
         jump shift(k.add(1), remaining)
 

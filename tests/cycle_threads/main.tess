@@ -6,21 +6,21 @@
 // roam.tess calls two routines of the RazorForge runtime library and deadlock.tess a third, defined here so the
 // program links: the current task, the scheduler's yield, and the crash exit.
 
-import Standard::Alloc
-import Standard::Format
-import Standard::Os
-
-/// An entity: the header of the entity its one Roamed field holds (null for none).
-record Node
-    child : Addr
-
-preset WORKERS: U64 = 4
-preset ROUNDS: U64 = 20000
+import Standard/Alloc
+import Standard/Format
+import Standard/Os
 
 /// How many entities the collector has freed.
 global FREED : @U64
 /// How many workers have finished.
 global DONE : @U64
+
+preset WORKERS: U64 = 4
+preset ROUNDS: U64 = 20000
+
+/// An entity: the header of the entity its one Roamed field holds (null for none).
+record Node
+    child : Addr
 
 #export("rf_current_task_id")
 routine stub_current_task_id() -> U64
@@ -41,9 +41,9 @@ routine stub_crash_exit() -> Void
 /// :param entity: The node.
 routine trace_node(entity: Addr) -> Void
     block entry()
-        node  : @Node = entity.to<@Node>()
+        node  : @Node = entity.to[@Node]()
         child : Addr  = node.child.load()
-        branch child.to<@Byte>().is_null()
+        branch child.to[@Byte]().is_null()
             ? return()
             : continue
         visit_child(child)
@@ -55,7 +55,7 @@ routine free_node(entity: Addr) -> Void
     block entry()
         before : U64 = FREED.atomic_fetch_add(1)
         claim alloc : @Allocator <- make_c_heap_allocator()
-        deallocate(entity.to<@Node>(), alloc)
+        deallocate(entity.to[@Node](), alloc)
         return()
 
 /// The entity type's destroy routine, for the last strong release: frees the node without counting it.
@@ -63,7 +63,7 @@ routine free_node(entity: Addr) -> Void
 routine drop_node(entity: Addr) -> Void
     block entry()
         claim alloc : @Allocator <- make_c_heap_allocator()
-        deallocate(entity.to<@Node>(), alloc)
+        deallocate(entity.to[@Node](), alloc)
         return()
 
 /// A new local entity with one strong handle.
@@ -71,8 +71,8 @@ routine drop_node(entity: Addr) -> Void
 routine new_entity() -> @RoamHeader
     block entry()
         claim alloc : @Allocator <- make_c_heap_allocator()
-        node   : @Node       = allocate<Node>(1, alloc)
-        header : @RoamHeader = allocate<RoamHeader>(1, alloc)
+        node   : @Node       = allocate[Node](1, alloc)
+        header : @RoamHeader = allocate[RoamHeader](1, alloc)
         node.child.store(null)
         header.store(RoamHeader { count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
             holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
@@ -84,7 +84,7 @@ routine new_entity() -> @RoamHeader
 /// :param target: The entity it points at.
 routine link(owner: @RoamHeader, target: @RoamHeader) -> Void
     block entry()
-        node : @Node = owner.data.load().to<@Node>()
+        node : @Node = owner.data.load().to[@Node]()
         roam_hold(target)
         node.child.store(target)
         return()
@@ -128,7 +128,7 @@ routine run_workers(left: U64) -> Void
     block spawn()
         claim alloc  : @Allocator <- make_c_heap_allocator()
         claim unused : @U64       <- 0
-        thread : Thread = Thread.spawn(worker.to<Callable>(), unused, alloc)
+        thread : Thread = Thread.spawn(worker.to[Callable](), unused, alloc)
         run_workers(left.sub(1))
         thread.join()
         return()

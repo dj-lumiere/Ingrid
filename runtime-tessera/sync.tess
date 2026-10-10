@@ -1,15 +1,15 @@
 // What the rest of Ingrid's runtime code shares: the C library and runtime routines it calls, the clock, the
 // identity of the calling thread, and the crash handler of the Tessera code in this library. Threads wait on
-// Standard::Os's Mutex and Condition.
+// Standard/Os's Mutex and Condition.
 //
 // The runtime library is shared (razorforge_runtime.dll / .so / .dylib), and this code is compiled into it, so a
 // routine RazorForge calls is exported under its C name (#export), and calls into the rest of the library (the crash
 // report) go through the C library.
 
-module Ingrid::Runtime
+module Ingrid/Runtime
 
-import Standard::Format
-import Standard::Os
+import Standard/Format
+import Standard/Os
 
 // -- the C library -------------------------------------------------------------------
 
@@ -61,13 +61,13 @@ routine rf_invalidate(ptr: Addr) -> Void
 /// :param what: The message of the error raised when the allocation fails.
 /// :returns: The first of the zeroed elements.
 /// :throws: Crashes with `OutOfMemoryError` (message `what`) when `calloc` fails.
-routine zeroed<T>(count: USize, what: CStr) -> @T
+routine zeroed[T](count: USize, what: CStr) -> @T
 require T: typename
     block entry()
-        p : Addr = c_calloc(count, sizeof<T>())
+        p : Addr = c_calloc(count, sizeof[T]())
         branch p.is_null()
             ? rf_throw("OutOfMemoryError", what)
-            : return(p.to<@T>())
+            : return(p.to[@T]())
 
 // -- the clock and the calling thread ------------------------------------------------
 
@@ -94,7 +94,7 @@ routine c_pthread_self() -> Addr
 #[export("rf_current_thread_id"), target(os: "windows")]
 routine rf_current_thread_id() -> U64
     block entry()
-        return(c_get_current_thread_id().to<U64>())
+        return(c_get_current_thread_id().to[U64]())
 
 /// A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
 /// detecting a re-entrant claim).
@@ -102,15 +102,15 @@ routine rf_current_thread_id() -> U64
 #[export("rf_current_thread_id"), target(os: not "windows")]
 routine rf_current_thread_id() -> U64
     block entry()
-        return(ptrtoint<Addr, U64>(c_pthread_self()))
+        return(ptrtoint[Addr, U64](c_pthread_self()))
 
 /// The environment variable name as a positive integer, or 0 when it is unset, empty, not a number, or not
 /// positive. Only the leading decimal digits count, and a value too large saturates at U64's maximum.
 /// :param name: The variable's name.
 /// :returns: The parsed value, or 0.
 routine env_positive(name: CStr) -> U64
-    shared text  : @Byte = c_getenv(name)
-    shared value : @U64  <- 0
+    local text  : @Byte = c_getenv(name)
+    local value : @U64  <- 0
 
     block entry()
         unset : Bool = text.is_null()
@@ -120,14 +120,14 @@ routine env_positive(name: CStr) -> U64
 
     block digit(i: USize)
         digit_byte : Byte = text.stride(i).load()
-        c          : U8   = digit_byte.to<U8>()
+        c          : U8   = digit_byte.to[U8]()
         more       : Bool = c.ge(48).bitand(c.le(57))
         branch more
             ? add(i, c)
             : return(value.load())
 
     block add(i: USize, c: U8)
-        next : U64 = value.load().mul_clamp(10).add_clamp(c.sub(48).to<U64>())
+        next : U64 = value.load().mul_clamp(10).add_clamp(c.sub(48).to[U64]())
         next.store_into(value)
         jump digit(i.add(1))
 
@@ -141,17 +141,17 @@ routine env_positive(name: CStr) -> U64
 /// :param place: Where the crash was raised, or null for no place.
 #[export("tessera_crash_handler"), noreturn]
 routine runtime_crash_handler(name: Bytes, message: Bytes, place: @SourceLocation) -> Void
-    shared kind     : @Array<Byte, 128>  <- uninit
-    shared kind_ptr : @Byte              = kind.to<@Byte>()
-    shared buffer   : @Array<Byte, 1024> <- uninit
-    shared out      : @SliceWriter       <- uninit
+    local kind     : @Array[Byte, 128]  <- .hollow()
+    local kind_ptr : @Byte              = kind.to[@Byte]()
+    local buffer   : @Array[Byte, 1024] <- .hollow()
+    local out      : @SliceWriter       <- .hollow()
 
     block entry()
-        claim kind_out : @SliceWriter <- SliceWriter.construct(kind.to<@Byte>(), 127)
+        claim kind_out : @SliceWriter <- SliceWriter.construct(kind.to[@Byte](), 127)
         write_str(kind_out, name)
-        kind_text : Bytes = kind_out.to<Bytes>()
+        kind_text : Bytes = kind_out.to[Bytes]()
         kind_ptr.stride(kind_text.count).store(0x00)
-        out.store(SliceWriter.construct(buffer.to<@Byte>(), 1023))
+        out.store(SliceWriter.construct(buffer.to[@Byte](), 1023))
         write_str(out, message)
         nowhere : Bool = place.is_null()
         branch nowhere
@@ -162,7 +162,7 @@ routine runtime_crash_handler(name: Bytes, message: Bytes, place: @SourceLocatio
 
     // The name and the text both end in a NUL for rf_throw.
     block finish()
-        text     : Bytes = out.to<Bytes>()
-        text_ptr : @Byte = buffer.to<@Byte>()
+        text     : Bytes = out.to[Bytes]()
+        text_ptr : @Byte = buffer.to[@Byte]()
         text_ptr.stride(text.count).store(0x00)
-        rf_throw(kind_ptr.to<CStr>(), text_ptr.to<CStr>())
+        rf_throw(kind_ptr.to[CStr](), text_ptr.to[CStr]())
