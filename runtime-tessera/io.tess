@@ -60,13 +60,13 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
             : continue
         c_memcpy(d, s, len)
         terminator: @Byte = d.to[@Byte]().stride(len)
-        terminator.store(0x00)
+        terminator.poke(0x00)
         return(d.to[@Byte]())
 
 // -- requests and the I/O threads ----------------------------------------------------
 
-global IO_LOCK: @Mutex
-global IO_WORK: @Condition
+global IO_LOCK: @ExclusiveLock
+global IO_WORK: @SignalCaster
 global IO_HEAD: @@IoReq
 global IO_TAIL: @@IoReq
 /// 1 once the I/O threads run. Until then the work runs inline.
@@ -93,14 +93,14 @@ record IoReq
 #export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
     block entry()
-        return(IO_LAST_LEN.load())
+        return(IO_LAST_LEN.peek())
 
 /// Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
 /// and stores the results in `req`.
 /// :param req: The request.
 routine io_do_work(req: @IoReq) -> Void
     block entry()
-        kind: U32 = req.kind.load()
+        kind: U32 = req.kind.peek()
         when
             kind.eq(IO_READ_FILE) => read()
             kind.eq(IO_WRITE_FILE) => write()
@@ -109,46 +109,46 @@ routine io_do_work(req: @IoReq) -> Void
 
     block read()
         claim data: @@Byte <- null
-        got: S64 = read_whole_file(req.path.load(), data)
+        got: S64 = read_whole_file(req.path.peek(), data)
         branch got.ge(0)
             ? continue
             : return()
-        req.data.store(data.load())
-        req.result.store(got)
+        req.data.poke(data.peek())
+        req.result.poke(got)
         return()
 
     block write()
-        req.result.store(write_whole_file(req.path.load(), req.data.load(), req.data_len.load()))
+        req.result.poke(write_whole_file(req.path.peek(), req.data.peek(), req.data_len.peek()))
         return()
 
     block process()
-        proc_run_blocking(req.proc.load())
+        proc_run_blocking(req.proc.peek())
         return()
 
     block call()
-        body: Callable[(Addr), Void] = req.call.load()
-        body.call(req.call_arg.load())
+        body: Callable[(Addr), Void] = req.call.peek()
+        body.call(req.call_arg.peek())
         return()
 
 /// An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
 /// :param lock: The lock the request queue is kept under (IO_LOCK).
-routine io_thread_main(lock: @Mutex) -> Void
+routine io_thread_main(lock: @ExclusiveLock) -> Void
     block entry()
         rf_thread_stack_guarantee()
         lock.lock()
         jump look()
 
     block look()
-        req: @IoReq = IO_HEAD.load()
+        req: @IoReq = IO_HEAD.peek()
         branch req.is_null()
             ? sleep()
             : continue
-        next: @IoReq = req.qnext.load()
-        IO_HEAD.store(next)
+        next: @IoReq = req.qnext.peek()
+        IO_HEAD.poke(next)
         branch next.is_null()
             ? continue
             : run(req)
-        IO_TAIL.store(null)
+        IO_TAIL.poke(null)
         jump run(req)
 
     block sleep()
@@ -158,7 +158,7 @@ routine io_thread_main(lock: @Mutex) -> Void
     block run(req: @IoReq)
         lock.unlock()
         io_do_work(req)
-        rf_sched_wake(req.sched.load(), req.coro.load())
+        rf_sched_wake(req.sched.peek(), req.coro.peek())
         jump entry()
 
 /// Starts the I/O threads at process startup (rf_runtime_init, on the main thread), so a later coroutine call is
@@ -167,7 +167,7 @@ routine io_thread_main(lock: @Mutex) -> Void
 #export("rf_io_runtime_init")
 routine rf_io_runtime_init() -> Void
     block entry()
-        branch IO_OK.load().eq(1)
+        branch IO_OK.peek().eq(1)
             ? return()
             : continue
         jump start(0)
@@ -176,7 +176,7 @@ routine rf_io_runtime_init() -> Void
         branch i.eq(IO_THREADS)
             ? continue
             : one(i)
-        IO_OK.store(1)
+        IO_OK.poke(1)
         return()
 
     block one(i: USize)
@@ -188,21 +188,21 @@ routine rf_io_runtime_init() -> Void
 routine io_submit(req: @IoReq) -> Void
     block entry()
         IO_LOCK.lock()
-        req.qnext.store(null)
-        tail: @IoReq = IO_TAIL.load()
+        req.qnext.poke(null)
+        tail: @IoReq = IO_TAIL.peek()
         branch tail.is_null()
             ? first()
             : continue
-        tail.qnext.store(req)
+        tail.qnext.poke(req)
         jump queued()
 
     block first()
-        IO_HEAD.store(req)
+        IO_HEAD.poke(req)
         jump queued()
 
     block queued()
-        IO_TAIL.store(req)
-        IO_WORK.wake_one()
+        IO_TAIL.poke(req)
+        IO_WORK.cast_one()
         IO_LOCK.unlock()
         return()
 
@@ -211,7 +211,7 @@ routine io_submit(req: @IoReq) -> Void
 /// :param req: The request.
 routine io_run(req: @IoReq) -> Void
     block entry()
-        branch IO_OK.load().eq(1)
+        branch IO_OK.peek().eq(1)
             ? continue
             : inline()
         sched: @Sched = rf_sched_current()
@@ -219,8 +219,8 @@ routine io_run(req: @IoReq) -> Void
         branch sched.is_null().bitor(this_coro.is_null())
             ? inline()
             : continue
-        req.sched.store(sched)
-        req.coro.store(this_coro)
+        req.sched.poke(sched)
+        req.coro.poke(this_coro)
         rf_sched_arm_cross_waker(sched)
         io_submit(req)
         rf_sched_park_external()
@@ -240,13 +240,13 @@ routine io_run(req: @IoReq) -> Void
 routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     block entry()
         req: @IoReq = zeroed[IoReq](1, "Failed to allocate async I/O request")
-        req.kind.store(kind)
-        req.result.store(-1)
+        req.kind.poke(kind)
+        req.result.poke(-1)
         copy: @Byte = strdupn(path, path_len)
         branch copy.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O path")
             : continue
-        req.path.store(copy)
+        req.path.poke(copy)
         return(req)
 
 /// Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
@@ -260,18 +260,18 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     block entry()
         req: @IoReq = io_req_new(IO_READ_FILE, path, path_len)
         io_run(req)
-        data: @Byte = req.data.load()
-        result: S64 = req.result.load()
-        c_free(req.path.load())
+        data: @Byte = req.data.peek()
+        result: S64 = req.result.peek()
+        c_free(req.path.peek())
         c_free(req)
         branch result.lt(0)
             ? failed()
             : continue
-        IO_LAST_LEN.store(result.to[U64]())
+        IO_LAST_LEN.poke(result.to[U64]())
         return(data)
 
     block failed()
-        IO_LAST_LEN.store(0)
+        IO_LAST_LEN.poke(0)
         return(null)
 
 /// Writes data_len bytes of data to the file (truncating it): the bytes written, or -1. The payload is copied, so
@@ -288,7 +288,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
     local len: S64 = data_len.max(0)
 
     block entry()
-        req.data_len.store(len)
+        req.data_len.poke(len)
         branch len.gt(0)
             ? copy()
             : run()
@@ -299,14 +299,14 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
             ? rf_throw("OutOfMemoryError", "Failed to allocate async I/O write buffer")
             : continue
         c_memcpy(buf, data, len.to[USize]())
-        req.data.store(buf.to[@Byte]())
+        req.data.poke(buf.to[@Byte]())
         jump run()
 
     block run()
         io_run(req)
-        result: S64 = req.result.load()
-        c_free(req.data.load())
-        c_free(req.path.load())
+        result: S64 = req.result.peek()
+        c_free(req.data.peek())
+        c_free(req.path.peek())
         c_free(req)
         return(result)
 
@@ -354,7 +354,7 @@ routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
         branch runtime.is_null()
             ? return(0)
             : continue
-        branch runtime.should_stop.load()
+        branch runtime.should_stop.peek()
             ? return(0)
             : return(1)
 
@@ -376,7 +376,7 @@ routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
         branch runtime.is_null()
             ? return()
             : continue
-        runtime.should_stop.store(true)
+        runtime.should_stop.poke(true)
         return()
 
 // -- subprocesses --------------------------------------------------------------------
@@ -419,35 +419,35 @@ record ProcState
 #export("rf_proc_term_signal")
 routine rf_proc_term_signal() -> S32
     block entry()
-        return(PROC_SIGNAL.load())
+        return(PROC_SIGNAL.peek())
 
 /// The captured stdout of this thread's last subprocess.
 /// :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
 #export("rf_proc_output")
 routine rf_proc_output() -> @Byte
     block entry()
-        return(PROC_OUT.load())
+        return(PROC_OUT.peek())
 
 /// The length of the captured stdout of this thread's last subprocess.
 /// :returns: The output's length in bytes.
 #export("rf_proc_output_len")
 routine rf_proc_output_len() -> U64
     block entry()
-        return(PROC_OUT_LEN.load())
+        return(PROC_OUT_LEN.peek())
 
 /// The captured stderr of this thread's last subprocess.
 /// :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
 #export("rf_proc_errors")
 routine rf_proc_errors() -> @Byte
     block entry()
-        return(PROC_ERR.load())
+        return(PROC_ERR.peek())
 
 /// The length of the captured stderr of this thread's last subprocess.
 /// :returns: The errors' length in bytes.
 #export("rf_proc_errors_len")
 routine rf_proc_errors_len() -> U64
     block entry()
-        return(PROC_ERR_LEN.load())
+        return(PROC_ERR_LEN.peek())
 
 /// A malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or empty when that can't be had.
 /// :param s: The string.
@@ -478,40 +478,40 @@ routine free_bytes(b: Bytes) -> Void
 routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
     block entry()
         st: @ProcState = zeroed[ProcState](1, "Failed to allocate subprocess state")
-        st.shell.store(shell)
-        st.program.store(program)
-        st.exit_status.store(-1)
+        st.shell.poke(shell)
+        st.program.poke(program)
+        st.exit_status.poke(-1)
         return(st)
 
 /// Frees a subprocess state and its strings, not the captured streams: those go to the caller.
 /// :param st: The state to free.
 routine proc_state_free(st: @ProcState) -> Void
     block entry()
-        free_bytes(st.program.load())
-        free_bytes(st.directory.load())
+        free_bytes(st.program.peek())
+        free_bytes(st.directory.peek())
         jump args(0)
 
     block args(i: USize)
-        branch i.eq(st.arg_count.load())
+        branch i.eq(st.arg_count.peek())
             ? env(0)
             : continue
-        arg_slot: @Bytes = st.args.load().stride(i)
-        free_bytes(arg_slot.load())
+        arg_slot: @Bytes = st.args.peek().stride(i)
+        free_bytes(arg_slot.peek())
         jump args(i.add(1))
 
     block env(i: USize)
-        branch i.eq(st.env_count.load())
+        branch i.eq(st.env_count.peek())
             ? arrays()
             : continue
-        env_slot: @EnvVar = st.env.load().stride(i)
-        v: EnvVar = env_slot.load()
+        env_slot: @EnvVar = st.env.peek().stride(i)
+        v: EnvVar = env_slot.peek()
         free_bytes(v.name)
         free_bytes(v.value)
         jump env(i.add(1))
 
     block arrays()
-        c_free(st.args.load())
-        c_free(st.env.load())
+        c_free(st.args.peek())
+        c_free(st.env.peek())
         c_free(st)
         return()
 
@@ -529,7 +529,7 @@ routine terminated(b: Bytes) -> @Byte
             ? lost()
             : continue
         terminator: @Byte = buf.to[@Byte]().stride(n)
-        terminator.store(0x00)
+        terminator.poke(0x00)
         return(buf.to[@Byte]())
 
     block lost()
@@ -540,47 +540,47 @@ routine terminated(b: Bytes) -> @Byte
 /// exit status, the signal that stopped it, or that it couldn't start.
 /// :param st: The prepared state.
 routine proc_run_blocking(st: @ProcState) -> Void
-    local alloc: @Allocator <- make_c_heap_allocator()
+    local alloc: @MemoryManager <- make_c_heap_memory()
 
     block entry()
-        dir: Bytes = st.directory.load()
+        dir: Bytes = st.directory.peek()
         branch dir.is_empty()
             ? run(Option[Bytes].Absent)
             : run(Option[Bytes].Present(dir))
 
     block run(directory: Option[Bytes])
-        options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.load(),
-            env_count: st.env_count.load(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE,
+        options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.peek(),
+            env_count: st.env_count.peek(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE,
             stderr: OutputMode.CAPTURE)
-        branch st.shell.load()
-            ? ran(run_shell_result(st.program.load(), options, alloc))
+        branch st.shell.peek()
+            ? ran(run_shell_result(st.program.peek(), options, alloc))
             : run_args(options)
 
     block run_args(options: ProcessOptions)
-        args: Slice[Bytes] = Slice[Bytes].construct(st.args.load(), st.arg_count.load())
-        jump ran(run_process_result(st.program.load(), args, options, alloc))
+        args: Slice[Bytes] = Slice[Bytes].construct(st.args.peek(), st.arg_count.peek())
+        jump ran(run_process_result(st.program.peek(), args, options, alloc))
 
     block ran(r: Result[ProcessOutput, ProcessError])
         when r
             .Success(out) => continue
             .Failure => failed()
-        st.output.store(out.stdout)
-        st.errors.store(out.stderr)
+        st.output.poke(out.stdout)
+        st.errors.poke(out.stderr)
         when out.status
             .Exited(code) => exited(code)
             .Signaled(signal) => signaled(signal)
 
     block failed()
-        st.spawn_failed.store(true)
+        st.spawn_failed.poke(true)
         return()
 
     block exited(code: S32)
-        st.exit_status.store(code.to[S64]())
+        st.exit_status.poke(code.to[S64]())
         return()
 
     block signaled(signal: S32)
-        st.exit_status.store(0)
-        st.term_signal.store(signal)
+        st.exit_status.poke(0)
+        st.term_signal.poke(signal)
         return()
 
 /// Runs a prepared state, parking a scheduler-driven coroutine meanwhile, publishes the captured streams and the
@@ -591,18 +591,18 @@ routine proc_run_blocking(st: @ProcState) -> Void
 routine proc_exec(st: @ProcState) -> S64
     block entry()
         req: @IoReq = zeroed[IoReq](1, "Failed to allocate subprocess request")
-        req.kind.store(IO_RUN_PROCESS)
-        req.proc.store(st)
+        req.kind.poke(IO_RUN_PROCESS)
+        req.proc.poke(st)
         io_run(req)
-        PROC_SIGNAL.store(st.term_signal.load())
-        PROC_OUT.store(terminated(st.output.load()))
+        PROC_SIGNAL.poke(st.term_signal.peek())
+        PROC_OUT.poke(terminated(st.output.peek()))
         output_count: USize = st.output.count()
-        PROC_OUT_LEN.store(output_count.to[U64]())
-        PROC_ERR.store(terminated(st.errors.load()))
+        PROC_OUT_LEN.poke(output_count.to[U64]())
+        PROC_ERR.poke(terminated(st.errors.peek()))
         errors_count: USize = st.errors.count()
-        PROC_ERR_LEN.store(errors_count.to[U64]())
-        failed: Bool = st.spawn_failed.load()
-        code: S64 = st.exit_status.load()
+        PROC_ERR_LEN.poke(errors_count.to[U64]())
+        failed: Bool = st.spawn_failed.peek()
+        code: S64 = st.exit_status.peek()
         proc_state_free(st)
         c_free(req)
         branch failed
@@ -640,24 +640,24 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         branch b.is_null()
             ? return()
             : continue
-        n: USize = b.arg_count.load()
-        branch n.lt(b.arg_cap.load())
+        n: USize = b.arg_count.peek()
+        branch n.lt(b.arg_cap.peek())
             ? put(n)
             : continue
-        doubled: USize = b.arg_cap.load().mul(2)
+        doubled: USize = b.arg_cap.peek().mul(2)
         cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.args.load(), cap.mul(sizeof[Bytes]()))
+        bigger: Addr = c_realloc(b.args.peek(), cap.mul(sizeof[Bytes]()))
         branch bigger.is_null()
             ? return()
             : continue
-        b.args.store(bigger.to[@Bytes]())
-        b.arg_cap.store(cap)
+        b.args.poke(bigger.to[@Bytes]())
+        b.arg_cap.poke(cap)
         jump put(n)
 
     block put(n: USize)
-        slot: @Bytes = b.args.load().stride(n)
-        slot.store(owned_copy(arg, arg_len))
-        b.arg_count.store(n.add(1))
+        slot: @Bytes = b.args.peek().stride(n)
+        slot.poke(owned_copy(arg, arg_len))
+        b.arg_count.poke(n.add(1))
         return()
 
 /// Sets the working directory of a subprocess being built. An empty directory inherits the parent's. A null `b` does
@@ -671,8 +671,8 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
         branch b.is_null()
             ? return()
             : continue
-        free_bytes(b.directory.load())
-        b.directory.store(owned_copy(cwd, cwd_len))
+        free_bytes(b.directory.peek())
+        b.directory.poke(owned_copy(cwd, cwd_len))
         return()
 
 /// An environment override, merged into the parent's environment at launch (PATH and the rest stay). A null `b` does
@@ -688,24 +688,24 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
         branch b.is_null()
             ? return()
             : continue
-        n: USize = b.env_count.load()
-        branch n.lt(b.env_cap.load())
+        n: USize = b.env_count.peek()
+        branch n.lt(b.env_cap.peek())
             ? put(n)
             : continue
-        doubled: USize = b.env_cap.load().mul(2)
+        doubled: USize = b.env_cap.peek().mul(2)
         cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.env.load(), cap.mul(sizeof[EnvVar]()))
+        bigger: Addr = c_realloc(b.env.peek(), cap.mul(sizeof[EnvVar]()))
         branch bigger.is_null()
             ? return()
             : continue
-        b.env.store(bigger.to[@EnvVar]())
-        b.env_cap.store(cap)
+        b.env.poke(bigger.to[@EnvVar]())
+        b.env_cap.poke(cap)
         jump put(n)
 
     block put(n: USize)
-        slot: @EnvVar = b.env.load().stride(n)
-        slot.store(EnvVar(name: owned_copy(key, key_len), value: owned_copy(val, val_len)))
-        b.env_count.store(n.add(1))
+        slot: @EnvVar = b.env.peek().stride(n)
+        slot.poke(EnvVar(name: owned_copy(key, key_len), value: owned_copy(val, val_len)))
+        b.env_count.poke(n.add(1))
         return()
 
 /// Runs a subprocess built with {rf_proc_begin}, and frees its state.
@@ -728,9 +728,9 @@ routine rf_proc_run_built(b: @ProcState) -> S64
 routine rf_blocking_call(body: Callable[(Addr), Void], arg: Addr) -> Void
     block entry()
         req: @IoReq = zeroed[IoReq](1, "Failed to allocate a blocking call request")
-        req.kind.store(IO_CALL)
-        req.call.store(body)
-        req.call_arg.store(arg)
+        req.kind.poke(IO_CALL)
+        req.call.poke(body)
+        req.call_arg.poke(arg)
         io_run(req)
         c_free(req)
         return()

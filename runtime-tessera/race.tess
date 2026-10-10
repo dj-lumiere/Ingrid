@@ -32,29 +32,29 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> Void
         branch me.is_null()
             ? return()
             : continue
-        n: SSize = me.count.load()
-        branch n.eq(me.cap.load())
+        n: SSize = me.count.peek()
+        branch n.eq(me.cap.peek())
             ? continue
             : put(n)
         cap: SSize = n.eq(0)
             ? 4
             : n.mul(2)
-        handles: Addr = c_realloc(me.handles.load(), cap.to[USize]().mul(sizeof[Addr]()))
-        kinds: Addr = c_realloc(me.kinds.load(), cap.to[USize]())
+        handles: Addr = c_realloc(me.handles.peek(), cap.to[USize]().mul(sizeof[Addr]()))
+        kinds: Addr = c_realloc(me.kinds.peek(), cap.to[USize]())
         branch handles.is_null().bitor(kinds.is_null())
             ? rf_throw("OutOfMemoryError", "Failed to grow race competitor set")
             : continue
-        me.handles.store(handles.to[@Addr]())
-        me.kinds.store(kinds.to[@U8]())
-        me.cap.store(cap)
+        me.handles.poke(handles.to[@Addr]())
+        me.kinds.poke(kinds.to[@U8]())
+        me.cap.poke(cap)
         jump put(n)
 
     block put(n: SSize)
-        handle_slot: @Addr = me.handles.load().stride(n)
-        handle_slot.store(handle)
-        kind_slot: @U8 = me.kinds.load().stride(n)
-        kind_slot.store(kind)
-        me.count.store(n.add(1))
+        handle_slot: @Addr = me.handles.peek().stride(n)
+        handle_slot.poke(handle)
+        kind_slot: @U8 = me.kinds.peek().stride(n)
+        kind_slot.poke(kind)
+        me.count.poke(n.add(1))
         return()
 
 /// Adds a coroutine competitor to the race.
@@ -82,16 +82,16 @@ routine rf_race_add_task(r: @Race, t: @Task) -> Void
 /// :returns: Its coroutine or task.
 routine Race.handle(me: @Me, i: SSize) -> Addr
     block entry()
-        slot: @Addr = me.handles.load().stride(i)
-        return(slot.load())
+        slot: @Addr = me.handles.peek().stride(i)
+        return(slot.peek())
 
 /// Whether competitor `i` is a threaded task, unchecked.
 /// :param i: The competitor's index.
 /// :returns: True for a task, false for a coroutine.
 routine Race.is_task(me: @Me, i: SSize) -> Bool
     block entry()
-        slot: @U8 = me.kinds.load().stride(i)
-        return(slot.load().eq(1))
+        slot: @U8 = me.kinds.peek().stride(i)
+        return(slot.peek().eq(1))
 
 /// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
 /// to. Each keeps a cross-thread wake promised meanwhile.
@@ -103,7 +103,7 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> Void
         jump next(0)
 
     block next(i: SSize)
-        branch i.eq(me.count.load())
+        branch i.eq(me.count.peek())
             ? return()
             : continue
         branch me.is_task(i)
@@ -133,7 +133,7 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> Void
         jump next(0)
 
     block next(i: SSize)
-        branch i.eq(me.count.load())
+        branch i.eq(me.count.peek())
             ? return()
             : continue
         branch me.is_task(i).bitor(me.handle(i).is_null())
@@ -145,14 +145,14 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> Void
             : clear(i, c)
 
     block point(i: SSize, c: @Coro)
-        c.awaiter.store(awaiter)
+        c.awaiter.poke(awaiter)
         jump next(i.add(1))
 
     block clear(i: SSize, c: @Coro)
-        branch c.awaiter.load().ptr_eq(awaiter)
+        branch c.awaiter.peek().ptr_eq(awaiter)
             ? continue
             : next(i.add(1))
-        c.awaiter.store(null)
+        c.awaiter.poke(null)
         jump next(i.add(1))
 
 /// The index of the first competitor to finish (the smallest completion stamp among the finished ones), or -1 while
@@ -163,7 +163,7 @@ routine Race.winner(me: @Me) -> SSize
         jump next(0, -1, U64.MAX)
 
     block next(i: SSize, best: SSize, best_seq: U64)
-        branch i.eq(me.count.load())
+        branch i.eq(me.count.peek())
             ? return(best)
             : continue
         branch me.is_task(i)
@@ -176,7 +176,7 @@ routine Race.winner(me: @Me) -> SSize
             ? next(i.add(1), best, best_seq)
             : continue
         branch is_finished(c)
-            ? consider(i, best, best_seq, c.completion_seq.atomic_load())
+            ? consider(i, best, best_seq, c.completion_seq.peek_atomic())
             : next(i.add(1), best, best_seq)
 
     block task(i: SSize, best: SSize, best_seq: U64)
@@ -200,7 +200,7 @@ routine rf_race_wait(r: @Race) -> SSize
         branch r.is_null()
             ? return(-1)
             : continue
-        branch r.count.load().eq(0)
+        branch r.count.peek().eq(0)
             ? return(-1)
             : continue
         return(wait_for_winner(r))
@@ -216,8 +216,8 @@ private routine wait_for_winner(r: @Race) -> SSize
     block entry()
         r.register(s, this_coro, true)
         s.lock.lock()
-        next_waiters: SSize = s.waiters.load().add(1)
-        next_waiters.store_into(s.waiters)
+        next_waiters: SSize = s.waiters.peek().add(1)
+        next_waiters.poke_into(s.waiters)
         branch this_coro.is_null()
             ? poll()
             : continue
@@ -253,8 +253,8 @@ private routine wait_for_winner(r: @Race) -> SSize
         jump finish(winner)
 
     block finish(winner: SSize)
-        remaining_waiters: SSize = s.waiters.load().sub(1)
-        remaining_waiters.store_into(s.waiters)
+        remaining_waiters: SSize = s.waiters.peek().sub(1)
+        remaining_waiters.poke_into(s.waiters)
         s.lock.unlock()
         r.register(s, null, false)
         return(winner)
@@ -267,7 +267,7 @@ routine rf_race_end(r: @Race) -> Void
         branch r.is_null()
             ? return()
             : continue
-        c_free(r.handles.load())
-        c_free(r.kinds.load())
+        c_free(r.handles.peek())
+        c_free(r.kinds.peek())
         c_free(r)
         return()

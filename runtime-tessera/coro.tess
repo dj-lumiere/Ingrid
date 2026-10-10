@@ -66,7 +66,7 @@ record Coro
 #noinline
 routine current_coro() -> @Coro
     block entry()
-        c: @Coro = CURRENT_CORO.load()
+        c: @Coro = CURRENT_CORO.peek()
         return(c)
 
 /// Takes the next completion stamp, shared by coroutines and threaded tasks.
@@ -82,11 +82,11 @@ routine next_completion_seq() -> U64
 routine coro_trampoline() -> Void
     block entry()
         this_coro: @Coro = current_coro()
-        body: Callable[(Addr,), Void] = this_coro.entry.load()
-        body.call(this_coro.userdata.load())
-        this_coro.completion_seq.atomic_store(next_completion_seq())
-        this_coro.status.atomic_store(CORO_COMPLETED)
-        switch_stack(this_coro.sp, this_coro.resumer_sp.load())
+        body: Callable[(Addr,), Void] = this_coro.entry.peek()
+        body.call(this_coro.userdata.peek())
+        this_coro.completion_seq.poke_atomic(next_completion_seq())
+        this_coro.status.poke_atomic(CORO_COMPLETED)
+        switch_stack(this_coro.sp, this_coro.resumer_sp.peek())
         unreachable
 
 /// Reserves a coroutine stack from Standard/Fiber's stack allocator.
@@ -94,7 +94,7 @@ routine coro_trampoline() -> Void
 /// :returns: The stack's bottom, or null when it can't be reserved.
 routine stack_alloc(size: USize) -> Addr
     block entry()
-        stacks: Allocator = make_stack_allocator()
+        stacks: MemoryManager = make_stack_memory()
         alloc: Callable[(Addr, USize), Addr] = stacks.alloc_fn
         stack: Addr = alloc.call(stacks.state, size)
         return(stack)
@@ -103,7 +103,7 @@ routine stack_alloc(size: USize) -> Addr
 /// :param stack: The stack's bottom, from {stack_alloc}.
 routine stack_free(stack: Addr) -> Void
     block entry()
-        stacks: Allocator = make_stack_allocator()
+        stacks: MemoryManager = make_stack_memory()
         free: Callable[(Addr, Addr), Void] = stacks.free_fn
         free.call(stacks.state, stack)
         return()
@@ -122,10 +122,10 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
             ? return(null)
             : continue
         coro: @Coro = zeroed[Coro](1, "Failed to allocate coroutine control block")
-        coro.entry.store(entry)
-        coro.userdata.store(userdata)
-        coro.timer_idx.store(-1)
-        coro.completion_seq.store(U64.MAX)
+        coro.entry.poke(entry)
+        coro.userdata.poke(userdata)
+        coro.timer_idx.poke(-1)
+        coro.completion_seq.poke(U64.MAX)
         reserve: USize = stack_size.eq(0)
             ? DEFAULT_STACK
             : stack_size
@@ -133,8 +133,8 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
         branch stack.is_null()
             ? no_stack(coro)
             : continue
-        coro.stack.store(stack)
-        coro.sp.store(initial_stack(stack.to[@Byte](), reserve, coro_trampoline.addr()))
+        coro.stack.poke(stack)
+        coro.sp.poke(initial_stack(stack.to[@Byte](), reserve, coro_trampoline.addr()))
         return(coro)
 
     block no_stack(coro: @Coro)
@@ -151,15 +151,15 @@ routine rf_coro_resume(coro: @Coro) -> U32
         branch coro.is_null()
             ? return(CORO_COMPLETED)
             : continue
-        branch coro.status.atomic_load().eq(CORO_COMPLETED)
+        branch coro.status.peek_atomic().eq(CORO_COMPLETED)
             ? return(CORO_COMPLETED)
             : continue
         prev: @Coro = current_coro()
-        CURRENT_CORO.store(coro)
-        coro.status.atomic_store(CORO_RUNNING)
-        switch_stack(coro.resumer_sp, coro.sp.load())
-        CURRENT_CORO.store(prev)
-        return(coro.status.atomic_load())
+        CURRENT_CORO.poke(coro)
+        coro.status.poke_atomic(CORO_RUNNING)
+        switch_stack(coro.resumer_sp, coro.sp.peek())
+        CURRENT_CORO.poke(prev)
+        return(coro.status.peek_atomic())
 
 /// The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
 routine coro_switch_out() -> Void
@@ -168,8 +168,8 @@ routine coro_switch_out() -> Void
         branch this_coro.is_null()
             ? return()
             : continue
-        this_coro.status.atomic_store(CORO_PARKED)
-        switch_stack(this_coro.sp, this_coro.resumer_sp.load())
+        this_coro.status.poke_atomic(CORO_PARKED)
+        switch_stack(this_coro.sp, this_coro.resumer_sp.peek())
         return()
 
 /// A coroutine's status, a `CORO_` value.
@@ -180,7 +180,7 @@ routine rf_coro_status_get(coro: @Coro) -> U32
     block entry()
         branch coro.is_null()
             ? return(CORO_COMPLETED)
-            : return(coro.status.atomic_load())
+            : return(coro.status.peek_atomic())
 
 /// The coroutine running on this thread, or null.
 /// :returns: The running coroutine, or null on a plain thread.
@@ -209,7 +209,7 @@ routine rf_coro_request_cancel(coro: @Coro) -> Void
         branch coro.is_null()
             ? return()
             : continue
-        coro.cancel_requested.atomic_store(1)
+        coro.cancel_requested.poke_atomic(1)
         return()
 
 /// Whether a coroutine was asked to stop.
@@ -220,7 +220,7 @@ routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
     block entry()
         branch coro.is_null()
             ? return(0)
-            : return(coro.cancel_requested.atomic_load())
+            : return(coro.cancel_requested.peek_atomic())
 
 /// Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon). A null
 /// `coro` does nothing.
@@ -231,7 +231,7 @@ routine rf_coro_delete(coro: @Coro) -> Void
         branch coro.is_null()
             ? return()
             : continue
-        stack: Addr = coro.stack.load()
+        stack: Addr = coro.stack.peek()
         branch stack.is_null()
             ? free()
             : continue
@@ -251,7 +251,7 @@ routine rf_coro_set_detached(coro: @Coro) -> Void
         branch coro.is_null()
             ? return()
             : continue
-        coro.detached.store(true)
+        coro.detached.poke(true)
         return()
 
 /// An owned value was constructed: frame (a node in the owning scope) becomes the running coroutine's top. Outside a
@@ -267,10 +267,10 @@ routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
         branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
-        frame.value_ptr.store(value_ptr)
-        frame.destroy_fn.store(destroy_fn)
-        frame.prev.store(this_coro.cf_top.load())
-        this_coro.cf_top.store(frame)
+        frame.value_ptr.poke(value_ptr)
+        frame.destroy_fn.poke(destroy_fn)
+        frame.prev.poke(this_coro.cf_top.peek())
+        this_coro.cf_top.poke(frame)
         return()
 
 /// The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
@@ -283,10 +283,10 @@ routine rf_coro_cf_pop(frame: @CancelFrame) -> Void
         branch frame.is_null().bitor(this_coro.is_null())
             ? return()
             : continue
-        branch this_coro.cf_top.load().ptr_eq(frame)
+        branch this_coro.cf_top.peek().ptr_eq(frame)
             ? continue
             : return()
-        this_coro.cf_top.store(frame.prev.load())
+        this_coro.cf_top.poke(frame.prev.peek())
         return()
 
 /// A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
@@ -299,36 +299,36 @@ routine rf_coro_abandon(coro: @Coro) -> Void
         branch coro.is_null()
             ? return()
             : continue
-        branch coro.status.atomic_load().eq(CORO_COMPLETED)
+        branch coro.status.peek_atomic().eq(CORO_COMPLETED)
             ? free()
             : continue
         // Stamped like a completion, so a cancelled coroutine that finished first still wins a race!.
-        branch coro.completion_seq.atomic_load().eq(U64.MAX)
+        branch coro.completion_seq.peek_atomic().eq(U64.MAX)
             ? stamp()
             : cancel()
 
     block stamp()
-        coro.completion_seq.atomic_store(next_completion_seq())
+        coro.completion_seq.poke_atomic(next_completion_seq())
         jump cancel()
 
     block cancel()
-        coro.status.atomic_store(CORO_CANCELLED)
-        jump frame(coro.cf_top.load())
+        coro.status.poke_atomic(CORO_CANCELLED)
+        jump frame(coro.cf_top.peek())
 
     block frame(f: @CancelFrame)
         branch f.is_null()
             ? done()
             : continue
-        prev: @CancelFrame = f.prev.load()
-        destroy: Callable[(Addr,), Void] = f.destroy_fn.load()
+        prev: @CancelFrame = f.prev.peek()
+        destroy: Callable[(Addr,), Void] = f.destroy_fn.peek()
         branch destroy.addr().is_null()
             ? frame(prev)
             : continue
-        destroy.call(f.value_ptr.load())
+        destroy.call(f.value_ptr.peek())
         jump frame(prev)
 
     block done()
-        coro.cf_top.store(null)
+        coro.cf_top.poke(null)
         jump free()
 
     block free()

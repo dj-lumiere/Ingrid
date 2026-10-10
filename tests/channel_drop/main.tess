@@ -90,7 +90,7 @@ routine rf_cancel_requested() -> U32
 
 /// Drops one side of each round's channel as soon as the round starts.
 routine drop_each_round(dropper: @Dropper) -> Void
-    local race: @Race = dropper.race.load()
+    local race: @Race = dropper.race.peek()
 
     block entry()
         jump wait(1)
@@ -100,12 +100,12 @@ routine drop_each_round(dropper: @Dropper) -> Void
         branch past
             ? return()
             : continue
-        started: Bool = race.round.atomic_load().ge(round)
+        started: Bool = race.round.peek_atomic().ge(round)
         branch started
             ? continue
             : wait(round)
-        chan: @Channel = race.chan.atomic_load()
-        branch dropper.producer.load()
+        chan: @Channel = race.chan.peek_atomic()
+        branch dropper.producer.peek()
             ? feeder(round, chan)
             : consumer(round, chan)
 
@@ -137,12 +137,12 @@ routine start() -> Void
             ? report()
             : continue
         chan: @Channel = rf_channel_create(1)
-        race.chan.atomic_store(chan)
-        race.round.atomic_store(n)
+        race.chan.poke_atomic(chan)
+        race.round.poke_atomic(n)
         jump wait(n)
 
     block wait(n: U32)
-        both_done: Bool = race.done.atomic_load().eq(n.mul(2))
+        both_done: Bool = race.done.peek_atomic().eq(n.mul(2))
         branch both_done
             ? round(n.add(1))
             : wait(n)
@@ -151,6 +151,6 @@ routine start() -> Void
         a.join()
         b.join()
         expected: U64 = ROUNDS.to[U64]().mul(2)
-        frees: U64 = FREES.atomic_load()
+        frees: U64 = FREES.peek_atomic()
         Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
         return()

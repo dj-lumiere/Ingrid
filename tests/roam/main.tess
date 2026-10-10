@@ -28,15 +28,15 @@ routine stub_current_task_id() -> U64
 #export("rf_coro_yield")
 routine stub_coro_yield() -> Void
     block entry()
-        yields: U64 = YIELDS.load().add(1)
-        yields.store_into(YIELDS)
-        waited: @RoamHeader = CONTENDED.load()
+        yields: U64 = YIELDS.peek().add(1)
+        yields.poke_into(YIELDS)
+        waited: @RoamHeader = CONTENDED.peek()
         branch waited.is_null()
             ? return()
             : continue
-        waited.holder_task.atomic_store(0)
-        waited.locked.atomic_store(0)
-        CONTENDED.store(null)
+        waited.holder_task.poke_atomic(0)
+        waited.locked.poke_atomic(0)
+        CONTENDED.poke(null)
         return()
 
 /// The deadlock detector's exit, never reached here (the detector is off unless RF_DEADLOCK_DETECT asks for it).
@@ -49,9 +49,9 @@ routine stub_crash_exit() -> Void
 routine drop_node(entity: Addr) -> Void
     block entry()
         node: @Node = entity.to[@Node]()
-        id: U64 = node.id.load()
+        id: U64 = node.id.peek()
         Out.write("  destroyed node {id}\n")
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         deallocate(node, alloc)
         return()
 
@@ -59,7 +59,7 @@ routine drop_node(entity: Addr) -> Void
 routine trace_node(entity: Addr) -> Void
     block entry()
         node: @Node = entity.to[@Node]()
-        child: Addr = node.child.load()
+        child: Addr = node.child.peek()
         branch child.to[@Byte]().is_null()
             ? return()
             : continue
@@ -69,15 +69,15 @@ routine trace_node(entity: Addr) -> Void
 /// A new entity with one strong handle, from the C heap as the runtime frees it. A cyclic type has a trace routine.
 routine new_entity(id: U64, child: Addr, cyclic: Bool) -> @RoamHeader
     block entry()
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         node: @Node = allocate[Node](1, alloc)
         header: @RoamHeader = allocate[RoamHeader](1, alloc)
-        id.store_into(node.id)
-        child.store_into(node.child)
+        id.poke_into(node.id)
+        child.poke_into(node.child)
         trace: Addr = cyclic
             ? trace_node.addr()
             : null
-        header.store(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+        header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
             holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace, free_hook: null,
             drop_hook: drop_node.addr(), shape_users: 0))
         return(header)
@@ -85,16 +85,16 @@ routine new_entity(id: U64, child: Addr, cyclic: Bool) -> @RoamHeader
 routine show_counts(label: Bytes, header: @RoamHeader) -> Void
     block entry()
         strong: U64 = roam_strong_count(header)
-        weak: U64 = header.weak.load()
+        weak: U64 = header.weak.peek()
         destroyed: Bool = roam_is_destroyed(header)
         Out.write("{label}: strong {strong}, weak {weak}, destroyed {destroyed}\n")
         return()
 
 routine show_lock(label: Bytes, header: @RoamHeader) -> Void
     block entry()
-        locked: U8 = header.locked.load()
-        holder: U64 = header.holder_task.load()
-        depth: U64 = header.depth.load()
+        locked: U8 = header.locked.peek()
+        holder: U64 = header.holder_task.peek()
+        depth: U64 = header.depth.peek()
         Out.write("{label}: locked {locked}, holder {holder}, depth {depth}\n")
         return()
 
@@ -133,14 +133,14 @@ routine candidates() -> Void
         roam_hold(cyclic)
         roam_unhold(cyclic)
         roam_unhold(cyclic)
-        acyclic_buffered: Bool = acyclic.buffered.load()
-        cyclic_buffered: Bool = cyclic.buffered.load()
-        state: S32 = cyclic.state.load()
+        acyclic_buffered: Bool = acyclic.buffered.peek()
+        cyclic_buffered: Bool = cyclic.buffered.peek()
+        state: S32 = cyclic.state.peek()
         Out.write("acyclic buffered {acyclic_buffered}, cyclic buffered {cyclic_buffered}, state {state}\n")
         // The last release takes it out of the candidate buffer before freeing it.
         roam_unhold(cyclic)
         roam_unhold(acyclic)
-        roots: U64 = ROOTS.count.load()
+        roots: U64 = ROOTS.count.peek()
         Out.write("candidates left: {roots}\n")
         return()
 
@@ -187,12 +187,12 @@ routine locking() -> Void
         jump contended(promoted)
 
     block contended(promoted: @RoamHeader)
-        promoted.locked.atomic_store(1)
-        promoted.holder_task.atomic_store(9)
-        1.store_into(promoted.depth)
-        CONTENDED.store(promoted)
+        promoted.locked.poke_atomic(1)
+        promoted.holder_task.poke_atomic(9)
+        1.poke_into(promoted.depth)
+        CONTENDED.poke(promoted)
         roam_lock_enter(promoted)
-        yields: U64 = YIELDS.load()
+        yields: U64 = YIELDS.peek()
         Out.write("yields: {yields}\n")
         show_lock("taken after the holder left", promoted)
         roam_lock_exit(promoted)

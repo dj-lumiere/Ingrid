@@ -10,7 +10,7 @@ import Standard/Os
 
 global WAITS: @Array[DeadlockWait, 256]
 /// Guards WAITS.
-global WAITS_LOCK: @Mutex
+global WAITS_LOCK: @ExclusiveLock
 /// 0 before the environment is read, 1 off, 2 on.
 global DETECTOR: @U8
 
@@ -37,7 +37,7 @@ private routine rf_crash_exit() -> Void
 /// :returns: True when the detector is on.
 routine is_detector_on() -> Bool
     block entry()
-        state: U8 = DETECTOR.atomic_load()
+        state: U8 = DETECTOR.peek_atomic()
         branch state.eq(0)
             ? read()
             : return(state.eq(2))
@@ -47,7 +47,7 @@ routine is_detector_on() -> Bool
         branch value.is_null()
             ? decided(false)
             : continue
-        first: Byte = value.load()
+        first: Byte = value.peek()
         off: Bool = first.eq(0x00).bitor(first.eq(b'0'))
         jump decided(off.bitnot())
 
@@ -55,7 +55,7 @@ routine is_detector_on() -> Bool
         state: U8 = on
             ? 2
             : 1
-        DETECTOR.atomic_store(state)
+        DETECTOR.poke_atomic(state)
         return(on)
 
 /// The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
@@ -69,8 +69,8 @@ routine slot_of(task: U64) -> USize
         branch i.ge(WAIT_SLOTS)
             ? return(WAIT_SLOTS)
             : continue
-        slot: @DeadlockWait = WAITS.at(i)
-        here: Bool = slot.used.load().bitand(slot.task.load().eq(task))
+        slot: @DeadlockWait = WAITS.getslot(i)
+        here: Bool = slot.used.peek().bitand(slot.task.peek().eq(task))
         branch here
             ? return(i)
             : look(i.add(1))
@@ -85,7 +85,7 @@ routine free_slot() -> USize
         branch i.ge(WAIT_SLOTS)
             ? return(WAIT_SLOTS)
             : continue
-        branch WAITS.at(i).used.load()
+        branch WAITS.getslot(i).used.peek()
             ? look(i.add(1))
             : return(i)
 
@@ -113,10 +113,10 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             : record(slot)
 
     block record(slot: USize)
-        entry: @DeadlockWait = WAITS.at(slot)
-        waiter.store_into(entry.task)
-        holder.store_into(entry.holder)
-        true.store_into(entry.used)
+        entry: @DeadlockWait = WAITS.getslot(slot)
+        waiter.poke_into(entry.task)
+        holder.poke_into(entry.holder)
+        true.poke_into(entry.used)
         jump follow(holder, 0)
 
     block follow(current: U64, steps: USize)
@@ -127,7 +127,7 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
         branch at.ge(WAIT_SLOTS)
             ? done()
             : continue
-        next: U64 = WAITS.at(at).holder.load()
+        next: U64 = WAITS.getslot(at).holder.peek()
         branch next.eq(waiter)
             ? deadlock(current)
             : follow(next, steps.add(1))
@@ -155,7 +155,7 @@ routine deadlock_wait_end(waiter: U64) -> Void
             : done()
 
     block clear(slot: USize)
-        false.store_into(WAITS.at(slot).used)
+        false.poke_into(WAITS.getslot(slot).used)
         jump done()
 
     block done()

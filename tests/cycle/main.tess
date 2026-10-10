@@ -36,7 +36,7 @@ routine stub_crash_exit() -> Void
 routine trace_node(entity: Addr) -> Void
     block entry()
         node: @Node = entity.to[@Node]()
-        child: Addr = node.child.load()
+        child: Addr = node.child.peek()
         branch child.to[@Byte]().is_null()
             ? return()
             : continue
@@ -48,9 +48,9 @@ routine trace_node(entity: Addr) -> Void
 routine free_node(entity: Addr) -> Void
     block entry()
         node: @Node = entity.to[@Node]()
-        id: U64 = node.id.load()
+        id: U64 = node.id.peek()
         Out.write("  freed node {id}\n")
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         deallocate(node, alloc)
         return()
 
@@ -58,21 +58,21 @@ routine free_node(entity: Addr) -> Void
 routine drop_node(entity: Addr) -> Void
     block entry()
         node: @Node = entity.to[@Node]()
-        id: U64 = node.id.load()
+        id: U64 = node.id.peek()
         Out.write("  destroyed node {id}\n")
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         deallocate(node, alloc)
         return()
 
 /// A new entity with one strong handle and no Roamed field yet, from the C heap as the runtime frees it.
 routine new_entity(id: U64) -> @RoamHeader
     block entry()
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         node: @Node = allocate[Node](1, alloc)
         header: @RoamHeader = allocate[RoamHeader](1, alloc)
-        id.store_into(node.id)
-        node.child.store(null)
-        header.store(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+        id.poke_into(node.id)
+        node.child.poke(null)
+        header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
             holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
             free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
         return(header)
@@ -80,22 +80,22 @@ routine new_entity(id: U64) -> @RoamHeader
 /// Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
 routine link(owner: @RoamHeader, target: @RoamHeader) -> Void
     block entry()
-        node: @Node = owner.data.load().to[@Node]()
+        node: @Node = owner.data.peek().to[@Node]()
         roam_hold(target)
-        node.child.store(target)
+        node.child.poke(target)
         return()
 
 routine collect_and_show(label: Bytes) -> Void
     block entry()
         freed: U64 = collect()
-        roots: U64 = ROOTS.count.load()
+        roots: U64 = ROOTS.count.peek()
         Out.write("{label}: freed {freed}, candidates left {roots}\n")
         return()
 
 routine show_count(label: Bytes, header: @RoamHeader) -> Void
     block entry()
         strong: U64 = roam_strong_count(header)
-        state: S32 = header.state.load()
+        state: S32 = header.state.peek()
         Out.write("{label}: strong {strong}, state {state}\n")
         return()
 

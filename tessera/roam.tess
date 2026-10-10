@@ -57,7 +57,7 @@ private routine coro_yield() -> Void
 /// :param header: The header to free.
 routine free_header_memory(header: @RoamHeader) -> Void
     block entry()
-        claim alloc: @Allocator <- make_c_heap_allocator()
+        claim alloc: @MemoryManager <- make_c_heap_memory()
         deallocate(header, alloc)
         return()
 
@@ -70,7 +70,7 @@ routine free_header_memory(header: @RoamHeader) -> Void
 routine roam_hold(header: @RoamHeader) -> Void
     block entry()
         world_enter()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         branch escaped
             ? atomic()
             : local()
@@ -80,8 +80,8 @@ routine roam_hold(header: @RoamHeader) -> Void
         jump done()
 
     block local()
-        next_count: U64 = header.count.load().add(1)
-        next_count.store_into(header.count)
+        next_count: U64 = header.count.peek().add(1)
+        next_count.poke_into(header.count)
         jump done()
 
     block done()
@@ -97,7 +97,7 @@ routine roam_hold(header: @RoamHeader) -> Void
 routine roam_unhold(header: @RoamHeader) -> Void
     block entry()
         world_enter()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         branch escaped
             ? atomic()
             : local()
@@ -110,8 +110,8 @@ routine roam_unhold(header: @RoamHeader) -> Void
             : candidate()
 
     block local()
-        remaining: U64 = header.count.load().sub(1)
-        remaining.store_into(header.count)
+        remaining: U64 = header.count.peek().sub(1)
+        remaining.poke_into(header.count)
         last: Bool = remaining.eq(0)
         branch last
             ? release_data(false)
@@ -119,7 +119,7 @@ routine roam_unhold(header: @RoamHeader) -> Void
 
     block release_data(escaped: Bool)
         // A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
-        branch header.buffered.load()
+        branch header.buffered.peek()
             ? unbuffer(escaped)
             : drop(escaped)
 
@@ -128,11 +128,11 @@ routine roam_unhold(header: @RoamHeader) -> Void
         jump drop(escaped)
 
     block drop(escaped: Bool)
-        run_hook(header.drop_hook.load(), header.data.load())
-        header.dead.atomic_store(1)
+        run_hook(header.drop_hook.peek(), header.data.peek())
+        header.dead.poke_atomic(1)
         weak: U64 = escaped
-            ? header.weak.atomic_load()
-            : header.weak.load()
+            ? header.weak.peek_atomic()
+            : header.weak.peek()
         branch weak.eq(0)
             ? free_header()
             : done()
@@ -158,21 +158,21 @@ routine roam_unhold(header: @RoamHeader) -> Void
 routine roam_release_inner(header: @RoamHeader) -> Addr
     block entry()
         world_enter()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         count: U64 = escaped
-            ? header.count.atomic_load()
-            : header.count.load()
+            ? header.count.peek_atomic()
+            : header.count.peek()
         weak: U64 = escaped
-            ? header.weak.atomic_load()
-            : header.weak.load()
+            ? header.weak.peek_atomic()
+            : header.weak.peek()
         alone: Bool = count.eq(1).bitand(weak.eq(0))
         branch alone
             ? release()
             : shared()
 
     block release()
-        data: Addr = header.data.load()
-        branch header.buffered.load()
+        data: Addr = header.data.peek()
+        branch header.buffered.peek()
             ? unbuffer(data)
             : free(data)
 
@@ -195,16 +195,16 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
 /// :param header: The entity's header.
 private routine mark_candidate(header: @RoamHeader) -> Void
     block entry()
-        hook: @Byte = header.trace_hook.load().to[@Byte]()
+        hook: @Byte = header.trace_hook.peek().to[@Byte]()
         acyclic: Bool = hook.is_null()
         branch acyclic
             ? return()
             : continue
-        branch header.buffered.load()
+        branch header.buffered.peek()
             ? return()
             : continue
-        true.store_into(header.buffered)
-        SUSPECTED.store_into(header.state)
+        true.poke_into(header.buffered)
+        SUSPECTED.poke_into(header.state)
         add_candidate(header)
         return()
 
@@ -215,7 +215,7 @@ private routine mark_candidate(header: @RoamHeader) -> Void
 routine run_hook(hook: Addr, entity: Addr) -> Void
     block entry()
         claim slot: @Addr <- hook
-        callee: Callable[(Addr,), Void] = slot.to[@Callable[(Addr,), Void]]().load()
+        callee: Callable[(Addr,), Void] = slot.to[@Callable[(Addr,), Void]]().peek()
         callee.call(entity)
         return()
 
@@ -225,10 +225,10 @@ routine run_hook(hook: Addr, entity: Addr) -> Void
 #[export("ingrid_roam_strong_count"), inline]
 routine roam_strong_count(header: @RoamHeader) -> U64
     block entry()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         count: U64 = escaped
-            ? header.count.atomic_load()
-            : header.count.load()
+            ? header.count.peek_atomic()
+            : header.count.peek()
         return(count)
 
 // ── Weak observers ─────────────────────────────────────────────────────────
@@ -239,7 +239,7 @@ routine roam_strong_count(header: @RoamHeader) -> U64
 routine roam_observe(header: @RoamHeader) -> Void
     block entry()
         world_enter()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         branch escaped
             ? atomic()
             : local()
@@ -249,8 +249,8 @@ routine roam_observe(header: @RoamHeader) -> Void
         jump done()
 
     block local()
-        next_weak: U64 = header.weak.load().add(1)
-        next_weak.store_into(header.weak)
+        next_weak: U64 = header.weak.peek().add(1)
+        next_weak.poke_into(header.weak)
         jump done()
 
     block done()
@@ -264,7 +264,7 @@ routine roam_observe(header: @RoamHeader) -> Void
 routine roam_unobserve(header: @RoamHeader) -> Void
     block entry()
         world_enter()
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         branch escaped
             ? atomic()
             : local()
@@ -274,12 +274,12 @@ routine roam_unobserve(header: @RoamHeader) -> Void
         jump check(previous.eq(1))
 
     block local()
-        remaining: U64 = header.weak.load().sub(1)
-        remaining.store_into(header.weak)
+        remaining: U64 = header.weak.peek().sub(1)
+        remaining.poke_into(header.weak)
         jump check(remaining.eq(0))
 
     block check(last: Bool)
-        dead: Bool = header.dead.atomic_load().eq(1)
+        dead: Bool = header.dead.peek_atomic().eq(1)
         branch last.bitand(dead)
             ? free_header()
             : done()
@@ -298,7 +298,7 @@ routine roam_unobserve(header: @RoamHeader) -> Void
 #[export("ingrid_roam_is_destroyed"), inline]
 routine roam_is_destroyed(header: @RoamHeader) -> Bool
     block entry()
-        return(header.dead.atomic_load().eq(1))
+        return(header.dead.peek_atomic().eq(1))
 
 /// The collector's finalizer, after the free hook has torn the entity down: marks it dead and frees the header
 /// unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
@@ -306,11 +306,11 @@ routine roam_is_destroyed(header: @RoamHeader) -> Bool
 #[export("ingrid_roam_cyclic_finalize")]
 routine roam_cyclic_finalize(header: @RoamHeader) -> Void
     block entry()
-        header.dead.atomic_store(1)
-        escaped: Bool = header.escaped.atomic_load().eq(1)
+        header.dead.poke_atomic(1)
+        escaped: Bool = header.escaped.peek_atomic().eq(1)
         weak: U64 = escaped
-            ? header.weak.atomic_load()
-            : header.weak.load()
+            ? header.weak.peek_atomic()
+            : header.weak.peek()
         branch weak.eq(0)
             ? free_header()
             : return()
@@ -327,7 +327,7 @@ routine roam_cyclic_finalize(header: @RoamHeader) -> Void
 #[export("ingrid_roam_is_escaped"), inline]
 routine roam_is_escaped(header: @RoamHeader) -> Bool
     block entry()
-        return(header.escaped.atomic_load().eq(1))
+        return(header.escaped.peek_atomic().eq(1))
 
 /// Promotes the entity, and every entity reachable from it through Roamed fields, to escaped: atomic counting and
 /// the lock from now on. Runs on the owner before the handle is published, so nothing races the flip. Escape is a
@@ -337,12 +337,12 @@ routine roam_is_escaped(header: @RoamHeader) -> Bool
 /// :throws: Crashes with `MemoryAllocationError` when the worklist cannot grow.
 #[export("ingrid_roam_promote")]
 routine roam_promote(header: @RoamHeader) -> Void
-    local alloc: @Allocator <- make_c_heap_allocator()
+    local alloc: @MemoryManager <- make_c_heap_memory()
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
     block entry()
-        branch header.escaped.atomic_load().eq(1)
+        branch header.escaped.peek_atomic().eq(1)
             ? finish()
             : continue
         work.add_last(header)
@@ -353,12 +353,12 @@ routine roam_promote(header: @RoamHeader) -> Void
             ? finish()
             : continue
         node: @RoamHeader = work.remove_last().to[@RoamHeader]()
-        branch node.escaped.atomic_load().eq(1)
+        branch node.escaped.peek_atomic().eq(1)
             ? next()
             : continue
-        node.holder_task.atomic_store(0)
-        0.store_into(node.depth)
-        node.escaped.atomic_store(1)
+        node.holder_task.poke_atomic(0)
+        0.poke_into(node.depth)
+        node.escaped.poke_atomic(1)
         children(node, kids)
         jump push(0, kids.count())
 
@@ -384,7 +384,7 @@ routine roam_promote(header: @RoamHeader) -> Void
 #[export("ingrid_roam_lock_enter"), inline]
 routine roam_lock_enter(header: @RoamHeader) -> Void
     block entry()
-        branch header.escaped.atomic_load().eq(1)
+        branch header.escaped.peek_atomic().eq(1)
             ? acquire()
             : return()
 
@@ -393,8 +393,8 @@ routine roam_lock_enter(header: @RoamHeader) -> Void
         jump attempt(task)
 
     block attempt(task: U64)
-        held: Bool = header.locked.atomic_load().eq(1)
-        mine: Bool = header.holder_task.atomic_load().eq(task)
+        held: Bool = header.locked.peek_atomic().eq(1)
+        mine: Bool = header.holder_task.peek_atomic().eq(task)
         branch held.bitand(mine)
             ? reenter(task)
             : continue
@@ -404,17 +404,17 @@ routine roam_lock_enter(header: @RoamHeader) -> Void
             .Failure => contended(task)
 
     block reenter(task: U64)
-        next_depth: U64 = header.depth.load().add(1)
-        next_depth.store_into(header.depth)
+        next_depth: U64 = header.depth.peek().add(1)
+        next_depth.poke_into(header.depth)
         jump acquired(task)
 
     block took(task: U64)
-        header.holder_task.atomic_store(task)
-        1.store_into(header.depth)
+        header.holder_task.poke_atomic(task)
+        1.poke_into(header.depth)
         jump acquired(task)
 
     block contended(task: U64)
-        deadlock_wait_begin(task, header.holder_task.atomic_load())
+        deadlock_wait_begin(task, header.holder_task.peek_atomic())
         coro_yield()
         jump attempt(task)
 
@@ -429,20 +429,20 @@ routine roam_lock_enter(header: @RoamHeader) -> Void
 #[export("ingrid_roam_lock_exit"), inline]
 routine roam_lock_exit(header: @RoamHeader) -> Void
     block entry()
-        branch header.escaped.atomic_load().eq(1)
+        branch header.escaped.peek_atomic().eq(1)
             ? release()
             : return()
 
     block release()
-        depth: U64 = header.depth.load().sub(1)
-        depth.store_into(header.depth)
+        depth: U64 = header.depth.peek().sub(1)
+        depth.poke_into(header.depth)
         branch depth.eq(0)
             ? unlock()
             : return()
 
     block unlock()
-        header.holder_task.atomic_store(0)
-        header.locked.atomic_store(0)
+        header.holder_task.poke_atomic(0)
+        header.locked.poke_atomic(0)
         return()
 
 // ── Layout check ───────────────────────────────────────────────────────────

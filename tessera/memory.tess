@@ -67,7 +67,7 @@ private routine out_of_memory(what: Bytes, bytes: U64) -> Void
         out.write("Failed to {what} {bytes} bytes")
         text: Bytes = out.to[Bytes]()
         terminator: @Byte = buffer.to[@Byte]().stride(text.count)
-        terminator.store(0x00)
+        terminator.poke(0x00)
         rf_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStr]())
 
 /// Allocates `bytes` zeroed bytes from the C heap.
@@ -170,7 +170,7 @@ record RegionBlock
 #export("rf_region_mark")
 routine rf_region_mark() -> U64
     block entry()
-        return(ptrtoint[@RegionBlock, U64](REGION_TOP.load()))
+        return(ptrtoint[@RegionBlock, U64](REGION_TOP.peek()))
 
 /// Allocates `bytes` zeroed bytes in this thread's region, freed by the release to a mark taken before.
 /// :param bytes: How many bytes.
@@ -185,8 +185,8 @@ routine rf_region_alloc(bytes: U64) -> Addr
             ? out_of_memory("allocate scratch", bytes)
             : continue
         node: @RegionBlock = p.to[@RegionBlock]()
-        node.prev.store(REGION_TOP.load())
-        REGION_TOP.store(node)
+        node.prev.poke(REGION_TOP.peek())
+        REGION_TOP.poke(node)
         return(node.stride(1))
 
 /// Frees every block allocated since `mark`, in this thread's region.
@@ -199,10 +199,10 @@ routine rf_region_release(mark: U64) -> Void
         jump next()
 
     block next()
-        top: @RegionBlock = REGION_TOP.load()
+        top: @RegionBlock = REGION_TOP.peek()
         branch top.is_null().bitor(top.ptr_eq(stop))
             ? return()
             : continue
-        REGION_TOP.store(top.prev.load())
+        REGION_TOP.poke(top.prev.peek())
         c_free(top)
         jump next()

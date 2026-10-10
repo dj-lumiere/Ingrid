@@ -21,8 +21,8 @@ record ChannelWaiter
 
 /// rf_channel.
 record Channel
-    lock: Mutex
-    cond: Condition  // threads waiting for room or for an item
+    lock: ExclusiveLock
+    cond: SignalCaster  // threads waiting for room or for an item
     slots: @Addr
     capacity: U64  // buffered items; 0 is a rendezvous
     slot_cap: U64  // max(capacity, 1)
@@ -37,7 +37,7 @@ record Channel
 /// Wakes every coroutine on list and every waiting thread. Each checks again and unlinks itself. The caller holds
 /// the lock.
 /// :param list: The first parked coroutine to wake, or null.
-routine Channel.wake_all(me: @Me, list: @ChannelWaiter) -> Void
+routine Channel.cast_all(me: @Me, list: @ChannelWaiter) -> Void
     block entry()
         jump next(list)
 
@@ -45,11 +45,11 @@ routine Channel.wake_all(me: @Me, list: @ChannelWaiter) -> Void
         branch w.is_null()
             ? threads()
             : continue
-        rf_sched_wake(w.sched.load(), w.coro.load())
-        jump next(w.next.load())
+        rf_sched_wake(w.sched.peek(), w.coro.peek())
+        jump next(w.next.peek())
 
     block threads()
-        me.cond.wake_all()
+        me.cond.cast_all()
         return()
 
 /// Creates a channel with one producer handle and one consumer handle.
@@ -66,11 +66,11 @@ routine rf_channel_create(capacity: U64) -> @Channel
             ? rf_throw("OutOfMemoryError", "channel capacity too large to allocate")
             : continue
         chan: @Channel = zeroed[Channel](1, "failed to allocate channel")
-        chan.slots.store(zeroed[Addr](slot_cap.to[USize](), "failed to allocate channel buffer"))
-        chan.capacity.store(capacity)
-        chan.slot_cap.store(slot_cap)
-        chan.producer_refs.store(1)
-        chan.consumer_refs.store(1)
+        chan.slots.poke(zeroed[Addr](slot_cap.to[USize](), "failed to allocate channel buffer"))
+        chan.capacity.poke(capacity)
+        chan.slot_cap.poke(slot_cap)
+        chan.producer_refs.poke(1)
+        chan.consumer_refs.poke(1)
         return(chan)
 
 /// Whether the drop that just took a count from 1 to 0 left no handle at all. The caller holds the lock: deciding
@@ -80,8 +80,8 @@ routine rf_channel_create(capacity: U64) -> @Channel
 routine Channel.is_last_drop(me: @Me, refs: U32) -> Bool
     block entry()
         dropped_last: Bool = refs.eq(1)
-        no_producers: Bool = me.producer_refs.load().eq(0)
-        none_left: Bool = no_producers.bitand(me.consumer_refs.load().eq(0))
+        no_producers: Bool = me.producer_refs.peek().eq(0)
+        none_left: Bool = no_producers.bitand(me.consumer_refs.peek().eq(0))
         return(dropped_last.bitand(none_left))
 
 /// Frees the channel when the drop decided so under the lock. The caller has given the lock back, and no handle is
@@ -92,7 +92,7 @@ routine Channel.free_if(me: @Me, last: Bool) -> Void
         branch last
             ? continue
             : return()
-        c_free(me.slots.load())
+        c_free(me.slots.peek())
         c_free(me)
         return()
 
@@ -105,8 +105,8 @@ routine rf_channel_add_feeder(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        next_producer_refs: U32 = chan.producer_refs.load().add(1)
-        next_producer_refs.store_into(chan.producer_refs)
+        next_producer_refs: U32 = chan.producer_refs.peek().add(1)
+        next_producer_refs.poke_into(chan.producer_refs)
         chan.lock.unlock()
         return()
 
@@ -119,8 +119,8 @@ routine rf_channel_add_consumer(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        next_consumer_refs: U32 = chan.consumer_refs.load().add(1)
-        next_consumer_refs.store_into(chan.consumer_refs)
+        next_consumer_refs: U32 = chan.consumer_refs.peek().add(1)
+        next_consumer_refs.poke_into(chan.consumer_refs)
         chan.lock.unlock()
         return()
 
@@ -134,15 +134,15 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        refs: U32 = chan.producer_refs.load()
+        refs: U32 = chan.producer_refs.peek()
         left: U32 = refs.sub_clamp(1)
-        chan.producer_refs.store(left)
+        chan.producer_refs.poke(left)
         last: Bool = chan.is_last_drop(refs)
-        branch left.eq(0).bitand(chan.closed.load().bitnot())
+        branch left.eq(0).bitand(chan.closed.peek().bitnot())
             ? continue
             : done(last)
-        chan.closed.store(true)
-        chan.wake_all(chan.not_empty_head.load())
+        chan.closed.poke(true)
+        chan.cast_all(chan.not_empty_head.peek())
         jump done(last)
 
     block done(last: Bool)
@@ -160,14 +160,14 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        refs: U32 = chan.consumer_refs.load()
+        refs: U32 = chan.consumer_refs.peek()
         left: U32 = refs.sub_clamp(1)
-        chan.consumer_refs.store(left)
+        chan.consumer_refs.poke(left)
         last: Bool = chan.is_last_drop(refs)
         branch left.eq(0)
             ? continue
             : done(last)
-        chan.wake_all(chan.not_full_head.load())
+        chan.cast_all(chan.not_full_head.peek())
         jump done(last)
 
     block done(last: Bool)
@@ -184,12 +184,12 @@ routine rf_channel_close(chan: @Channel) -> Void
             ? return()
             : continue
         chan.lock.lock()
-        branch chan.closed.load()
+        branch chan.closed.peek()
             ? done()
             : continue
-        chan.closed.store(true)
-        chan.wake_all(chan.not_empty_head.load())
-        chan.wake_all(chan.not_full_head.load())
+        chan.closed.poke(true)
+        chan.cast_all(chan.not_empty_head.peek())
+        chan.cast_all(chan.not_full_head.peek())
         jump done()
 
     block done()
@@ -206,8 +206,8 @@ routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> Void
         branch sched.is_null().bitor(coro.is_null())
             ? thread()
             : continue
-        claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: list.load())
-        list.store(node)
+        claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: list.peek())
+        list.poke(node)
         me.lock.unlock()
         rf_sched_park_external()
         me.lock.lock()
@@ -226,15 +226,15 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
         jump look(list)
 
     block look(at: @@ChannelWaiter)
-        w: @ChannelWaiter = at.load()
+        w: @ChannelWaiter = at.peek()
         branch w.is_null()
             ? return()
             : continue
         branch w.ptr_eq(node)
             ? continue
             : look(w.next)
-        at.store(node.next.load())
-        node.next.store(null)
+        at.poke(node.next.peek())
+        node.next.poke(null)
         return()
 
 /// Sends one payload: 1, or 0 when the channel is closed or has no consumer. Waits while it is full, and for a
@@ -260,9 +260,9 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
         jump room()
 
     block room()
-        full: Bool = me.count.load().eq(me.slot_cap.load())
-        not_closed: Bool = me.closed.load().bitnot()
-        open: Bool = not_closed.bitand(me.consumer_refs.load().gt(0))
+        full: Bool = me.count.peek().eq(me.slot_cap.peek())
+        not_closed: Bool = me.closed.peek().bitnot()
+        open: Bool = not_closed.bitand(me.consumer_refs.peek().gt(0))
         branch full.bitand(open)
             ? continue
             : put()
@@ -273,26 +273,26 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
         jump room()
 
     block put()
-        branch me.closed.load().bitor(me.consumer_refs.load().eq(0))
+        branch me.closed.peek().bitor(me.consumer_refs.peek().eq(0))
             ? finish(0)
             : continue
-        cap: U64 = me.slot_cap.load()
-        linear_tail: U64 = me.head.load().add(me.count.load())
+        cap: U64 = me.slot_cap.peek()
+        linear_tail: U64 = me.head.peek().add(me.count.peek())
         tail: U64 = linear_tail.mod(cap)
-        tail_slot: @Addr = me.slots.load().stride(tail.to[USize]())
-        tail_slot.store(payload)
-        next_count: U64 = me.count.load().add(1)
-        next_count.store_into(me.count)
-        me.wake_all(me.not_empty_head.load())
-        branch me.capacity.load().eq(0)
+        tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
+        tail_slot.poke(payload)
+        next_count: U64 = me.count.peek().add(1)
+        next_count.poke_into(me.count)
+        me.cast_all(me.not_empty_head.peek())
+        branch me.capacity.peek().eq(0)
             ? taken()
             : finish(1)
 
     // A rendezvous: not over until this item was taken.
     block taken()
-        has_items: Bool = me.count.load().gt(0)
-        pending: Bool = has_items.bitand(me.closed.load().bitnot())
-        waiting: Bool = pending.bitand(me.consumer_refs.load().gt(0))
+        has_items: Bool = me.count.peek().gt(0)
+        pending: Bool = has_items.bitand(me.closed.peek().bitnot())
+        waiting: Bool = pending.bitand(me.consumer_refs.peek().gt(0))
         branch waiting
             ? continue
             : finish(1)
@@ -326,20 +326,20 @@ routine rf_channel_offer(chan: @Channel, payload: Addr) -> U32
 routine Channel.offer(me: @Me, payload: Addr) -> U32
     block entry()
         me.lock.lock()
-        branch me.closed.load().bitor(me.consumer_refs.load().eq(0))
+        branch me.closed.peek().bitor(me.consumer_refs.peek().eq(0))
             ? finish(0)
             : continue
-        branch me.count.load().eq(me.slot_cap.load())
+        branch me.count.peek().eq(me.slot_cap.peek())
             ? finish(2)
             : continue
-        cap: U64 = me.slot_cap.load()
-        linear_tail: U64 = me.head.load().add(me.count.load())
+        cap: U64 = me.slot_cap.peek()
+        linear_tail: U64 = me.head.peek().add(me.count.peek())
         tail: U64 = linear_tail.mod(cap)
-        tail_slot: @Addr = me.slots.load().stride(tail.to[USize]())
-        tail_slot.store(payload)
-        next_count: U64 = me.count.load().add(1)
-        next_count.store_into(me.count)
-        me.wake_all(me.not_empty_head.load())
+        tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
+        tail_slot.poke(payload)
+        next_count: U64 = me.count.peek().add(1)
+        next_count.poke_into(me.count)
+        me.cast_all(me.not_empty_head.peek())
         jump finish(1)
 
     block finish(result: U32)
@@ -366,8 +366,8 @@ routine Channel.next(me: @Me) -> Addr
         jump item()
 
     block item()
-        empty: Bool = me.count.load().eq(0)
-        branch empty.bitand(me.closed.load().bitnot())
+        empty: Bool = me.count.peek().eq(0)
+        branch empty.bitand(me.closed.peek().bitnot())
             ? continue
             : take()
         branch rf_cancel_requested().eq(0)
@@ -377,17 +377,17 @@ routine Channel.next(me: @Me) -> Addr
         jump item()
 
     block take()
-        branch me.count.load().eq(0)
+        branch me.count.peek().eq(0)
             ? finish(null)
             : continue
-        head: U64 = me.head.load()
-        slot: @Addr = me.slots.load().stride(head.to[USize]())
-        payload: Addr = slot.load()
-        slot.store(null)
-        me.head.store(head.add(1).mod(me.slot_cap.load()))
-        remaining_count: U64 = me.count.load().sub(1)
-        remaining_count.store_into(me.count)
-        me.wake_all(me.not_full_head.load())
+        head: U64 = me.head.peek()
+        slot: @Addr = me.slots.peek().stride(head.to[USize]())
+        payload: Addr = slot.peek()
+        slot.poke(null)
+        me.head.poke(head.add(1).mod(me.slot_cap.peek()))
+        remaining_count: U64 = me.count.peek().sub(1)
+        remaining_count.poke_into(me.count)
+        me.cast_all(me.not_full_head.peek())
         jump finish(payload)
 
     block finish(payload: Addr)
@@ -404,7 +404,7 @@ routine rf_channel_count(chan: @Channel) -> U64
             ? return(0)
             : continue
         chan.lock.lock()
-        n: U64 = chan.count.load()
+        n: U64 = chan.count.peek()
         chan.lock.unlock()
         return(n)
 
@@ -418,7 +418,7 @@ routine rf_channel_is_closed(chan: @Channel) -> U32
             ? return(1)
             : continue
         chan.lock.lock()
-        closed: Bool = chan.closed.load()
+        closed: Bool = chan.closed.peek()
         chan.lock.unlock()
         branch closed
             ? return(1)
@@ -432,4 +432,4 @@ routine rf_channel_capacity(chan: @Channel) -> U64
     block entry()
         branch chan.is_null()
             ? return(0)
-            : return(chan.capacity.load())
+            : return(chan.capacity.peek())

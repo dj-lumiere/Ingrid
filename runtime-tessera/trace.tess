@@ -36,7 +36,7 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
         branch left.eq(0)
             ? done()
             : continue
-        d: U8 = v.load().bitand(15).to[U8]()
+        d: U8 = v.peek().bitand(15).to[U8]()
         // '0' + d, or 'a' / 'A' + d - 10
         letter: U8 = upper
             ? 55
@@ -44,8 +44,8 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
         c: U8 = d.lt(10)
             ? d.add(48)
             : d.add(letter)
-        text.stride(left.sub(1)).store(c.bits())
-        v.load().shr(4).store_into(v)
+        text.stride(left.sub(1)).poke(c.bits())
+        v.peek().shr(4).poke_into(v)
         jump digit(left.sub(1))
 
     block done()
@@ -60,14 +60,14 @@ routine write_hex(value: U64, digits: USize, upper: Bool) -> Void
 #export("__rf_set_trace_mode")
 routine rf_set_trace_mode(mode: CInt) -> Void
     block entry()
-        TRACE_MODE.store(mode)
+        TRACE_MODE.poke(mode)
         install_fault_handlers()
         return()
 
 /// Writes the stack trace the trace mode asks for on stderr: the native stack, an empty shadow stack, or nothing.
 routine print_stack_for_mode() -> Void
     block entry()
-        mode: CInt = TRACE_MODE.load()
+        mode: CInt = TRACE_MODE.peek()
         when
             mode.eq(TRACE_SHADOW) => shadow()
             mode.eq(TRACE_PLATFORM) => platform()
@@ -105,12 +105,12 @@ routine write_error_title(name: Bytes) -> Void
             : put(i, c)
 
     block word(i: USize, c: U8)
-        one.store(32)
+        one.poke(32)
         Err.writer().write_bytes(one.to[@Byte](), 1)
         jump put(i, c.add(32))
 
     block put(i: USize, c: U8)
-        one.store(c)
+        one.poke(c)
         Err.writer().write_bytes(one.to[@Byte](), 1)
         jump next(i.add(1))
 
@@ -228,9 +228,9 @@ routine print_platform_stack(fault: U64) -> Void
     block entry()
         c_sym_set_options(SYM_OPTIONS)
         c_sym_initialize(process, null, 1)
-        sym.to[@U32]().store(SYMBOL_INFO_SIZE)
+        sym.to[@U32]().poke(SYMBOL_INFO_SIZE)
         max_name_field: @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to[@U32]()
-        max_name_field.store(MAX_SYM_NAME)
+        max_name_field.poke(MAX_SYM_NAME)
         Err.write("Stack trace:\n")
         branch fault.eq(0)
             ? frame(0, 0)
@@ -238,7 +238,7 @@ routine print_platform_stack(fault: U64) -> Void
         branch c_sym_from_addr(process, fault, null, sym).eq(0)
             ? frame(0, 0)
             : continue
-        start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().load()
+        start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek()
         jump seek(0, start)
 
     // the first frame in the routine that faulted, or every frame when none is
@@ -246,11 +246,11 @@ routine print_platform_stack(fault: U64) -> Void
         branch i.eq(frames)
             ? frame(0, 0)
             : continue
-        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).load())
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
         branch c_sym_from_addr(process, address, null, sym).eq(0)
             ? seek(i.add(1), start)
             : continue
-        branch sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().load().eq(start)
+        branch sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek().eq(start)
             ? frame(i, 0)
             : seek(i.add(1), start)
 
@@ -259,7 +259,7 @@ routine print_platform_stack(fault: U64) -> Void
         branch i.eq(frames)
             ? return()
             : continue
-        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).load())
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
         branch c_sym_from_addr(process, address, null, sym).ne(0)
             ? named(i, n, address)
             : continue
@@ -271,7 +271,7 @@ routine print_platform_stack(fault: U64) -> Void
     block named(i: U32, n: U32, address: U64)
         symbol_name: @Byte = sym.stride(SYMBOL_INFO_NAME)
         name: Bytes = symbol_name.to[CStr]().to[Bytes]()
-        line.to[@U32]().store(IMAGEHLP_LINE64_SIZE)
+        line.to[@U32]().poke(IMAGEHLP_LINE64_SIZE)
         // a return address points past its call: one byte back is the call's own line
         branch c_sym_get_line_from_addr64(process, address.sub(1), line_offset, line).ne(0)
             ? with_line(i, n, name)
@@ -280,8 +280,8 @@ routine print_platform_stack(fault: U64) -> Void
         jump frame(i.add(1), n.add(1))
 
     block with_line(i: U32, n: U32, name: Bytes)
-        file_name: Bytes = line.stride(LINE_FILE_NAME).to[@@Byte]().load().to[CStr]().to[Bytes]()
-        line_number: U32 = line.stride(LINE_NUMBER).to[@U32]().load()
+        file_name: Bytes = line.stride(LINE_FILE_NAME).to[@@Byte]().peek().to[CStr]().to[Bytes]()
+        line_number: U32 = line.stride(LINE_NUMBER).to[@U32]().peek()
         Err.write("  {n}: at {name} ({file_name}:{line_number})\n")
         jump frame(i.add(1), n.add(1))
 
@@ -323,14 +323,14 @@ routine print_platform_stack(fault: U64) -> Void
             ? raw(i)
             : continue
         n: CInt = i.sub(2)
-        text: @Byte = symbols.stride(i.to[USize]()).load()
+        text: @Byte = symbols.stride(i.to[USize]()).peek()
         line: Bytes = text.to[CStr]().to[Bytes]()
         Err.write("  {n}: {line}\n")
         jump frame(i.add(1))
 
     block raw(i: CInt)
         n: CInt = i.sub(2)
-        address: Addr = stack.stride(i.to[USize]()).load()
+        address: Addr = stack.stride(i.to[USize]()).peek()
         Err.write("  {n}: {address}\n")
         jump frame(i.add(1))
 
@@ -370,7 +370,7 @@ routine c_set_thread_stack_guarantee(size: @U32) -> CInt
 #export("rf_set_stack_overflow_report")
 routine rf_set_stack_overflow_report(report: Callable[(U64,), Void]) -> Void
     block entry()
-        STACK_OVERFLOW_REPORT.store(report)
+        STACK_OVERFLOW_REPORT.poke(report)
         return()
 
 /// Keeps 64 KiB of the calling thread's stack back for its exception handler, so a stack overflow on the thread can
@@ -396,12 +396,12 @@ routine rf_thread_stack_guarantee() -> Void
 #[target(os: "windows"), callconv("stdcall")]
 routine exception_handler(pointers: @Addr) -> CInt
     block entry()
-        exception: Addr = pointers.load()
-        code: U32 = exception.to[@U32]().load()
+        exception: Addr = pointers.peek()
+        code: U32 = exception.to[@U32]().peek()
         branch code.eq(0xC00000FD)
             ? overflow()
             : continue
-        branch TRACE_MODE.load().eq(TRACE_NONE)
+        branch TRACE_MODE.peek().eq(TRACE_NONE)
             ? return(0)
             : continue
         name: Bytes = exception_name(code).to[Bytes]()
@@ -409,19 +409,19 @@ routine exception_handler(pointers: @Addr) -> CInt
         Err.write("\x1B[91m\n{name} (code 0x")
         write_hex(code.to[U64](), 8, true)
         Err.write(")\n\x1B[0m")
-        fault: U64 = exception.to[@Byte]().stride(EXCEPTION_ADDRESS).to[@U64]().load()
+        fault: U64 = exception.to[@Byte]().stride(EXCEPTION_ADDRESS).to[@U64]().peek()
         print_platform_stack(fault)
         return(0)
 
     block overflow()
-        report: Callable[(U64,), Void] = STACK_OVERFLOW_REPORT.load()
+        report: Callable[(U64,), Void] = STACK_OVERFLOW_REPORT.peek()
         branch report.addr().is_null()
             ? return(0)
             : continue
         claim low: @USize <- 0
         claim high: @USize <- 0
         c_get_current_thread_stack_limits(low, high)
-        span: USize = high.load().sub(low.load())
+        span: USize = high.peek().sub(low.peek())
         size: U64 = span.to[U64]()
         report.call(size)
         return(0)
@@ -487,7 +487,7 @@ routine sigbus() -> CInt
 #target(os: not "windows")
 routine fault_handler(signo: CInt) -> Void
     block entry()
-        branch TRACE_MODE.load().eq(TRACE_NONE)
+        branch TRACE_MODE.peek().eq(TRACE_NONE)
             ? reraise()
             : continue
         name: Bytes = signal_name(signo).to[Bytes]()

@@ -1,6 +1,6 @@
 // RazorForge's SignalCaster: a monitor (a lock and a wait set). A waiter takes the lock, checks its condition, and
 // waits while it doesn't hold: wait releases the lock, suspends, and takes it again when woken. The lock and the
-// waiting of plain threads are Standard/Os's Mutex and Condition. What is RazorForge's own is here: the handle count
+// waiting of plain threads are Standard/Os's ExclusiveLock and SignalCaster. What is RazorForge's own is here: the handle count
 // the agents sharing one SignalCaster hold, and the coroutines a wait parks on the RazorForge scheduler (a cast on any
 // thread wakes them, before any thread).
 
@@ -10,8 +10,8 @@ import Standard/Os
 
 /// rf_signal.
 record Monitor
-    lock: Mutex  // the monitor lock, which guards the caller's condition
-    cond: Condition  // plain threads wait here
+    lock: ExclusiveLock  // the monitor lock, which guards the caller's condition
+    cond: SignalCaster  // plain threads wait here
     waiters: @ChannelWaiter  // parked coroutines
     refcount: U32
 
@@ -22,7 +22,7 @@ record Monitor
 routine rf_signal_create() -> @Monitor
     block entry()
         sig: @Monitor = zeroed[Monitor](1, "failed to allocate SignalCaster")
-        sig.refcount.store(1)
+        sig.refcount.poke(1)
         return(sig)
 
 /// Adds a handle to the monitor, under its lock. A null `sig` does nothing.
@@ -34,8 +34,8 @@ routine rf_signal_add_ref(sig: @Monitor) -> Void
             ? return()
             : continue
         sig.lock.lock()
-        next_refcount: U32 = sig.refcount.load().add(1)
-        next_refcount.store_into(sig.refcount)
+        next_refcount: U32 = sig.refcount.peek().add(1)
+        next_refcount.poke_into(sig.refcount)
         sig.lock.unlock()
         return()
 
@@ -48,9 +48,9 @@ routine rf_signal_drop(sig: @Monitor) -> Void
             ? return()
             : continue
         sig.lock.lock()
-        refs: U32 = sig.refcount.load()
+        refs: U32 = sig.refcount.peek()
         left: U32 = refs.sub_clamp(1)
-        sig.refcount.store(left)
+        sig.refcount.poke(left)
         sig.lock.unlock()
         branch left.eq(0)
             ? continue
@@ -95,8 +95,8 @@ routine rf_signal_wait(sig: @Monitor) -> Void
             ? thread()
             : continue
         claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro,
-            next: sig.waiters.load())
-        sig.waiters.store(node)
+            next: sig.waiters.peek())
+        sig.waiters.poke(node)
         sig.lock.unlock()
         // a cast may come from another thread: not a deadlock meanwhile
         rf_sched_arm_cross_waker(sched)
@@ -128,8 +128,8 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
             ? thread(deadline)
             : continue
         claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro,
-            next: sig.waiters.load())
-        sig.waiters.store(node)
+            next: sig.waiters.peek())
+        sig.waiters.poke(node)
         sig.lock.unlock()
         rf_sched_park_deadline(timeout_ns)
         sig.lock.lock()
@@ -160,15 +160,15 @@ routine rf_signal_cast_one(sig: @Monitor) -> Void
 routine Monitor.cast_one(me: @Me) -> Void
     block entry()
         me.lock.lock()
-        w: @ChannelWaiter = me.waiters.load()
+        w: @ChannelWaiter = me.waiters.peek()
         branch w.is_null()
             ? thread()
             : continue
-        rf_sched_wake(w.sched.load(), w.coro.load())
+        rf_sched_wake(w.sched.peek(), w.coro.peek())
         jump finish()
 
     block thread()
-        me.cond.wake_one()
+        me.cond.cast_one()
         jump finish()
 
     block finish()
@@ -184,16 +184,16 @@ routine rf_signal_cast_all(sig: @Monitor) -> Void
             ? return()
             : continue
         sig.lock.lock()
-        jump next(sig.waiters.load())
+        jump next(sig.waiters.peek())
 
     block next(w: @ChannelWaiter)
         branch w.is_null()
             ? done()
             : continue
-        rf_sched_wake(w.sched.load(), w.coro.load())
-        jump next(w.next.load())
+        rf_sched_wake(w.sched.peek(), w.coro.peek())
+        jump next(w.next.peek())
 
     block done()
-        sig.cond.wake_all()
+        sig.cond.cast_all()
         sig.lock.unlock()
         return()

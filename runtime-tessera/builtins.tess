@@ -16,7 +16,7 @@ import Standard/Os
 
 #threadlocal
 global EMUTLS: @@EmutlsArray
-global EMUTLS_LOCK: @Mutex
+global EMUTLS_LOCK: @ExclusiveLock
 global EMUTLS_NEXT: @USize
 
 /// compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
@@ -73,7 +73,7 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
     block entry()
         claim p: @Addr <- null
         branch c_posix_memalign(p, align.max(sizeof[Addr]()), size).eq(0)
-            ? return(p.load())
+            ? return(p.peek())
             : return(null)
 
 /// This thread's object for `control`, made (from its initial value, or zeroed) on the thread's first use. The
@@ -85,20 +85,20 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 #export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
     block entry()
-        index: USize = control.index.atomic_load()
+        index: USize = control.index.peek_atomic()
         branch index.eq(0)
             ? assign()
             : array(index)
 
     block assign()
         EMUTLS_LOCK.lock()
-        current: USize = control.index.load()
+        current: USize = control.index.peek()
         branch current.eq(0)
             ? continue
             : assigned(current)
-        next: USize = EMUTLS_NEXT.load().add(1)
-        EMUTLS_NEXT.store(next)
-        control.index.atomic_store(next)
+        next: USize = EMUTLS_NEXT.peek().add(1)
+        EMUTLS_NEXT.poke(next)
+        control.index.poke_atomic(next)
         jump assigned(next)
 
     block assigned(index: USize)
@@ -106,53 +106,53 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
         jump array(index)
 
     block array(index: USize)
-        arr: @EmutlsArray = EMUTLS.load()
+        arr: @EmutlsArray = EMUTLS.peek()
         branch arr.is_null()
             ? fresh(index)
             : sized(arr, index)
 
     block fresh(index: USize)
         made: @EmutlsArray = zeroed[EmutlsArray](1, "Failed to allocate thread-local storage")
-        EMUTLS.store(made)
+        EMUTLS.poke(made)
         jump sized(made, index)
 
     block sized(arr: @EmutlsArray, index: USize)
-        have: USize = arr.size.load()
+        have: USize = arr.size.peek()
         branch have.lt(index)
             ? continue
             : object(arr, index)
-        grown: Addr = c_realloc(arr.data.load(), index.mul(sizeof[Addr]()))
+        grown: Addr = c_realloc(arr.data.peek(), index.mul(sizeof[Addr]()))
         branch grown.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to grow thread-local storage")
             : continue
         c_memset(grown.to[@Byte]().stride(have.mul(sizeof[Addr]())), 0,
             index.sub(have).mul(sizeof[Addr]()))
-        arr.data.store(grown.to[@Addr]())
-        arr.size.store(index)
+        arr.data.poke(grown.to[@Addr]())
+        arr.size.poke(index)
         jump object(arr, index)
 
     block object(arr: @EmutlsArray, index: USize)
-        slot: @Addr = arr.data.load().stride(index.sub(1))
-        obj: Addr = slot.load()
+        slot: @Addr = arr.data.peek().stride(index.sub(1))
+        obj: Addr = slot.peek()
         branch obj.is_null()
             ? make(slot)
             : return(obj)
 
     block make(slot: @Addr)
-        size: USize = control.size.load()
-        made: Addr = aligned_alloc(size, control.align.load())
+        size: USize = control.size.peek()
+        made: Addr = aligned_alloc(size, control.align.peek())
         branch made.is_null()
             ? rf_throw("OutOfMemoryError", "Failed to allocate a thread-local variable")
             : continue
-        init: Addr = control.value.load()
+        init: Addr = control.value.peek()
         branch init.is_null()
             ? zero(slot, made, size)
             : continue
         c_memcpy(made, init, size)
-        slot.store(made)
+        slot.poke(made)
         return(made)
 
     block zero(slot: @Addr, made: Addr, size: USize)
         c_memset(made, 0, size)
-        slot.store(made)
+        slot.poke(made)
         return(made)

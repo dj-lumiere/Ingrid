@@ -46,7 +46,7 @@ preset OUTPUT_BUFFER: USize = 8192
 
 /// What show has written and Out hasn't been given yet, behind a lock (shows come from every thread).
 record OutputBuffer
-    lock: Mutex
+    lock: ExclusiveLock
     bytes: Array[Byte, OUTPUT_BUFFER]
     count: USize
 
@@ -55,7 +55,7 @@ record OutputBuffer
 /// :returns: True when every show is flushed.
 routine is_stdout_interactive() -> Bool
     block entry()
-        cached: CInt = STDOUT_INTERACTIVE.load()
+        cached: CInt = STDOUT_INTERACTIVE.peek()
         branch cached.ge(0)
             ? return(cached.eq(1))
             : continue
@@ -63,7 +63,7 @@ routine is_stdout_interactive() -> Bool
         branch force.is_null()
             ? terminal()
             : continue
-        branch force.load().eq(b'1')
+        branch force.peek().eq(b'1')
             ? decide(true)
             : terminal()
 
@@ -71,18 +71,18 @@ routine is_stdout_interactive() -> Bool
         jump decide(Out.is_terminal())
 
     block decide(interactive: Bool)
-        STDOUT_INTERACTIVE.store(interactive ? 1 : 0)
+        STDOUT_INTERACTIVE.poke(interactive ? 1 : 0)
         return(interactive)
 
 /// Gives Out what the buffer holds and empties it. The caller holds the lock.
 routine OutputBuffer.drain(me: @Me) -> Void
     block entry()
-        n: USize = me.count.load()
+        n: USize = me.count.peek()
         branch n.eq(0)
             ? return()
             : continue
         Out.write_all_result(me.bytes.to[@Byte](), n)
-        me.count.store(0)
+        me.count.poke(0)
         return()
 
 /// Writes `count` bytes to standard output through the shared buffer. When they don't fit, the buffer is drained
@@ -96,7 +96,7 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
 
     block entry()
         out.lock.lock()
-        needed: USize = out.count.load().add(count)
+        needed: USize = out.count.peek().add(count)
         branch needed.gt(OUTPUT_BUFFER)
             ? continue
             : keep()
@@ -111,9 +111,9 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
         jump done()
 
     block keep()
-        out.bytes.to[@Byte]().stride(out.count.load()).copy(ptr, count)
-        next_count: USize = out.count.load().add(count)
-        next_count.store_into(out.count)
+        out.bytes.to[@Byte]().stride(out.count.peek()).copy(ptr, count)
+        next_count: USize = out.count.peek().add(count)
+        next_count.poke_into(out.count)
         jump done()
 
     block done()
@@ -166,7 +166,7 @@ routine terminated_text(text: Bytes) -> @Byte
             ? lost()
             : continue
         terminator: @Byte = buf.to[@Byte]().stride(n)
-        terminator.store(0x00)
+        terminator.poke(0x00)
         return(buf.to[@Byte]())
 
     block lost()
@@ -187,11 +187,11 @@ routine terminated_option(text: Option[Bytes]) -> @Byte
 /// :returns: The line as a NUL-terminated string the caller frees, or null.
 #export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
-    local alloc: @Allocator <- .hollow()
+    local alloc: @MemoryManager <- .hollow()
 
     block entry()
         rf_console_flush()
-        alloc.store(heap())
+        alloc.poke(heap())
         jump next()
 
     block next()
@@ -213,7 +213,7 @@ routine rf_console_ask_line() -> @Byte
 routine rf_console_ask_word() -> @Byte
     block entry()
         rf_console_flush()
-        claim alloc: @Allocator <- heap()
+        claim alloc: @MemoryManager <- heap()
         return(terminated_option(In.read_word_checked(alloc)))
 
 /// Up to `count` bytes from stdin, NUL-terminated. Standard output is flushed first.
@@ -223,7 +223,7 @@ routine rf_console_ask_word() -> @Byte
 routine rf_console_ask_bytes(count: USize) -> @Byte
     block entry()
         rf_console_flush()
-        claim alloc: @Allocator <- heap()
+        claim alloc: @MemoryManager <- heap()
         return(terminated_text(In.read_count(count, alloc)))
 
 /// The rest of stdin, NUL-terminated. Standard output is flushed first.
@@ -232,7 +232,7 @@ routine rf_console_ask_bytes(count: USize) -> @Byte
 routine rf_console_ask_all() -> @Byte
     block entry()
         rf_console_flush()
-        claim alloc: @Allocator <- heap()
+        claim alloc: @MemoryManager <- heap()
         return(terminated_text(In.read_all(alloc)))
 
 // -- the crash report's OS side ------------------------------------------------------
