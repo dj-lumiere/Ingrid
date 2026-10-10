@@ -306,6 +306,46 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
         me.lock.unlock()
         return(sent)
 
+/// Sends one payload only when there is room for it now, never waiting: 1 when sent, 2 when the channel is full,
+/// 0 when it is closed or has no consumer. A rendezvous channel has room while no item waits in it, and the sender
+/// does not wait for a consumer to take the item.
+/// :param chan: The channel, or null.
+/// :param payload: The item to send.
+/// :returns: 1 when sent, 2 when full, 0 when `chan` is null, closed, or has no consumer.
+#export("rf_channel_offer")
+routine rf_channel_offer(chan: @Channel, payload: Addr) -> U32
+    block entry()
+        branch chan.is_null()
+            ? return(0)
+            : continue
+        return(chan.offer(payload))
+
+/// rf_channel_offer on a channel that is there: everything under the lock, which finish gives back.
+/// :param payload: The item to send.
+/// :returns: 1 when sent, 2 when full, 0 when closed or without a consumer.
+routine Channel.offer(me: @Me, payload: Addr) -> U32
+    block entry()
+        me.lock.lock()
+        branch me.closed.load().bitor(me.consumer_refs.load().eq(0))
+            ? finish(0)
+            : continue
+        branch me.count.load().eq(me.slot_cap.load())
+            ? finish(2)
+            : continue
+        cap         : U64   = me.slot_cap.load()
+        linear_tail : U64   = me.head.load().add(me.count.load())
+        tail        : U64   = linear_tail.mod(cap)
+        tail_slot   : @Addr = me.slots.load().stride(tail.to<USize>())
+        tail_slot.store(payload)
+        next_count : U64 = me.count.load().add(1)
+        next_count.store_into(me.count)
+        me.wake_all(me.not_empty_head.load())
+        jump finish(1)
+
+    block finish(result: U32)
+        me.lock.unlock()
+        return(result)
+
 /// Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
 /// was cancelled.
 /// :param chan: The channel, or null.
