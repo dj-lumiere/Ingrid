@@ -784,10 +784,7 @@ routine ResultBuffer.entry(me: @Me, name: Span[Byte], typed: Bool, is_dir: Bool,
     if sep == 1
         me.byte(b'\n')
     if typed
-        kind2: Byte = when
-            is_dir => b'd'
-            else => b'f'
-        me.byte(kind2)
+        me.byte(if is_dir then b'd' else b'f')
         me[digits] = dl
         me.byte(b' ')
     me[name.data] = name.count()
@@ -987,23 +984,20 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
     local p: Span[Byte] = path_of(path, len: path_len)
 
     r: Result[FileHandle, FsError] = File.at(p).open_read_write_result()
-    error: FsError = when r
-        is FileHandle as f =>
-            local f2: @FileHandle <- f
-            set: Result[Unit, FsError] = f2.set_size_result(size.to[U64]())
-            f2.close()
-            return status(set)
-        is FsError as error => error
-    if not (error == FsError.NOT_FOUND)
-        return -1
-    made: Result[FileHandle, FsError] = File.at(p).create_new_result()
-    when made
-        is FileHandle as f =>
-            local f2: @FileHandle <- f
-            set: Result[Unit, FsError] = f2.set_size_result(size.to[U64]())
-            f2.close()
-            return status(set)
-        is FsError => return -1
+    opened: FileHandle = when r
+        is FileHandle as f => f
+        is FsError as error =>
+            if not (error == FsError.NOT_FOUND)
+                return -1
+            made: Result[FileHandle, FsError] = File.at(p).create_new_result()
+            when made
+                is FileHandle as f =>
+                    becomes f
+                is FsError => return -1
+    local f: @FileHandle <- opened
+    set: Result[Unit, FsError] = f.set_size_result(size.to[U64]())
+    f.close()
+    return status(set)
 
 // -- memory-mapped files -----------------------------------------------------------------
 
