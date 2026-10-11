@@ -43,27 +43,23 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> Void
     if me.is_null()
         return
     n: SSize = me.count.peek()
-    if not (n == me.cap.peek())
-        jump put(n)
-    cap: SSize = when
-        n == 0 => 4
-        else => n * 2
-    handles: Addr = c_realloc(ptr: me.handles.peek(), size: cap.to[USize]() * sizeof[Addr]())
-    kinds: Addr = c_realloc(ptr: me.kinds.peek(), size: cap.to[USize]())
-    if handles.is_null() or kinds.is_null()
-        rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
-    me.handles.poke(handles.to[@Addr]())
-    me.kinds.poke(kinds.to[@U8]())
-    me.cap.poke(cap)
-    jump put(n)
-
-    block put(n: SSize)
-        handle_slot: @Addr = me.handles.peek().stride(n)
-        handle_slot.poke(handle)
-        kind_slot: @U8 = me.kinds.peek().stride(n)
-        kind_slot.poke(kind)
-        me.count.poke(n + 1)
-        return
+    if n == me.cap.peek()
+        cap: SSize = when
+            n == 0 => 4
+            else => n * 2
+        handles: Addr = c_realloc(ptr: me.handles.peek(), size: cap.to[USize]() * sizeof[Addr]())
+        kinds: Addr = c_realloc(ptr: me.kinds.peek(), size: cap.to[USize]())
+        if handles.is_null() or kinds.is_null()
+            rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
+        me.handles.poke(handles.to[@Addr]())
+        me.kinds.poke(kinds.to[@U8]())
+        me.cap.poke(cap)
+    handle_slot: @Addr = me.handles.peek().stride(n)
+    handle_slot.poke(handle)
+    kind_slot: @U8 = me.kinds.peek().stride(n)
+    kind_slot.poke(kind)
+    me.count.poke(n + 1)
+    return
 
 /// Adds a coroutine competitor to the race.
 /// :param r: The race.
@@ -106,13 +102,16 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> Void
     each i in 0 til me.count.peek()
         if not me.is_task(i)
             continue
-        task: @Task = me.handle(i).to[@Task]()
-        if on
-            rf_task_race_register(task, s, coro)
-            rf_sched_arm_cross_waker(s)
         else
-            rf_task_race_register(task, s: null, coro: null)
-            rf_sched_disarm_cross_waker(s)
+            task: @Task = me.handle(i).to[@Task]()
+            if on
+                rf_task_race_register(task, s, coro)
+                rf_sched_arm_cross_waker(s)
+                continue
+            else
+                rf_task_race_register(task, s: null, coro: null)
+                rf_sched_disarm_cross_waker(s)
+                continue
     then
         return
 
@@ -124,13 +123,16 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> Void
     each i in 0 til me.count.peek()
         if me.is_task(i) or me.handle(i).is_null()
             continue
-        c: @Coro = me.handle(i).to[@Coro]()
-        if set
-            c.awaiter.poke(awaiter)
         else
-            if not c.awaiter.peek().ptr_eq(awaiter)
+            c: @Coro = me.handle(i).to[@Coro]()
+            if set
+                c.awaiter.poke(awaiter)
                 continue
-            c.awaiter.poke(null)
+            else if not c.awaiter.peek().ptr_eq(awaiter)
+                continue
+            else
+                c.awaiter.poke(null)
+                continue
     then
         return
 
@@ -150,7 +152,7 @@ routine Race.winner(me: @Me) -> SSize
                 c: @Coro = me.handle(i).to[@Coro]()
                 if c.is_null()
                     continue with best: best, best_seq: best_seq
-                if is_finished(c)
+                else if is_finished(c)
                     becomes c.completion_seq.peek_atomic()
                 else
                     continue with best: best, best_seq: best_seq

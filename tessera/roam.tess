@@ -167,22 +167,17 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
     weak: U64 = when
         escaped => header.weak.peek_atomic()
         else => header.weak.peek()
-    alone: Bool = count == 1 and weak == 0
-    data: Addr = when
-        alone =>
-            data: Addr = header.data.peek()
-            if header.buffered.peek()
-                remove_candidate(header)
-                becomes data
-            else
-                becomes data
-        else =>
-            world_leave()
-            none: Addr = inttoptr[USize, Addr](0)
-            return none
-    free_header_memory(header)
-    world_leave()
-    return data
+    if count == 1 and weak == 0
+        data: Addr = header.data.peek()
+        if header.buffered.peek()
+            remove_candidate(header)
+        free_header_memory(header)
+        world_leave()
+        return data
+    else
+        world_leave()
+        none: Addr = inttoptr[USize, Addr](0)
+        return none
 
 /// Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
 /// trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
@@ -305,27 +300,29 @@ routine roam_promote(header: @RoamHeader) -> Void
         work.destruct()
         kids.destruct()
         return
-    work.add_last(header)
+    else
+        work.add_last(header)
 
-    until work.is_empty()
-        node: @RoamHeader = work.remove_last().to[@RoamHeader]()
-        if node.escaped.peek_atomic() == 1
-            continue
-        node.holder_task.poke_atomic(0)
-        0.poke_into(node.depth)
-        node.escaped.poke_atomic(1)
-        children(node, kids)
+        until work.is_empty()
+            node: @RoamHeader = work.remove_last().to[@RoamHeader]()
+            if node.escaped.peek_atomic() == 1
+                continue
+            else
+                node.holder_task.poke_atomic(0)
+                0.poke_into(node.depth)
+                node.escaped.poke_atomic(1)
+                children(node, kids)
 
-        n: USize = kids.count()
+                n: USize = kids.count()
 
-        each i in 0 til n
-            work.add_last(kids[i])
+                each i in 0 til n
+                    work.add_last(kids[i])
+                then
+                    continue
         then
-            continue
-    then
-        work.destruct()
-        kids.destruct()
-        return
+            work.destruct()
+            kids.destruct()
+            return
 
 // ── The task-keyed reentrant lock ──────────────────────────────────────────
 
@@ -389,22 +386,61 @@ routine roam_lock_exit(header: @RoamHeader) -> Void
 routine roam_field_offset(i: U64) -> U64
     local header: @RoamHeader <- .hollow()
 
-    field: Addr = when i
-        0 => header.count
-        1 => header.weak
-        2 => header.dead
-        3 => header.escaped
-        4 => header.data
-        5 => header.locked
-        6 => header.holder_task
-        7 => header.depth
-        8 => header.state
-        9 => header.buffered
-        10 => header.trace_hook
-        11 => header.free_hook
-        12 => header.drop_hook
-        13 => header.shape_users
+    when i
+        0 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.count)
+            return place - base
+        1 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.weak)
+            return place - base
+        2 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.dead)
+            return place - base
+        3 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.escaped)
+            return place - base
+        4 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.data)
+            return place - base
+        5 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.locked)
+            return place - base
+        6 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.holder_task)
+            return place - base
+        7 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.depth)
+            return place - base
+        8 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.state)
+            return place - base
+        9 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.buffered)
+            return place - base
+        10 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.trace_hook)
+            return place - base
+        11 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.free_hook)
+            return place - base
+        12 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.drop_hook)
+            return place - base
+        13 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.shape_users)
+            return place - base
         else => return U64.MAX
-    base: U64 = ptrtoint[Addr, U64](header)
-    place: U64 = ptrtoint[Addr, U64](field)
-    return place - base

@@ -169,9 +169,10 @@ routine rf_coro_create(entry: Callable[(Addr,), Void], userdata: Addr, stack_siz
     if stack.is_null()
         c_free(coro)
         rf_throw(error_type: "OutOfMemoryError", message: "Failed to reserve coroutine stack (out of address space or commit limit)")
-    coro.stack.poke(stack)
-    coro.sp.poke(initial_stack(stack: stack.to[@Byte](), size: reserve, entry: coro_trampoline.addr()))
-    return coro
+    else
+        coro.stack.poke(stack)
+        coro.sp.poke(initial_stack(stack: stack.to[@Byte](), size: reserve, entry: coro_trampoline.addr()))
+        return coro
 
 /// Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
 /// :param coro: The coroutine to run.
@@ -253,10 +254,8 @@ routine rf_coro_delete(coro: @Coro) -> Void
     if coro.is_null()
         return
     stack: Addr = coro.stack.peek()
-    if stack.is_null()
-        c_free(coro)
-        return
-    stack_free(stack)
+    if not stack.is_null()
+        stack_free(stack)
     c_free(coro)
     return
 
@@ -312,17 +311,17 @@ routine rf_coro_abandon(coro: @Coro) -> Void
         // Stamped like a completion, so a cancelled coroutine that finished first still wins a race!.
         rf_coro_delete(coro)
         return
-    if coro.completion_seq.peek_atomic() == U64.MAX
-        coro.completion_seq.poke_atomic(next_completion_seq())
-    coro.status.poke_atomic(CORO_CANCELLED)
+    else
+        if coro.completion_seq.peek_atomic() == U64.MAX
+            coro.completion_seq.poke_atomic(next_completion_seq())
+        coro.status.poke_atomic(CORO_CANCELLED)
 
-    until f.is_null() with f: @CancelFrame = coro.cf_top.peek()
-        prev: @CancelFrame = f.prev.peek()
-        destroy: Callable[(Addr,), Void] = f.destroy_fn.peek()
-        if destroy.addr().is_null()
+        until f.is_null() with f: @CancelFrame = coro.cf_top.peek()
+            prev: @CancelFrame = f.prev.peek()
+            destroy: Callable[(Addr,), Void] = f.destroy_fn.peek()
+            if not destroy.addr().is_null()
+                destroy.call(f.value_ptr.peek())
             continue with f: prev
-        destroy.call(f.value_ptr.peek())
-        continue with f: prev
-    coro.cf_top.poke(null)
-    rf_coro_delete(coro)
-    return
+        coro.cf_top.poke(null)
+        rf_coro_delete(coro)
+        return

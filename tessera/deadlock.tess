@@ -40,20 +40,21 @@ private routine rf_crash_exit() -> Void
 /// :returns: True when the detector is on.
 routine is_detector_on() -> Bool
     state: U8 = DETECTOR.peek_atomic()
-    on: Bool = when
-        state == 0 =>
-            value: @Byte = c_getenv("RF_DEADLOCK_DETECT")
-            if value.is_null()
-                becomes false
-            first: Byte = value.peek()
-            off: Bool = first == 0x00 or first == b'0'
-            becomes not off
-        else => return state == 2
-    state2: U8 = when
-        on => 2
-        else => 1
-    DETECTOR.poke_atomic(state2)
-    return on
+    if state == 0
+        value: @Byte = c_getenv("RF_DEADLOCK_DETECT")
+        on: Bool = when
+            value.is_null() => false
+            else =>
+                first: Byte = value.peek()
+                off: Bool = first == 0x00 or first == b'0'
+                becomes not off
+        state2: U8 = when
+            on => 2
+            else => 1
+        DETECTOR.poke_atomic(state2)
+        return on
+    else
+        return state == 2
 
 /// The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
 /// :param task: The waiting task's id.
@@ -109,13 +110,14 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> Void
             if at >= WAIT_SLOTS
                 WAITS_LOCK.unlock()
                 return
-            next: U64 = WAITS.getslot(at).holder.peek()
-            if next == waiter
-                WAITS_LOCK.unlock()
-                Err.write("runtime error: Roamed lock deadlock: task {waiter} and task {other} took the same escaped entities in opposite order. Take shared entities in one consistent order.\n")
-                rf_crash_exit()
             else
-                continue with current: next
+                next: U64 = WAITS.getslot(at).holder.peek()
+                if next == waiter
+                    WAITS_LOCK.unlock()
+                    Err.write("runtime error: Roamed lock deadlock: task {waiter} and task {other} took the same escaped entities in opposite order. Take shared entities in one consistent order.\n")
+                    rf_crash_exit()
+                else
+                    continue with current: next
         then
             WAITS_LOCK.unlock()
             return

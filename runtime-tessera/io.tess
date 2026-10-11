@@ -181,8 +181,9 @@ routine rf_io_runtime_init() -> Void
         if not (i == IO_THREADS)
             DEFAULT_THREADS.launch_unwatched(entry: io_thread_main.to[Callable](), arg: IO_LOCK)
             continue with i: i + 1
-        IO_OK.poke(1)
-        return
+        else
+            IO_OK.poke(1)
+            return
 
 /// Appends a request to the I/O queue and wakes one I/O thread.
 /// :param req: The request.
@@ -192,11 +193,8 @@ routine io_submit(req: @IoReq) -> Void
     tail: @IoReq = IO_TAIL.peek()
     if tail.is_null()
         IO_HEAD.poke(req)
-        IO_TAIL.poke(req)
-        IO_WORK.cast_one()
-        IO_LOCK.unlock()
-        return
-    tail.qnext.poke(req)
+    else
+        tail.qnext.poke(req)
     IO_TAIL.poke(req)
     IO_WORK.cast_one()
     IO_LOCK.unlock()
@@ -206,20 +204,18 @@ routine io_submit(req: @IoReq) -> Void
 /// parked, else here. The one park pairs with the I/O thread's one wake, which may come first.
 /// :param req: The request.
 routine io_run(req: @IoReq) -> Void
-    if not (IO_OK.peek() == 1)
-        io_do_work(req)
-        return
-    sched: @Sched = rf_sched_current()
-    this_coro: @Coro = current_coro()
-    if sched.is_null() or this_coro.is_null()
-        io_do_work(req)
-        return
-    req.sched.poke(sched)
-    req.coro.poke(this_coro)
-    rf_sched_arm_cross_waker(sched)
-    io_submit(req)
-    rf_sched_park_external()
-    rf_sched_disarm_cross_waker(sched)
+    if IO_OK.peek() == 1
+        sched: @Sched = rf_sched_current()
+        this_coro: @Coro = current_coro()
+        if not (sched.is_null() or this_coro.is_null())
+            req.sched.poke(sched)
+            req.coro.poke(this_coro)
+            rf_sched_arm_cross_waker(sched)
+            io_submit(req)
+            rf_sched_park_external()
+            rf_sched_disarm_cross_waker(sched)
+            return
+    io_do_work(req)
     return
 
 /// A new request of `kind` on a copy of `path`, its result -1 until the work runs.
@@ -255,8 +251,9 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     if result < 0
         IO_LAST_LEN.poke(0)
         return null
-    IO_LAST_LEN.poke(result.to[U64]())
-    return data
+    else
+        IO_LAST_LEN.poke(result.to[U64]())
+        return data
 
 /// Writes data_len bytes of data to the file (truncating it): the bytes written, or -1. The payload is copied, so
 /// the caller's buffer needn't outlive the call. A negative `data_len` writes nothing.
@@ -496,18 +493,16 @@ routine proc_state_free(st: @ProcState) -> Void
 routine terminated(b: Memory[Byte]) -> @Byte
     local held: @Memory[Byte] <- b
 
-    if b.data.is_null()
-        held.drop()
-        return null
-    n: USize = b.count()
-    buf: Addr = c_malloc(n + 1)
-    if buf.is_null()
-        held.drop()
-        return null
-    c_memcpy(buf, b.data, n)
-    buf.to[@Byte]().stride(n).poke(0x00)
+    if not b.data.is_null()
+        n: USize = b.count()
+        buf: Addr = c_malloc(n + 1)
+        if not buf.is_null()
+            c_memcpy(buf, b.data, n)
+            buf.to[@Byte]().stride(n).poke(0x00)
+            held.drop()
+            return buf.to[@Byte]()
     held.drop()
-    return buf.to[@Byte]()
+    return null
 
 /// Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the
 /// exit status, the signal that stopped it, or that it couldn't start.
@@ -597,18 +592,14 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
     if b.is_null()
         return
     n: USize = b.arg_count.peek()
-    if n < b.arg_cap.peek()
-        slot: @Span[Byte] = b.args.peek().stride(n)
-        slot.poke(owned_copy(s: arg, n: arg_len))
-        b.arg_count.poke(n + 1)
-        return
-    doubled: USize = b.arg_cap.peek() * 2
-    cap: USize = doubled.max(4)
-    bigger: Addr = c_realloc(ptr: b.args.peek(), size: cap * sizeof[Span[Byte]]())
-    if bigger.is_null()
-        return
-    b.args.poke(bigger.to[@Span[Byte]]())
-    b.arg_cap.poke(cap)
+    if not (n < b.arg_cap.peek())
+        doubled: USize = b.arg_cap.peek() * 2
+        cap: USize = doubled.max(4)
+        bigger: Addr = c_realloc(ptr: b.args.peek(), size: cap * sizeof[Span[Byte]]())
+        if bigger.is_null()
+            return
+        b.args.poke(bigger.to[@Span[Byte]]())
+        b.arg_cap.poke(cap)
     slot: @Span[Byte] = b.args.peek().stride(n)
     slot.poke(owned_copy(s: arg, n: arg_len))
     b.arg_count.poke(n + 1)
@@ -639,18 +630,14 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
     if b.is_null()
         return
     n: USize = b.env_count.peek()
-    if n < b.env_cap.peek()
-        slot: @EnvVar = b.env.peek().stride(n)
-        slot.poke(EnvVar(name: owned_copy(s: key, n: key_len), value: owned_copy(s: val, n: val_len)))
-        b.env_count.poke(n + 1)
-        return
-    doubled: USize = b.env_cap.peek() * 2
-    cap: USize = doubled.max(4)
-    bigger: Addr = c_realloc(ptr: b.env.peek(), size: cap * sizeof[EnvVar]())
-    if bigger.is_null()
-        return
-    b.env.poke(bigger.to[@EnvVar]())
-    b.env_cap.poke(cap)
+    if not (n < b.env_cap.peek())
+        doubled: USize = b.env_cap.peek() * 2
+        cap: USize = doubled.max(4)
+        bigger: Addr = c_realloc(ptr: b.env.peek(), size: cap * sizeof[EnvVar]())
+        if bigger.is_null()
+            return
+        b.env.poke(bigger.to[@EnvVar]())
+        b.env_cap.poke(cap)
     slot: @EnvVar = b.env.peek().stride(n)
     slot.poke(EnvVar(name: owned_copy(s: key, n: key_len), value: owned_copy(s: val, n: val_len)))
     b.env_count.poke(n + 1)

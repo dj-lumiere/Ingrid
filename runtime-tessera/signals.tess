@@ -69,10 +69,11 @@ routine invoke(e: HandlerEntry) -> Void
         call: Callable[(Addr, Addr), Void] = slot.to[@Callable[(Addr, Addr), Void]]().peek()
         call.call(e.box, e.ctx)
         return
-    local plain: @Addr <- fn
-    call: Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().peek()
-    call.call(e.box)
-    return
+    else
+        local plain: @Addr <- fn
+        call: Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().peek()
+        call.call(e.box)
+        return
 
 /// Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
 /// can't be allocated, no handler runs.
@@ -80,24 +81,22 @@ routine invoke(e: HandlerEntry) -> Void
 routine dispatch(list: @HandlerList) -> Void
     SIGNALS_LOCK.lock()
     n: USize = list.count.peek()
-    if n == 0
-        SIGNALS_LOCK.unlock()
-        return
-    bytes: USize = n * sizeof[HandlerEntry]()
-    snapshot: Addr = c_malloc(bytes)
-    if snapshot.is_null()
-        SIGNALS_LOCK.unlock()
-        return
-    c_memcpy(snapshot, list.items.peek(), bytes)
+    if not (n == 0)
+        bytes: USize = n * sizeof[HandlerEntry]()
+        snapshot: Addr = c_malloc(bytes)
+        if not snapshot.is_null()
+            c_memcpy(snapshot, list.items.peek(), bytes)
+            SIGNALS_LOCK.unlock()
+
+            snapshot2: @HandlerEntry = snapshot.to[@HandlerEntry]()
+
+            each i in 0 til n
+                invoke(snapshot2.stride(i).peek())
+            then
+                c_free(snapshot2)
+                return
     SIGNALS_LOCK.unlock()
-
-    snapshot2: @HandlerEntry = snapshot.to[@HandlerEntry]()
-
-    each i in 0 til n
-        invoke(snapshot2.stride(i).peek())
-    then
-        c_free(snapshot2)
-        return
+    return
 
 /// Runs the handlers of one signal.
 /// :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
@@ -114,21 +113,17 @@ routine dispatch_which(which: S32) -> Void
 routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
     local n: USize = me.count.peek()
 
-    if not (n == me.cap.peek())
+    if n == me.cap.peek()
+        cap: USize = me.cap.peek()
+        ncap: USize = when
+            cap == 0 => 4
+            else => cap * 2
+        grown: Addr = c_realloc(ptr: me.items.peek(), size: ncap * sizeof[HandlerEntry]())
         // out of memory: the registration is dropped, as registration is best-effort
-        slot: @HandlerEntry = me.items.peek().stride(n)
-        slot.poke(entry)
-        me.count.poke(n + 1)
-        return
-    cap: USize = me.cap.peek()
-    ncap: USize = when
-        cap == 0 => 4
-        else => cap * 2
-    grown: Addr = c_realloc(ptr: me.items.peek(), size: ncap * sizeof[HandlerEntry]())
-    if grown.is_null()
-        return
-    me.items.poke(grown.to[@HandlerEntry]())
-    me.cap.poke(ncap)
+        if grown.is_null()
+            return
+        me.items.poke(grown.to[@HandlerEntry]())
+        me.cap.poke(ncap)
     slot: @HandlerEntry = me.items.peek().stride(n)
     slot.poke(entry)
     me.count.poke(n + 1)
@@ -144,10 +139,8 @@ routine register_entry(which: S32, entry: HandlerEntry) -> Void
         which == SIG_TERMINATE => TERMINATE_HANDLERS
         else => INTERRUPT_HANDLERS
     list.append(entry)
-    if SIGNALS_INSTALLED.peek()
-        SIGNALS_LOCK.unlock()
-        return
-    install_signal_dispatch()
+    if not SIGNALS_INSTALLED.peek()
+        install_signal_dispatch()
     SIGNALS_LOCK.unlock()
     return
 
@@ -345,7 +338,7 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
         if rc2 == 1
             dispatch_which(code.peek().to[S32]())
             continue
-        if rc2 < 0 and errno() == 4
+        else if rc2 < 0 and errno() == 4
             continue
         else
             return

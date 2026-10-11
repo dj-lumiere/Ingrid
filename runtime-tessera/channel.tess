@@ -159,12 +159,9 @@ routine rf_channel_drop_feeder(chan: @Channel) -> Void
     left: U32 = refs -^ 1
     chan.producer_refs.poke(left)
     last: Bool = chan.is_last_drop(refs)
-    if not ((left == 0) & ~chan.closed.peek())
-        chan.lock.unlock()
-        chan.free_if(last)
-        return
-    chan.closed.poke(true)
-    chan.cast_all(chan.not_empty_head.peek())
+    if (left == 0) & ~chan.closed.peek()
+        chan.closed.poke(true)
+        chan.cast_all(chan.not_empty_head.peek())
     chan.lock.unlock()
     chan.free_if(last)
     return
@@ -181,11 +178,8 @@ routine rf_channel_drop_consumer(chan: @Channel) -> Void
     left: U32 = refs -^ 1
     chan.consumer_refs.poke(left)
     last: Bool = chan.is_last_drop(refs)
-    if not (left == 0)
-        chan.lock.unlock()
-        chan.free_if(last)
-        return
-    chan.cast_all(chan.not_full_head.peek())
+    if left == 0
+        chan.cast_all(chan.not_full_head.peek())
     chan.lock.unlock()
     chan.free_if(last)
     return
@@ -197,12 +191,10 @@ routine rf_channel_close(chan: @Channel) -> Void
     if chan.is_null()
         return
     chan.lock.lock()
-    if chan.closed.peek()
-        chan.lock.unlock()
-        return
-    chan.closed.poke(true)
-    chan.cast_all(chan.not_empty_head.peek())
-    chan.cast_all(chan.not_full_head.peek())
+    if not chan.closed.peek()
+        chan.closed.poke(true)
+        chan.cast_all(chan.not_empty_head.peek())
+        chan.cast_all(chan.not_full_head.peek())
     chan.lock.unlock()
     return
 
@@ -230,15 +222,16 @@ routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> Void
             return
         me.lock.unlock()
         rf_throw(error_type: "DeadlockError", message: "this thread waits on a channel, and no other work is running that could send to it, take from it or close it: what it waits for is held right here. Close or let go of the sender before reading the channel to its end (`tx.close()`, or let the sender end), or start the work that sends before waiting.")
-    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a channel waiter")
-    node.poke(ChannelWaiter(sched: sched, coro: coro, next: list.peek()))
-    list.poke(node)
-    me.lock.unlock()
-    rf_sched_park_external()
-    me.lock.lock()
-    unlink(list, node)
-    c_free(node)
-    return
+    else
+        node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a channel waiter")
+        node.poke(ChannelWaiter(sched: sched, coro: coro, next: list.peek()))
+        list.poke(node)
+        me.lock.unlock()
+        rf_sched_park_external()
+        me.lock.lock()
+        unlink(list, node)
+        c_free(node)
+        return
 
 /// Removes `node` from a list of parked coroutines, if it is there.
 /// :param list: The list's head.
@@ -250,9 +243,10 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> Void
             return
         if not w2.ptr_eq(node)
             continue with at: w2.next
-        at.poke(node.next.peek())
-        node.next.poke(null)
-        return
+        else
+            at.poke(node.next.peek())
+            node.next.poke(null)
+            return
 
 /// Sends one payload: 1, or 0 when the channel is closed or has no consumer. Waits while it is full, and for a
 /// rendezvous until a consumer took the item. A cancelled agent stops waiting.
@@ -277,27 +271,30 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
             // A rendezvous: not over until this item was taken.
             me.lock.unlock()
             return 0
-        me.wait(me.not_full_head)
+        else
+            me.wait(me.not_full_head)
+            continue
     if me.closed.peek() | (me.consumer_refs.peek() == 0)
         me.lock.unlock()
         return 0
-    cap: U64 = me.slot_cap.peek()
-    linear_tail: U64 = me.head.peek() + me.count.peek()
-    tail: U64 = linear_tail % cap
-    tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
-    tail_slot.poke(payload)
-    next_count: U64 = me.count.peek() + 1
-    next_count.poke_into(me.count)
-    me.cast_all(me.not_empty_head.peek())
-    if me.capacity.peek() == 0
-        until not ((me.count.peek() > 0) & ~me.closed.peek() & (me.consumer_refs.peek() > 0)) or not (rf_cancel_requested() == 0)
-            me.wait(me.not_full_head)
-        then
+    else
+        cap: U64 = me.slot_cap.peek()
+        linear_tail: U64 = me.head.peek() + me.count.peek()
+        tail: U64 = linear_tail % cap
+        tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
+        tail_slot.poke(payload)
+        next_count: U64 = me.count.peek() + 1
+        next_count.poke_into(me.count)
+        me.cast_all(me.not_empty_head.peek())
+        if me.capacity.peek() == 0
+            until not ((me.count.peek() > 0) & ~me.closed.peek() & (me.consumer_refs.peek() > 0)) or not (rf_cancel_requested() == 0)
+                me.wait(me.not_full_head)
+            then
+                me.lock.unlock()
+                return 1
+        else
             me.lock.unlock()
             return 1
-    else
-        me.lock.unlock()
-        return 1
 
 /// Sends one payload only when there is room for it now, never waiting: 1 when sent, 2 when the channel is full,
 /// 0 when it is closed or has no consumer. A rendezvous channel has room while no item waits in it, and the sender
@@ -316,22 +313,23 @@ routine rf_channel_offer(chan: @Channel, payload: Addr) -> U32
 /// :returns: 1 when sent, 2 when full, 0 when closed or without a consumer.
 routine Channel.offer(me: @Me, payload: Addr) -> U32
     me.lock.lock()
-    if me.closed.peek() | (me.consumer_refs.peek() == 0)
-        me.lock.unlock()
-        return 0
-    if me.count.peek() == me.slot_cap.peek()
-        me.lock.unlock()
-        return 2
-    cap: U64 = me.slot_cap.peek()
-    linear_tail: U64 = me.head.peek() + me.count.peek()
-    tail: U64 = linear_tail % cap
-    tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
-    tail_slot.poke(payload)
-    next_count: U64 = me.count.peek() + 1
-    next_count.poke_into(me.count)
-    me.cast_all(me.not_empty_head.peek())
+    result: U32 = when
+        me.closed.peek() | (me.consumer_refs.peek() == 0) => 0
+        else =>
+            if me.count.peek() == me.slot_cap.peek()
+                becomes 2
+            else
+                cap: U64 = me.slot_cap.peek()
+                linear_tail: U64 = me.head.peek() + me.count.peek()
+                tail: U64 = linear_tail % cap
+                tail_slot: @Addr = me.slots.peek().stride(tail.to[USize]())
+                tail_slot.poke(payload)
+                next_count: U64 = me.count.peek() + 1
+                next_count.poke_into(me.count)
+                me.cast_all(me.not_empty_head.peek())
+                becomes 1
     me.lock.unlock()
-    return 1
+    return result
 
 /// Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
 /// was cancelled.
@@ -352,20 +350,23 @@ routine Channel.next(me: @Me) -> Addr
         if not (rf_cancel_requested() == 0)
             me.lock.unlock()
             return null
-        me.wait(me.not_empty_head)
+        else
+            me.wait(me.not_empty_head)
+            continue
     if me.count.peek() == 0
         me.lock.unlock()
         return null
-    head: U64 = me.head.peek()
-    slot: @Addr = me.slots.peek().stride(head.to[USize]())
-    payload: Addr = slot.peek()
-    slot.poke(null)
-    me.head.poke((head + 1) % me.slot_cap.peek())
-    remaining_count: U64 = me.count.peek() - 1
-    remaining_count.poke_into(me.count)
-    me.cast_all(me.not_full_head.peek())
-    me.lock.unlock()
-    return payload
+    else
+        head: U64 = me.head.peek()
+        slot: @Addr = me.slots.peek().stride(head.to[USize]())
+        payload: Addr = slot.peek()
+        slot.poke(null)
+        me.head.poke((head + 1) % me.slot_cap.peek())
+        remaining_count: U64 = me.count.peek() - 1
+        remaining_count.poke_into(me.count)
+        me.cast_all(me.not_full_head.peek())
+        me.lock.unlock()
+        return payload
 
 /// The number of items waiting in the channel.
 /// :param chan: The channel, or null.

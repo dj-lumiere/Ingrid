@@ -26,9 +26,8 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
         c_high => DecExact(neg: pneg, coeff: pc, exp: pe, pref: 0)
         else => DecExact(neg: c.neg, coeff: cc, exp: c.exp, pref: 0)
 
-    both_zero: Bool = pc == 0 and cc == 0
-    values2: (U256, U256, Bool, S64) = when
-        both_zero =>
+    when
+        pc == 0 and cc == 0 =>
             // (+0) + (+0) and (-0) + (-0) keep their sign, mixed signs give +0
             e: S64 = pe.min(c.exp)
             return (neg: pneg & c.neg, coeff: 0, exp: e, pref: e)
@@ -38,33 +37,34 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
             // h: the addend with the larger exponent, l: the other
             shift: S64 = h.exp - l.exp
             hd: S64 = dec_digits256(h.coeff)
-            if hd + shift <= 75
-                becomes (h.coeff * dec_p10(shift), l.coeff, false, l.exp)
-            else
-                k: S64 = 75 - hd
-                high: U256 = h.coeff * dec_p10(k)
-                drop: S64 = shift - k
-                if drop > 76
-                    becomes (high, 0, l.coeff != 0, h.exp - k)
-                else
-                    q: U256 = dec_div_p10_256(x: l.coeff, k: drop)
-                    becomes (high, q, q *% dec_p10(drop) != l.coeff, h.exp - k)
-    hc, lc, sticky, e = values2
-    same: Bool = h.neg == l.neg
-    down: Bool = hc >= lc
-    values3: (U256, Bool, S64, Bool) = when
-        same => (hc + lc, h.neg, l.exp, false)
-        down => (hc - lc, h.neg, l.exp, true)
-        else => (lc - hc, l.neg, l.exp, true)
-    r, neg, pref, minus = values3
-    when
-        r == 0 and not sticky => return (neg: false, coeff: 0, exp: e, pref: pref)
-        sticky =>
-            less: U256 = when
-                minus => r -% 1
-                else => r
-            return (neg: neg, coeff: less * 10 + 1, exp: e - 1, pref: pref)
-        else => return (neg: neg, coeff: r, exp: e, pref: pref)
+            fits: Bool = hd + shift <= 75
+            values2: (U256, U256, Bool, S64) = when
+                fits => (h.coeff * dec_p10(shift), l.coeff, false, l.exp)
+                else =>
+                    k: S64 = 75 - hd
+                    high: U256 = h.coeff * dec_p10(k)
+                    drop: S64 = shift - k
+                    if drop > 76
+                        becomes (high, 0, l.coeff != 0, h.exp - k)
+                    else
+                        q: U256 = dec_div_p10_256(x: l.coeff, k: drop)
+                        becomes (high, q, q *% dec_p10(drop) != l.coeff, h.exp - k)
+            hc, lc, sticky, e = values2
+            same: Bool = h.neg == l.neg
+            down: Bool = hc >= lc
+            values3: (U256, Bool, S64, Bool) = when
+                same => (hc + lc, h.neg, l.exp, false)
+                down => (hc - lc, h.neg, l.exp, true)
+                else => (lc - hc, l.neg, l.exp, true)
+            r, neg, pref, minus = values3
+            when
+                r == 0 and not sticky => return (neg: false, coeff: 0, exp: e, pref: pref)
+                sticky =>
+                    less: U256 = when
+                        minus => r -% 1
+                        else => r
+                    return (neg: neg, coeff: less * 10 + 1, exp: e - 1, pref: pref)
+                else => return (neg: neg, coeff: r, exp: e, pref: pref)
 
 /// a × b + c rounded once to f. An infinity or a NaN gives what IEEE 754 says: a NaN in, or an infinity times zero,
 /// or infinities of opposite sign meeting, gives a NaN.
@@ -512,22 +512,31 @@ routine dec_from_dpd(bits: U128, width: U32) -> Dec
     kind: U8 = when
         signaling => DEC_SNAN
         else => DEC_QNAN
-    values2: (U128, U128) = when
+    when
         combo == 0x1E => return dec_inf(neg)
         combo == 0x1F => return (neg: neg, kind: kind, exp: 0, coeff: 0)
-        combo < 0x18 => (combo >> 3, combo & 7)
-        else => ((combo >> 1) & 3, (combo & 1) + 8)
-    ehi, msd = values2
-    elo: U128 = (bits >> top - 6 - cont) & U128.shl(1, cont) - 1
-    e: U128 = (ehi << cont) | elo
-    bias: S64 = dec_bias(width)
-
-    // the declets, highest first
-    exp: S64 = e.to[S64]() - bias
-    while left != 0 with left: U128 = declets, c: U128 = msd
-        i: U128 = left - 1
-        code: U128 = (bits >> i * 10) & 0x3FF
-        group: U128 = DEC_DPD_TO_BIN.getitem(code.to[USize]()).to[U128]()
-        continue with left: i, c: c * 1000 + group
-    then
-        return dec_num(neg, coeff: c, exp)
+        combo < 0x18 =>
+            elo: U128 = (bits >> top - 6 - cont) & U128.shl(1, cont) - 1
+            e: U128 = ((combo >> 3) << cont) | elo
+            bias: S64 = dec_bias(width)
+            // the declets, highest first
+            exp: S64 = e.to[S64]() - bias
+            while left != 0 with left: U128 = declets, c: U128 = combo & 7
+                i: U128 = left - 1
+                code: U128 = (bits >> i * 10) & 0x3FF
+                group: U128 = DEC_DPD_TO_BIN.getitem(code.to[USize]()).to[U128]()
+                continue with left: i, c: c * 1000 + group
+            then
+                return dec_num(neg, coeff: c, exp)
+        else =>
+            elo: U128 = (bits >> top - 6 - cont) & U128.shl(1, cont) - 1
+            e: U128 = (((combo >> 1) & 3) << cont) | elo
+            bias: S64 = dec_bias(width)
+            exp: S64 = e.to[S64]() - bias
+            while left != 0 with left: U128 = declets, c: U128 = (combo & 1) + 8
+                i: U128 = left - 1
+                code: U128 = (bits >> i * 10) & 0x3FF
+                group: U128 = DEC_DPD_TO_BIN.getitem(code.to[USize]()).to[U128]()
+                continue with left: i, c: c * 1000 + group
+            then
+                return dec_num(neg, coeff: c, exp)

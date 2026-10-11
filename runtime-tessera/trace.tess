@@ -305,11 +305,11 @@ routine print_platform_stack(fault: U64) -> Void
             n: CInt = i - 2
             address: Addr = stack.stride(i.to[USize]()).peek()
             Err.write("  {n}: {address}\n")
-            continue
-        n: CInt = i - 2
-        text: @Byte = symbols.stride(i.to[USize]()).peek()
-        line: Span[Byte] = text.to[CStr]().getview()
-        Err.write("  {n}: {line}\n")
+        else
+            n: CInt = i - 2
+            text: @Byte = symbols.stride(i.to[USize]()).peek()
+            line: Span[Byte] = text.to[CStr]().getview()
+            Err.write("  {n}: {line}\n")
     c_free(symbols)
     return
 
@@ -392,16 +392,17 @@ routine exception_handler(pointers: @Addr) -> CInt
         size: U64 = span.to[U64]()
         report.call(size)
         return 0
-    if TRACE_MODE.peek() == TRACE_NONE
+    else
+        if TRACE_MODE.peek() == TRACE_NONE
+            return 0
+        name: Span[Byte] = exception_name(code).getview()
+        rf_console_flush()
+        Err.write("[91m\n{name} (code 0x")
+        write_hex(value: code.to[U64](), digits: 8, upper: true)
+        Err.write(")\n[0m")
+        fault: U64 = exception.to[@Byte]().stride(EXCEPTION_ADDRESS).to[@U64]().peek()
+        print_platform_stack(fault)
         return 0
-    name: Span[Byte] = exception_name(code).getview()
-    rf_console_flush()
-    Err.write("[91m\n{name} (code 0x")
-    write_hex(value: code.to[U64](), digits: 8, upper: true)
-    Err.write(")\n[0m")
-    fault: U64 = exception.to[@Byte]().stride(EXCEPTION_ADDRESS).to[@U64]().peek()
-    print_platform_stack(fault)
-    return 0
 
 /// The name of a Windows exception code.
 /// :param code: The exception code.
@@ -463,13 +464,10 @@ routine sigbus() -> CInt
 /// :param signo: The signal that came.
 @target(os: not "windows")
 routine fault_handler(signo: CInt) -> Void
-    if TRACE_MODE.peek() == TRACE_NONE
-        c_signal(signo, null)
-        c_raise(signo)
-        return
-    name: Span[Byte] = signal_name(signo).getview()
-    Err.write("[91m\n{name}\n[0m")
-    print_platform_stack(0)
+    if not (TRACE_MODE.peek() == TRACE_NONE)
+        name: Span[Byte] = signal_name(signo).getview()
+        Err.write("[91m\n{name}\n[0m")
+        print_platform_stack(0)
     c_signal(signo, null)
     c_raise(signo)
     return

@@ -200,31 +200,35 @@ routine Deque.push_bottom(me: @Me, c: @Coro) -> Void
 /// :returns: The coroutine, or null when the deque is empty.
 routine Deque.pop_bottom(me: @Me) -> @Coro
     me.lock.lock()
-    if me.bottom.peek() == me.top.peek()
-        me.lock.unlock()
-        return null
-    b: USize = me.bottom.peek() - 1
-    me.bottom.poke(b)
-    slot: @@Coro = me.slot(b)
-    c: @Coro = slot.peek()
-    slot.poke(null)
+    empty: Bool = me.bottom.peek() == me.top.peek()
+    taken: @Coro = when
+        empty => null
+        else =>
+            b: USize = me.bottom.peek() - 1
+            me.bottom.poke(b)
+            slot: @@Coro = me.slot(b)
+            c: @Coro = slot.peek()
+            slot.poke(null)
+            becomes c
     me.lock.unlock()
-    return c
+    return taken
 
 /// Takes from the thieves' end: the oldest coroutine, or null.
 /// :returns: The coroutine, or null when the deque is empty.
 routine Deque.steal_top(me: @Me) -> @Coro
     me.lock.lock()
-    if me.bottom.peek() == me.top.peek()
-        me.lock.unlock()
-        return null
-    t: USize = me.top.peek()
-    slot: @@Coro = me.slot(t)
-    c: @Coro = slot.peek()
-    slot.poke(null)
-    me.top.poke(t + 1)
+    empty: Bool = me.bottom.peek() == me.top.peek()
+    taken: @Coro = when
+        empty => null
+        else =>
+            t: USize = me.top.peek()
+            slot: @@Coro = me.slot(t)
+            c: @Coro = slot.peek()
+            slot.poke(null)
+            me.top.poke(t + 1)
+            becomes c
     me.lock.unlock()
-    return c
+    return taken
 
 /// Takes c out if it is there, closing the gap: whether it was.
 /// :param c: The coroutine.
@@ -272,9 +276,10 @@ routine Sched.push_injector(me: @Me, c: @Coro) -> Void
         me.injector_head.poke(c)
         me.injector_tail.poke(c)
         return
-    tail.sched_next.poke(c)
-    me.injector_tail.poke(c)
-    return
+    else
+        tail.sched_next.poke(c)
+        me.injector_tail.poke(c)
+        return
 
 /// The injector's head, now RUNNING, or null. The caller holds the scheduler lock.
 /// :returns: The coroutine, or null when the injector is empty.
@@ -302,8 +307,9 @@ routine Sched.enqueue_ready(me: @Me, c: @Coro) -> Void
         c.sched_state.poke_atomic(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return
-    me.push_injector(c)
-    return
+    else
+        me.push_injector(c)
+        return
 
 // -- the timer heap (callers hold the scheduler lock) --------------------------------
 
@@ -353,32 +359,27 @@ routine Sched.timer_sift_down(me: @Me, i: SSize) -> Void
     local l: SSize = i * 2 + 1
     local r: SSize = l + 1
 
-    jump left()
-
-    block left()
-        if not (l < n)
-            jump right(i)
-        left_wake: U64 = me.timer_at(l).wake_ns.peek()
-        if left_wake < me.timer_at(i).wake_ns.peek()
-            jump right(l)
-        else
-            jump right(i)
-
-    block right(m: SSize)
-        if not (r < n)
-            jump pick(m)
-        right_wake: U64 = me.timer_at(r).wake_ns.peek()
-        if right_wake < me.timer_at(m).wake_ns.peek()
-            jump pick(r)
-        else
-            jump pick(m)
-
-    block pick(m: SSize)
-        if m == i
-            return
-        me.timer_swap(i, j: m)
-        me.timer_sift_down(m)
+    m: SSize = when
+        not (l < n) => i
+        else =>
+            left_wake: U64 = me.timer_at(l).wake_ns.peek()
+            if left_wake < me.timer_at(i).wake_ns.peek()
+                becomes l
+            else
+                becomes i
+    m2: SSize = when
+        not (r < n) => m
+        else =>
+            right_wake: U64 = me.timer_at(r).wake_ns.peek()
+            if right_wake < me.timer_at(m).wake_ns.peek()
+                becomes r
+            else
+                becomes m
+    if m2 == i
         return
+    me.timer_swap(i, j: m2)
+    me.timer_sift_down(m2)
+    return
 
 /// Adds `c` to the timer heap by its `wake_ns`, doubling the heap (from 16) when it is full.
 /// :param c: The coroutine.
@@ -415,8 +416,9 @@ routine Sched.timer_pop_min(me: @Me) -> @Coro
         vacated.poke(null)
         me.timer_sift_down(0)
         return top
-    me.timer_heap.peek().poke(null)
-    return top
+    else
+        me.timer_heap.peek().poke(null)
+        return top
 
 /// Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
 /// :param c: The coroutine.
@@ -433,15 +435,16 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> Void
         vacated: @@Coro = me.timer_heap.peek().stride(last)
         vacated.poke(null)
         return
-    moved: @Coro = me.timer_at(last)
-    me.timer_put(i, c: moved)
-    vacated: @@Coro = me.timer_heap.peek().stride(last)
-    vacated.poke(null)
-    me.timer_sift_up(i)
-    if not (moved.timer_idx.peek() == i)
+    else
+        moved: @Coro = me.timer_at(last)
+        me.timer_put(i, c: moved)
+        vacated: @@Coro = me.timer_heap.peek().stride(last)
+        vacated.poke(null)
+        me.timer_sift_up(i)
+        if not (moved.timer_idx.peek() == i)
+            return
+        me.timer_sift_down(i)
         return
-    me.timer_sift_down(i)
-    return
 
 // -- making a coroutine ready ---------------------------------------------------------
 
@@ -499,15 +502,13 @@ routine rf_sched_spawn(s: @Sched, c: @Coro) -> Void
 /// :param c: The coroutine.
 routine Sched.spawn(me: @Me, c: @Coro) -> Void
     me.lock.lock()
-    if c.initial_spawned.peek()
-        me.lock.unlock()
-        return
-    c.initial_spawned.poke(true)
-    c.home.poke(me)
-    me.enqueue_ready(c)
-    next_live: SSize = me.live.peek() + 1
-    next_live.poke_into(me.live)
-    me.cond.cast_one()
+    if not c.initial_spawned.peek()
+        c.initial_spawned.poke(true)
+        c.home.poke(me)
+        me.enqueue_ready(c)
+        next_live: SSize = me.live.peek() + 1
+        next_live.poke_into(me.live)
+        me.cond.cast_one()
     me.lock.unlock()
     return
 
@@ -547,10 +548,8 @@ routine rf_coro_yield() -> Void
     this_coro: @Coro = current_coro()
     if this_coro.is_null()
         return
-    if current_sched().is_null()
-        coro_switch_out()
-        return
-    this_coro.park_intent.poke(PARK_YIELD)
+    if not current_sched().is_null()
+        this_coro.park_intent.poke(PARK_YIELD)
     coro_switch_out()
     return
 
@@ -565,10 +564,8 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
     s.lock.lock()
     before: U32 = c.sched_state.peek_atomic()
     s.make_ready(c)
-    if not (before == SCHED_IDLE)
-        s.lock.unlock()
-        return
-    s.cond.cast_one()
+    if before == SCHED_IDLE
+        s.cond.cast_one()
     s.lock.unlock()
     return
 
@@ -593,10 +590,8 @@ routine rf_sched_disarm_cross_waker(s: @Sched) -> Void
         return
     s.lock.lock()
     n: SSize = s.cross_wakers.peek()
-    if not (n > 0)
-        s.lock.unlock()
-        return
-    s.cross_wakers.poke(n - 1)
+    if n > 0
+        s.cross_wakers.poke(n - 1)
     s.lock.unlock()
     return
 
@@ -639,12 +634,14 @@ routine Sched.try_steal(me: @Me) -> @Coro
         v: SSize = (offset % n.to[U64]()).to[SSize]()
         if v == worker_id()
             continue
-        victim: @Deque = me.deques.peek().stride(v)
-        c: @Coro = victim.steal_top()
-        if c.is_null()
-            continue
-        c.sched_state.poke_atomic(SCHED_RUNNING)
-        return c
+        else
+            victim: @Deque = me.deques.peek().stride(v)
+            c: @Coro = victim.steal_top()
+            if c.is_null()
+                continue
+            else
+                c.sched_state.poke_atomic(SCHED_RUNNING)
+                return c
     then
         return null
 
@@ -654,52 +651,38 @@ routine Sched.try_steal(me: @Me) -> @Coro
 routine Sched.run_coro(me: @Me, c: @Coro) -> Void
     st: U32 = rf_coro_resume(c)
     if st == CORO_COMPLETED
-        jump completed()
-    else
-        jump parked()
-
-    block completed()
         me.lock.lock()
         c.sched_state.poke_atomic(SCHED_DONE)
-        if c.counted_done.peek()
-            jump awaiter()
-        c.counted_done.poke(true)
-        remaining_live: SSize = me.live.peek() - 1
-        remaining_live.poke_into(me.live)
-        jump awaiter()
-
-    // Whoever waits for this coroutine goes on. A top-level waiter re-checks on block_cond. A waiter spawned on
-    // another scheduler is woken there, after this lock is released, so it never moves to this scheduler.
-    block awaiter()
+        if not c.counted_done.peek()
+            c.counted_done.poke(true)
+            remaining_live: SSize = me.live.peek() - 1
+            remaining_live.poke_into(me.live)
+        // Whoever waits for this coroutine goes on. A top-level waiter re-checks on block_cond. A waiter spawned on
+        // another scheduler is woken there, after this lock is released, so it never moves to this scheduler.
         w: @Coro = c.awaiter.peek()
-        if w.is_null()
-            jump signal(null)
-        c.awaiter.poke(null)
-        home: @Me = w.home.peek()
-        if not (home.is_null() | home.ptr_eq(me))
-            jump signal(w)
-        me.make_ready(w)
-        jump signal(null)
-
-    block signal(away: @Coro)
+        away: @Coro = when
+            w.is_null() => null
+            else =>
+                c.awaiter.poke(null)
+                home: @Me = w.home.peek()
+                if not (home.is_null() | home.ptr_eq(me))
+                    becomes w
+                else
+                    me.make_ready(w)
+                    becomes null
         free_now: Bool = c.owner_released.peek() | c.detached.peek()
         me.cond.cast_one()
         me.block_cond.cast_all()
         me.lock.unlock()
-        if away.is_null()
-            jump release(free_now)
-        rf_sched_wake(s: away.home.peek(), c: away)
-        jump release(free_now)
-
-    block release(free_now: Bool)
+        if not away.is_null()
+            rf_sched_wake(s: away.home.peek(), c: away)
         if not free_now
             return
         rf_coro_delete(c)
         return
-
-    // A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
-    // leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
-    block parked()
+    else
+        // A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
+        // leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
         intent: U32 = c.park_intent.peek()
         c.park_intent.poke(PARK_NONE)
         notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
@@ -707,35 +690,29 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
         deques: @Deque = me.deques.peek()
         has_deque: Bool = id >= 0 and deques.is_not_null()
         if has_deque and (notified or intent == PARK_YIELD)
-            jump requeue_local(id, deques)
+            c.sched_state.poke_atomic(SCHED_QUEUED)
+            deques.stride(id).push_bottom(c)
+            return
         else
-            jump slow(intent)
-
-    block requeue_local(id: SSize, deques: @Deque)
-        c.sched_state.poke_atomic(SCHED_QUEUED)
-        deques.stride(id).push_bottom(c)
-        return
-
-    block slow(intent: U32)
-        me.lock.lock()
-        when
-            c.sched_state.peek_atomic() == SCHED_NOTIFIED => jump ready()
-            intent == PARK_TIMER => jump timer()
-            intent == PARK_YIELD => jump ready()
-            else => jump idle()
-
-    block ready()
-        me.enqueue_ready(c)
-        jump unlock()
-
-    block timer()
-        me.insert_timer(c)
-        c.sched_state.poke_atomic(SCHED_IDLE)
-        jump unlock()
-
-    block idle()
-        c.sched_state.poke_atomic(SCHED_IDLE)
-        jump unlock()
+            me.lock.lock()
+            when
+                c.sched_state.peek_atomic() == SCHED_NOTIFIED =>
+                    me.enqueue_ready(c)
+                    me.lock.unlock()
+                    return
+                intent == PARK_TIMER =>
+                    me.insert_timer(c)
+                    c.sched_state.poke_atomic(SCHED_IDLE)
+                    me.lock.unlock()
+                    return
+                intent == PARK_YIELD =>
+                    me.enqueue_ready(c)
+                    me.lock.unlock()
+                    return
+                else =>
+                    c.sched_state.poke_atomic(SCHED_IDLE)
+                    me.lock.unlock()
+                    return
 
     block unlock()
         me.lock.unlock()
@@ -746,22 +723,18 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> Void
 routine Sched.claim_work(me: @Me) -> @Coro
     id: SSize = worker_id()
     deques: @Deque = me.deques.peek()
-    if not (id >= 0 and deques.is_not_null())
-        jump injector()
-    c: @Coro = deques.stride(id).pop_bottom()
-    if c.is_null()
-        jump injector()
-    c.sched_state.poke_atomic(SCHED_RUNNING)
-    return c
-
-    block injector()
-        me.lock.lock()
-        c: @Coro = me.pop_injector()
-        me.lock.unlock()
-        if c.is_null()
-            return me.try_steal()
-        else
+    if id >= 0 and deques.is_not_null()
+        c: @Coro = deques.stride(id).pop_bottom()
+        if not c.is_null()
+            c.sched_state.poke_atomic(SCHED_RUNNING)
             return c
+    me.lock.lock()
+    c: @Coro = me.pop_injector()
+    me.lock.unlock()
+    if c.is_null()
+        return me.try_steal()
+    else
+        return c
 
 /// Runs one ready coroutine (true), or waits until something may be ready (false). Called with no lock held. Due
 /// timers are moved to the injector while waiting.
@@ -776,76 +749,82 @@ routine Sched.step(me: @Me) -> Bool
         me.lock.lock()
         id: SSize = worker_id()
         deques: @Deque = me.deques.peek()
-        mine: @Coro = deques.stride(id).pop_bottom()
-        mine.sched_state.poke_atomic(SCHED_RUNNING)
-        me.lock.unlock()
-        me.run_coro(mine)
-        return true
+        if id >= 0 and deques.is_not_null()
+            mine: @Coro = deques.stride(id).pop_bottom()
+            if not mine.is_null()
+                mine.sched_state.poke_atomic(SCHED_RUNNING)
+                me.lock.unlock()
+                me.run_coro(mine)
+                return true
+        found_coro: @Coro = me.pop_injector()
+        if found_coro.is_null()
+            found_coro2: @Coro = me.try_steal()
+            if found_coro2.is_null()
+                if me.timer_count.peek() > 0
+                    // A timer pending is progress waiting to happen, never a deadlock: wait out the earliest one.
+                    now: U64 = monotonic_ns()
+                    deadline: U64 = me.timer_at(0).wake_ns.peek()
+                    if deadline > now
+                        more_idle: SSize = me.workers_idle.peek() + 1
+                        more_idle.poke_into(me.workers_idle)
+                        me.cond.wait_until(mutex: me.lock, deadline_ns: deadline)
+                        fewer_idle: SSize = me.workers_idle.peek() - 1
+                        fewer_idle.poke_into(me.workers_idle)
+
+                    now2: U64 = monotonic_ns()
+
+                    while me.timer_count.peek() > 0
+                        earliest_wake: U64 = me.timer_at(0).wake_ns.peek()
+                        if not (earliest_wake <= now2)
+                            // Nothing ready, no timer: only a wake from another thread can help. Without one promised, with someone
+                            // waiting for a coroutine and every other worker idle, it is a deadlock once it persists.
+                            me.lock.unlock()
+                            return false
+                        else
+                            me.push_injector(me.timer_pop_min())
+                            continue
+                    then
+                        me.lock.unlock()
+                        return false
+                else
+                    has_live: Bool = me.live.peek() > 0
+                    pending: Bool = has_live and me.cross_wakers.peek() == 0
+                    awaited: Bool = me.waiters.peek() > 0
+                    idle_with_me: SSize = me.workers_idle.peek() + 1
+                    last: Bool = idle_with_me == me.workers_total.peek()
+                    if pending and awaited and last
+                        confirm: U64 = me.deadlock_confirm.peek() + 1
+                        me.deadlock_confirm.poke(confirm)
+                        if confirm >= DEADLOCK_CONFIRMS
+                            me.lock.unlock()
+                            rf_throw(error_type: "DeadlockError", message: "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
+                        else
+                            more_idle: SSize = me.workers_idle.peek() + 1
+                            more_idle.poke_into(me.workers_idle)
+                            me.cond.wait_for(mutex: me.lock, timeout_ns: DEADLOCK_GRACE_NS)
+                            fewer_idle: SSize = me.workers_idle.peek() - 1
+                            fewer_idle.poke_into(me.workers_idle)
+                            me.lock.unlock()
+                            return false
+                    else
+                        more_idle: SSize = me.workers_idle.peek() + 1
+                        more_idle.poke_into(me.workers_idle)
+                        me.cond.wait(me.lock)
+                        fewer_idle: SSize = me.workers_idle.peek() - 1
+                        fewer_idle.poke_into(me.workers_idle)
+                        me.lock.unlock()
+                        return false
+            else
+                me.lock.unlock()
+                me.run_coro(found_coro2)
+                return true
+        else
+            me.lock.unlock()
+            me.run_coro(found_coro)
+            return true
     else
         me.run_coro(c)
         return true
-    found_coro: @Coro = me.pop_injector()
-    if found_coro.is_null()
-        found_coro2: @Coro = me.try_steal()
-        if found_coro2.is_null()
-            if me.timer_count.peek() > 0
-                // A timer pending is progress waiting to happen, never a deadlock: wait out the earliest one.
-                now: U64 = monotonic_ns()
-                deadline: U64 = me.timer_at(0).wake_ns.peek()
-                more_idle: SSize = me.workers_idle.peek() + 1
-                more_idle.poke_into(me.workers_idle)
-                me.cond.wait_until(mutex: me.lock, deadline_ns: deadline)
-                fewer_idle: SSize = me.workers_idle.peek() - 1
-                fewer_idle.poke_into(me.workers_idle)
-            else
-                // Nothing ready, no timer: only a wake from another thread can help. Without one promised, with someone
-                // waiting for a coroutine and every other worker idle, it is a deadlock once it persists.
-                has_live: Bool = me.live.peek() > 0
-                pending: Bool = has_live and me.cross_wakers.peek() == 0
-                awaited: Bool = me.waiters.peek() > 0
-                idle_with_me: SSize = me.workers_idle.peek() + 1
-                last: Bool = idle_with_me == me.workers_total.peek()
-                if pending and awaited and last
-                    confirm: U64 = me.deadlock_confirm.peek() + 1
-                    me.deadlock_confirm.poke(confirm)
-                    if confirm >= DEADLOCK_CONFIRMS
-                        me.lock.unlock()
-                        rf_throw(error_type: "DeadlockError", message: "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
-                    more_idle: SSize = me.workers_idle.peek() + 1
-                    more_idle.poke_into(me.workers_idle)
-                    me.cond.wait_for(mutex: me.lock, timeout_ns: DEADLOCK_GRACE_NS)
-                    fewer_idle: SSize = me.workers_idle.peek() - 1
-                    fewer_idle.poke_into(me.workers_idle)
-                    me.lock.unlock()
-                    return false
-                else
-                    more_idle: SSize = me.workers_idle.peek() + 1
-                    more_idle.poke_into(me.workers_idle)
-                    me.cond.wait(me.lock)
-                    fewer_idle: SSize = me.workers_idle.peek() - 1
-                    fewer_idle.poke_into(me.workers_idle)
-                    me.lock.unlock()
-                    return false
-        else
-            me.lock.unlock()
-            me.run_coro(found_coro2)
-            return true
-    else
-        me.lock.unlock()
-        me.run_coro(found_coro)
-        return true
-
-    now: U64 = monotonic_ns()
-
-    while me.timer_count.peek() > 0
-        earliest_wake: U64 = me.timer_at(0).wake_ns.peek()
-        if not (earliest_wake <= now)
-            me.lock.unlock()
-            return false
-        me.push_injector(me.timer_pop_min())
-    then
-        me.lock.unlock()
-        return false
 
 /// Drives every spawned coroutine to completion on this thread. A null `s` does nothing.
 /// :param s: The scheduler.
@@ -864,7 +843,9 @@ routine rf_sched_run(s: @Sched) -> Void
         if done2
             CURRENT_SCHED.poke(prev)
             return
-        s.step()
+        else
+            s.step()
+            continue
 
 /// Whether a coroutine has completed or been cancelled.
 /// :param c: The coroutine.
@@ -1048,7 +1029,9 @@ routine run_here_ready() -> Bool
         earliest_wake: U64 = here.timer_at(0).wake_ns.peek()
         if not (earliest_wake <= now)
             break
-        here.push_injector(here.timer_pop_min())
+        else
+            here.push_injector(here.timer_pop_min())
+            continue
     c: @Coro = here.pop_injector()
     here.lock.unlock()
     if c.is_null()
@@ -1065,13 +1048,14 @@ routine Sched.block_wait(me: @Me) -> Void
     if not here_has_live()
         me.block_cond.wait(me.lock)
         return
-    me.lock.unlock()
-    ran: Bool = run_here_ready()
-    me.lock.lock()
-    if ran
+    else
+        me.lock.unlock()
+        ran: Bool = run_here_ready()
+        me.lock.lock()
+        if ran
+            return
+        me.block_cond.wait_for(mutex: me.lock, timeout_ns: HERE_POLL_NS)
         return
-    me.block_cond.wait_for(mutex: me.lock, timeout_ns: HERE_POLL_NS)
-    return
 
 /// Spawns a new coroutine onto the process pool (start_now()).
 /// :param c: The coroutine.
@@ -1113,7 +1097,9 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
                 return
-            s.block_wait()
+            else
+                s.block_wait()
+                continue
         then
             remaining_waiters: SSize = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
@@ -1129,9 +1115,9 @@ routine rf_sched_run_until_default(target: @Coro) -> Void
                 rf_sched_park_external()
                 rf_sched_disarm_cross_waker(home2)
                 s.lock.lock()
-                continue
-            rf_sched_park_external()
-            s.lock.lock()
+            else
+                rf_sched_park_external()
+                s.lock.lock()
         then
             target.awaiter.poke(null)
             remaining_waiters: SSize = s.waiters.peek() - 1

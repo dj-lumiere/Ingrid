@@ -170,32 +170,21 @@ routine Task.signal_completion(me: @Me) -> Void
     me.coro_sched.poke(null)
     me.coro_waiter.poke(null)
     me.coro_lock.unlock()
-    if sched.is_null()
-        jump race(race_sched, race_waiter)
-    // the waiter's promise of a wake from this thread is kept
-    rf_sched_disarm_cross_waker(sched)
-    if waiter.is_null()
-        jump race(race_sched, race_waiter)
-    rf_sched_wake(s: sched, c: waiter)
-    jump race(race_sched, race_waiter)
+    if not sched.is_null()
+        // the waiter's promise of a wake from this thread is kept
+        rf_sched_disarm_cross_waker(sched)
+        if not waiter.is_null()
+            rf_sched_wake(s: sched, c: waiter)
 
     // Left registered, so a later spurious wake is harmless, and race! clears it when it is over.
-    block race(race_sched: @Sched, race_waiter: @Coro)
-        if race_sched.is_null()
-            jump threads()
+    if not race_sched.is_null()
         if race_waiter.is_null()
-            jump signal(race_sched)
-        rf_sched_wake(s: race_sched, c: race_waiter)
-        jump threads()
-
-    block signal(race_sched: @Sched)
-        rf_sched_signal(race_sched)
-        jump threads()
-
-    block threads()
-        me.done.poke_atomic(1)
-        wake_all(me.done)
-        return
+            rf_sched_signal(race_sched)
+        else
+            rf_sched_wake(s: race_sched, c: race_waiter)
+    me.done.poke_atomic(1)
+    wake_all(me.done)
+    return
 
 /// Registers (s not null) or clears the scheduler of a race! over a set that has this task, and its coroutine
 /// (null for a thread racer). A null `task` does nothing.
@@ -260,19 +249,19 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 /// :returns: 1 when complete already, 0 once registered.
 routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     me.coro_lock.lock()
-    if me.is_completed()
-        jump finish(1, false)
-    arm: Bool = me.coro_sched.peek().is_null()
-    me.coro_sched.poke(sched)
-    me.coro_waiter.poke(waiter)
-    jump finish(0, arm)
-
-    block finish(complete: U32, arm: Bool)
-        me.coro_lock.unlock()
-        if not arm
-            return complete
-        rf_sched_arm_cross_waker(sched)
+    values2: (U32, Bool) = when
+        me.is_completed() => (1, false)
+        else =>
+            arm: Bool = me.coro_sched.peek().is_null()
+            me.coro_sched.poke(sched)
+            me.coro_waiter.poke(waiter)
+            becomes (0, arm)
+    complete, arm = values2
+    me.coro_lock.unlock()
+    if not arm
         return complete
+    rf_sched_arm_cross_waker(sched)
+    return complete
 
 /// The deadline passed: 1 for a value that just came in, else 0 with waiter's registration taken back (and its
 /// promised wake withdrawn after the lock is given back).
@@ -281,22 +270,23 @@ routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
 /// :returns: 1 when the task completed meanwhile, else 0.
 routine Task.withdraw_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     me.coro_lock.lock()
-    if me.is_completed()
-        jump finish(1, false)
-    mine: Bool = me.coro_waiter.peek().ptr_eq(waiter)
-    disarm: Bool = mine and me.coro_sched.peek().is_not_null()
-    if not mine
-        jump finish(0, disarm)
-    me.coro_sched.poke(null)
-    me.coro_waiter.poke(null)
-    jump finish(0, disarm)
-
-    block finish(complete: U32, disarm: Bool)
-        me.coro_lock.unlock()
-        if not disarm
-            return complete
-        rf_sched_disarm_cross_waker(sched)
+    values2: (U32, Bool) = when
+        me.is_completed() => (1, false)
+        else =>
+            mine: Bool = me.coro_waiter.peek().ptr_eq(waiter)
+            disarm: Bool = mine and me.coro_sched.peek().is_not_null()
+            if not mine
+                becomes (0, disarm)
+            else
+                me.coro_sched.poke(null)
+                me.coro_waiter.poke(null)
+                becomes (0, disarm)
+    complete, disarm = values2
+    me.coro_lock.unlock()
+    if not disarm
         return complete
+    rf_sched_disarm_cross_waker(sched)
+    return complete
 
 /// The name of a task kind.
 /// :param kind: A `TASK_SUSPENDED` / `TASK_THREADED` value.
@@ -361,22 +351,19 @@ routine Task.uncount(me: @Me) -> Void
 routine Task.free(me: @Me) -> Void
     me.uncount()
     payload: Addr = me.value_payload.peek()
-    if payload.is_null()
-        jump nodes(me.dependents_head.peek())
-    c_free(payload)
-    me.value_payload.poke(null)
-    jump nodes(me.dependents_head.peek())
+    node: @TaskNode = when
+        payload.is_null() => me.dependents_head.peek()
+        else =>
+            c_free(payload)
+            me.value_payload.poke(null)
+            becomes me.dependents_head.peek()
 
-    block nodes(node: @TaskNode)
-        if node.is_null()
-            jump done()
-        next: @TaskNode = node.next.peek()
-        c_free(node)
-        jump nodes(next)
-
-    block done()
-        c_free(me)
-        return
+    until node2.is_null() with node2: @TaskNode = node
+        next: @TaskNode = node2.next.peek()
+        c_free(node2)
+        continue with node2: next
+    c_free(me)
+    return
 
 /// Frees a task at once, with its untaken result and dependents list. A null `task` does nothing.
 /// :param task: The task.
@@ -395,24 +382,23 @@ routine rf_task_release(task: @Task) -> Void
     if task.is_null()
         return
     if not (task.kind.peek() == TASK_THREADED)
-        jump free()
-    task.coro_lock.lock()
-    task.consumer_released.poke(true)
-    if not (task.worker_exited.peek() & ~task.reaped.peek())
-        jump unlocked(false)
-    task.reaped.poke(true)
-    jump unlocked(true)
-
-    block unlocked(reap: Bool)
-        task.coro_lock.unlock()
-        if reap
-            jump free()
-        else
-            return
-
-    block free()
         task.free()
         return
+    else
+        task.coro_lock.lock()
+        task.consumer_released.poke(true)
+        reap: Bool = task.worker_exited.peek() & ~task.reaped.peek()
+        reap2: Bool = when
+            not reap => false
+            else =>
+                task.reaped.poke(true)
+                becomes true
+        task.coro_lock.unlock()
+        if reap2
+            task.free()
+            return
+        else
+            return
 
 /// A task's id.
 /// :param task: The task, or null.
@@ -498,9 +484,12 @@ routine rf_task_wait(task: @Task) -> U32
                 // This thread's start_here() jobs go on while it waits for the thread.
                 if run_here_ready()
                     continue
-                wait_on_for(at: task.done, expected: 0, timeout_ns: HERE_POLL_NS)
+                else
+                    wait_on_for(at: task.done, expected: 0, timeout_ns: HERE_POLL_NS)
+                    continue
+            else
+                wait_on(at: task.done, expected: 0)
                 continue
-            wait_on(at: task.done, expected: 0)
         then
             return task.completion.peek()
     else
@@ -517,18 +506,19 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         return COMPLETION_ERROR
     if task.is_completed() or task.kind.peek() != TASK_THREADED
         return task.completion.peek()
-    secs: U64 = timeout_seconds.max(0).to[U64]()
-    span: U64 = secs *^ 1000000000 +^ timeout_nanoseconds.to[U64]()
+    else
+        secs: U64 = timeout_seconds.max(0).to[U64]()
+        span: U64 = secs *^ 1000000000 +^ timeout_nanoseconds.to[U64]()
 
-    deadline: U64 = monotonic_ns() +^ span
+        deadline: U64 = monotonic_ns() +^ span
 
-    until task.is_completed()
-        now: U64 = monotonic_ns()
-        if now >= deadline
-            return COMPLETION_TIMEOUT
-        wait_on_for(at: task.done, expected: 0, timeout_ns: deadline - now)
-    then
-        return task.completion.peek()
+        until task.is_completed()
+            now: U64 = monotonic_ns()
+            if now >= deadline
+                return COMPLETION_TIMEOUT
+            wait_on_for(at: task.done, expected: 0, timeout_ns: deadline - now)
+        then
+            return task.completion.peek()
 
 /// A threaded task's thread: frees its start data, runs the routine as the current task, then, as its final act,
 /// frees the task when the consumer is done with it or it is detached (with a detached task's result box).
@@ -543,41 +533,33 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
     CURRENT_TASK.poke(task)
     body.call(userdata)
     CURRENT_TASK.poke(null)
-    jump reap(task)
 
     // The thread's final act, after the completion (and its wakes) are over: it frees the task if the consumer
     // is already done with it, or if it is detached, which has no consumer.
-    block reap(task: @Task)
-        task.coro_lock.lock()
-        task.worker_exited.poke(true)
-        owner: Bool = task.consumer_released.peek() | task.detached.peek()
-        if not (owner & ~task.reaped.peek())
-            jump unlocked(task, false, null)
-        task.reaped.poke(true)
-        box: Addr = when
-            task.detached.peek() => task.value_payload.peek()
-            else => null
-        if box.is_null()
-            jump unlocked(task, true, null)
-        task.value_payload.poke(null)
-        jump unlocked(task, true, box)
-
-    block unlocked(task: @Task, reap: Bool, box: Addr)
-        task.coro_lock.unlock()
-        if box.is_null()
-            jump finish(task, reap)
-        else
-            jump invalidate(task, reap, box)
-
-    block invalidate(task: @Task, reap: Bool, box: Addr)
+    task.coro_lock.lock()
+    task.worker_exited.poke(true)
+    owner: Bool = task.consumer_released.peek() | task.detached.peek()
+    reap: Bool = owner & ~task.reaped.peek()
+    values2: (Bool, Addr) = when
+        not reap => (false, null)
+        else =>
+            task.reaped.poke(true)
+            box: Addr = when
+                task.detached.peek() => task.value_payload.peek()
+                else => null
+            if box.is_null()
+                becomes (true, null)
+            else
+                task.value_payload.poke(null)
+                becomes (true, box)
+    reap2, box = values2
+    task.coro_lock.unlock()
+    if not box.is_null()
         rf_invalidate(box)
-        jump finish(task, reap)
-
-    block finish(task: @Task, reap: Bool)
-        if not reap
-            return
-        task.free()
+    if not reap
         return
+    task.free()
+    return
 
 /// Starts a threaded task's routine on a thread of its own: 1, or 0 for a task that can't. A task already started
 /// isn't started again (the first verb that runs it starts it).
@@ -598,11 +580,12 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], user
             return 0
         else
             return 1
-    start: @ThreadedStart = zeroed[ThreadedStart](count: 1, what: "Failed to allocate thread start data")
-    start.poke(ThreadedStart(task: task, entry: entry, userdata: userdata))
-    task.status.poke_atomic(TASK_READY)
-    DEFAULT_THREADS.launch_unwatched(entry: threaded_task_main.to[Callable](), arg: start)
-    return 1
+    else
+        start: @ThreadedStart = zeroed[ThreadedStart](count: 1, what: "Failed to allocate thread start data")
+        start.poke(ThreadedStart(task: task, entry: entry, userdata: userdata))
+        task.status.poke_atomic(TASK_READY)
+        DEFAULT_THREADS.launch_unwatched(entry: threaded_task_main.to[Callable](), arg: start)
+        return 1
 
 /// Marks a task `TASK_READY`. A null `task` does nothing.
 /// :param task: The task.
@@ -659,10 +642,12 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
             rf_invalidate(result_payload)
             task.free()
             return
-        task.free()
+        else
+            task.free()
+            return
+    else
+        task.complete(how: COMPLETION_VALUE, value: result_payload, error: null)
         return
-    task.complete(how: COMPLETION_VALUE, value: result_payload, error: null)
-    return
 
 /// execute(): the task frees itself when it completes. A threaded task's thread is already running, so this agrees
 /// with its final act under the lock: if it already exited, the task is freed here. A null `task` does nothing.
@@ -678,16 +663,15 @@ routine rf_task_set_detached(task: @Task) -> Void
     if not (exited & ~task.reaped.peek())
         task.coro_lock.unlock()
         return
-    task.reaped.poke(true)
-    task.coro_lock.unlock()
-    payload: Addr = task.value_payload.peek()
-    task.value_payload.poke(null)
-    if payload.is_null()
+    else
+        task.reaped.poke(true)
+        task.coro_lock.unlock()
+        payload: Addr = task.value_payload.peek()
+        task.value_payload.poke(null)
+        if not payload.is_null()
+            rf_invalidate(payload)
         task.free()
         return
-    rf_invalidate(payload)
-    task.free()
-    return
 
 /// Whether a task is detached.
 /// :param task: The task, or null.
@@ -848,9 +832,10 @@ routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
         task.dependents_head.poke(node)
         task.dependents_tail.poke(node)
         return
-    tail.next.poke(node)
-    task.dependents_tail.poke(node)
-    return
+    else
+        tail.next.poke(node)
+        task.dependents_tail.poke(node)
+        return
 
 /// A task's prerequisite count.
 /// :param task: The task, or null.
@@ -887,12 +872,13 @@ routine rf_task_prerequisite_complete(task: @Task, success: Bool) -> Bool
         task.status.poke_atomic(TASK_COMPLETED)
         task.signal_completion()
         return false
-    remaining: U32 = task.prerequisites_remaining.peek()
-    left: U32 = remaining -^ 1
-    task.prerequisites_remaining.poke(left)
-    if not (left == 0)
-        return false
-    if not (task.status.peek_atomic() == TASK_NEW)
+    else
+        remaining: U32 = task.prerequisites_remaining.peek()
+        left: U32 = remaining -^ 1
+        task.prerequisites_remaining.poke(left)
+        if not (left == 0)
+            return false
+        if not (task.status.peek_atomic() == TASK_NEW)
+            return true
+        task.status.poke_atomic(TASK_READY)
         return true
-    task.status.poke_atomic(TASK_READY)
-    return true

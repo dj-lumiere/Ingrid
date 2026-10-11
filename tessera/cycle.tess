@@ -322,30 +322,30 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> Void
         work.destruct()
         kids.destruct()
         return
-    SCANNING.poke_into(root.state)
-    work.add_last(root)
+    else
+        SCANNING.poke_into(root.state)
+        work.add_last(root)
 
-    until work.is_empty()
-        node: @RoamHeader = work.remove_last().to[@RoamHeader]()
-        children(node, kids)
+        until work.is_empty()
+            node: @RoamHeader = work.remove_last().to[@RoamHeader]()
+            children(node, kids)
 
-        n: USize = kids.count()
+            n: USize = kids.count()
 
-        each i in 0 til n
-            kid_address: Addr = kids[i]
-            kid: @RoamHeader = kid_address.to[@RoamHeader]()
-            kid_count: U64 = kid.count.peek() - 1
-            kid_count.poke_into(kid.count)
-            if kid.state.peek() == SCANNING
+            each i in 0 til n
+                kid_address: Addr = kids[i]
+                kid: @RoamHeader = kid_address.to[@RoamHeader]()
+                kid_count: U64 = kid.count.peek() - 1
+                kid_count.poke_into(kid.count)
+                if not (kid.state.peek() == SCANNING)
+                    SCANNING.poke_into(kid.state)
+                    work.add_last(kid)
+            then
                 continue
-            SCANNING.poke_into(kid.state)
-            work.add_last(kid)
         then
-            continue
-    then
-        work.destruct()
-        kids.destruct()
-        return
+            work.destruct()
+            kids.destruct()
+            return
 
 /// Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
 /// is garbage for now, and its children are decided the same way.
@@ -362,18 +362,19 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> Void
         node: @RoamHeader = work.remove_last().to[@RoamHeader]()
         if not (node.state.peek() == SCANNING)
             continue
-        if node.count.peek() > 0
+        else if node.count.peek() > 0
             scan_live(root: node, alloc)
             continue
-        GARBAGE.poke_into(node.state)
-        children(node, kids)
+        else
+            GARBAGE.poke_into(node.state)
+            children(node, kids)
 
-        n: USize = kids.count()
+            n: USize = kids.count()
 
-        each i in 0 til n
-            work.add_last(kids[i])
-        then
-            continue
+            each i in 0 til n
+                work.add_last(kids[i])
+            then
+                continue
     work.destruct()
     kids.destruct()
     return
@@ -400,10 +401,9 @@ routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> Void
             kid: @RoamHeader = kid_address.to[@RoamHeader]()
             kid_count: U64 = kid.count.peek() + 1
             kid_count.poke_into(kid.count)
-            if kid.state.peek() == LIVE
-                continue
-            LIVE.poke_into(kid.state)
-            work.add_last(kid)
+            if not (kid.state.peek() == LIVE)
+                LIVE.poke_into(kid.state)
+                work.add_last(kid)
         then
             continue
     work.destruct()
@@ -426,16 +426,17 @@ routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> Void
         garbage: Bool = node.state.peek() == GARBAGE
         if not (garbage and not node.buffered.peek())
             continue
-        LIVE.poke_into(node.state)
-        buffer_push(buffer: REAP, item: node)
-        children(node, kids)
+        else
+            LIVE.poke_into(node.state)
+            buffer_push(buffer: REAP, item: node)
+            children(node, kids)
 
-        n: USize = kids.count()
+            n: USize = kids.count()
 
-        each i in 0 til n
-            work.add_last(kids[i])
-        then
-            continue
+            each i in 0 til n
+                work.add_last(kids[i])
+            then
+                continue
     work.destruct()
     kids.destruct()
     return
@@ -459,8 +460,8 @@ routine collect() -> U64
         if node.state.peek() == SUSPECTED
             mark_scanning(root: node, alloc)
             roots.add_last(node)
-            continue
-        false.poke_into(node.buffered)
+        else
+            false.poke_into(node.buffered)
     then
         // Exactly the n roots this pass took leave the buffer: a root reported while freeing must stay for a later pass.
         remove_front(buffer: ROOTS, n)
