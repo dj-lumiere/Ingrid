@@ -64,7 +64,7 @@ routine RoamHeader.construct(count: U64, weak: U64, dead: U8, escaped: U8, data:
     return Me(count, weak, dead, escaped, data, locked, holder_task, depth, state, buffered, trace_hook, free_hook, drop_hook, shape_users)
 
 /// Releases nothing: a `RoamHeader` holds no memory of its own.
-routine RoamHeader.destruct(me: @Me) -> Void
+routine RoamHeader.destruct(me: @Me) -> None
     return
 
 // ── The task scheduler (native) ──────────────────────────────────────────
@@ -78,11 +78,11 @@ private routine current_task_id() -> U64
 /// Yields the running task to the native scheduler, so another task can run on this worker.
 @external("c")
 @symbol("rf_coro_yield")
-private routine coro_yield() -> Void
+private routine coro_yield() -> None
 
 /// Frees a header's memory. Controllers are allocated from the C heap (calloc), which the heap allocator frees.
 /// :param header: The header to free.
-routine free_header_memory(header: @RoamHeader) -> Void
+routine free_header_memory(header: @RoamHeader) -> None
     local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: header, alloc)
     return
@@ -94,7 +94,7 @@ routine free_header_memory(header: @RoamHeader) -> Void
 /// :param header: The entity's header.
 @export("ingrid_roam_hold")
 @inline
-routine roam_hold(header: @RoamHeader) -> Void
+routine roam_hold(header: @RoamHeader) -> None
     world_enter()
     if header.escaped.peek_atomic() == 1
         previous: U64 = header.count.atomic_fetch_add(1)
@@ -111,7 +111,7 @@ routine roam_hold(header: @RoamHeader) -> Void
 /// :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity's count is already 0.
 @export("ingrid_roam_unhold")
 @inline
-routine roam_unhold(header: @RoamHeader) -> Void
+routine roam_unhold(header: @RoamHeader) -> None
     world_enter()
     escaped: Bool = header.escaped.peek_atomic() == 1
     escaped2: Bool = when
@@ -182,7 +182,7 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
 /// Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
 /// trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
 /// :param header: The entity's header.
-private routine mark_candidate(header: @RoamHeader) -> Void
+private routine mark_candidate(header: @RoamHeader) -> None
     hook: @Byte = header.trace_hook.peek().to[@Byte]()
     if hook.is_null()
         return
@@ -197,9 +197,9 @@ private routine mark_candidate(header: @RoamHeader) -> Void
 /// address goes through a slot read back as the Callable.
 /// :param hook: The hook's code address, a routine taking the entity's `Addr`.
 /// :param entity: The entity to pass it.
-routine run_hook(hook: Addr, entity: Addr) -> Void
+routine run_hook(hook: Addr, entity: Addr) -> None
     local slot: @Addr <- hook
-    callee: Callable[(Addr,), Void] = slot.to[@Callable[(Addr,), Void]]().peek()
+    callee: Callable[(Addr,), None] = slot.to[@Callable[(Addr,), None]]().peek()
     callee.call(entity)
     return
 
@@ -220,7 +220,7 @@ routine roam_strong_count(header: @RoamHeader) -> U64
 /// Adds a weak observer. Only ever called through a handle already held, so the header is alive.
 /// :param header: The entity's header.
 @export("ingrid_roam_observe")
-routine roam_observe(header: @RoamHeader) -> Void
+routine roam_observe(header: @RoamHeader) -> None
     world_enter()
     if header.escaped.peek_atomic() == 1
         previous: U64 = header.weak.atomic_fetch_add(1)
@@ -234,7 +234,7 @@ routine roam_observe(header: @RoamHeader) -> Void
 /// :param header: The entity's header.
 /// :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity has no weak observer.
 @export("ingrid_roam_unobserve")
-routine roam_unobserve(header: @RoamHeader) -> Void
+routine roam_unobserve(header: @RoamHeader) -> None
     world_enter()
     escaped: Bool = header.escaped.peek_atomic() == 1
     last: Bool = when
@@ -262,7 +262,7 @@ routine roam_is_destroyed(header: @RoamHeader) -> Bool
 /// unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
 /// :param header: The entity's header.
 @export("ingrid_roam_cyclic_finalize")
-routine roam_cyclic_finalize(header: @RoamHeader) -> Void
+routine roam_cyclic_finalize(header: @RoamHeader) -> None
     header.dead.poke_atomic(1)
     escaped: Bool = header.escaped.peek_atomic() == 1
     weak: U64 = when
@@ -291,7 +291,7 @@ routine roam_is_escaped(header: @RoamHeader) -> Bool
 /// :param header: The entity's header.
 /// :throws: Crashes with `MemoryAllocationError` when the worklist cannot grow.
 @export("ingrid_roam_promote")
-routine roam_promote(header: @RoamHeader) -> Void
+routine roam_promote(header: @RoamHeader) -> None
     local alloc: @MemoryManager <- make_c_heap_memory()
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
@@ -333,14 +333,14 @@ routine roam_promote(header: @RoamHeader) -> Void
 /// :param header: The entity's header.
 @export("ingrid_roam_lock_enter")
 @inline
-routine roam_lock_enter(header: @RoamHeader) -> Void
+routine roam_lock_enter(header: @RoamHeader) -> None
     if header.escaped.peek_atomic() == 1
         task: U64 = current_task_id()
 
         until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task
-            taken: Result[Unit, U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
+            taken: Result[None, U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
             when taken
-                is Unit =>
+                is None =>
                     header.holder_task.poke_atomic(task)
                     1.poke_into(header.depth)
                     deadlock_wait_end(task)
@@ -363,7 +363,7 @@ routine roam_lock_enter(header: @RoamHeader) -> Void
 /// :throws: Crashes with `IntegerOverflowError` when an escaped entity's lock depth is already 0.
 @export("ingrid_roam_lock_exit")
 @inline
-routine roam_lock_exit(header: @RoamHeader) -> Void
+routine roam_lock_exit(header: @RoamHeader) -> None
     if header.escaped.peek_atomic() == 1
         depth: U64 = header.depth.peek() - 1
         depth.poke_into(header.depth)

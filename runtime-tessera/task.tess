@@ -71,7 +71,7 @@ record Task
 /// What a task's thread starts with, freed by the thread.
 record ThreadedStart
     task: @Task
-    entry: Callable[(Addr,), Void]
+    entry: Callable[(Addr,), None]
     userdata: Addr
 
 /// Makes a `TaskNode` from its fields.
@@ -82,7 +82,7 @@ routine TaskNode.construct(next: @Me, task: @Task) -> Me
     return Me(next, task)
 
 /// Releases nothing: a `TaskNode` holds no memory of its own.
-routine TaskNode.destruct(me: @Me) -> Void
+routine TaskNode.destruct(me: @Me) -> None
     return
 
 /// Makes a `Task` from its fields.
@@ -123,7 +123,7 @@ routine Task.construct(kind: U32, status: U32, completion_seq: U64, completion: 
     return Me(kind, status, completion_seq, completion, value_payload, error_payload, cancel_requested, result_consumed, detached, worker_exited, consumer_released, reaped, done, execution_backend, wait_backend, dependents_head, dependents_tail, prerequisite_count, prerequisites_remaining, task_id, coro_lock, coro_sched, coro_waiter, race_sched, race_waiter, counted)
 
 /// Releases nothing: a `Task` holds no memory of its own.
-routine Task.destruct(me: @Me) -> Void
+routine Task.destruct(me: @Me) -> None
     return
 
 /// Makes a `ThreadedStart` from its fields.
@@ -131,11 +131,11 @@ routine Task.destruct(me: @Me) -> Void
 /// :param entry: Its `entry`.
 /// :param userdata: Its `userdata`.
 /// :returns: The new value.
-routine ThreadedStart.construct(task: @Task, entry: Callable[(Addr,), Void], userdata: Addr) -> Me
+routine ThreadedStart.construct(task: @Task, entry: Callable[(Addr,), None], userdata: Addr) -> Me
     return Me(task, entry, userdata)
 
 /// Releases nothing: a `ThreadedStart` holds no memory of its own.
-routine ThreadedStart.destruct(me: @Me) -> Void
+routine ThreadedStart.destruct(me: @Me) -> None
     return
 
 /// The threaded task running on this thread.
@@ -153,7 +153,7 @@ routine Task.is_completed(me: @Me) -> Bool
 
 /// Stamps the completion order once, before the status says COMPLETED, so a racer that sees COMPLETED sees the
 /// stamp.
-routine Task.stamp(me: @Me) -> Void
+routine Task.stamp(me: @Me) -> None
     if not (me.completion_seq.peek_atomic() == U64.MAX)
         return
     me.completion_seq.poke_atomic(next_completion_seq())
@@ -161,7 +161,7 @@ routine Task.stamp(me: @Me) -> Void
 
 /// The completion is in: a coroutine waiting for it is woken, a race! over it re-polls, and a thread waiting in
 /// rf_task_wait returns.
-routine Task.signal_completion(me: @Me) -> Void
+routine Task.signal_completion(me: @Me) -> None
     me.coro_lock.lock()
     sched: @Sched = me.coro_sched.peek()
     waiter: @Coro = me.coro_waiter.peek()
@@ -192,7 +192,7 @@ routine Task.signal_completion(me: @Me) -> Void
 /// :param s: The race's scheduler, or null to clear.
 /// :param coro: The race's coroutine, or null.
 @export("rf_task_race_register")
-routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> Void
+routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> None
     if task.is_null()
         return
     task.coro_lock.lock()
@@ -339,7 +339,7 @@ routine rf_task_create(kind: U32) -> @Task
     return task
 
 /// Takes the task out of LIVE_TASKS, once: at its completion, or when it is freed without having completed.
-routine Task.uncount(me: @Me) -> Void
+routine Task.uncount(me: @Me) -> None
     was: U32 = me.counted.atomic_swap(0)
     if not (was == 1)
         return
@@ -348,7 +348,7 @@ routine Task.uncount(me: @Me) -> Void
 
 /// Frees the task with a result nobody took (a deadline give-up, a race! loser) and the dependents list. The error
 /// payload is not freed.
-routine Task.free(me: @Me) -> Void
+routine Task.free(me: @Me) -> None
     me.uncount()
     payload: Addr = me.value_payload.peek()
     node: @TaskNode = when
@@ -368,7 +368,7 @@ routine Task.free(me: @Me) -> Void
 /// Frees a task at once, with its untaken result and dependents list. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_destroy")
-routine rf_task_destroy(task: @Task) -> Void
+routine rf_task_destroy(task: @Task) -> None
     if task.is_null()
         return
     task.free()
@@ -378,7 +378,7 @@ routine rf_task_destroy(task: @Task) -> Void
 /// its thread. A coroutine task has no thread and is freed at once. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_release")
-routine rf_task_release(task: @Task) -> Void
+routine rf_task_release(task: @Task) -> None
     if task.is_null()
         return
     if not (task.kind.peek() == TASK_THREADED)
@@ -523,10 +523,10 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
 /// A threaded task's thread: frees its start data, runs the routine as the current task, then, as its final act,
 /// frees the task when the consumer is done with it or it is detached (with a detached task's result box).
 /// :param start: The task, its routine, and the routine's argument.
-routine threaded_task_main(start: @ThreadedStart) -> Void
+routine threaded_task_main(start: @ThreadedStart) -> None
     rf_thread_stack_guarantee()
     task: @Task = start.task.peek()
-    body: Callable[(Addr,), Void] = start.entry.peek()
+    body: Callable[(Addr,), None] = start.entry.peek()
     userdata: Addr = start.userdata.peek()
     c_free(start)
     task.status.poke_atomic(TASK_RUNNING)
@@ -570,7 +570,7 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
 /// :throws: Crashes with `OutOfMemoryError` when the start data can't be allocated, and with `TaskSpawnError` when
 ///     the thread can't be started.
 @export("rf_task_spawn_threaded")
-routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], userdata: Addr) -> CInt
+routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), None], userdata: Addr) -> CInt
     if task.is_null() or entry.addr().is_null()
         return 0
     if not (task.kind.peek() == TASK_THREADED)
@@ -590,7 +590,7 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], user
 /// Marks a task `TASK_READY`. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_mark_ready")
-routine rf_task_mark_ready(task: @Task) -> Void
+routine rf_task_mark_ready(task: @Task) -> None
     if task.is_null()
         return
     task.status.poke_atomic(TASK_READY)
@@ -599,7 +599,7 @@ routine rf_task_mark_ready(task: @Task) -> Void
 /// Marks a task `TASK_RUNNING`. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_mark_running")
-routine rf_task_mark_running(task: @Task) -> Void
+routine rf_task_mark_running(task: @Task) -> None
     if task.is_null()
         return
     task.status.poke_atomic(TASK_RUNNING)
@@ -608,7 +608,7 @@ routine rf_task_mark_running(task: @Task) -> Void
 /// Marks a task `TASK_PARKED`. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_mark_parked")
-routine rf_task_mark_parked(task: @Task) -> Void
+routine rf_task_mark_parked(task: @Task) -> None
     if task.is_null()
         return
     task.status.poke_atomic(TASK_PARKED)
@@ -618,7 +618,7 @@ routine rf_task_mark_parked(task: @Task) -> Void
 /// :param how: A `COMPLETION_` value.
 /// :param value: The result box, or null.
 /// :param error: The error payload, or null.
-routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> Void
+routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> None
     me.uncount()
     me.stamp()
     me.completion.poke(how)
@@ -634,7 +634,7 @@ routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> Void
 /// :param task: The task.
 /// :param result_payload: The result box, or null.
 @export("rf_task_complete_value")
-routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
+routine rf_task_complete_value(task: @Task, result_payload: Addr) -> None
     if task.is_null()
         return
     if task.detached.peek() & (task.kind.peek() == TASK_SUSPENDED)
@@ -653,7 +653,7 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
 /// with its final act under the lock: if it already exited, the task is freed here. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_set_detached")
-routine rf_task_set_detached(task: @Task) -> Void
+routine rf_task_set_detached(task: @Task) -> None
     if task.is_null()
         return
     task.coro_lock.lock()
@@ -689,7 +689,7 @@ routine rf_task_is_detached(task: @Task) -> U8
 /// :param task: The task.
 /// :param error_payload: The error payload.
 @export("rf_task_complete_error")
-routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
+routine rf_task_complete_error(task: @Task, error_payload: Addr) -> None
     if task.is_null()
         return
     task.complete(how: COMPLETION_ERROR, value: null, error: error_payload)
@@ -698,7 +698,7 @@ routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
 /// Completes a task as cancelled and wakes its waiters. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_complete_cancelled")
-routine rf_task_complete_cancelled(task: @Task) -> Void
+routine rf_task_complete_cancelled(task: @Task) -> None
     if task.is_null()
         return
     task.complete(how: COMPLETION_CANCELLED, value: null, error: null)
@@ -707,7 +707,7 @@ routine rf_task_complete_cancelled(task: @Task) -> Void
 /// Completes a task as timed out and wakes its waiters. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_complete_timeout")
-routine rf_task_complete_timeout(task: @Task) -> Void
+routine rf_task_complete_timeout(task: @Task) -> None
     if task.is_null()
         return
     task.complete(how: COMPLETION_TIMEOUT, value: null, error: null)
@@ -716,7 +716,7 @@ routine rf_task_complete_timeout(task: @Task) -> Void
 /// Asks a task to stop: a flag its routine reads with rf_cancel_requested. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_request_cancel")
-routine rf_task_request_cancel(task: @Task) -> Void
+routine rf_task_request_cancel(task: @Task) -> None
     if task.is_null()
         return
     task.cancel_requested.poke_atomic(1)
@@ -749,7 +749,7 @@ routine rf_cancel_requested() -> U32
 /// Records that a task's result was taken. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_mark_result_consumed")
-routine rf_task_mark_result_consumed(task: @Task) -> Void
+routine rf_task_mark_result_consumed(task: @Task) -> None
     if task.is_null()
         return
     task.result_consumed.poke(true)
@@ -769,7 +769,7 @@ routine rf_task_is_result_consumed(task: @Task) -> Bool
 /// :param task: The task.
 /// :param backend: The backend pointer.
 @export("rf_task_attach_execution_backend")
-routine rf_task_attach_execution_backend(task: @Task, backend: Addr) -> Void
+routine rf_task_attach_execution_backend(task: @Task, backend: Addr) -> None
     if task.is_null()
         return
     task.execution_backend.poke(backend)
@@ -789,7 +789,7 @@ routine rf_task_execution_backend(task: @Task) -> Addr
 /// :param task: The task.
 /// :param backend: The backend pointer.
 @export("rf_task_attach_wait_backend")
-routine rf_task_attach_wait_backend(task: @Task, backend: Addr) -> Void
+routine rf_task_attach_wait_backend(task: @Task, backend: Addr) -> None
     if task.is_null()
         return
     task.wait_backend.poke(backend)
@@ -808,7 +808,7 @@ routine rf_task_wait_backend(task: @Task) -> Addr
 /// Adds one prerequisite to a task's count and to those remaining. A null `task` does nothing.
 /// :param task: The task.
 @export("rf_task_add_prerequisite")
-routine rf_task_add_prerequisite(task: @Task) -> Void
+routine rf_task_add_prerequisite(task: @Task) -> None
     if task.is_null()
         return
     next_prerequisite_count: U32 = task.prerequisite_count.peek() + 1
@@ -822,7 +822,7 @@ routine rf_task_add_prerequisite(task: @Task) -> Void
 /// :param dependent: The task that waits for it.
 /// :throws: Crashes with `OutOfMemoryError` when the list node can't be allocated.
 @export("rf_task_add_dependent")
-routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
+routine rf_task_add_dependent(task: @Task, dependent: @Task) -> None
     if task.is_null() or dependent.is_null()
         return
     node: @TaskNode = zeroed[TaskNode](count: 1, what: "Failed to allocate task queue node")

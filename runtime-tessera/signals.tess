@@ -42,7 +42,7 @@ routine HandlerEntry.construct(box: Addr, ctx: Addr, has_ctx: Bool) -> Me
     return Me(box, ctx, has_ctx)
 
 /// Releases nothing: a `HandlerEntry` holds no memory of its own.
-routine HandlerEntry.destruct(me: @Me) -> Void
+routine HandlerEntry.destruct(me: @Me) -> None
     return
 
 /// Makes a `HandlerList` from its fields.
@@ -54,31 +54,31 @@ routine HandlerList.construct(items: @HandlerEntry, count: USize, cap: USize) ->
     return Me(items, count, cap)
 
 /// Releases nothing: a `HandlerList` holds no memory of its own.
-routine HandlerList.destruct(me: @Me) -> Void
+routine HandlerList.destruct(me: @Me) -> None
     return
 
 /// Calls one handler: the box's first word is the function, which takes the box (and the context). A null box does
 /// nothing.
 /// :param e: The handler.
-routine invoke(e: HandlerEntry) -> Void
+routine invoke(e: HandlerEntry) -> None
     if e.box.is_null()
         return
     fn: Addr = e.box.to[@Addr]().peek()
     if e.has_ctx
         local slot: @Addr <- fn
-        call: Callable[(Addr, Addr), Void] = slot.to[@Callable[(Addr, Addr), Void]]().peek()
+        call: Callable[(Addr, Addr), None] = slot.to[@Callable[(Addr, Addr), None]]().peek()
         call.call(e.box, e.ctx)
         return
     else
         local plain: @Addr <- fn
-        call: Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().peek()
+        call: Callable[(Addr,), None] = plain.to[@Callable[(Addr,), None]]().peek()
         call.call(e.box)
         return
 
 /// Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
 /// can't be allocated, no handler runs.
 /// :param list: The handlers to run.
-routine dispatch(list: @HandlerList) -> Void
+routine dispatch(list: @HandlerList) -> None
     SIGNALS_LOCK.lock()
     n: USize = list.count.peek()
     if not (n == 0)
@@ -100,7 +100,7 @@ routine dispatch(list: @HandlerList) -> Void
 
 /// Runs the handlers of one signal.
 /// :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
-routine dispatch_which(which: S32) -> Void
+routine dispatch_which(which: S32) -> None
     list: @HandlerList = when
         which == SIG_TERMINATE => TERMINATE_HANDLERS
         else => INTERRUPT_HANDLERS
@@ -110,7 +110,7 @@ routine dispatch_which(which: S32) -> Void
 /// Appends a handler, doubling the storage (from 4) when it is full. When the storage can't grow, the handler is
 /// dropped.
 /// :param entry: The handler to add.
-routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
+routine HandlerList.append(me: @Me, entry: HandlerEntry) -> None
     local n: USize = me.count.peek()
 
     if n == me.cap.peek()
@@ -133,7 +133,7 @@ routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
 /// :param which: `SIG_TERMINATE` for the terminate list, anything else for the interrupt list.
 /// :param entry: The handler to add.
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
-routine register_entry(which: S32, entry: HandlerEntry) -> Void
+routine register_entry(which: S32, entry: HandlerEntry) -> None
     SIGNALS_LOCK.lock()
     list: @HandlerList = when
         which == SIG_TERMINATE => TERMINATE_HANDLERS
@@ -149,7 +149,7 @@ routine register_entry(which: S32, entry: HandlerEntry) -> Void
 /// :param handler_box: The Routine value's closure box.
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 @export("rf_signal_register")
-routine rf_signal_register(which: S32, handler_box: Addr) -> Void
+routine rf_signal_register(which: S32, handler_box: Addr) -> None
     register_entry(which, entry: HandlerEntry(box: handler_box, ctx: null, has_ctx: false))
     return
 
@@ -159,7 +159,7 @@ routine rf_signal_register(which: S32, handler_box: Addr) -> Void
 /// :param context: The raw pointer passed to the handler.
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 @export("rf_signal_register_ctx")
-routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> Void
+routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> None
     register_entry(which, entry: HandlerEntry(box: handler_box, ctx: context, has_ctx: true))
     return
 
@@ -173,7 +173,7 @@ routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> 
 @symbol("SetConsoleCtrlHandler")
 @callconv("stdcall")
 @target(os: "windows")
-routine c_set_console_ctrl_handler(handler: Callable[#callconv("stdcall"), (U32,), CInt],
+routine c_set_console_ctrl_handler(handler: Callable[@callconv("stdcall"), (U32,), CInt],
     add: CInt) -> CInt
 
 /// On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
@@ -195,7 +195,7 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
 
 /// Installs the console control handler. Called with the lock held.
 @target(os: "windows")
-routine install_signal_dispatch() -> Void
+routine install_signal_dispatch() -> None
     c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
     SIGNALS_INSTALLED.poke(true)
     return
@@ -212,14 +212,14 @@ preset SIGTERM: CInt = 15
 /// macOS: handler, mask (4 bytes), flags.
 @target(os: "linux")
 record SigAction
-    handler: Callable[(CInt,), Void]
+    handler: Callable[(CInt,), None]
     mask: Array[U64, 16]
     flags: CInt
     restorer: Addr
 
 @target(os: "macos")
 record SigAction
-    handler: Callable[(CInt,), Void]
+    handler: Callable[(CInt,), None]
     mask: U32
     flags: CInt
 
@@ -230,13 +230,13 @@ record SigAction
 /// :param restorer: Its `restorer`.
 /// :returns: The new value.
 @target(os: "linux")
-routine SigAction.construct(handler: Callable[(CInt,), Void], mask: Array[U64, 16], flags: CInt,
+routine SigAction.construct(handler: Callable[(CInt,), None], mask: Array[U64, 16], flags: CInt,
     restorer: Addr) -> Me
     return Me(handler, mask, flags, restorer)
 
 /// Releases nothing: a `SigAction` holds no memory of its own.
 @target(os: "linux")
-routine SigAction.destruct(me: @Me) -> Void
+routine SigAction.destruct(me: @Me) -> None
     return
 
 /// Makes a `SigAction` from its fields.
@@ -245,12 +245,12 @@ routine SigAction.destruct(me: @Me) -> Void
 /// :param flags: Its `flags`.
 /// :returns: The new value.
 @target(os: "macos")
-routine SigAction.construct(handler: Callable[(CInt,), Void], mask: U32, flags: CInt) -> Me
+routine SigAction.construct(handler: Callable[(CInt,), None], mask: U32, flags: CInt) -> Me
     return Me(handler, mask, flags)
 
 /// Releases nothing: a `SigAction` holds no memory of its own.
 @target(os: "macos")
-routine SigAction.destruct(me: @Me) -> Void
+routine SigAction.destruct(me: @Me) -> None
     return
 
 /// POSIX `sigaction`: sets the action for a signal.
@@ -314,7 +314,7 @@ private routine errno() -> CInt
 /// Async-signal-safe: writes the which-code byte to the self-pipe, retrying on EINTR, and returns.
 /// :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 @target(os: not "windows")
-routine posix_signal_handler(signo: CInt) -> Void
+routine posix_signal_handler(signo: CInt) -> None
     local code: U8 = when
         signo == SIGTERM => 1
         else => 0
@@ -328,7 +328,7 @@ routine posix_signal_handler(signo: CInt) -> Void
 /// Reads which-codes from the pipe and runs the handlers.
 /// :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 @target(os: not "windows")
-routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
+routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
     local code: @U8 <- 0
 
     rf_thread_stack_guarantee()
@@ -347,7 +347,7 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
 /// held. If the pipe can't be made, nothing is installed and a later registration tries again.
 /// :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 @target(os: not "windows")
-routine install_signal_dispatch() -> Void
+routine install_signal_dispatch() -> None
     fds: @CInt = SELF_PIPE.to[@CInt]()
     if c_pipe(fds) != 0
         return

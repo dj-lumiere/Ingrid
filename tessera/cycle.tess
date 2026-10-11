@@ -67,7 +67,7 @@ routine WorldSlot.construct(inside: U32, next: Addr) -> Me
     return Me(inside, next)
 
 /// Releases nothing: a `WorldSlot` holds no memory of its own.
-routine WorldSlot.destruct(me: @Me) -> Void
+routine WorldSlot.destruct(me: @Me) -> None
     return
 
 /// Makes a `HeaderBuffer` from its fields.
@@ -79,7 +79,7 @@ routine HeaderBuffer.construct(items: @Addr, count: U64, capacity: U64) -> Me
     return Me(items, count, capacity)
 
 /// Releases nothing: a `HeaderBuffer` holds no memory of its own.
-routine HeaderBuffer.destruct(me: @Me) -> Void
+routine HeaderBuffer.destruct(me: @Me) -> None
     return
 
 // ── The world lock ─────────────────────────────────────────────────────────
@@ -98,9 +98,9 @@ routine my_slot() -> @WorldSlot
         while true
             head: Addr = SLOTS.peek_atomic()
             slot.next.poke(head)
-            added: Result[Unit, Addr] = SLOTS.atomic_compare_exchange(expected: head, new: slot)
+            added: Result[None, Addr] = SLOTS.atomic_compare_exchange(expected: head, new: slot)
             when added
-                is Unit => return slot
+                is None => return slot
                 is Addr => continue
     else
         return mine.to[@WorldSlot]()
@@ -108,7 +108,7 @@ routine my_slot() -> @WorldSlot
 /// Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
 /// its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
 /// reads WRITER, so one of them always sees the other (both are sequentially consistent).
-routine world_enter() -> Void
+routine world_enter() -> None
     if IN_COLLECTOR.peek()
         return
 
@@ -127,7 +127,7 @@ routine world_enter() -> Void
         return
 
 /// Leaves the world as a mutator: one step shallower in this thread's slot.
-routine world_leave() -> Void
+routine world_leave() -> None
     if IN_COLLECTOR.peek()
         return
     step_out(MY_SLOT.peek().to[@WorldSlot]())
@@ -136,7 +136,7 @@ routine world_leave() -> Void
 /// One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
 /// wakes nobody, so sharing and releasing an entity make no system call.
 /// :param slot: This thread's slot.
-routine step_out(slot: @WorldSlot) -> Void
+routine step_out(slot: @WorldSlot) -> None
     previous: U32 = slot.inside.atomic_fetch_sub(1)
     if previous == WAITING.bitor(1)
         before: U32 = slot.inside.atomic_fetch_and(WAITING.bitnot())
@@ -147,13 +147,13 @@ routine step_out(slot: @WorldSlot) -> Void
 
 /// Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
 /// thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
-routine world_stop() -> Void
+routine world_stop() -> None
     while true
         state: U32 = WORLD.peek_atomic()
         if state & WRITER == 0
-            taken: Result[Unit, U32] = WORLD.atomic_compare_exchange(expected: state, new: WRITER)
+            taken: Result[None, U32] = WORLD.atomic_compare_exchange(expected: state, new: WRITER)
             when taken
-                is Unit => break
+                is None => break
                 is U32 => continue
         else
             // Another pass runs. Its restart wakes everyone waiting on WORLD.
@@ -170,9 +170,9 @@ routine world_stop() -> Void
                 break
             else
                 waiting: U32 = inside2 | WAITING
-                set: Result[Unit, U32] = slot.inside.atomic_compare_exchange(expected: inside2, new: waiting)
+                set: Result[None, U32] = slot.inside.atomic_compare_exchange(expected: inside2, new: waiting)
                 when set
-                    is Unit =>
+                    is None =>
                         wait_on(at: slot.inside, expected: waiting)
                         continue
                     is U32 => continue
@@ -182,7 +182,7 @@ routine world_stop() -> Void
         return
 
 /// Restarts the world after a pass and wakes every mutator and pass waiting for it.
-routine world_restart() -> Void
+routine world_restart() -> None
     false.poke_into(IN_COLLECTOR)
     WORLD.poke_atomic(0)
     wake_all(WORLD)
@@ -194,7 +194,7 @@ routine world_restart() -> Void
 /// :param buffer: The buffer to append to.
 /// :param item: The header address to append.
 /// :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
-routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
+routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> None
     local count: U64 = buffer.count.peek()
     local capacity: U64 = buffer.capacity.peek()
 
@@ -215,7 +215,7 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
 
 /// Empties `buffer`, keeping its memory for the next items.
 /// :param buffer: The buffer to empty.
-routine buffer_clear(buffer: @HeaderBuffer) -> Void
+routine buffer_clear(buffer: @HeaderBuffer) -> None
     0.poke_into(buffer.count)
     return
 
@@ -232,7 +232,7 @@ routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
 /// only from its own thread, with no mutator running).
 /// :param header: The entity's header.
 /// :throws: Crashes with `MemoryAllocationError` when growing the roots buffer fails.
-routine add_candidate(header: @RoamHeader) -> Void
+routine add_candidate(header: @RoamHeader) -> None
     if IN_COLLECTOR.peek()
         buffer_push(buffer: ROOTS, item: header)
         return
@@ -245,7 +245,7 @@ routine add_candidate(header: @RoamHeader) -> Void
 /// Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
 /// the last root into its place (the order of roots doesn't matter).
 /// :param header: The header about to be freed.
-routine remove_candidate(header: @RoamHeader) -> Void
+routine remove_candidate(header: @RoamHeader) -> None
     unlock: Bool = when
         IN_COLLECTOR.peek() => false
         else =>
@@ -261,7 +261,7 @@ routine remove_candidate(header: @RoamHeader) -> Void
 /// Removes `header` from `buffer` if it is there, moving the last item into its place.
 /// :param buffer: The buffer to remove from.
 /// :param header: The header to remove.
-routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
+routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> None
     n: U64 = buffer.count.peek()
 
     each i in 0 til n
@@ -282,7 +282,7 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
 /// :param child: The field's header.
 /// :throws: Crashes with `MemoryAllocationError` when growing the children buffer fails.
 @export("ingrid_cyclic_visit_child")
-routine visit_child(child: Addr) -> Void
+routine visit_child(child: Addr) -> None
     buffer_push(buffer: SCRATCH, item: child)
     return
 
@@ -292,7 +292,7 @@ routine visit_child(child: Addr) -> Void
 /// :param kids: The list that receives the children's headers.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 @reshaping(kids)
-routine children(node: @RoamHeader, kids: @List[Addr]) -> Void
+routine children(node: @RoamHeader, kids: @List[Addr]) -> None
     kids.clear()
     trace: Addr = node.trace_hook.peek()
     if trace.to[@Byte]().is_null()
@@ -314,7 +314,7 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> Void
 /// :param root: The possible cycle root to start from.
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> Void
+routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
@@ -352,7 +352,7 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> Void
 /// :param root: The root whose graph to decide.
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine scan(root: @RoamHeader, alloc: @MemoryManager) -> Void
+routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
@@ -383,7 +383,7 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> Void
 /// :param root: The node found live.
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> Void
+routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
@@ -415,7 +415,7 @@ routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> Void
 /// :param root: The root whose garbage to gather.
 /// :param alloc: The allocator for the walk's work lists.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> Void
+routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
@@ -495,7 +495,7 @@ routine collect() -> U64
 /// Removes the first n items of `buffer`, keeping any added after them.
 /// :param buffer: The buffer to shorten.
 /// :param n: How many items to remove from the front (all of them when `n` is at least the count).
-routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
+routine remove_front(buffer: @HeaderBuffer, n: U64) -> None
     count: U64 = buffer.count.peek()
     if n >= count
         buffer_clear(buffer)

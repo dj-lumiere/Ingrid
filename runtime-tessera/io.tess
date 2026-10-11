@@ -85,7 +85,7 @@ record IoReq
     data_len: S64
     result: S64  // bytes read or written, negative on an error
     proc: @ProcState
-    call: Callable[(Addr), Void]  // IO_CALL: the routine to run, with call_arg
+    call: Callable[(Addr), None]  // IO_CALL: the routine to run, with call_arg
     call_arg: Addr
 
 /// Makes a `IoReq` from its fields.
@@ -102,12 +102,12 @@ record IoReq
 /// :param call_arg: Its `call_arg`.
 /// :returns: The new value.
 routine IoReq.construct(kind: U32, sched: @Sched, coro: @Coro, qnext: @Me, path: @Byte, data: @Byte,
-    data_len: S64, result: S64, proc: @ProcState, call: Callable[(Addr), Void],
+    data_len: S64, result: S64, proc: @ProcState, call: Callable[(Addr), None],
     call_arg: Addr) -> Me
     return Me(kind, sched, coro, qnext, path, data, data_len, result, proc, call, call_arg)
 
 /// Releases nothing: a `IoReq` holds no memory of its own.
-routine IoReq.destruct(me: @Me) -> Void
+routine IoReq.destruct(me: @Me) -> None
     return
 
 /// The length of this thread's last {rf_io_read_file_all}.
@@ -119,7 +119,7 @@ routine rf_io_get_result_len() -> U64
 /// Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
 /// and stores the results in `req`.
 /// :param req: The request.
-routine io_do_work(req: @IoReq) -> Void
+routine io_do_work(req: @IoReq) -> None
     kind: U32 = req.kind.peek()
     when
         kind == IO_READ_FILE =>
@@ -134,7 +134,7 @@ routine io_do_work(req: @IoReq) -> Void
             req.result.poke(write_whole_file(cpath: req.path.peek(), data: req.data.peek(), len: req.data_len.peek()))
             return
         kind == IO_CALL =>
-            body: Callable[(Addr,), Void] = req.call.peek()
+            body: Callable[(Addr,), None] = req.call.peek()
             body.call(req.call_arg.peek())
             return
         else =>
@@ -143,7 +143,7 @@ routine io_do_work(req: @IoReq) -> Void
 
 /// An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
 /// :param lock: The lock the request queue is kept under (IO_LOCK).
-routine io_thread_main(lock: @ExclusiveLock) -> Void
+routine io_thread_main(lock: @ExclusiveLock) -> None
     rf_thread_stack_guarantee()
     lock.lock()
     jump look()
@@ -173,7 +173,7 @@ routine io_thread_main(lock: @ExclusiveLock) -> Void
 /// only a submit and a park. A second call does nothing.
 /// :throws: Crashes with `TaskSpawnError` when an I/O thread can't be started.
 @export("rf_io_runtime_init")
-routine rf_io_runtime_init() -> Void
+routine rf_io_runtime_init() -> None
     if IO_OK.peek() == 1
         return
 
@@ -187,7 +187,7 @@ routine rf_io_runtime_init() -> Void
 
 /// Appends a request to the I/O queue and wakes one I/O thread.
 /// :param req: The request.
-routine io_submit(req: @IoReq) -> Void
+routine io_submit(req: @IoReq) -> None
     IO_LOCK.lock()
     req.qnext.poke(null)
     tail: @IoReq = IO_TAIL.peek()
@@ -203,7 +203,7 @@ routine io_submit(req: @IoReq) -> Void
 /// Runs a request to completion: inside a scheduler-driven coroutine on an I/O thread while the coroutine is
 /// parked, else here. The one park pairs with the I/O thread's one wake, which may come first.
 /// :param req: The request.
-routine io_run(req: @IoReq) -> Void
+routine io_run(req: @IoReq) -> None
     if IO_OK.peek() == 1
         sched: @Sched = rf_sched_current()
         this_coro: @Coro = current_coro()
@@ -309,7 +309,7 @@ routine rf_async_runtime_create() -> @AsyncRuntime
 /// Frees a runtime object from {rf_async_runtime_create}.
 /// :param runtime: The runtime object to free.
 @export("rf_async_runtime_destroy")
-routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> Void
+routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> None
     c_free(runtime)
     return
 
@@ -338,7 +338,7 @@ routine rf_async_runtime_run_default(runtime: @AsyncRuntime) -> CInt
 /// Marks the runtime stopped. A null `runtime` does nothing.
 /// :param runtime: The runtime object.
 @export("rf_async_runtime_stop")
-routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> Void
+routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> None
     if runtime.is_null()
         return
     runtime.should_stop.poke(true)
@@ -402,7 +402,7 @@ routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte],
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap, exit_status, term_signal, spawn_failed, output, errors)
 
 /// Drops the captured streams. The program and the directory are malloc'd copies `free_bytes` gives back.
-routine ProcState.destruct(me: @Me) -> Void
+routine ProcState.destruct(me: @Me) -> None
     me.output.drop()
     me.errors.drop()
     return
@@ -451,7 +451,7 @@ routine owned_copy(s: @Byte, n: S32) -> Span[Byte]
 
 /// Frees the malloc'd memory of `b`.
 /// :param b: The bytes to free.
-routine free_bytes(b: Span[Byte]) -> Void
+routine free_bytes(b: Span[Byte]) -> None
     c_free(b.data)
     return
 
@@ -469,7 +469,7 @@ routine proc_state_new(shell: Bool, program: Span[Byte]) -> @ProcState
 
 /// Frees a subprocess state and its strings, not the captured streams: those go to the caller.
 /// :param st: The state to free.
-routine proc_state_free(st: @ProcState) -> Void
+routine proc_state_free(st: @ProcState) -> None
     free_bytes(st.program.peek())
     free_bytes(st.directory.peek())
 
@@ -507,12 +507,12 @@ routine terminated(b: Memory[Byte]) -> @Byte
 /// Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the
 /// exit status, the signal that stopped it, or that it couldn't start.
 /// :param st: The prepared state.
-routine proc_run_blocking(st: @ProcState) -> Void
+routine proc_run_blocking(st: @ProcState) -> None
     local alloc: @MemoryManager <- make_c_heap_memory()
 
     dir: Span[Byte] = st.directory.peek()
     directory: Maybe[Span[Byte]] = when
-        dir.is_empty() => Unit()
+        dir.is_empty() => None()
         else => dir
     options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.peek(), env_count: st.env_count.peek(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE, stderr: OutputMode.CAPTURE)
     r: Result[ProcessOutput, ProcessError] = when
@@ -588,7 +588,7 @@ routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
 /// :param arg: The argument.
 /// :param arg_len: Its length, or negative for a NUL-terminated `arg`.
 @export("rf_proc_add_arg")
-routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
+routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> None
     if b.is_null()
         return
     n: USize = b.arg_count.peek()
@@ -611,7 +611,7 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
 /// :param cwd: The directory.
 /// :param cwd_len: Its length, or negative for a NUL-terminated `cwd`.
 @export("rf_proc_set_cwd")
-routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
+routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> None
     if b.is_null()
         return
     free_bytes(b.directory.peek())
@@ -626,7 +626,7 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> Void
 /// :param val: The variable's value.
 /// :param val_len: Its length, or negative for a NUL-terminated `val`.
 @export("rf_proc_add_env")
-routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> Void
+routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> None
     if b.is_null()
         return
     n: USize = b.env_count.peek()
@@ -660,7 +660,7 @@ routine rf_proc_run_built(b: @ProcState) -> S64
 /// :param arg: Its argument.
 /// :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 @export("rf_blocking_call")
-routine rf_blocking_call(body: Callable[(Addr), Void], arg: Addr) -> Void
+routine rf_blocking_call(body: Callable[(Addr), None], arg: Addr) -> None
     req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate a blocking call request")
     req.kind.poke(IO_CALL)
     req.call.poke(body)
