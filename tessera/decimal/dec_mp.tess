@@ -339,84 +339,49 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
     if a.is_zero(n) or b.is_zero(n)
         return Mp.zero()
     else
-        jump clear(0)
+        each i in 0 til n
+            // row i writes limb i + n itself, so only the low n limbs need zeros
+            0.poke_into(pp.stride(i))
 
-    block clear(i: USize)
-        if i >= n
-            jump row(0)
-        else
-            jump clear_one(i)
+        while i < n with i: USize = 0
+            ai: U64 = pa.stride(i).peek()
 
-    // row i writes limb i + n itself, so only the low n limbs need zeros
-    block clear_one(i: USize)
-        0.poke_into(pp.stride(i))
-        jump clear(i + 1)
-
-    block row(i: USize)
-        if i >= n
-            jump pack()
-        else
-            jump column(i, pa.stride(i).peek(), 0, 0)
-
-    block column(i: USize, ai: U64, j: USize, carry: U64)
-        if j >= n
-            jump end_row(i, carry)
-        else
-            jump term(i, ai, j, carry)
-
-    // a[i] b[j] + prod[i + j] + carry stays below 2^128
-    block term(i: USize, ai: U64, j: USize, carry: U64)
-        at: @U64 = pp.stride(i + j)
-        x: U128 = ai.mul_wide(pb.stride(j).peek())
-        sum: U128 = x +% at.peek().to[U128]() +% carry.to[U128]()
-        sum.to_wrap[U64]().poke_into(at)
-        jump column(i, ai, j + 1, (sum >> 64).to_wrap[U64]())
-
-    block end_row(i: USize, carry: U64)
-        carry.poke_into(pp.stride(i + n))
-        jump row(i + 1)
-
-    // both mantissas have their top bit set, so the product's top limb has bit 63 or bit 62 set: the top n limbs
-    // as they are, or shifted up one bit (what mp_pack would give, without its search)
-    block pack()
+            each j in 0 til n with carry: U64 = 0
+                // a[i] b[j] + prod[i + j] + carry stays below 2^128
+                at: @U64 = pp.stride(i + j)
+                x: U128 = ai.mul_wide(pb.stride(j).peek())
+                sum: U128 = x +% at.peek().to[U128]() +% carry.to[U128]()
+                sum.to_wrap[U64]().poke_into(at)
+                continue with carry: (sum >> 64).to_wrap[U64]()
+            then
+                carry.poke_into(pp.stride(i + n))
+                continue with i: i + 1
+        // both mantissas have their top bit set, so the product's top limb has bit 63 or bit 62 set: the top n limbs
+        // as they are, or shifted up one bit (what mp_pack would give, without its search)
         size: USize = n * 2
         top: U64 = pp.stride(size - 1).peek()
         e: S64 = a.exp + b.exp
         (a.neg ^ b.neg).poke_into(r.neg)
         when
-            top >> 63 == 1 => jump whole(e, 0)
-            top >> 62 == 1 => jump halved(e - 1, 0)
-            else => jump general(size)
+            top >> 63 == 1 =>
+                each k in 0 til n
+                    pp.stride(k + n).peek().poke_into(pr.stride(k))
+                then
+                    e.poke_into(r.exp)
+                    return r.peek()
+            top >> 62 == 1 =>
+                e2: S64 = e - 1
 
-    block whole(e: S64, k: USize)
-        if k >= n
-            jump seal(e)
-        else
-            jump whole_one(e, k)
-
-    block whole_one(e: S64, k: USize)
-        pp.stride(k + n).peek().poke_into(pr.stride(k))
-        jump whole(e, k + 1)
-
-    block halved(e: S64, k: USize)
-        if k >= n
-            jump seal(e)
-        else
-            jump halved_one(e, k)
-
-    block halved_one(e: S64, k: USize)
-        high: U64 = pp.stride(k + n).peek()
-        low: U64 = pp.stride(k + n - 1).peek()
-        ((high << 1) | (low >> 63)).poke_into(pr.stride(k))
-        jump halved(e, k + 1)
-
-    block seal(e: S64)
-        e.poke_into(r.exp)
-        return r.peek()
-
-    block general(size: USize)
-        scale: S64 = a.exp + b.exp - size.to[S64]() * 64
-        return mp_pack(value: MpUnpacked(neg: a.neg ^ b.neg, limbs: prod, len: size, scale: scale), n)
+                each k in 0 til n
+                    high: U64 = pp.stride(k + n).peek()
+                    low: U64 = pp.stride(k + n - 1).peek()
+                    ((high << 1) | (low >> 63)).poke_into(pr.stride(k))
+                then
+                    e2.poke_into(r.exp)
+                    return r.peek()
+            else =>
+                scale: S64 = a.exp + b.exp - size.to[S64]() * 64
+                return mp_pack(value: MpUnpacked(neg: a.neg ^ b.neg, limbs: prod, len: size, scale: scale), n)
 
 /// a × k for a small k > 0, truncated.
 /// :param a: The first operand.
