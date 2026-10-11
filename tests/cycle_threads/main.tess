@@ -26,83 +26,75 @@ record Node
 /// :param child: Its `child`.
 /// :returns: The new value.
 routine Node.construct(child: Addr) -> Me
-    return(Me(child))
+    return Me(child)
 
 /// Releases nothing: a `Node` holds no memory of its own.
-routine Node.destruct(me: @Me) -> Void
-    return()
+routine Node.destruct(me: @Me) -> None
+    return
 
-#export("rf_current_task_id")
+@export("rf_current_task_id")
 routine stub_current_task_id() -> U64
-    return(1)
+    return 1
 
-#export("rf_coro_yield")
-routine stub_coro_yield() -> Void
-    return()
+@export("rf_coro_yield")
+routine stub_coro_yield() -> None
+    return
 
-#[export("rf_crash_exit"), noreturn]
-routine stub_crash_exit() -> Void
+@export("rf_crash_exit")
+@noreturn
+routine stub_crash_exit() -> None
     exit(82)
 
 /// The entity type's trace routine: hands the collector the header its Roamed field holds.
 /// :param entity: The node.
-routine trace_node(entity: Addr) -> Void
+routine trace_node(entity: Addr) -> None
     node: @Node = entity.to[@Node]()
     child: Addr = node.child.peek()
-    branch child.to[@Byte]().is_null()
-        ? return()
-        : continue
+    if child.to[@Byte]().is_null()
+        return
     visit_child(child)
-    return()
+    return
 
 /// The entity type's collector free routine: counts the node and frees it.
 /// :param entity: The node.
-routine free_node(entity: Addr) -> Void
+routine free_node(entity: Addr) -> None
     before: U64 = FREED.atomic_fetch_add(1)
-    claim alloc: @MemoryManager <- make_c_heap_memory()
+    local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: entity.to[@Node](), alloc)
-    return()
+    return
 
 /// The entity type's destroy routine, for the last strong release: frees the node without counting it.
 /// :param entity: The node.
-routine drop_node(entity: Addr) -> Void
-    claim alloc: @MemoryManager <- make_c_heap_memory()
+routine drop_node(entity: Addr) -> None
+    local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: entity.to[@Node](), alloc)
-    return()
+    return
 
 /// A new local entity with one strong handle.
 /// :returns: Its header.
 routine new_entity() -> @RoamHeader
-    claim alloc: @MemoryManager <- make_c_heap_memory()
+    local alloc: @MemoryManager <- make_c_heap_memory()
     node: @Node = allocate[Node](count: 1, alloc)
     header: @RoamHeader = allocate[RoamHeader](count: 1, alloc)
     node.child.poke(null)
-    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
-        holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
-        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
-    return(header)
+    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0, holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(), free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
+    return header
 
 /// Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
 /// :param owner: The entity whose field is set.
 /// :param target: The entity it points at.
-routine link(owner: @RoamHeader, target: @RoamHeader) -> Void
+routine link(owner: @RoamHeader, target: @RoamHeader) -> None
     node: @Node = owner.data.peek().to[@Node]()
     roam_hold(target)
     node.child.poke(target)
-    return()
+    return
 
 /// A worker: ROUNDS times, makes a cycle of two and lets go of it, then shares and releases its private entity.
 /// :param unused: Nothing.
-routine worker(unused: @U64) -> Void
+routine worker(unused: @U64) -> None
     mine: @RoamHeader = new_entity()
-    jump round(0, mine)
 
-    block round(i: U64, mine: @RoamHeader)
-        branch i.lt(ROUNDS)
-            ? one(i, mine)
-            : finish(mine)
-
-    block one(i: U64, mine: @RoamHeader)
+    each i in 0 til ROUNDS
         a: @RoamHeader = new_entity()
         b: @RoamHeader = new_entity()
         link(owner: a, target: b)
@@ -111,52 +103,41 @@ routine worker(unused: @U64) -> Void
         roam_unhold(a)
         roam_hold(mine)
         roam_unhold(mine)
-        jump round(i.add(1), mine)
-
-    block finish(mine: @RoamHeader)
+    then
         roam_unhold(mine)
         before: U64 = DONE.atomic_fetch_add(1)
-        return()
+        return
 
 /// Starts `left` more workers, runs passes until they have all finished, and waits for them.
 /// :param left: How many workers are still to start.
-routine run_workers(left: U64) -> Void
-    branch left.eq(0)
-        ? collect_while_working()
-        : spawn()
-
-    block spawn()
-        claim unused: @U64 <- 0
-        thread: Thread[Void] = get_thread[Void]()
+routine run_workers(left: U64) -> None
+    if left == 0
+        while DONE.peek_atomic() != WORKERS
+            freed: U64 = collect()
+        then
+            return
+    else
+        local unused: @U64 <- 0
+        thread: Thread[None] = get_thread[None]()
         thread.put_work(entry: worker.to[Callable](), args: unused)
-        run_workers(left.sub(1))
+        run_workers(left - 1)
         thread.wait_finished()
         thread.give_back()
-        return()
-
-    block collect_while_working()
-        freed: U64 = collect()
-        done: Bool = DONE.peek_atomic().eq(WORKERS)
-        branch done
-            ? return()
-            : collect_while_working()
+        return
 
 /// Runs passes until one frees nothing.
-routine collect_the_rest() -> Void
-    jump pass()
+routine collect_the_rest() -> None
+    while collect() != 0
+        pass
+    then
+        return
 
-    block pass()
-        freed: U64 = collect()
-        branch freed.eq(0)
-            ? return()
-            : pass()
-
-routine start() -> Void
+routine start() -> None
     run_workers(WORKERS)
     collect_the_rest()
     freed: U64 = FREED.peek_atomic()
-    expected: U64 = WORKERS.mul(ROUNDS).mul(2)
-    all: Bool = freed.eq(expected)
+    expected: U64 = WORKERS.mul(ROUNDS) * 2
+    all: Bool = freed == expected
     left: U64 = ROOTS.count.peek()
     Out.write("every cycle freed once: {all}, candidates left {left}\n")
-    return()
+    return

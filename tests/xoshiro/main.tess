@@ -15,126 +15,96 @@ routine draw(state: @Words) -> U64
     s: Words = state.peek()
     result: U64 = xoshiro256ss_output(s0: s.w0, s1: s.w1, s2: s.w2, s3: s.w3)
     xoshiro256ss_step(s0: s.w0, s1: s.w1, s2: s.w2, s3: s.w3).poke_into(state)
-    return(result)
+    return result
 
 /// Folds a value into a running checksum.
-#inline
+@inline
 routine fold(h: U64, v: U64) -> U64
-    return(h.bitxor(v).mul_wrap(FNV_PRIME))
+    return (h ^ v) *% FNV_PRIME
 
 /// The checksum of a million 64-bit draws.
 routine fold_u64(state: @Words) -> U64
     local h: @U64 <- FNV_START
 
-    jump each(0)
-
-    block each(i: U64)
-        branch i.ge(DRAWS)
-            ? return(h.peek())
-            : continue
+    each i in 0 til DRAWS
         fold(h: h.peek(), v: draw(state)).poke_into(h)
-        jump each(i.add(1))
+    then
+        return h.peek()
 
 /// The checksum of a million 32-bit draws (the high half of a draw, widened back).
 routine fold_u32(state: @Words) -> U64
     local h: @U64 <- FNV_START
 
-    jump each(0)
-
-    block each(i: U64)
-        branch i.ge(DRAWS)
-            ? return(h.peek())
-            : continue
-        fold(h: h.peek(), v: draw(state).shr(32)).poke_into(h)
-        jump each(i.add(1))
+    each i in 0 til DRAWS
+        fold(h: h.peek(), v: draw(state) >> 32).poke_into(h)
+    then
+        return h.peek()
 
 /// The checksum of the bits of a million [0, 1) draws.
 routine fold_b64(state: @Words) -> U64
     local h: @U64 <- FNV_START
 
-    jump each(0)
-
-    block each(i: U64)
-        branch i.ge(DRAWS)
-            ? return(h.peek())
-            : continue
+    each i in 0 til DRAWS
         unit: B64 = random_unit_b64(draw(state))
         fold(h: h.peek(), v: unit.bits()).poke_into(h)
-        jump each(i.add(1))
+    then
+        return h.peek()
 
 /// RazorForge's range draw: low plus a draw modulo the wrapped span.
 routine range(state: @Words, low: U64, high: U64) -> U64
-    span: U64 = high.sub_wrap(low)
-    return(low.add_wrap(draw(state).mod(span)))
+    span: U64 = high -% low
+    return low +% draw(state) % span
 
 /// The checksum of a million pairs of range draws, [10, 1000) and a span that wraps past U64.MAX.
 routine fold_range(state: @Words) -> U64
     local h: @U64 <- FNV_START
 
-    jump each(0)
-
-    block each(i: U64)
-        branch i.ge(DRAWS)
-            ? return(h.peek())
-            : continue
+    each i in 0 til DRAWS
         first: U64 = fold(h: h.peek(), v: range(state, low: 10, high: 1000))
         second: U64 = fold(h: first, v: range(state, low: 18446744073709551000, high: 5))
         second.poke_into(h)
-        jump each(i.add(1))
+    then
+        return h.peek()
 
 /// How many of a million chance(0.3) trials succeed.
 routine count_chance(state: @Words) -> U64
     local heads: @U64 <- 0
 
-    jump each(0)
-
-    block each(i: U64)
-        branch i.ge(DRAWS)
-            ? return(heads.peek())
-            : continue
+    each i in 0 til DRAWS
         unit: B64 = random_unit_b64(draw(state))
-        hit: Bool = unit.lt(0.3)
-        heads.peek().add(hit.to[U64]()).poke_into(heads)
-        jump each(i.add(1))
+        hit: Bool = unit < 0.3
+        (heads.peek() + hit.to[U64]()).poke_into(heads)
+    then
+        return heads.peek()
 
 /// The checksum of a million rounds of the splitmix64 chain, each fed the last one's output.
 routine fold_splitmix(seed: U64) -> U64
-    jump each(0, seed, FNV_START)
-
-    block each(i: U64, acc: U64, h: U64)
-        branch i.ge(DRAWS)
-            ? return(h)
-            : continue
+    each i in 0 til DRAWS with acc: U64 = seed, h: U64 = FNV_START
         next: U64 = splitmix64(acc)
-        jump each(i.add(1), next, fold(h, v: next))
+        continue with acc: next, h: fold(h, v: next)
+    then
+        return h
 
 /// Writes every line random_streams.rf writes for one seed.
-routine stream(seed: U64) -> Void
+routine stream(seed: U64) -> None
     local state: @Words <- xoshiro256ss_seed(seed)
 
-    jump first(0)
-
-    block first(i: U64)
-        branch i.ge(5)
-            ? sums()
-            : continue
+    while i < 5 with i: U64 = 0
         Out.write("seed {seed} u64 #{i}: {draw(state)}\n")
-        jump first(i.add(1))
+        continue with i: i + 1
+    Out.write("seed {seed} u64 x1e6: {fold_u64(state)}\n")
+    Out.write("seed {seed} u32 x1e6: {fold_u32(state)}\n")
+    Out.write("seed {seed} b64 x1e6: {fold_b64(state)}\n")
+    Out.write("seed {seed} range x2e6: {fold_range(state)}\n")
+    Out.write("seed {seed} chance(0.3) x1e6: {count_chance(state)}\n")
+    Out.write("seed {seed} splitmix chain x1e6: {fold_splitmix(seed)}\n")
+    return
 
-    block sums()
-        Out.write("seed {seed} u64 x1e6: {fold_u64(state)}\n")
-        Out.write("seed {seed} u32 x1e6: {fold_u32(state)}\n")
-        Out.write("seed {seed} b64 x1e6: {fold_b64(state)}\n")
-        Out.write("seed {seed} range x2e6: {fold_range(state)}\n")
-        Out.write("seed {seed} chance(0.3) x1e6: {count_chance(state)}\n")
-        Out.write("seed {seed} splitmix chain x1e6: {fold_splitmix(seed)}\n")
-        return()
-
-routine start() -> Void
+routine start() -> None
     stream(0)
     stream(1)
     stream(42)
     stream(12345)
     stream(1311768467463790320)
     stream(18446744073709551615)
-    return()
+    return

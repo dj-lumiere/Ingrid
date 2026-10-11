@@ -18,65 +18,50 @@ preset PAIRS: U64 = 1500
 routine pow10(n: U64) -> U64
     local power: @U64 <- 1
 
-    jump step(0)
-
-    block step(i: U64)
-        branch i.ge(n)
-            ? return(power.peek())
-            : continue
-        power.peek().mul(10).poke_into(power)
-        jump step(i.add(1))
+    each i in 0 til n
+        (power.peek() * 10).poke_into(power)
+    then
+        return power.peek()
 
 /// An operand from two random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
 /// :param r: A random word.
 /// :param s: A random word.
 /// :returns: The operand's bits.
 routine operand(r: U64, s: U64) -> U64
-    local sign: U64 = r.shr(40).bitand(1).shl(63)
-    local spread: U64 = r.shr(16)
-    local kind: U64 = r.mod(4)
+    local sign: U64 = ((r >> 40) & 1) << 63
+    local spread: U64 = r >> 16
+    local kind: U64 = r % 4
 
     when kind
-        0 => return(s)
-        3 => special()
-        else => finite()
-
-    block special()
-        which: U64 = r.shr(24).mod(4)
-        when which
-            0 => zero()
-            1 => return(sign.bitor(0x7800000000000000))
-            2 => return(0x7C00000000000000)
-            else => return(0x7E00000000000000)
-
-    block zero()
-        biased: U64 = spread.mod(768)
-        return(sign.bitor(biased.shl(53)))
-
-    block finite()
-        digits: U64 = r.shr(8).mod(17)
-        coeff: U64 = s.mod(pow10(digits)).bitand(0x1FFFFFFFFFFFFF)
-        near: Bool = kind.eq(1)
-        biased: U64 = near
-            ? spread.mod(41).add(378)
-            : spread.mod(768)
-        return(sign.bitor(biased.shl(53)).bitor(coeff))
+        0 => return s
+        3 =>
+            which: U64 = (r >> 24) % 4
+            when which
+                0 =>
+                    biased: U64 = spread % 768
+                    return sign | (biased << 53)
+                1 => return sign | 0x7800000000000000
+                2 => return 0x7C00000000000000
+                else => return 0x7E00000000000000
+        else =>
+            digits: U64 = (r >> 8) % 17
+            coeff: U64 = s % pow10(digits) & 0x1FFFFFFFFFFFFF
+            near: Bool = kind == 1
+            biased: U64 = when
+                near => spread % 41 + 378
+                else => spread % 768
+            return sign | (biased << 53) | coeff
 
 /// The next word of the generator, as RazorForge's C/ingrid_splitmix64 steps it.
 /// :returns: The next word.
 routine draw() -> U64
     next: U64 = splitmix64(STATE.peek())
     next.poke_into(STATE)
-    return(next)
+    return next
 
 /// Prints the lines.
-routine start() -> Void
-    jump pair(0)
-
-    block pair(i: U64)
-        branch i.ge(PAIRS)
-            ? return()
-            : continue
+routine start() -> None
+    each i in 0 til PAIRS
         r1: U64 = draw()
         s1: U64 = draw()
         r2: U64 = draw()
@@ -85,4 +70,5 @@ routine start() -> Void
         b: U64 = operand(r: r2, s: s2)
         Out.write("{a} {b} {ingrid_d64_add(a, b)} {ingrid_d64_sub(a, b)} {ingrid_d64_mul(a, b)} ")
         Out.write("{ingrid_d64_div(a, b)} {ingrid_d64_order(a, b)}\n")
-        jump pair(i.add(1))
+    then
+        return

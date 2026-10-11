@@ -42,132 +42,111 @@ record Dropper
 /// :param done: Its `done`.
 /// :returns: The new value.
 routine Race.construct(chan: @Channel, round: U32, done: U32) -> Me
-    return(Me(chan, round, done))
+    return Me(chan, round, done)
 
 /// Releases nothing: a `Race` holds no memory of its own.
-routine Race.destruct(me: @Me) -> Void
-    return()
+routine Race.destruct(me: @Me) -> None
+    return
 
 /// Makes a `Dropper` from its fields.
 /// :param race: Its `race`.
 /// :param producer: Its `producer`.
 /// :returns: The new value.
 routine Dropper.construct(race: @Race, producer: Bool) -> Me
-    return(Me(race, producer))
+    return Me(race, producer)
 
 /// Releases nothing: a `Dropper` holds no memory of its own.
-routine Dropper.destruct(me: @Me) -> Void
-    return()
+routine Dropper.destruct(me: @Me) -> None
+    return
 
 // -- what channel.tess calls in the rest of the runtime library ----------------------
 
-#[external("c"), symbol("calloc")]
+@external("c")
+@symbol("calloc")
 routine c_calloc(count: USize, size: USize) -> Addr
 
 /// Counts the block instead of freeing it.
-routine c_free(ptr: Addr) -> Void
-    branch ptr.is_null()
-        ? return()
-        : continue
+routine c_free(ptr: Addr) -> None
+    if ptr.is_null()
+        return
     discard_previous: U64 = FREES.atomic_fetch_add(1)
-    return()
+    return
 
 /// count zeroed Ts.
 routine zeroed[T](count: USize, what: CStr) -> @T
-require T: typename
+needs T: typename
     p: Addr = c_calloc(count, sizeof[T]())
-    return(p.to[@T]())
+    return p.to[@T]()
 
-#[external("c"), symbol("exit"), noreturn]
-routine exit(status: CInt) -> Void
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
 
-#noreturn
-routine rf_throw(error_type: CStr, message: CStr) -> Void
+@noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> None
     Out.write("rf_throw\n")
     exit(1)
 
 routine rf_sched_current() -> @Sched
-    return(null)
+    return null
 
 routine current_coro() -> @Coro
-    return(null)
+    return null
 
-routine rf_sched_wake(s: @Sched, c: @Coro) -> Void
-    return()
+routine rf_sched_wake(s: @Sched, c: @Coro) -> None
+    return
 
-routine rf_sched_park_external() -> Void
-    return()
+routine rf_sched_park_external() -> None
+    return
 
 routine rf_cancel_requested() -> U32
-    return(0)
+    return 0
 
 // -- the race ------------------------------------------------------------------------
 
 /// Drops one side of each round's channel as soon as the round starts.
-routine drop_each_round(dropper: @Dropper) -> Void
+routine drop_each_round(dropper: @Dropper) -> None
     local race: @Race = dropper.race.peek()
 
-    jump wait(1)
+    while round <= ROUNDS with round: U32 = 1
+        if not (race.round.peek_atomic() >= round)
+            continue with round: round
+        else
+            chan: @Channel = race.chan.peek_atomic()
+            if dropper.producer.peek()
+                rf_channel_drop_feeder(chan)
+            else
+                rf_channel_drop_consumer(chan)
+            discard_previous: U32 = race.done.atomic_fetch_add(1)
+            continue with round: round + 1
+    then
+        return
 
-    block wait(round: U32)
-        past: Bool = round.gt(ROUNDS)
-        branch past
-            ? return()
-            : continue
-        started: Bool = race.round.peek_atomic().ge(round)
-        branch started
-            ? continue
-            : wait(round)
-        chan: @Channel = race.chan.peek_atomic()
-        branch dropper.producer.peek()
-            ? feeder(round, chan)
-            : consumer(round, chan)
-
-    block feeder(round: U32, chan: @Channel)
-        rf_channel_drop_feeder(chan)
-        jump dropped(round)
-
-    block consumer(round: U32, chan: @Channel)
-        rf_channel_drop_consumer(chan)
-        jump dropped(round)
-
-    block dropped(round: U32)
-        discard_previous: U32 = race.done.atomic_fetch_add(1)
-        jump wait(round.add(1))
-
-routine start() -> Void
+routine start() -> None
     local race: @Race <- Race(chan: null, round: 0, done: 0)
     local producer: @Dropper <- Dropper(race: race, producer: true)
     local consumer: @Dropper <- Dropper(race: race, producer: false)
-    local a: Thread[Void] = get_thread[Void]()
-    local b: Thread[Void] = get_thread[Void]()
+    local a: Thread[None] = get_thread[None]()
+    local b: Thread[None] = get_thread[None]()
+
     a.put_work(entry: drop_each_round.to[Callable](), args: producer)
     b.put_work(entry: drop_each_round.to[Callable](), args: consumer)
 
-    jump round(1)
-
-    block round(n: U32)
-        past: Bool = n.gt(ROUNDS)
-        branch past
-            ? report()
-            : continue
+    each n in 1 to ROUNDS
         chan: @Channel = rf_channel_create(1)
         race.chan.poke_atomic(chan)
         race.round.poke_atomic(n)
-        jump wait(n)
 
-    block wait(n: U32)
-        both_done: Bool = race.done.peek_atomic().eq(n.mul(2))
-        branch both_done
-            ? round(n.add(1))
-            : wait(n)
-
-    block report()
-        a.wait_finished()
-        a.give_back()
-        b.wait_finished()
-        b.give_back()
-        expected: U64 = ROUNDS.to[U64]().mul(2)
-        frees: U64 = FREES.peek_atomic()
-        Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
-        return()
+        while race.done.peek_atomic() != n * 2
+            pass
+        then
+            continue
+    a.wait_finished()
+    a.give_back()
+    b.wait_finished()
+    b.give_back()
+    expected: U64 = ROUNDS.to[U64]() * 2
+    frees: U64 = FREES.peek_atomic()
+    Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
+    return

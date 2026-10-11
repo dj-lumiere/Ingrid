@@ -14,28 +14,32 @@ import Standard/Os
 record Sched
     id: U64
 
-#[external("c"), symbol("calloc")]
+@external("c")
+@symbol("calloc")
 routine c_calloc(count: USize, size: USize) -> Addr
 
-#[external("c"), symbol("free")]
-routine c_free(ptr: Addr) -> Void
+@external("c")
+@symbol("free")
+routine c_free(ptr: Addr) -> None
 
 /// count zeroed Ts.
 routine zeroed[T](count: USize, what: CStr) -> @T
-require T: typename
+needs T: typename
     p: Addr = c_calloc(count, sizeof[T]())
-    return(p.to[@T]())
+    return p.to[@T]()
 
-#[external("c"), symbol("exit"), noreturn]
-routine exit(status: CInt) -> Void
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
 
-#noreturn
-routine rf_throw(error_type: CStr, message: CStr) -> Void
+@noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> None
     Out.write("rf_throw\n")
     exit(1)
 
 routine rf_current_thread_id() -> U64
-    return(1)
+    return 1
 
 // -- the shadow stack ----------------------------------------------------------------
 
@@ -43,20 +47,17 @@ routine rf_current_thread_id() -> U64
 routine depth(coro: @Coro) -> USize
     local found: @USize <- 0
 
-    jump next(coro.cf_top.peek())
-
-    block next(f: @CancelFrame)
-        branch f.is_null()
-            ? return(found.peek())
-            : continue
-        found.peek().add(1).poke_into(found)
-        jump next(f.prev.peek())
+    until f.is_null() with f: @CancelFrame = coro.cf_top.peek()
+        (found.peek() + 1).poke_into(found)
+        continue with f: f.prev.peek()
+    then
+        return found.peek()
 
 /// Destroys nothing: the frames' values are never abandoned here.
-routine keep(value: Addr) -> Void
-    return()
+routine keep(value: Addr) -> None
+    return
 
-routine start() -> Void
+routine start() -> None
     local coro: @Coro = zeroed[Coro](count: 1, what: "coroutine")
     local first: @CancelFrame <- .hollow()
     local second: @CancelFrame <- .hollow()
@@ -78,4 +79,4 @@ routine start() -> Void
     Out.write("pop of null on the empty stack again: depth {depth(coro)}\n")
     CURRENT_CORO.poke(null)
     c_free(coro)
-    return()
+    return

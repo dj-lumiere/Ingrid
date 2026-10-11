@@ -18,7 +18,8 @@ preset PAIRS: U64 = 1500
 /// :param b_low: The low 64 bits of b.
 /// :param b_high: The high 64 bits of b.
 /// :returns: The sum in Words.
-#[external("c"), symbol("ingrid_d128_add")]
+@external("c")
+@symbol("ingrid_d128_add")
 routine c_d128_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
 /// ingrid_d128_sub through the C ABI.
@@ -27,7 +28,8 @@ routine c_d128_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 /// :param b_low: The low 64 bits of b.
 /// :param b_high: The high 64 bits of b.
 /// :returns: The difference in Words.
-#[external("c"), symbol("ingrid_d128_sub")]
+@external("c")
+@symbol("ingrid_d128_sub")
 routine c_d128_sub(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
 /// ingrid_d128_mul through the C ABI.
@@ -36,7 +38,8 @@ routine c_d128_sub(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 /// :param b_low: The low 64 bits of b.
 /// :param b_high: The high 64 bits of b.
 /// :returns: The product in Words.
-#[external("c"), symbol("ingrid_d128_mul")]
+@external("c")
+@symbol("ingrid_d128_mul")
 routine c_d128_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
 /// ingrid_d128_div through the C ABI.
@@ -45,7 +48,8 @@ routine c_d128_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 /// :param b_low: The low 64 bits of b.
 /// :param b_high: The high 64 bits of b.
 /// :returns: The quotient in Words.
-#[external("c"), symbol("ingrid_d128_div")]
+@external("c")
+@symbol("ingrid_d128_div")
 routine c_d128_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 
 /// ingrid_d128_order through the C ABI.
@@ -54,7 +58,8 @@ routine c_d128_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
 /// :param b_low: The low 64 bits of b.
 /// :param b_high: The high 64 bits of b.
 /// :returns: The order.
-#[external("c"), symbol("ingrid_d128_order")]
+@external("c")
+@symbol("ingrid_d128_order")
 routine c_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
 
 /// 10 to the power n.
@@ -63,14 +68,10 @@ routine c_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
 routine pow10(n: U64) -> U128
     local power: @U128 <- 1
 
-    jump step(0)
-
-    block step(i: U64)
-        branch i.ge(n)
-            ? return(power.peek())
-            : continue
-        power.peek().mul(10).poke_into(power)
-        jump step(i.add(1))
+    each i in 0 til n
+        (power.peek() * 10).poke_into(power)
+    then
+        return power.peek()
 
 /// An operand from three random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
 /// :param r: A random word.
@@ -78,62 +79,51 @@ routine pow10(n: U64) -> U128
 /// :param t: A random word.
 /// :returns: The operand's bits.
 routine operand(r: U64, s: U64, t: U64) -> U128
-    local high: U128 = s.to[U128]().shl(64)
-    local wide: U128 = high.bitor(t.to[U128]())
-    local negative: U128 = r.shr(40).bitand(1).to[U128]()
-    local sign: U128 = negative.shl(127)
-    local spread: U64 = r.shr(16)
-    local kind: U64 = r.mod(4)
+    local high: U128 = s.to[U128]() << 64
+    local wide: U128 = high | t.to[U128]()
+    local negative: U128 = ((r >> 40) & 1).to[U128]()
+    local sign: U128 = negative << 127
+    local spread: U64 = r >> 16
+    local kind: U64 = r % 4
 
     when kind
-        0 => return(wide)
-        3 => special()
-        else => finite()
-
-    block special()
-        which: U64 = r.shr(24).mod(4)
-        when which
-            0 => zero()
-            1 => return(sign.bitor(0x78000000000000000000000000000000))
-            2 => return(0x7C000000000000000000000000000000)
-            else => return(0x7E000000000000000000000000000000)
-
-    block zero()
-        biased: U128 = spread.mod(12288).to[U128]()
-        return(sign.bitor(biased.shl(113)))
-
-    block finite()
-        digits: U64 = r.shr(8).mod(35)
-        coeff: U128 = wide.mod(pow10(digits))
-        near: Bool = kind.eq(1)
-        biased: U64 = near
-            ? spread.mod(81).add(6136)
-            : spread.mod(12288)
-        place: U128 = biased.to[U128]().shl(113)
-        return(sign.bitor(place).bitor(coeff))
+        0 => return wide
+        3 =>
+            which: U64 = (r >> 24) % 4
+            when which
+                0 =>
+                    biased: U128 = (spread % 12288).to[U128]()
+                    return sign | (biased << 113)
+                1 => return sign | 0x78000000000000000000000000000000
+                2 => return 0x7C000000000000000000000000000000
+                else => return 0x7E000000000000000000000000000000
+        else =>
+            digits: U64 = (r >> 8) % 35
+            coeff: U128 = wide % pow10(digits)
+            near: Bool = kind == 1
+            biased: U64 = when
+                near => spread % 81 + 6136
+                else => spread % 12288
+            place: U128 = biased.to[U128]() << 113
+            return sign | place | coeff
 
 /// A result handed back in Words, as its 128 bits.
 /// :param words: The words an export hands back.
 /// :returns: The 128 bits.
 routine bits(words: Words) -> U128
-    high: U128 = words.w1.to[U128]().shl(64)
-    return(high.bitor(words.w0.to[U128]()))
+    high: U128 = words.w1.to[U128]() << 64
+    return high | words.w0.to[U128]()
 
 /// The next word of the generator, as RazorForge's C/ingrid_splitmix64 steps it.
 /// :returns: The next word.
 routine draw() -> U64
     next: U64 = splitmix64(STATE.peek())
     next.poke_into(STATE)
-    return(next)
+    return next
 
 /// Prints the lines.
-routine start() -> Void
-    jump pair(0)
-
-    block pair(i: U64)
-        branch i.ge(PAIRS)
-            ? return()
-            : continue
+routine start() -> None
+    each i in 0 til PAIRS
         r1: U64 = draw()
         s1: U64 = draw()
         t1: U64 = draw()
@@ -143,11 +133,12 @@ routine start() -> Void
         a: U128 = operand(r: r1, s: s1, t: t1)
         b: U128 = operand(r: r2, s: s2, t: t2)
         a_low: U64 = a.to_wrap[U64]()
-        a_high: U64 = a.shr(64).to[U64]()
+        a_high: U64 = (a >> 64).to[U64]()
         b_low: U64 = b.to_wrap[U64]()
-        b_high: U64 = b.shr(64).to[U64]()
+        b_high: U64 = (b >> 64).to[U64]()
         Out.write("{a} {b} {bits(c_d128_add(a_low, a_high, b_low, b_high))} ")
         Out.write("{bits(c_d128_sub(a_low, a_high, b_low, b_high))} ")
         Out.write("{bits(c_d128_mul(a_low, a_high, b_low, b_high))} ")
         Out.write("{bits(c_d128_div(a_low, a_high, b_low, b_high))} {c_d128_order(a_low, a_high, b_low, b_high)}\n")
-        jump pair(i.add(1))
+    then
+        return

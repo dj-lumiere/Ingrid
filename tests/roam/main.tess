@@ -25,84 +25,81 @@ record Node
 /// :param child: Its `child`.
 /// :returns: The new value.
 routine Node.construct(id: U64, child: Addr) -> Me
-    return(Me(id, child))
+    return Me(id, child)
 
 /// Releases nothing: a `Node` holds no memory of its own.
-routine Node.destruct(me: @Me) -> Void
-    return()
+routine Node.destruct(me: @Me) -> None
+    return
 
-#export("rf_current_task_id")
+@export("rf_current_task_id")
 routine stub_current_task_id() -> U64
-    return(7)
+    return 7
 
-#export("rf_coro_yield")
-routine stub_coro_yield() -> Void
-    yields: U64 = YIELDS.peek().add(1)
+@export("rf_coro_yield")
+routine stub_coro_yield() -> None
+    yields: U64 = YIELDS.peek() + 1
     yields.poke_into(YIELDS)
     waited: @RoamHeader = CONTENDED.peek()
-    branch waited.is_null()
-        ? return()
-        : continue
+    if waited.is_null()
+        return
     waited.holder_task.poke_atomic(0)
     waited.locked.poke_atomic(0)
     CONTENDED.poke(null)
-    return()
+    return
 
 /// The deadlock detector's exit, never reached here (the detector is off unless RF_DEADLOCK_DETECT asks for it).
-#[export("rf_crash_exit"), noreturn]
-routine stub_crash_exit() -> Void
+@export("rf_crash_exit")
+@noreturn
+routine stub_crash_exit() -> None
     exit(82)
 
 /// The entity type's destroy routine: reports which entity went and frees it.
-routine drop_node(entity: Addr) -> Void
+routine drop_node(entity: Addr) -> None
     node: @Node = entity.to[@Node]()
     id: U64 = node.id.peek()
     Out.write("  destroyed node {id}\n")
-    claim alloc: @MemoryManager <- make_c_heap_memory()
+    local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: node, alloc)
-    return()
+    return
 
 /// The entity type's trace routine: hands the collector the header its Roamed field holds.
-routine trace_node(entity: Addr) -> Void
+routine trace_node(entity: Addr) -> None
     node: @Node = entity.to[@Node]()
     child: Addr = node.child.peek()
-    branch child.to[@Byte]().is_null()
-        ? return()
-        : continue
+    if child.to[@Byte]().is_null()
+        return
     visit_child(child)
-    return()
+    return
 
 /// A new entity with one strong handle, from the C heap as the runtime frees it. A cyclic type has a trace routine.
 routine new_entity(id: U64, child: Addr, cyclic: Bool) -> @RoamHeader
-    claim alloc: @MemoryManager <- make_c_heap_memory()
+    local alloc: @MemoryManager <- make_c_heap_memory()
     node: @Node = allocate[Node](count: 1, alloc)
     header: @RoamHeader = allocate[RoamHeader](count: 1, alloc)
     id.poke_into(node.id)
     child.poke_into(node.child)
-    trace: Addr = cyclic
-        ? trace_node.addr()
-        : null
-    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
-        holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace, free_hook: null,
-        drop_hook: drop_node.addr(), shape_users: 0))
-    return(header)
+    trace: Addr = when
+        cyclic => trace_node.addr()
+        else => null
+    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0, holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace, free_hook: null, drop_hook: drop_node.addr(), shape_users: 0))
+    return header
 
-routine show_counts(label: Span[Byte], header: @RoamHeader) -> Void
+routine show_counts(label: Span[Byte], header: @RoamHeader) -> None
     strong: U64 = roam_strong_count(header)
     weak: U64 = header.weak.peek()
     destroyed: Bool = roam_is_destroyed(header)
     Out.write("{label}: strong {strong}, weak {weak}, destroyed {destroyed}\n")
-    return()
+    return
 
-routine show_lock(label: Span[Byte], header: @RoamHeader) -> Void
+routine show_lock(label: Span[Byte], header: @RoamHeader) -> None
     locked: U8 = header.locked.peek()
     holder: U64 = header.holder_task.peek()
     depth: U64 = header.depth.peek()
     Out.write("{label}: locked {locked}, holder {holder}, depth {depth}\n")
-    return()
+    return
 
 /// hold and unhold on a local entity, the last unhold destroying it while a weak observer keeps the header.
-routine counts() -> Void
+routine counts() -> None
     Out.write("counts\n")
     a: @RoamHeader = new_entity(id: 1, child: null, cyclic: false)
     show_counts(label: "new", header: a)
@@ -121,10 +118,10 @@ routine counts() -> Void
     b: @RoamHeader = new_entity(id: 2, child: null, cyclic: false)
     roam_unhold(b)
     Out.write("no observer, header freed with the entity\n")
-    return()
+    return
 
 /// A release that leaves a cyclic entity alive reports it to the collector once. An acyclic one is never reported.
-routine candidates() -> Void
+routine candidates() -> None
     Out.write("candidates\n")
     acyclic: @RoamHeader = new_entity(id: 3, child: null, cyclic: false)
     cyclic: @RoamHeader = new_entity(id: 4, child: null, cyclic: true)
@@ -143,10 +140,10 @@ routine candidates() -> Void
     roam_unhold(acyclic)
     roots: U64 = ROOTS.count.peek()
     Out.write("candidates left: {roots}\n")
-    return()
+    return
 
 /// Promotion escapes the entity and everything it reaches. Counting goes atomic, and a second promotion stops at once.
-routine promotion() -> Void
+routine promotion() -> None
     Out.write("promotion\n")
     leaf: @RoamHeader = new_entity(id: 6, child: null, cyclic: true)
     parent: @RoamHeader = new_entity(id: 5, child: leaf, cyclic: true)
@@ -162,11 +159,11 @@ routine promotion() -> Void
     show_counts(label: "escaped, released", header: parent)
     roam_unhold(leaf)
     roam_unhold(parent)
-    return()
+    return
 
 /// The lock does nothing on a local entity. On an escaped one it is reentrant for its task, and a contended entry
 /// yields until the holder releases it.
-routine locking() -> Void
+routine locking() -> None
     Out.write("lock\n")
     entity: @RoamHeader = new_entity(id: 7, child: null, cyclic: false)
     roam_lock_enter(entity)
@@ -183,25 +180,22 @@ routine locking() -> Void
     show_lock(label: "left once", header: promoted)
     roam_lock_exit(promoted)
     show_lock(label: "left", header: promoted)
-    jump contended(promoted)
+    promoted.locked.poke_atomic(1)
+    promoted.holder_task.poke_atomic(9)
+    1.poke_into(promoted.depth)
+    CONTENDED.poke(promoted)
+    roam_lock_enter(promoted)
+    yields: U64 = YIELDS.peek()
+    Out.write("yields: {yields}\n")
+    show_lock(label: "taken after the holder left", header: promoted)
+    roam_lock_exit(promoted)
+    show_lock(label: "left", header: promoted)
+    roam_unhold(promoted)
+    return
 
-    block contended(promoted: @RoamHeader)
-        promoted.locked.poke_atomic(1)
-        promoted.holder_task.poke_atomic(9)
-        1.poke_into(promoted.depth)
-        CONTENDED.poke(promoted)
-        roam_lock_enter(promoted)
-        yields: U64 = YIELDS.peek()
-        Out.write("yields: {yields}\n")
-        show_lock(label: "taken after the holder left", header: promoted)
-        roam_lock_exit(promoted)
-        show_lock(label: "left", header: promoted)
-        roam_unhold(promoted)
-        return()
-
-routine start() -> Void
+routine start() -> None
     counts()
     candidates()
     promotion()
     locking()
-    return()
+    return

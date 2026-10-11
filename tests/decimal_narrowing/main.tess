@@ -29,7 +29,7 @@ preset SECONDS: @Array[U64, 16] <- [5, 25, 125, 625, 3125, 9999999, 1000001, 500
 routine draw() -> U64
     next: U64 = splitmix64(STATE.peek())
     next.poke_into(STATE)
-    return(next)
+    return next
 
 /// One operation at format f: op 0 add, 1 subtract, 2 multiply, 3 divide, 4 square root of a.
 /// :param a: The first operand.
@@ -39,19 +39,19 @@ routine draw() -> U64
 /// :returns: The result.
 routine dec_op(a: Dec, b: Dec, op: U32, f: DecFormat) -> Dec
     when op
-        0 => return(dec_add(a, b, f))
-        1 => return(dec_add(a, b: b.negate(), f))
-        2 => return(dec_mul(a, b, f))
-        3 => return(dec_div(a, b, f))
-        else => return(dec_sqrt(x: a, f))
+        0 => return dec_add(a, b, f)
+        1 => return dec_add(a, b: b.negate(), f)
+        2 => return dec_mul(a, b, f)
+        3 => return dec_div(a, b, f)
+        else => return dec_sqrt(x: a, f)
 
 /// Whether two decimals are the same encoding (kind, sign, exponent, coefficient).
 /// :param x: One decimal.
 /// :param y: The other.
 /// :returns: Whether they are the same.
 routine dec_is_same(x: Dec, y: Dec) -> Bool
-    same: Bool = x.kind.eq(y.kind).bitand(x.neg.eq(y.neg)).bitand(x.exp.eq(y.exp))
-    return(same.bitand(x.coeff.eq(y.coeff)))
+    same: Bool = x.kind == y.kind and x.neg == y.neg and x.exp == y.exp
+    return same and x.coeff == y.coeff
 
 /// Compares one operation rounded once at f with the same operation rounded to D128 and then to f, and counts it.
 /// The square root's single rounding is reduced (its result is), so the narrowed one is reduced too.
@@ -59,104 +59,86 @@ routine dec_is_same(x: Dec, y: Dec) -> Bool
 /// :param b: The second operand.
 /// :param op: Which operation (dec_op).
 /// :param f: The narrow format.
-routine compare(a: Dec, b: Dec, op: U32, f: DecFormat) -> Void
+routine compare(a: Dec, b: Dec, op: U32, f: DecFormat) -> None
     narrow: Dec = dec_op(a, b, op, f: dec_format128()).narrow(f)
-    root: Bool = op.eq(4)
-    twice: Dec = root
-        ? narrow.reduce(f)
-        : narrow
-    COUNT.peek().add(1).poke_into(COUNT)
-    branch dec_is_same(x: dec_op(a, b, op, f), y: twice)
-        ? return()
-        : differ()
-
-    block differ()
-        BAD.peek().add(1).poke_into(BAD)
-        return()
+    root: Bool = op == 4
+    twice: Dec = when
+        root => narrow.reduce(f)
+        else => narrow
+    (COUNT.peek() + 1).poke_into(COUNT)
+    if dec_is_same(x: dec_op(a, b, op, f), y: twice)
+        return
+    else
+        (BAD.peek() + 1).poke_into(BAD)
+        return
 
 /// Every operation on a and b at format f.
 /// :param a: The first operand.
 /// :param b: The second operand.
 /// :param f: The narrow format.
-routine compare_all(a: Dec, b: Dec, f: DecFormat) -> Void
+routine compare_all(a: Dec, b: Dec, f: DecFormat) -> None
     compare(a, b, op: 0, f)
     compare(a, b, op: 1, f)
     compare(a, b, op: 2, f)
     compare(a, b, op: 3, f)
     compare(a, b, op: 4, f)
-    return()
+    return
 
 /// D32: coefficients across the whole 7-digit range against second operands that put results near halfway
 /// points, at exponent gaps 0 to 9.
-routine d32_sample() -> Void
-    jump coefficient(1)
-
-    block coefficient(c: U64)
-        branch c.ge(10000000)
-            ? return()
-            : seconds(c, 0)
-
-    block seconds(c: U64, j: USize)
-        branch j.ge(18)
-            ? coefficient(c.add(4999))
-            : one(c, j)
-
-    block one(c: U64, j: USize)
-        r: U64 = draw()
-        fix: Bool = j.lt(16)
-        bc: U64 = fix
-            ? SECONDS.getitem(j.min(15))
-            : r.mod(9999999).add(1)
-        gap: S64 = r.shr(32).mod(10).to[S64]()
-        neg: Bool = r.shr(40).bitand(1).eq(1)
-        compare_all(a: dec_num(neg: false, coeff: c.to[U128](), exp: 0),
-            b: dec_num(neg, coeff: bc.to[U128](), exp: gap.neg()), f: dec_format32())
-        jump seconds(c, j.add(1))
+routine d32_sample() -> None
+    while c < 10000000 with c: U64 = 1
+        each j in 0 til 18
+            r: U64 = draw()
+            fix: Bool = j < 16
+            bc: U64 = when
+                fix => SECONDS.getitem(j.min(15))
+                else => r % 9999999 + 1
+            gap: S64 = ((r >> 32) % 10).to[S64]()
+            neg: Bool = (r >> 40) & 1 == 1
+            compare_all(a: dec_num(neg: false, coeff: c.to[U128](), exp: 0), b: dec_num(neg, coeff: bc.to[U128](), exp: -gap), f: dec_format32())
+        then
+            continue with c: c + 4999
+    then
+        return
 
 /// A 16-digit coefficient, sometimes one next to a halfway point of fewer digits.
 /// :returns: The coefficient.
 routine d64_coefficient() -> U128
     r: U64 = draw()
-    base: U64 = r.mod(9000000000000000).add(1000000000000000)
-    mode: U64 = r.shr(60)
-    tens: U64 = base.div(10).mul(10)
-    hund: U64 = base.div(100).mul(100)
-    mill: U64 = base.div(1000000).mul(1000000)
+    base: U64 = r % 9000000000000000 + 1000000000000000
+    mode: U64 = r >> 60
+    tens: U64 = base / 10 * 10
+    hund: U64 = base / 100 * 100
+    mill: U64 = base / 1000000 * 1000000
     when mode
-        0 => return(tens.add(5).to[U128]())
-        1 => return(hund.add(50).to[U128]())
-        2 => return(9999999999999999)
-        3 => return(mill.add(500001).to[U128]())
-        else => return(base.to[U128]())
+        0 => return (tens + 5).to[U128]()
+        1 => return (hund + 50).to[U128]()
+        2 => return 9999999999999999
+        3 => return (mill + 500001).to[U128]()
+        else => return base.to[U128]()
 
 /// D64: count random pairs of such coefficients at exponent gaps 0 to 35.
 /// :param count: How many pairs.
-routine d64_sample(count: U64) -> Void
-    jump loop(0)
-
-    block loop(i: U64)
-        branch i.ge(count)
-            ? return()
-            : one(i)
-
-    block one(i: U64)
+routine d64_sample(count: U64) -> None
+    each i in 0 til count
         r: U64 = draw()
-        a: Dec = dec_num(neg: false, coeff: d64_coefficient(), exp: r.mod(41).to[S64]().sub(20))
-        gap: S64 = r.shr(8).mod(36).to[S64]()
-        neg: Bool = r.shr(20).bitand(1).eq(1)
-        compare_all(a, b: dec_num(neg, coeff: d64_coefficient(), exp: a.exp.sub(gap)),
-            f: dec_format64())
-        jump loop(i.add(1))
+        a: Dec = dec_num(neg: false, coeff: d64_coefficient(), exp: (r % 41).to[S64]() - 20)
+        gap: S64 = ((r >> 8) % 36).to[S64]()
+        neg: Bool = (r >> 20) & 1 == 1
+        compare_all(a, b: dec_num(neg, coeff: d64_coefficient(), exp: a.exp - gap), f: dec_format64())
+    then
+        return
 
 /// Writes a decimal as coefficient e exponent.
 /// :param label: What the value is.
 /// :param x: The value.
-routine show(label: Span[Byte], x: Dec) -> Void
+routine show(label: Span[Byte], x: Dec) -> None
     Out.write("  {label}: {x.coeff}e{x.exp}\n")
-    return()
+    return
 
 /// The two counterexamples, each rounded once at D64 and through D128.
-routine counterexamples() -> Void
+routine counterexamples() -> None
     f: DecFormat = dec_format64()
     wide: DecFormat = dec_format128()
     a: Dec = dec_num(neg: false, coeff: 2000000000000001, exp: 0)
@@ -171,10 +153,10 @@ routine counterexamples() -> Void
     Out.write("add 10000000000000005 (17 digits, non-canonical) + 1e-20\n")
     show(label: "once at D64", x: dec_add(a: wide_face, b: tiny, f))
     show(label: "through D128", x: dec_add(a: wide_face, b: tiny, f: wide).narrow(f))
-    return()
+    return
 
 /// Runs the samples and the counterexamples.
-routine start() -> Void
+routine start() -> None
     d32_sample()
     Out.write("d32: {COUNT.peek()} results, {BAD.peek()} differ\n")
     0.poke_into(BAD)
@@ -182,4 +164,4 @@ routine start() -> Void
     d64_sample(20000)
     Out.write("d64: {COUNT.peek()} results, {BAD.peek()} differ\n")
     counterexamples()
-    return()
+    return
