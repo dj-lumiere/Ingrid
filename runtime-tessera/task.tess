@@ -21,11 +21,6 @@ global LIVE_TASKS: @U64
 #threadlocal
 global CURRENT_TASK: @@Task
 
-/// The heap allocator the runtime's threads start with (Thread.spawn keeps the pointer until the thread runs).
-global RUNTIME_HEAP: @MemoryManager
-
-global RUNTIME_HEAP_READY: @U32
-
 // rf_task_kind, rf_task_status, rf_task_completion_kind (razorforge_runtime.h).
 preset TASK_SUSPENDED: U32 = 0
 preset TASK_THREADED:  U32 = 1
@@ -146,16 +141,6 @@ routine ThreadedStart.construct(task: @Task, entry: Callable[(Addr,), Void], use
 /// Releases nothing: a `ThreadedStart` holds no memory of its own.
 routine ThreadedStart.destruct(me: @Me) -> Void
     return()
-
-/// The heap allocator the runtime's threads start with, made on first use.
-/// :returns: The C heap allocator, in a global that lives as long as the process.
-routine runtime_heap() -> @MemoryManager
-    branch RUNTIME_HEAP_READY.peek_atomic().eq(1)
-        ? return(RUNTIME_HEAP)
-        : continue
-    RUNTIME_HEAP.poke(make_c_heap_memory())
-    RUNTIME_HEAP_READY.poke_atomic(1)
-    return(RUNTIME_HEAP)
 
 /// The threaded task running on this thread.
 /// :returns: The task, or null outside a threaded task's thread.
@@ -664,8 +649,7 @@ routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], user
         what: "Failed to allocate thread start data")
     start.poke(ThreadedStart(task: task, entry: entry, userdata: userdata))
     task.status.poke_atomic(TASK_READY)
-    Thread.spawn(entry: threaded_task_main.to[Callable](), arg: start,
-        alloc: runtime_heap()).detach()
+    DEFAULT_THREADS.launch_unwatched(entry: threaded_task_main.to[Callable](), arg: start)
     return(1)
 
     block started()
