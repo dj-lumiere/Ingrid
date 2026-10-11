@@ -95,10 +95,12 @@ routine we_exp(x: We) -> We
 /// :returns: e^x - 1.
 routine we_expm1(x: We) -> We
     if x.v.exp <= -24
-        until we_is_negligible(term: we_div_u64(a: we_mul(a: term, b: x), k: i), sum) with term: We = x, sum: We = x, i: U64 = 2
-            continue with term: next, sum: we_add(a: sum, b: next), i: i + 1
-        then
-            return we_plus_abs(s: sum, e: next.v.exp + 1)
+        while true with term: We = x, sum: We = x, i: U64 = 2
+            next2: We = we_div_u64(a: we_mul(a: term, b: x), k: i)
+            if we_is_negligible(term: next2, sum)
+                return we_plus_abs(s: sum, e: next2.v.exp + 1)
+            else
+                continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 1
     else
         return we_sub(a: we_exp(x), b: we_int(1))
 
@@ -267,16 +269,24 @@ routine we_sincos_series(r: We) -> WePair
     local r2: We = we_mul(a: r, b: r)
     local one: We = we_int(1)
 
-    // term = r^(2i - 1) / (2i - 1)!, signs alternating
-    until we_is_negligible(term: we_div_u64(a: we_mul(a: term, b: r2), k: i * 2 * (i * 2 + 1)).negate(), sum) with term: We = r, sum: We = r, i: U64 = 1
-        continue with term: next, sum: we_add(a: sum, b: next), i: i + 1
-    then
-        s: We = we_plus_abs(s: sum, e: next.v.exp)
+    jump sine(r, r, 1)
 
-        until we_is_negligible(term: we_div_u64(a: we_mul(a: term2, b: r2), k: (i2 * 2 - 1) * (i2 * 2)).negate(), sum: sum2) with term2: We = one, sum2: We = one, i2: U64 = 1
-            continue with term2: next2, sum2: we_add(a: sum2, b: next2), i2: i2 + 1
-        then
-            return (a: s, b: we_plus_abs(s: sum2, e: next.v.exp))
+    // term = r^(2i - 1) / (2i - 1)!, signs alternating
+    block sine(term: We, sum: We, i: U64)
+        div: U64 = i * 2 * (i * 2 + 1)
+        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
+        if we_is_negligible(term: next, sum)
+            jump cosine(we_plus_abs(s: sum, e: next.v.exp), one, one, 1)
+        else
+            jump sine(next, we_add(a: sum, b: next), i + 1)
+
+    block cosine(s: We, term: We, sum: We, i: U64)
+        div: U64 = (i * 2 - 1) * (i * 2)
+        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
+        if we_is_negligible(term: next, sum)
+            return (a: s, b: we_plus_abs(s: sum, e: next.v.exp))
+        else
+            jump cosine(s, next, we_add(a: sum, b: next), i + 1)
 
 /// sin r and cos r for |r| <= 0.8: r = c + s with c = j/64 and |s| <= 1/128, exactly in fixed point, sin s = s P(s^2)
 /// and cos s = Q(s^2) by Horner's scheme in fixed point, then sin r = sin c cos s + cos c sin s and cos r = cos c cos s
@@ -515,10 +525,12 @@ routine wide_eval_sinh(x: Dec) -> We
     local x2: We = we_mul(a: xm, b: xm)
 
     if xm.v.exp <= -24
-        until we_is_negligible(term: we_div_u64(a: we_mul(a: term, b: x2), k: i * (i + 1)), sum) with term: We = xm, sum: We = xm, i: U64 = 2
-            continue with term: next, sum: we_add(a: sum, b: next), i: i + 2
-        then
-            return we_plus_abs(s: sum, e: next.v.exp + 1)
+        while true with term: We = xm, sum: We = xm, i: U64 = 2
+            next2: We = we_div_u64(a: we_mul(a: term, b: x2), k: i * (i + 1))
+            if we_is_negligible(term: next2, sum)
+                return we_plus_abs(s: sum, e: next2.v.exp + 1)
+            else
+                continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 2
     else
         e: We = we_exp(xm.magnitude())
         d: We = we_sub(a: e, b: we_div(a: we_int(1), b: e))
@@ -713,35 +725,45 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
     base: We = we_add(a: b, b: we_const(DEC_HALF_LN_2PI))
     scale: B64 = b64_pow2(-(bits + 8)) * zf
     limit: B64 = base.v.to_b64().abs() * scale
+    jump count(base, limit, 1, wf, we_const(DEC_STIRLING).v.to_b64().abs(), 0.0)
 
     // T_k = |c_k| w^k (1.01): the terms 0 .. k - 1 are in when T_k falls below the limit
-    until we_const(DEC_STIRLING.add(k)).v.to_b64().abs() * power * 1.01 < limit or k + 1 >= DEC_STIRLING_TERMS with k: USize = 1, power: B64 = wf, total: B64 = we_const(DEC_STIRLING).v.to_b64().abs(), weighted: B64 = 0.0
-        continue with k: k + 1, power: power * wf, total: total + tk, weighted: weighted + k.to[B64]() * tk
-    then
-        top: USize = k - 1
+    block count(base: We, limit: B64, k: USize, power: B64, total: B64, weighted: B64)
+        ck: B64 = we_const(DEC_STIRLING.add(k)).v.to_b64().abs()
+        tk: B64 = ck * power * 1.01
+        last: Bool = k + 1 >= DEC_STIRLING_TERMS
+        if tk < limit or last
+            jump horner(base, k - 1, tk, total, weighted)
+        else
+            jump count(base, limit, k + 1, power * wf, total + tk, weighted + k.to[B64]() * tk)
 
-        rest: B64 = tk
+    block horner(base: We, top: USize, rest: B64, total: B64, weighted: B64)
+        jump step(base, top, rest, total, weighted, top, wide_stirling_coefficient(top).v)
 
-        while k2 != 0 with k2: USize = top, acc: W = wide_stirling_coefficient(top).v
-            continue with k2: k2 - 1, acc: w_add(a: wide_stirling_coefficient(k2 - 1).v, b: w_mul(a: w.v, b: acc))
-        then
-            c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
-            low: B64 = c0 - (total - c0) * 1.01
-            n: B64 = top.to[B64]()
-            steps: B64 = n * 4.0 + 3.0
-            spread: B64 = steps * total + weighted * w.err
-            pe: B64 = when
-                low > 0.0 => spread / low * 1.02 + 2.0
-                else => B64.from_bits(0x7FF0000000000000)
-            s: We = we_mul(a: inv, b: (v: acc, err: pe))
-            r: We = we_add(a: base, b: s)
-            tail: B64 = rest / zf * 1.02
-            hb: U64 = tail.bits() >> 52
-            e: S64 = hb.to[S64]() - 1022
-            if tail == 0.0
-                return r
-            else
-                return we_plus_abs(s: r, e)
+    block step(base: We, top: USize, rest: B64, total: B64, weighted: B64, k: USize, acc: W)
+        if k == 0
+            jump sum(base, top, rest, total, weighted, acc)
+        else
+            jump step(base, top, rest, total, weighted, k - 1, w_add(a: wide_stirling_coefficient(k - 1).v, b: w_mul(a: w.v, b: acc)))
+
+    block sum(base: We, top: USize, rest: B64, total: B64, weighted: B64, p: W)
+        c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
+        low: B64 = c0 - (total - c0) * 1.01
+        n: B64 = top.to[B64]()
+        steps: B64 = n * 4.0 + 3.0
+        spread: B64 = steps * total + weighted * w.err
+        pe: B64 = when
+            low > 0.0 => spread / low * 1.02 + 2.0
+            else => B64.from_bits(0x7FF0000000000000)
+        s: We = we_mul(a: inv, b: (v: p, err: pe))
+        r: We = we_add(a: base, b: s)
+        tail: B64 = rest / zf * 1.02
+        hb: U64 = tail.bits() >> 52
+        e: S64 = hb.to[S64]() - 1022
+        if tail == 0.0
+            return r
+        else
+            return we_plus_abs(s: r, e)
 
 /// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 /// :param k: Which coefficient, from 0.

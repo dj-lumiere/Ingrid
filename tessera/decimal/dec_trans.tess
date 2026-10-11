@@ -123,13 +123,20 @@ routine me_exp(x: MpApprox, n: USize) -> MpApprox
     local small: MpApprox = me_sub(a: x, b: ln2k, n).ldexp(k: -s, n)
     local one: MpApprox = me_int(k: 1, n)
 
-    until me_is_negligible(term: me_div_u64(a: me_mul(a: term, b: small, n), k: i, n), sum, n) with term: MpApprox = small, sum: MpApprox = me_add(a: one, b: small, n), i: U64 = 2
-        continue with term: next, sum: me_add(a: sum, b: next, n), i: i + 1
-    then
-        each j in 0 til s with e: MpApprox = me_plus_abs(s: sum, e: next.v.exp + 1, n)
-            continue with e: me_mul(a: e, b: e, n)
-        then
+    jump series(small, me_add(a: one, b: small, n), 2)
+
+    block series(term: MpApprox, sum: MpApprox, i: U64)
+        next: MpApprox = me_div_u64(a: me_mul(a: term, b: small, n), k: i, n)
+        if me_is_negligible(term: next, sum, n)
+            jump square(me_plus_abs(s: sum, e: next.v.exp + 1, n), 0)
+        else
+            jump series(next, me_add(a: sum, b: next, n), i + 1)
+
+    block square(e: MpApprox, j: S64)
+        if j >= s
             return e.ldexp(k, n)
+        else
+            jump square(me_mul(a: e, b: e, n), j + 1)
 
 /// e^x - 1: below 1/16 its own series x + x^2/2 + ..., which keeps the relative accuracy near 0, else e^x - 1.
 /// :param x: The operand.
@@ -137,10 +144,12 @@ routine me_exp(x: MpApprox, n: USize) -> MpApprox
 /// :returns: e^x - 1.
 routine me_expm1(x: MpApprox, n: USize) -> MpApprox
     if x.v.exp <= -4
-        until me_is_negligible(term: me_div_u64(a: me_mul(a: term, b: x, n), k: i, n), sum, n) with term: MpApprox = x, sum: MpApprox = x, i: U64 = 2
-            continue with term: next, sum: me_add(a: sum, b: next, n), i: i + 1
-        then
-            return me_plus_abs(s: sum, e: next.v.exp + 1, n)
+        while true with term: MpApprox = x, sum: MpApprox = x, i: U64 = 2
+            next2: MpApprox = me_div_u64(a: me_mul(a: term, b: x, n), k: i, n)
+            if me_is_negligible(term: next2, sum, n)
+                return me_plus_abs(s: sum, e: next2.v.exp + 1, n)
+            else
+                continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 1
     else
         return me_sub(a: me_exp(x, n), b: me_int(k: 1, n), n)
 
@@ -211,16 +220,24 @@ routine me_sincos(r: MpApprox, n: USize) -> MePair
     local r2: MpApprox = me_mul(a: r, b: r, n)
     local one: MpApprox = me_int(k: 1, n)
 
-    // term = r^(2i - 1) / (2i - 1)!, signs alternating
-    until me_is_negligible(term: me_div_u64(a: me_mul(a: term, b: r2, n), k: i * 2 * (i * 2 + 1), n).negate(), sum, n) with term: MpApprox = r, sum: MpApprox = r, i: U64 = 1
-        continue with term: next, sum: me_add(a: sum, b: next, n), i: i + 1
-    then
-        s: MpApprox = me_plus_abs(s: sum, e: next.v.exp, n)
+    jump sine(r, r, 1)
 
-        until me_is_negligible(term: me_div_u64(a: me_mul(a: term2, b: r2, n), k: (i2 * 2 - 1) * (i2 * 2), n).negate(), sum: sum2, n) with term2: MpApprox = one, sum2: MpApprox = one, i2: U64 = 1
-            continue with term2: next2, sum2: me_add(a: sum2, b: next2, n), i2: i2 + 1
-        then
-            return (a: s, b: me_plus_abs(s: sum2, e: next.v.exp, n))
+    // term = r^(2i - 1) / (2i - 1)!, signs alternating
+    block sine(term: MpApprox, sum: MpApprox, i: U64)
+        div: U64 = i * 2 * (i * 2 + 1)
+        next: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div, n).negate()
+        if me_is_negligible(term: next, sum, n)
+            jump cosine(me_plus_abs(s: sum, e: next.v.exp, n), one, one, 1)
+        else
+            jump sine(next, me_add(a: sum, b: next, n), i + 1)
+
+    block cosine(s: MpApprox, term: MpApprox, sum: MpApprox, i: U64)
+        div: U64 = (i * 2 - 1) * (i * 2)
+        next: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div, n).negate()
+        if me_is_negligible(term: next, sum, n)
+            return (a: s, b: me_plus_abs(s: sum, e: next.v.exp, n))
+        else
+            jump cosine(s, next, me_add(a: sum, b: next, n), i + 1)
 
 /// atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
 /// :param d: The argument, below 2^-8 in magnitude.
@@ -581,10 +598,12 @@ routine dec_eval_sinh(x: Dec, n: USize) -> MpApprox
     local x2: MpApprox = me_mul(a: xm, b: xm, n)
 
     if xm.v.exp <= 0
-        until me_is_negligible(term: me_div_u64(a: me_mul(a: term, b: x2, n), k: i * (i + 1), n), sum, n) with term: MpApprox = xm, sum: MpApprox = xm, i: U64 = 2
-            continue with term: next, sum: me_add(a: sum, b: next, n), i: i + 2
-        then
-            return me_plus_abs(s: sum, e: next.v.exp + 1, n)
+        while true with term: MpApprox = xm, sum: MpApprox = xm, i: U64 = 2
+            next2: MpApprox = me_div_u64(a: me_mul(a: term, b: x2, n), k: i * (i + 1), n)
+            if me_is_negligible(term: next2, sum, n)
+                return me_plus_abs(s: sum, e: next2.v.exp + 1, n)
+            else
+                continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 2
     else
         e: MpApprox = me_exp(x: xm.magnitude(), n)
         d: MpApprox = me_sub(a: e, b: me_div(a: me_int(k: 1, n), b: e, n), n)
@@ -666,13 +685,16 @@ routine me_erf_positive(ax: MpApprox, n: USize) -> MpApprox
     local two: MpApprox = x2.ldexp(k: 1, n)
 
     // the next term is term × 2x^2 / i
-    until me_is_negligible(term: me_div_u64(a: me_mul(a: term, b: two, n), k: i, n), sum, n) & (two.v.to_b64(n) / (i + 2).to[B64]() < 0.5) with term: MpApprox = ax, sum: MpApprox = ax, i: U64 = 3
-        continue with term: next, sum: me_add(a: sum, b: next, n), i: i + 2
-    then
-        sum2: MpApprox = me_plus_abs(s: sum, e: next.v.exp + 1, n)
-        g: MpApprox = me_exp(x: x2.negate(), n)
-        c: MpApprox = me_const(i: DEC_TWO_OVER_SQRT_PI, n)
-        return me_mul(a: me_mul(a: sum2, b: g, n), b: c, n)
+    while true with term: MpApprox = ax, sum: MpApprox = ax, i: U64 = 3
+        next2: MpApprox = me_div_u64(a: me_mul(a: term, b: two, n), k: i, n)
+        ratio2: B64 = two.v.to_b64(n) / (i + 2).to[B64]()
+        if me_is_negligible(term: next2, sum, n) & (ratio2 < 0.5)
+            sum2: MpApprox = me_plus_abs(s: sum, e: next2.v.exp + 1, n)
+            g: MpApprox = me_exp(x: x2.negate(), n)
+            c: MpApprox = me_const(i: DEC_TWO_OVER_SQRT_PI, n)
+            return me_mul(a: me_mul(a: sum2, b: g, n), b: c, n)
+        else
+            continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 2
 
 /// erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
 /// smallest term or where terms stop mattering. The rest is below the first term left out.
@@ -753,10 +775,14 @@ routine me_lngamma_stirling(z: MpApprox, n: USize) -> MpApprox
     b: MpApprox = me_sub(a, b: z, n)
 
     // power = z^-(2k + 1)
-    until me_is_negligible(term: me_mul(a: dec_stirling_coefficient(k, n), b: power, n), sum, n) | (k + 1 >= DEC_STIRLING_TERMS) with sum: MpApprox = me_add(a: b, b: me_const(i: DEC_HALF_LN_2PI, n), n), power: MpApprox = inv, k: USize = 0
-        continue with sum: me_add(a: sum, b: term, n), power: me_mul(a: power, b: inv2, n), k: k + 1
-    then
-        return me_plus_abs(s: sum, e: term.v.exp + 1, n)
+    while true with sum: MpApprox = me_add(a: b, b: me_const(i: DEC_HALF_LN_2PI, n), n), power: MpApprox = inv, k: USize = 0
+        coefficient2: MpApprox = dec_stirling_coefficient(k, n)
+        term2: MpApprox = me_mul(a: coefficient2, b: power, n)
+        last2: Bool = k + 1 >= DEC_STIRLING_TERMS
+        if me_is_negligible(term: term2, sum, n) | last2
+            return me_plus_abs(s: sum, e: term2.v.exp + 1, n)
+        else
+            continue with sum: me_add(a: sum, b: term2, n), power: me_mul(a: power, b: inv2, n), k: k + 1
 
 /// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 /// :param k: Which coefficient, from 0.

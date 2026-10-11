@@ -396,18 +396,19 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
     if of.is_null()
         return no_result()
     if out.start(count + 1)
-        while count - out.len.peek() != 0
+        while true
+            wanted2: USize = count - out.len.peek()
+            if wanted2 == 0
+                return out.finish()
             if of.start.peek() < of.end.peek() or of.refill()
                 buffered: USize = of.end.peek() - of.start.peek()
-                n: USize = buffered.min(wanted)
+                n: USize = buffered.min(wanted2)
                 out[of.buffer.peek().stride(of.start.peek())] = n
                 next_start: USize = of.start.peek() + n
                 next_start.poke_into(of.start)
                 continue
             else
                 return out.finish()
-        then
-            return out.finish()
     else
         return out.fail()
 
@@ -744,17 +745,22 @@ routine decimal(v: U64, out: @Byte) -> USize
     local rev_buffer: @Array[Byte, 24] <- .hollow()
     local rev: @Byte = rev_buffer.to[@Byte]()
 
-    while remaining / 10 != 0 with remaining: U64 = v, n: USize = 0
+    jump digit(v, 0)
+
+    block digit(remaining: U64, n: USize)
         digit_value: U8 = (remaining % 10).to[U8]()
         rev.stride(n).poke((digit_value + 48).bits())
-        continue with remaining: rest, n: n + 1
-    then
-        n2: USize = n + 1
+        rest: U64 = remaining / 10
+        if rest == 0
+            jump copy(n + 1, 0)
+        else
+            jump digit(rest, n + 1)
 
-        each i in 0 til n2
-            out.stride(i).poke(rev.stride(n2 - 1 - i).peek())
-        then
-            return n2
+    block copy(n: USize, i: USize)
+        if i == n
+            return n
+        out.stride(i).poke(rev.stride(n - 1 - i).peek())
+        jump copy(n, i + 1)
 
 /// One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0), with
 /// '\n' before every entry but the first.

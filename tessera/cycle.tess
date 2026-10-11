@@ -164,14 +164,20 @@ routine world_stop() -> Void
     until at.to[@Byte]().is_null() with at: Addr = SLOTS.peek_atomic()
         slot: @WorldSlot = at.to[@WorldSlot]()
 
-        while slot.inside.peek_atomic() & WAITING.bitnot() != 0
-            waiting: U32 = inside | WAITING
-            set: Result[Unit, U32] = slot.inside.atomic_compare_exchange(expected: inside, new: waiting)
-            when set
-                is Unit => wait_on(at: slot.inside, expected: waiting)
-                is U32 => pass
-        then
-            continue with at: slot.next.peek()
+        while true
+            inside2: U32 = slot.inside.peek_atomic()
+            if inside2 & WAITING.bitnot() == 0
+                break
+            else
+                waiting: U32 = inside2 | WAITING
+                set: Result[Unit, U32] = slot.inside.atomic_compare_exchange(expected: inside2, new: waiting)
+                when set
+                    is Unit =>
+                        wait_on(at: slot.inside, expected: waiting)
+                        continue
+                    is U32 => continue
+
+        continue with at: slot.next.peek()
     then
         return
 
