@@ -239,12 +239,15 @@ routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> Void
     branch sched.is_null().bitor(coro.is_null())
         ? thread()
         : continue
-    claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: list.peek())
+    // The node outlives nothing of this routine's: it is on the heap while the list holds it, and goes after.
+    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a channel waiter")
+    node.poke(ChannelWaiter(sched: sched, coro: coro, next: list.peek()))
     list.poke(node)
     me.lock.unlock()
     rf_sched_park_external()
     me.lock.lock()
     unlink(list, node)
+    c_free(node)
     return()
 
     // A thread waits in short slices. When a few in a row pass with no agent left that could send, receive or close,

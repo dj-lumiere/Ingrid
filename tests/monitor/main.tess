@@ -18,6 +18,16 @@ import Standard/Os
 global CURRENT_SCHED: @@Sched
 global CURRENT_CORO: @@Coro
 
+/// The scheduler and the coroutine the test stands in for, for as long as the program runs.
+global THE_SCHED: @Sched <- (id: 1)
+global THE_CORO: @Coro <- (id: 7)
+
+/// Two parked coroutines on a monitor's wait list, the newer first.
+global OLDER: @Coro <- (id: 1)
+global NEWER: @Coro <- (id: 2)
+global FIRST_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: null)
+global SECOND_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
+
 /// The SignalCaster a park casts on, as another agent would meanwhile, or null to let the time run out.
 global CAST_DURING_PARK: @@Monitor
 
@@ -347,10 +357,8 @@ routine coroutines(sig: @Monitor) -> Void
     Out.write("after add_ref: {sig.refcount.peek()}\n")
     rf_signal_drop(sig)
     Out.write("after drop: {sig.refcount.peek()}\n")
-    claim sched: @Sched <- Sched(id: 1)
-    claim coro: @Coro <- Coro(id: 7)
-    CURRENT_SCHED.poke(sched)
-    CURRENT_CORO.poke(coro)
+    CURRENT_SCHED.poke(THE_SCHED)
+    CURRENT_CORO.poke(THE_CORO)
     CAST_DURING_PARK.poke(sig)
     Out.write("a coroutine waits:\n")
     rf_signal_lock(sig)
@@ -363,11 +371,7 @@ routine coroutines(sig: @Monitor) -> Void
     late: U32 = rf_signal_wait_deadline(sig, timeout_ns: 2000000)
     Out.write("  result {late}, {count_waiters(sig)} on the wait list\n")
     rf_signal_unlock(sig)
-    claim older: @Coro <- Coro(id: 1)
-    claim newer: @Coro <- Coro(id: 2)
-    claim first: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: older, next: null)
-    claim second: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: newer, next: first)
-    sig.waiters.poke(second)
+    sig.waiters.poke(SECOND_WAITER)
     Out.write("two coroutines parked, cast_one:\n")
     rf_signal_cast_one(sig)
     Out.write("cast_all:\n")

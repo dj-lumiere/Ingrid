@@ -102,7 +102,9 @@ routine rf_signal_wait(sig: @Monitor) -> Void
     branch sched.is_null().bitor(coro.is_null())
         ? thread()
         : continue
-    claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek())
+    // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a monitor waiter")
+    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
     sig.lock.unlock()
     // a cast may come from another thread: not a deadlock meanwhile
@@ -111,6 +113,7 @@ routine rf_signal_wait(sig: @Monitor) -> Void
     rf_sched_disarm_cross_waker(sched)
     sig.lock.lock()
     unlink(list: sig.waiters, node)
+    c_free(node)
     return()
 
     block thread()
@@ -133,12 +136,15 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
     branch sched.is_null().bitor(coro.is_null())
         ? thread(deadline)
         : continue
-    claim node: @ChannelWaiter <- ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek())
+    // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a monitor waiter")
+    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
     sig.lock.unlock()
     rf_sched_park_deadline(timeout_ns)
     sig.lock.lock()
     unlink(list: sig.waiters, node)
+    c_free(node)
     jump result(deadline)
 
     block thread(deadline: U64)
