@@ -1,101 +1,101 @@
-// What the in-process JIT resolves from this library that a native build gets from compiler-rt: emulated thread-local
-// storage (__emutls_get_address). The JIT looks it up in this library's exports. (The B16 and BF16 conversions come
-// from Tessera's standard library, which exports them on Windows.) 128-bit division isn't here: the standard
-// libraries divide U128 and S128 on U64 limbs, so no LLVM 128-bit divide (and no __udivti3) is left to resolve, and
-// a native build that still has one gets compiler-rt's.
+# What the in-process JIT resolves from this library that a native build gets from compiler-rt: emulated thread-local
+# storage (__emutls_get_address). The JIT looks it up in this library's exports. (The B16 and BF16 conversions come
+# from Tessera's standard library, which exports them on Windows.) 128-bit division isn't here: the standard
+# libraries divide U128 and S128 on U64 limbs, so no LLVM 128-bit divide (and no __udivti3) is left to resolve, and
+# a native build that still has one gets compiler-rt's.
 
 module Ingrid/Runtime
 
 import Standard/Os
 
-// -- emulated thread-local storage ---------------------------------------------------
-//
-// LLVM's JIT lowers thread_local globals to the emulated-TLS ABI, which calls __emutls_get_address with the
-// variable's control block. A native build gets it from compiler-rt. The JIT gets this one, compiler-rt's accessor
-// redone, with this library's own (real) thread-locals for each thread's objects.
+# -- emulated thread-local storage ---------------------------------------------------
+#
+# LLVM's JIT lowers thread_local globals to the emulated-TLS ABI, which calls __emutls_get_address with the
+# variable's control block. A native build gets it from compiler-rt. The JIT gets this one, compiler-rt's accessor
+# redone, with this library's own (real) thread-locals for each thread's objects.
 
 @threadlocal
 global EMUTLS: @@EmutlsArray
 global EMUTLS_LOCK: @ExclusiveLock
 global EMUTLS_NEXT: @USize
 
-/// compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
-/// initial value or null for zeros.
+### compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
+### initial value or null for zeros.
 record EmutlsControl
     size: USize
     align: USize
     index: USize
     value: Addr
 
-/// One thread's objects, by slot.
+### One thread's objects, by slot.
 record EmutlsArray
     size: USize
     data: @Addr
 
-/// Makes a `EmutlsControl` from its fields.
-/// :param size: Its `size`.
-/// :param align: Its `align`.
-/// :param index: Its `index`.
-/// :param value: Its `value`.
-/// :returns: The new value.
+### Makes a `EmutlsControl` from its fields.
+### :param size: Its `size`.
+### :param align: Its `align`.
+### :param index: Its `index`.
+### :param value: Its `value`.
+### :returns: The new value.
 routine EmutlsControl.construct(size: USize, align: USize, index: USize, value: Addr) -> Me
     return Me(size, align, index, value)
 
-/// Releases nothing: a `EmutlsControl` holds no memory of its own.
+### Releases nothing: a `EmutlsControl` holds no memory of its own.
 routine EmutlsControl.destruct(me: @Me) -> None
     return
 
-/// Makes a `EmutlsArray` from its fields.
-/// :param size: Its `size`.
-/// :param data: Its `data`.
-/// :returns: The new value.
+### Makes a `EmutlsArray` from its fields.
+### :param size: Its `size`.
+### :param data: Its `data`.
+### :returns: The new value.
 routine EmutlsArray.construct(size: USize, data: @Addr) -> Me
     return Me(size, data)
 
-/// Releases nothing: a `EmutlsArray` holds no memory of its own.
+### Releases nothing: a `EmutlsArray` holds no memory of its own.
 routine EmutlsArray.destruct(me: @Me) -> None
     return
 
-/// The C runtime's `_aligned_malloc` on Windows: `size` bytes aligned to `align`.
-/// :param size: The size in bytes.
-/// :param align: The alignment, a power of two.
-/// :returns: The block, or null when the allocation fails.
+### The C runtime's `_aligned_malloc` on Windows: `size` bytes aligned to `align`.
+### :param size: The size in bytes.
+### :param align: The alignment, a power of two.
+### :returns: The block, or null when the allocation fails.
 @external("c")
 @symbol("_aligned_malloc")
 @target(os: "windows")
 routine c_aligned_malloc(size: USize, align: USize) -> Addr
 
-/// POSIX `posix_memalign`: allocates `size` bytes aligned to `align` and stores the block in `out`.
-/// :param out: Where the block's address goes.
-/// :param align: The alignment, a power of two and a multiple of the pointer size.
-/// :param size: The size in bytes.
-/// :returns: 0 on success, an error number otherwise.
+### POSIX `posix_memalign`: allocates `size` bytes aligned to `align` and stores the block in `out`.
+### :param out: Where the block's address goes.
+### :param align: The alignment, a power of two and a multiple of the pointer size.
+### :param size: The size in bytes.
+### :returns: 0 on success, an error number otherwise.
 @external("c")
 @symbol("posix_memalign")
 @target(os: not "windows")
 routine c_posix_memalign(out: @Addr, align: USize, size: USize) -> CInt
 
-/// C's `memset`: fills `n` bytes at `dst` with the low byte of `value`.
-/// :param dst: The memory to fill.
-/// :param value: The byte value to fill with.
-/// :param n: The number of bytes.
-/// :returns: `dst`.
+### C's `memset`: fills `n` bytes at `dst` with the low byte of `value`.
+### :param dst: The memory to fill.
+### :param value: The byte value to fill with.
+### :param n: The number of bytes.
+### :returns: `dst`.
 @external("c")
 @symbol("memset")
 routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
 
-/// Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `_aligned_malloc`.
-/// :param size: The size in bytes.
-/// :param align: The wanted alignment.
-/// :returns: The block, or null when the allocation fails.
+### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `_aligned_malloc`.
+### :param size: The size in bytes.
+### :param align: The wanted alignment.
+### :returns: The block, or null when the allocation fails.
 @target(os: "windows")
 routine aligned_alloc(size: USize, align: USize) -> Addr
     return c_aligned_malloc(size, align.max(sizeof[Addr]()))
 
-/// Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `posix_memalign`.
-/// :param size: The size in bytes.
-/// :param align: The wanted alignment.
-/// :returns: The block, or null when the allocation fails.
+### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `posix_memalign`.
+### :param size: The size in bytes.
+### :param align: The wanted alignment.
+### :returns: The block, or null when the allocation fails.
 @target(os: not "windows")
 routine aligned_alloc(size: USize, align: USize) -> Addr
     local p: @Addr <- null
@@ -104,12 +104,12 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
     else
         return null
 
-/// This thread's object for `control`, made (from its initial value, or zeroed) on the thread's first use. The
-/// first use of `control` on any thread gives it the next free slot.
-/// :param control: The thread-local variable's control block.
-/// :returns: The calling thread's copy of the variable.
-/// :throws: Crashes with `OutOfMemoryError` when the thread's slot table, its growth, or the object can't be
-///     allocated.
+### This thread's object for `control`, made (from its initial value, or zeroed) on the thread's first use. The
+### first use of `control` on any thread gives it the next free slot.
+### :param control: The thread-local variable's control block.
+### :returns: The calling thread's copy of the variable.
+### :throws: Crashes with `OutOfMemoryError` when the thread's slot table, its growth, or the object can't be
+###     allocated.
 @export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
     index: USize = control.index.peek_atomic()

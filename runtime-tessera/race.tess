@@ -1,44 +1,44 @@
-// race!: waits until the first of a set of agents (coroutines and threaded tasks, in List order) finishes.
-//
-// The pool's workers drive the coroutine competitors. The racer only waits. Inside a coroutine it parks, registered
-// as the awaiter of every coroutine competitor and as the race waiter of every task, and re-polls when woken. On a
-// plain thread it waits on the pool's block_cond. The first to finish is the smallest completion stamp among the
-// finished ones, not the lowest index, so a late scan that finds several finished still picks the right one.
+# race!: waits until the first of a set of agents (coroutines and threaded tasks, in List order) finishes.
+#
+# The pool's workers drive the coroutine competitors. The racer only waits. Inside a coroutine it parks, registered
+# as the awaiter of every coroutine competitor and as the race waiter of every task, and re-polls when woken. On a
+# plain thread it waits on the pool's block_cond. The first to finish is the smallest completion stamp among the
+# finished ones, not the lowest index, so a late scan that finds several finished still picks the right one.
 
 module Ingrid/Runtime
 
-/// rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
+### rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
 record Race
     handles: @Addr
     kinds: @U8
     count: SSize
     cap: SSize
 
-/// Makes a `Race` from its fields.
-/// :param handles: Its `handles`.
-/// :param kinds: Its `kinds`.
-/// :param count: Its `count`.
-/// :param cap: Its `cap`.
-/// :returns: The new value.
+### Makes a `Race` from its fields.
+### :param handles: Its `handles`.
+### :param kinds: Its `kinds`.
+### :param count: Its `count`.
+### :param cap: Its `cap`.
+### :returns: The new value.
 routine Race.construct(handles: @Addr, kinds: @U8, count: SSize, cap: SSize) -> Me
     return Me(handles, kinds, count, cap)
 
-/// Releases nothing: a `Race` holds no memory of its own.
+### Releases nothing: a `Race` holds no memory of its own.
 routine Race.destruct(me: @Me) -> None
     return
 
-/// Starts an empty set of race competitors.
-/// :returns: The new set, freed with {rf_race_end}.
-/// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
+### Starts an empty set of race competitors.
+### :returns: The new set, freed with {rf_race_end}.
+### :throws: Crashes with `OutOfMemoryError` when the allocation fails.
 @export("rf_race_begin")
 routine rf_race_begin() -> @Race
     r: @Race = zeroed[Race](count: 1, what: "Failed to allocate race competitor set")
     return r
 
-/// Appends a competitor, doubling the storage (from 4) when it is full. A null `me` does nothing.
-/// :param handle: The competitor's coroutine or task.
-/// :param kind: 0 for a coroutine, 1 for a threaded task.
-/// :throws: Crashes with `OutOfMemoryError` when the storage can't grow.
+### Appends a competitor, doubling the storage (from 4) when it is full. A null `me` does nothing.
+### :param handle: The competitor's coroutine or task.
+### :param kind: 0 for a coroutine, 1 for a threaded task.
+### :throws: Crashes with `OutOfMemoryError` when the storage can't grow.
 routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> None
     if me.is_null()
         return
@@ -61,43 +61,43 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> None
     me.count.poke(n + 1)
     return
 
-/// Adds a coroutine competitor to the race.
-/// :param r: The race.
-/// :param c: The coroutine.
-/// :throws: Crashes with `OutOfMemoryError` when the set can't grow.
+### Adds a coroutine competitor to the race.
+### :param r: The race.
+### :param c: The coroutine.
+### :throws: Crashes with `OutOfMemoryError` when the set can't grow.
 @export("rf_race_add_coro")
 routine rf_race_add_coro(r: @Race, c: @Coro) -> None
     r.add_last(handle: c, kind: 0)
     return
 
-/// Adds a threaded-task competitor to the race.
-/// :param r: The race.
-/// :param t: The task.
-/// :throws: Crashes with `OutOfMemoryError` when the set can't grow.
+### Adds a threaded-task competitor to the race.
+### :param r: The race.
+### :param t: The task.
+### :throws: Crashes with `OutOfMemoryError` when the set can't grow.
 @export("rf_race_add_task")
 routine rf_race_add_task(r: @Race, t: @Task) -> None
     r.add_last(handle: t, kind: 1)
     return
 
-/// The handle of competitor `i`, unchecked.
-/// :param i: The competitor's index.
-/// :returns: Its coroutine or task.
+### The handle of competitor `i`, unchecked.
+### :param i: The competitor's index.
+### :returns: Its coroutine or task.
 routine Race.handle(me: @Me, i: SSize) -> Addr
     slot: @Addr = me.handles.peek().stride(i)
     return slot.peek()
 
-/// Whether competitor `i` is a threaded task, unchecked.
-/// :param i: The competitor's index.
-/// :returns: True for a task, false for a coroutine.
+### Whether competitor `i` is a threaded task, unchecked.
+### :param i: The competitor's index.
+### :returns: True for a task, false for a coroutine.
 routine Race.is_task(me: @Me, i: SSize) -> Bool
     slot: @U8 = me.kinds.peek().stride(i)
     return slot.peek() == 1
 
-/// Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
-/// to. Each keeps a cross-thread wake promised meanwhile.
-/// :param s: The scheduler to wake.
-/// :param coro: The racing coroutine, or null for a plain thread.
-/// :param on: True to register (and arm a cross-thread wake), false to unregister (and disarm it).
+### Every threaded task competitor wakes s (and coro, if a coroutine races) when it completes, or is told no longer
+### to. Each keeps a cross-thread wake promised meanwhile.
+### :param s: The scheduler to wake.
+### :param coro: The racing coroutine, or null for a plain thread.
+### :param on: True to register (and arm a cross-thread wake), false to unregister (and disarm it).
 routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> None
     each i in 0 til me.count.peek()
         if not me.is_task(i)
@@ -115,10 +115,10 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> None
     then
         return
 
-/// Sets the awaiter of every coroutine competitor to `awaiter`, or clears it on those whose awaiter is still
-/// `awaiter`.
-/// :param awaiter: The racing coroutine.
-/// :param set: True to set, false to clear.
+### Sets the awaiter of every coroutine competitor to `awaiter`, or clears it on those whose awaiter is still
+### `awaiter`.
+### :param awaiter: The racing coroutine.
+### :param set: True to set, false to clear.
 routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> None
     each i in 0 til me.count.peek()
         if me.is_task(i) or me.handle(i).is_null()
@@ -136,9 +136,9 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> None
     then
         return
 
-/// The index of the first competitor to finish (the smallest completion stamp among the finished ones), or -1 while
-/// none has.
-/// :returns: The winner's index, or -1.
+### The index of the first competitor to finish (the smallest completion stamp among the finished ones), or -1 while
+### none has.
+### :returns: The winner's index, or -1.
 routine Race.winner(me: @Me) -> SSize
     each i in 0 til me.count.peek() with best: SSize = -1, best_seq: U64 = U64.MAX
         seq: U64 = when
@@ -163,9 +163,9 @@ routine Race.winner(me: @Me) -> SSize
     then
         return best
 
-/// Waits until one competitor finishes: its index in List order, or -1 for an empty set.
-/// :param r: The race, or null.
-/// :returns: The winner's index, or -1 when `r` is null or empty.
+### Waits until one competitor finishes: its index in List order, or -1 for an empty set.
+### :param r: The race, or null.
+### :returns: The winner's index, or -1 when `r` is null or empty.
 @export("rf_race_wait")
 routine rf_race_wait(r: @Race) -> SSize
     if r.is_null()
@@ -174,10 +174,10 @@ routine rf_race_wait(r: @Race) -> SSize
         return -1
     return wait_for_winner(r)
 
-/// rf_race_wait on a set with competitors: registers as their waiter under the scheduler's lock, waits for a
-/// winner, and gives the lock and the registration back in finish.
-/// :param r: The race, with at least one competitor.
-/// :returns: The winner's index.
+### rf_race_wait on a set with competitors: registers as their waiter under the scheduler's lock, waits for a
+### winner, and gives the lock and the registration back in finish.
+### :param r: The race, with at least one competitor.
+### :returns: The winner's index.
 private routine wait_for_winner(r: @Race) -> SSize
     local s: @Sched = rf_sched_thread_default()
     local this_coro: @Coro = current_coro()
@@ -197,7 +197,7 @@ private routine wait_for_winner(r: @Race) -> SSize
             jump over(winner)
         if this_coro.is_null()
             jump blocking()
-        // A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
+        # A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
         s.lock.unlock()
         rf_sched_park_external()
         s.lock.lock()
@@ -223,8 +223,8 @@ private routine wait_for_winner(r: @Race) -> SSize
         r.register(s, coro: null, on: false)
         return winner
 
-/// Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.
-/// :param r: The race to free.
+### Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.
+### :param r: The race to free.
 @export("rf_race_end")
 routine rf_race_end(r: @Race) -> None
     if r.is_null()

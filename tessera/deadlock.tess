@@ -1,43 +1,43 @@
-// The deadlock detector for the Roamed lock (opt-in: RF_DEADLOCK_DETECT=1). A statement that touches two escaped
-// entities holds both their locks at once (the builder inserts the lock entries, so the call site doesn't show them),
-// and two tasks taking the same pair in opposite order deadlock. With the detector on, a task that finds a lock taken
-// records whom it waits for and walks the chain of holders. If the chain comes back to it, the wait is a cycle, and the
-// program stops with both task ids instead of hanging. Off by default, at no cost. The table is fixed. When it is full,
-// or a task waits on itself, nothing is detected (never a false report).
+# The deadlock detector for the Roamed lock (opt-in: RF_DEADLOCK_DETECT=1). A statement that touches two escaped
+# entities holds both their locks at once (the builder inserts the lock entries, so the call site doesn't show them),
+# and two tasks taking the same pair in opposite order deadlock. With the detector on, a task that finds a lock taken
+# records whom it waits for and walks the chain of holders. If the chain comes back to it, the wait is a cycle, and the
+# program stops with both task ids instead of hanging. Off by default, at no cost. The table is fixed. When it is full,
+# or a task waits on itself, nothing is detected (never a false report).
 
 import Standard/Format
 import Standard/Os
 
 global WAITS: @Array[DeadlockWait, 256]
-/// Guards WAITS.
+### Guards WAITS.
 global WAITS_LOCK: @ExclusiveLock
-/// 0 before the environment is read, 1 off, 2 on.
+### 0 before the environment is read, 1 off, 2 on.
 global DETECTOR: @U8
 
 preset WAIT_SLOTS: USize = 256
 
-/// One task waiting for a lock: who waits, and the task holding the lock.
+### One task waiting for a lock: who waits, and the task holding the lock.
 record DeadlockWait
     task: U64
     holder: U64
     used: Bool
 
-/// C's getenv: the value of the environment variable `name`.
-/// :param name: The variable's name.
-/// :returns: The value as a C string, or null when the variable is not set.
+### C's getenv: the value of the environment variable `name`.
+### :param name: The variable's name.
+### :returns: The value as a C string, or null when the variable is not set.
 @external("c")
 @symbol("getenv")
 routine c_getenv(name: CStr) -> @Byte
 
-/// Flushes standard output and exits with the crash status, as every RazorForge and Suflae crash does.
+### Flushes standard output and exits with the crash status, as every RazorForge and Suflae crash does.
 @external("c")
 @symbol("rf_crash_exit")
 @noreturn
 private routine rf_crash_exit() -> None
 
-/// Whether RF_DEADLOCK_DETECT asks for the detector: set, not empty, and not "0". Read once. Two threads reading it
-/// at once both find the same answer.
-/// :returns: True when the detector is on.
+### Whether RF_DEADLOCK_DETECT asks for the detector: set, not empty, and not "0". Read once. Two threads reading it
+### at once both find the same answer.
+### :returns: True when the detector is on.
 routine is_detector_on() -> Bool
     state: U8 = DETECTOR.peek_atomic()
     if state == 0
@@ -56,9 +56,9 @@ routine is_detector_on() -> Bool
     else
         return state == 2
 
-/// The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
-/// :param task: The waiting task's id.
-/// :returns: The slot's index, or WAIT_SLOTS.
+### The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
+### :param task: The waiting task's id.
+### :returns: The slot's index, or WAIT_SLOTS.
 routine slot_of(task: U64) -> USize
     each i in 0 til WAIT_SLOTS
         slot: @DeadlockWait = WAITS.getslot(i)
@@ -69,8 +69,8 @@ routine slot_of(task: U64) -> USize
     then
         return WAIT_SLOTS
 
-/// The first free slot, or WAIT_SLOTS when the table is full.
-/// :returns: The slot's index, or WAIT_SLOTS.
+### The first free slot, or WAIT_SLOTS when the table is full.
+### :returns: The slot's index, or WAIT_SLOTS.
 routine free_slot() -> USize
     each i in 0 til WAIT_SLOTS
         if WAITS.getslot(i).used.peek()
@@ -80,12 +80,12 @@ routine free_slot() -> USize
     then
         return WAIT_SLOTS
 
-/// Records that `waiter` waits for `holder`, then follows the holders: a chain that leads back to `waiter` is a
-/// deadlock, and the program stops. Does nothing when the detector is off, when `holder` is 0 or `waiter` itself, or
-/// when the table is full.
-/// :param waiter: The id of the task that found the lock taken.
-/// :param holder: The id of the task holding the lock.
-/// :note: A deadlock writes both task ids to standard error and exits with the crash status.
+### Records that `waiter` waits for `holder`, then follows the holders: a chain that leads back to `waiter` is a
+### deadlock, and the program stops. Does nothing when the detector is off, when `holder` is 0 or `waiter` itself, or
+### when the table is full.
+### :param waiter: The id of the task that found the lock taken.
+### :param holder: The id of the task holding the lock.
+### :note: A deadlock writes both task ids to standard error and exits with the crash status.
 routine deadlock_wait_begin(waiter: U64, holder: U64) -> None
     if not is_detector_on()
         return
@@ -122,8 +122,8 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> None
             WAITS_LOCK.unlock()
             return
 
-/// Clears `waiter`'s wait once it holds the lock. Does nothing when the detector is off.
-/// :param waiter: The id of the task that now holds the lock.
+### Clears `waiter`'s wait once it holds the lock. Does nothing when the detector is off.
+### :param waiter: The id of the task that now holds the lock.
 routine deadlock_wait_end(waiter: U64) -> None
     if not is_detector_on()
         return

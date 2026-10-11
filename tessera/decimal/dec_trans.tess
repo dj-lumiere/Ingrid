@@ -1,23 +1,23 @@
-// The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
-//
-// D32 and D64 first try a binary float, B64 and B128 with a proven bound on the error (dec_trans_fast.tess), which
-// settles nearly every argument. Next, and first for D128, the function is evaluated once at 192 bits on a float of
-// five words (dec_trans_wide.tess), and only then in binary multiprecision (dec_mp.tess), from 256 bits for D32 and
-// D64 and 384 for D128. Each evaluation comes with a proven bound on its error. When every value within the bound
-// rounds to the same decimal of the target width, that decimal is the correctly rounded result; otherwise the value
-// sits too close to a rounding midpoint and the evaluation is repeated with twice the bits (Ziv's strategy), up to
-// 1024. A function value of a decimal argument is transcendental, and so never exactly a midpoint, except where it
-// is rational (2^n, 10^n, x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to
-// even. The special values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come
-// first, the way RazorForge's engines gave them. Every result is reduced: the trailing zeros of the rounded
-// coefficient are stripped, as RazorForge's engines did for every function value.
+# The decimal transcendentals of D32, D64, and D128, correctly rounded, on one engine.
+#
+# D32 and D64 first try a binary float, B64 and B128 with a proven bound on the error (dec_trans_fast.tess), which
+# settles nearly every argument. Next, and first for D128, the function is evaluated once at 192 bits on a float of
+# five words (dec_trans_wide.tess), and only then in binary multiprecision (dec_mp.tess), from 256 bits for D32 and
+# D64 and 384 for D128. Each evaluation comes with a proven bound on its error. When every value within the bound
+# rounds to the same decimal of the target width, that decimal is the correctly rounded result; otherwise the value
+# sits too close to a rounding midpoint and the evaluation is repeated with twice the bits (Ziv's strategy), up to
+# 1024. A function value of a decimal argument is transcendental, and so never exactly a midpoint, except where it
+# is rational (2^n, 10^n, x^y): a band still straddling a midpoint at 1024 bits is taken to be on it, and rounds to
+# even. The special values (NaN, infinities, zeros, poles, and the results whose size alone settles them) come
+# first, the way RazorForge's engines gave them. Every result is reduced: the trailing zeros of the rounded
+# coefficient are stripped, as RazorForge's engines did for every function value.
 
 import Standard/Format
 
-/// The precision a computation goes up to: 1024 bits (dec_mp.tess allows a few limbs more inside a function).
+### The precision a computation goes up to: 1024 bits (dec_mp.tess allows a few limbs more inside a function).
 preset DEC_ZIV_TOP: USize = 16
 
-/// Which function dec_ziv evaluates.
+### Which function dec_ziv evaluates.
 preset DEC_EXP: U32 = 0
 preset DEC_EXPM1: U32 = 1
 preset DEC_EXP2: U32 = 2
@@ -46,23 +46,23 @@ preset DEC_CBRT: U32 = 24
 preset DEC_POW: U32 = 25
 preset DEC_ATAN2: U32 = 26
 
-// ── constants, series ─────────────────────────────────────────────────────────────────────────────
+# ── constants, series ─────────────────────────────────────────────────────────────────────────────
 
-/// Entry i of DEC_CONSTANTS at n limbs: truncated (2 units) from a 1280-bit value that is itself within 2^-1280.
-/// :param i: Its index in DEC_CONSTANTS.
-/// :param n: The precision in limbs.
-/// :returns: Entry i of DEC_CONSTANTS at n limbs.
+### Entry i of DEC_CONSTANTS at n limbs: truncated (2 units) from a 1280-bit value that is itself within 2^-1280.
+### :param i: Its index in DEC_CONSTANTS.
+### :param n: The precision in limbs.
+### :returns: Entry i of DEC_CONSTANTS at n limbs.
 routine me_const(i: USize, n: USize) -> MpApprox
     table: @U64 = DEC_CONSTANTS.to[@U64]()
     exp: S64 = DEC_CONSTANT_EXP.getitem(i)
     v: Mp = mp_const(table, at: i * 20, exp, n)
     return me_of(v, err: 3.0)
 
-/// The bound of s widened by an absolute error below 2^e.
-/// :param s: The sum.
-/// :param e: The power of two that bounds the added error.
-/// :param n: The precision in limbs.
-/// :returns: The bound of s widened by an absolute error below 2^e.
+### The bound of s widened by an absolute error below 2^e.
+### :param s: The sum.
+### :param e: The power of two that bounds the added error.
+### :param n: The precision in limbs.
+### :returns: The bound of s widened by an absolute error below 2^e.
 routine me_plus_abs(s: MpApprox, e: S64, n: USize) -> MpApprox
     bits: S64 = n.to[S64]() * 64
     units: B64 = b64_pow2(e - s.v.exp + 1 + bits)
@@ -71,29 +71,29 @@ routine me_plus_abs(s: MpApprox, e: S64, n: USize) -> MpApprox
     else
         return s.widen(units)
 
-/// Whether a series term no longer matters: below 2^-(64n + 8) of the sum.
-/// :param term: The term.
-/// :param sum: The sum so far.
-/// :param n: The precision in limbs.
-/// :returns: Whether a series term no longer matters.
+### Whether a series term no longer matters: below 2^-(64n + 8) of the sum.
+### :param term: The term.
+### :param sum: The sum so far.
+### :param n: The precision in limbs.
+### :returns: Whether a series term no longer matters.
 routine me_is_negligible(term: MpApprox, sum: MpApprox, n: USize) -> Bool
     bits: S64 = n.to[S64]() * 64 + 8
     tiny: Bool = term.v.exp < sum.v.exp - bits
     return term.v.is_zero(n) or tiny
 
-/// An exact small integer.
-/// :param k: The integer.
-/// :param n: The precision in limbs.
-/// :returns: An exact small integer.
+### An exact small integer.
+### :param k: The integer.
+### :param n: The precision in limbs.
+### :returns: An exact small integer.
 routine me_int(k: S64, n: USize) -> MpApprox
     m: MpApprox = me_of_u128(v: k.abs_diff(0).to[U128](), n)
     return m.with_sign(k < 0)
 
-/// x at fewer limbs: the top `to` limbs of the `from`-limb value, the bound rescaled plus a truncation.
-/// :param x: The value.
-/// :param from: The limbs it has.
-/// :param to: The limbs it keeps.
-/// :returns: x at fewer limbs.
+### x at fewer limbs: the top `to` limbs of the `from`-limb value, the bound rescaled plus a truncation.
+### :param x: The value.
+### :param from: The limbs it has.
+### :param to: The limbs it keeps.
+### :returns: x at fewer limbs.
 routine me_narrow(x: MpApprox, from: USize, to: USize) -> MpApprox
     local src: @Mp <- x.v
     local dst: @Mp <- Mp.zero()
@@ -108,13 +108,13 @@ routine me_narrow(x: MpApprox, from: USize, to: USize) -> MpApprox
     err: B64 = (x.err * scale + 2.0) * MP_UP
     return (v: dst.peek(), err: err)
 
-// ── exp, ln ───────────────────────────────────────────────────────────────────────────────────────
+# ── exp, ln ───────────────────────────────────────────────────────────────────────────────────────
 
-/// e^x for |x| < 2^16: x = k ln 2 + r, then e^(r / 2^s) by its Taylor series and s squarings (each doubling the
-/// relative error, which the bounds follow), times 2^k.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: e^x for |x| < 2^16.
+### e^x for |x| < 2^16: x = k ln 2 + r, then e^(r / 2^s) by its Taylor series and s squarings (each doubling the
+### relative error, which the bounds follow), times 2^k.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: e^x for |x| < 2^16.
 routine me_exp(x: MpApprox, n: USize) -> MpApprox
     local kf: B64 = x.v.to_b64(n) * 1.4426950408889634
     local k: S64 = kf.round().to[S64]()
@@ -138,10 +138,10 @@ routine me_exp(x: MpApprox, n: USize) -> MpApprox
         else
             jump square(me_mul(a: e, b: e, n), j + 1)
 
-/// e^x - 1: below 1/16 its own series x + x^2/2 + ..., which keeps the relative accuracy near 0, else e^x - 1.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: e^x - 1.
+### e^x - 1: below 1/16 its own series x + x^2/2 + ..., which keeps the relative accuracy near 0, else e^x - 1.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: e^x - 1.
 routine me_expm1(x: MpApprox, n: USize) -> MpApprox
     if x.v.exp <= -4
         while true with term: MpApprox = x, sum: MpApprox = x, i: U64 = 2
@@ -153,12 +153,12 @@ routine me_expm1(x: MpApprox, n: USize) -> MpApprox
     else
         return me_sub(a: me_exp(x, n), b: me_int(k: 1, n), n)
 
-/// ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
-/// :param t: The argument, below 1/32 in magnitude.
-/// :param n: The precision in limbs.
-/// :returns: ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+### ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+### :param t: The argument, below 1/32 in magnitude.
+### :param n: The precision in limbs.
+### :returns: ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
 routine me_ln1p_series(t: MpApprox, n: USize) -> MpApprox
-    // power = t^(i - 1)
+    # power = t^(i - 1)
     while true with power: MpApprox = t, sum: MpApprox = t, i: U64 = 2
         next_power2: MpApprox = me_mul(a: power, b: t, n)
         term2: MpApprox = me_div_u64(a: next_power2, k: i, n)
@@ -171,11 +171,11 @@ routine me_ln1p_series(t: MpApprox, n: USize) -> MpApprox
         else
             continue with power: next_power2, sum: me_add(a: sum, b: signed2, n), i: i + 1
 
-/// ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the B64 logarithm of m, and ln m = y0 + ln(1 + t) with
-/// t = m e^-y0 - 1, which is below 2^-50, so its series ends after a few terms.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: ln x for x > 0.
+### ln x for x > 0: x = m 2^E with m in [0.75, 1.5), y0 the B64 logarithm of m, and ln m = y0 + ln(1 + t) with
+### t = m e^-y0 - 1, which is below 2^-50, so its series ends after a few terms.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: ln x for x > 0.
 routine me_ln(x: MpApprox, n: USize) -> MpApprox
     local top: B64 = x.v.magnitude().top_b64(n)
     local low: Bool = top < 0.75
@@ -194,35 +194,35 @@ routine me_ln(x: MpApprox, n: USize) -> MpApprox
         part: MpApprox = me_mul(a: me_const(i: DEC_LN2, n), b: me_int(k: e, n), n)
         return me_add(a: part, b: lnm, n)
 
-/// ln(1 + t): its series below 1/32, else ln of the sum.
-/// :param t: The argument.
-/// :param n: The precision in limbs.
-/// :returns: ln(1 + t).
+### ln(1 + t): its series below 1/32, else ln of the sum.
+### :param t: The argument.
+### :param n: The precision in limbs.
+### :returns: ln(1 + t).
 routine me_ln1p(t: MpApprox, n: USize) -> MpApprox
     if t.v.exp <= -5
         return me_ln1p_series(t, n)
     else
         return me_ln(x: me_add(a: me_int(k: 1, n), b: t, n), n)
 
-// ── sin, cos, atan ────────────────────────────────────────────────────────────────────────────────
+# ── sin, cos, atan ────────────────────────────────────────────────────────────────────────────────
 
-/// Two values.
+### Two values.
 record MePair
     a: MpApprox
     b: MpApprox
 
-/// sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below
-/// the first term left out).
-/// :param r: The argument.
-/// :param n: The precision in limbs.
-/// :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
+### sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below
+### the first term left out).
+### :param r: The argument.
+### :param n: The precision in limbs.
+### :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
 routine me_sincos(r: MpApprox, n: USize) -> MePair
     local r2: MpApprox = me_mul(a: r, b: r, n)
     local one: MpApprox = me_int(k: 1, n)
 
     jump sine(r, r, 1)
 
-    // term = r^(2i - 1) / (2i - 1)!, signs alternating
+    # term = r^(2i - 1) / (2i - 1)!, signs alternating
     block sine(term: MpApprox, sum: MpApprox, i: U64)
         div: U64 = i * 2 * (i * 2 + 1)
         next: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div, n).negate()
@@ -239,14 +239,14 @@ routine me_sincos(r: MpApprox, n: USize) -> MePair
         else
             jump cosine(s, next, me_add(a: sum, b: next, n), i + 1)
 
-/// atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
-/// :param d: The argument, below 2^-8 in magnitude.
-/// :param n: The precision in limbs.
-/// :returns: atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
+### atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
+### :param d: The argument, below 2^-8 in magnitude.
+### :param n: The precision in limbs.
+### :returns: atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
 routine me_atan_series(d: MpApprox, n: USize) -> MpApprox
     local d2: MpApprox = me_mul(a: d, b: d, n)
 
-    // power = d^(i - 2)
+    # power = d^(i - 2)
     while true with power: MpApprox = d, sum: MpApprox = d, i: U64 = 3
         next_power2: MpApprox = me_mul(a: power, b: d2, n)
         term2: MpApprox = me_div_u64(a: next_power2, k: i, n)
@@ -259,11 +259,11 @@ routine me_atan_series(d: MpApprox, n: USize) -> MpApprox
         else
             continue with power: next_power2, sum: me_add(a: sum, b: signed2, n), i: i + 2
 
-/// atan x: below 2^-8 its series; above 1 in magnitude pi/2 - atan(1/x); else from y0, the B64 arctangent:
-/// tan(y0 - atan x) = (sin y0 - x cos y0) / (cos y0 + x sin y0) = d is below 2^-50, and atan x = y0 - atan d.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: atan x.
+### atan x: below 2^-8 its series; above 1 in magnitude pi/2 - atan(1/x); else from y0, the B64 arctangent:
+### tan(y0 - atan x) = (sin y0 - x cos y0) / (cos y0 + x sin y0) = d is below 2^-50, and atan x = y0 - atan d.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: atan x.
 routine me_atan(x: MpApprox, n: USize) -> MpApprox
     small: Bool = x.v.exp <= -8
     when
@@ -283,14 +283,14 @@ routine me_atan(x: MpApprox, n: USize) -> MpApprox
             d: MpApprox = me_div(a: num, b: den, n)
             return me_sub(a: y0m, b: me_atan_series(d, n), n)
 
-// ── decimal helpers ───────────────────────────────────────────────────────────────────────────────
+# ── decimal helpers ───────────────────────────────────────────────────────────────────────────────
 
-/// x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any
-/// use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few
-/// units of k).
-/// :param x: The operand.
-/// :param k: The integer to add.
-/// :returns: x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few units of k).
+### x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any
+### use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few
+### units of k).
+### :param x: The operand.
+### :param k: The integer to add.
+### :returns: x + k exactly, for a finite x with an exponent of at least -60 (else it returns x + k rounded far beyond any use); the coefficient as wide as it needs (it then fits 128 bits for every caller here, whose x is within a few units of k).
 routine dec_plus_int(x: Dec, k: S64) -> Dec
     local e: S64 = x.exp.min(0)
 
@@ -306,20 +306,20 @@ routine dec_plus_int(x: Dec, k: S64) -> Dec
             cx >= ck => return dec_num(neg: x.neg, coeff: (cx - ck).to_wrap[U128](), exp: e)
             else => return dec_num(neg: k < 0, coeff: (ck - cx).to_wrap[U128](), exp: e)
 
-/// |x| compared with c × 10^q: -1, 0, or 1.
-/// :param x: The operand.
-/// :param c: The coefficient compared with.
-/// :param q: Its exponent.
-/// :returns: |x| compared with c × 10^q.
+### |x| compared with c × 10^q: -1, 0, or 1.
+### :param x: The operand.
+### :param c: The coefficient compared with.
+### :param q: Its exponent.
+### :returns: |x| compared with c × 10^q.
 routine dec_compare_abs(x: Dec, c: U128, q: S64) -> S64
     if x.coeff == 0
         return -1
     else
         return dec_compare_magnitude(ca: x.coeff, ea: x.exp, cb: c, eb: q)
 
-/// Whether a finite x is an integer.
-/// :param x: The operand.
-/// :returns: Whether a finite x is an integer.
+### Whether a finite x is an integer.
+### :param x: The operand.
+### :returns: Whether a finite x is an integer.
 routine dec_is_integer(x: Dec) -> Bool
     when
         x.coeff == 0 => return true
@@ -329,9 +329,9 @@ routine dec_is_integer(x: Dec) -> Bool
             q: U128 = dec_div_p10(x: x.coeff, k: -x.exp)
             return q * dec_p10_128(-x.exp) == x.coeff
 
-/// Whether a finite integer x is odd.
-/// :param x: The operand.
-/// :returns: Whether a finite integer x is odd.
+### Whether a finite integer x is odd.
+### :param x: The operand.
+### :returns: Whether a finite integer x is odd.
 routine dec_is_odd_integer(x: Dec) -> Bool
     when
         x.coeff == 0 => return false
@@ -341,23 +341,23 @@ routine dec_is_odd_integer(x: Dec) -> Bool
             q: U128 = dec_div_p10(x: x.coeff, k: -x.exp)
             return q & 1 == 1
 
-// ── rounding to a decimal ─────────────────────────────────────────────────────────────────────────
+# ── rounding to a decimal ─────────────────────────────────────────────────────────────────────────
 
-/// A rounding attempt: whether the band decided it, and the result.
+### A rounding attempt: whether the band decided it, and the result.
 record DecTry
     ok: Bool
     d: Dec
 
-/// The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when
-/// the band reaches a midpoint. A tie rule other than 0 settles a band on a midpoint: 1 takes it to be exactly
-/// there (half to even), 2 rounds the magnitude up, 3 down.
-/// The value is scaled by a power of ten so that its integer part has p digits (fewer at the bottom of the range)
-/// and the fraction decides.
-/// :param y: The value with its bound.
-/// :param f: The format the result rounds to.
-/// :param n: The precision in limbs.
-/// :param tie_rule: How a band on a midpoint is settled: 0 not at all, 1 half to even, 2 up, 3 down.
-/// :returns: The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the band reaches a midpoint.
+### The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when
+### the band reaches a midpoint. A tie rule other than 0 settles a band on a midpoint: 1 takes it to be exactly
+### there (half to even), 2 rounds the magnitude up, 3 down.
+### The value is scaled by a power of ten so that its integer part has p digits (fewer at the bottom of the range)
+### and the fraction decides.
+### :param y: The value with its bound.
+### :param f: The format the result rounds to.
+### :param n: The precision in limbs.
+### :param tie_rule: How a band on a midpoint is settled: 0 not at all, 1 half to even, 2 up, 3 down.
+### :returns: The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the band reaches a midpoint.
 routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTry
     local neg: Bool = y.v.neg
     local ay: MpApprox = y.magnitude()
@@ -368,7 +368,7 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
     a: S64 = lg.floor().to[S64]()
     jump at((a - p + 1).max(f.qmin), 0)
 
-    // the digits at exponent q: z = |y| 10^-q
+    # the digits at exponent q: z = |y| 10^-q
     block at(q: S64, tries: S64)
         if q > f.qmax + 2
             return (ok: true, d: dec_inf(neg))
@@ -388,7 +388,7 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
             not last and tiny => jump at(q - 1, tries + 1)
             else => jump decide(q, z, int)
 
-    // the fraction against 1/2, with the band: |z| err 2^-64n
+    # the fraction against 1/2, with the band: |z| err 2^-64n
     block decide(q: S64, z: MpApprox, int: U128)
         frac: Mp = mp_sub(a: z.v, b: mp_of_u128(v: int, scale: 0, n), n)
         half: Mp = mp_of_u128(v: 1, scale: -1, n)
@@ -413,10 +413,10 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
             qq > f.qmax => return (ok: true, d: dec_inf(neg))
             else => return (ok: true, d: dec_num(neg, coeff: cc, exp: qq).reduce(f))
 
-/// floor(|x|) of an Mp below 2^128.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: floor(|x|) of an Mp below 2^128.
+### floor(|x|) of an Mp below 2^128.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: floor(|x|) of an Mp below 2^128.
 routine mp_floor_u128(x: Mp, n: USize) -> U128
     local slot: @Mp <- x
 
@@ -426,7 +426,7 @@ routine mp_floor_u128(x: Mp, n: USize) -> U128
         x.exp <= 0 => return 0
         x.exp > 128 => return U128.MAX
         else =>
-            // the integer part is the mantissa shifted right by `drop` bits
+            # the integer part is the mantissa shifted right by `drop` bits
             dropped: S64 = bits - x.exp
             buf: @Array[U64, 41] = slot.m.to[@U64]().to[@Array[U64, 41]]()
             low: U64 = mp_bits_at(buf, len: n, at: dropped)
@@ -438,20 +438,20 @@ routine mp_floor_u128(x: Mp, n: USize) -> U128
                 else => U128.shl(1, keep.max(0).to[U128]()) - 1
             return v & mask
 
-// ── Ziv ───────────────────────────────────────────────────────────────────────────────────────────
+# ── Ziv ───────────────────────────────────────────────────────────────────────────────────────────
 
-/// fn(x, y) correctly rounded to f: evaluated at more and more bits until its band settles the rounding.
-/// :param fn: Which function (a DEC_ code).
-/// :param x: The operand.
-/// :param y: The second argument (pow and atan2), else ignored.
-/// :param f: The format the result rounds to.
-/// :returns: fn(x, y) correctly rounded to f.
+### fn(x, y) correctly rounded to f: evaluated at more and more bits until its band settles the rounding.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2), else ignored.
+### :param f: The format the result rounds to.
+### :returns: fn(x, y) correctly rounded to f.
 routine dec_ziv(fn: U32, x: Dec, y: Dec, f: DecFormat) -> Dec
     fast: DecTry = dec_fast(fn, x, y, f)
     if fast.ok
         return fast.d
     else
-        // 192 bits on the W engine (dec_trans_wide.tess), then the multiprecision loop from the next precision up
+        # 192 bits on the W engine (dec_trans_wide.tess), then the multiprecision loop from the next precision up
         w: DecTry = dec_wide(fn, x, y, f)
         if w.ok
             return w.d
@@ -473,12 +473,12 @@ routine dec_ziv(fn: U32, x: Dec, y: Dec, f: DecFormat) -> Dec
                 else
                     continue with n: (n * 2).min(DEC_ZIV_TOP)
 
-/// fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
-/// :param fn: Which function (a DEC_ code).
-/// :param x: The operand.
-/// :param y: The second argument (pow and atan2), else ignored.
-/// :param n: The precision in limbs.
-/// :returns: fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
+### fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2), else ignored.
+### :param n: The precision in limbs.
+### :returns: fn(x, y) at n limbs (x, y finite, the special cases settled by the caller).
 routine dec_eval(fn: U32, x: Dec, y: Dec, n: USize) -> MpApprox
     when fn
         0 => return me_exp(x: me_of_dec(x, n), n)
@@ -509,32 +509,32 @@ routine dec_eval(fn: U32, x: Dec, y: Dec, n: USize) -> MpApprox
         25 => return dec_eval_pow(x, y, n)
         else => return dec_eval_atan2(y: x, x: y, n)
 
-// ── the evaluations ───────────────────────────────────────────────────────────────────────────────
+# ── the evaluations ───────────────────────────────────────────────────────────────────────────────
 
-/// ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: ln x of a finite x > 0.
+### ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: ln x of a finite x > 0.
 routine dec_eval_ln(x: Dec, n: USize) -> MpApprox
     if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
         return me_ln1p(t: me_of_dec(x: dec_plus_int(x, k: -1), n), n)
     else
         return me_ln(x: me_of_dec(x, n), n)
 
-/// ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: ln(1 + x) of a finite x > -1.
+### ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: ln(1 + x) of a finite x > -1.
 routine dec_eval_ln1p(x: Dec, n: USize) -> MpApprox
     if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
         return me_ln(x: me_of_dec(x: dec_plus_int(x, k: 1), n), n)
     else
         return me_ln1p(t: me_of_dec(x, n), n)
 
-/// 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at n limbs.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: 1 - |x| for |x| <= 1.
+### 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at n limbs.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: 1 - |x| for |x| <= 1.
 routine dec_one_minus_abs(x: Dec, n: USize) -> MpApprox
     local ax: Dec = dec_num(neg: false, coeff: x.coeff, exp: x.exp)
 
@@ -543,10 +543,10 @@ routine dec_one_minus_abs(x: Dec, n: USize) -> MpApprox
     else
         return me_sub(a: me_int(k: 1, n), b: me_of_dec(x: ax, n), n)
 
-/// asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: asin x for |x| <= 1.
+### asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: asin x for |x| <= 1.
 routine dec_eval_asin(x: Dec, n: USize) -> MpApprox
     local omx: MpApprox = dec_one_minus_abs(x, n)
 
@@ -558,17 +558,17 @@ routine dec_eval_asin(x: Dec, n: USize) -> MpApprox
         a: MpApprox = me_atan(x: me_div(a: me_of_dec(x, n).magnitude(), b: s, n), n)
         return a.with_sign(x.neg)
 
-/// acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: acos x for |x| <= 1.
+### acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: acos x for |x| <= 1.
 routine dec_eval_acos(x: Dec, n: USize) -> MpApprox
     local omx: MpApprox = dec_one_minus_abs(x, n)
 
     if x.neg & omx.v.is_zero(n)
         return me_const(i: DEC_PI, n)
     else
-        // 1 - x and 1 + x: one of them is 1 - |x|, the other 2 - (1 - |x|)
+        # 1 - x and 1 + x: one of them is 1 - |x|, the other 2 - (1 - |x|)
         other: MpApprox = me_sub(a: me_int(k: 2, n), b: omx, n)
         num: MpApprox = when
             x.neg => other
@@ -579,20 +579,20 @@ routine dec_eval_acos(x: Dec, n: USize) -> MpApprox
         t: MpApprox = me_sqrt(a: me_div(a: num, b: den, n), n)
         return me_atan(x: t, n).ldexp(k: 1, n)
 
-/// atan x, ±pi/2 for an infinity.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: atan x, ±pi/2 for an infinity.
+### atan x, ±pi/2 for an infinity.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: atan x, ±pi/2 for an infinity.
 routine dec_eval_atan(x: Dec, n: USize) -> MpApprox
     if x.is_inf()
         return me_const(i: DEC_PI, n).ldexp(k: -1, n).with_sign(x.neg)
     else
         return me_atan(x: me_of_dec(x, n), n)
 
-/// sinh x: below 1 its series (positive terms, relative accuracy), else (e^|x| - e^-|x|) / 2.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: sinh x.
+### sinh x: below 1 its series (positive terms, relative accuracy), else (e^|x| - e^-|x|) / 2.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: sinh x.
 routine dec_eval_sinh(x: Dec, n: USize) -> MpApprox
     local xm: MpApprox = me_of_dec(x, n)
     local x2: MpApprox = me_mul(a: xm, b: xm, n)
@@ -609,28 +609,28 @@ routine dec_eval_sinh(x: Dec, n: USize) -> MpApprox
         d: MpApprox = me_sub(a: e, b: me_div(a: me_int(k: 1, n), b: e, n), n)
         return d.ldexp(k: -1, n).with_sign(x.neg)
 
-/// cosh x = (e^|x| + e^-|x|) / 2.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: cosh x = (e^|x| + e^-|x|) / 2.
+### cosh x = (e^|x| + e^-|x|) / 2.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: cosh x = (e^|x| + e^-|x|) / 2.
 routine dec_eval_cosh(x: Dec, n: USize) -> MpApprox
     e: MpApprox = me_exp(x: me_of_dec(x, n).magnitude(), n)
     s: MpApprox = me_add(a: e, b: me_div(a: me_int(k: 1, n), b: e, n), n)
     return s.ldexp(k: -1, n)
 
-/// tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+### tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
 routine dec_eval_tanh(x: Dec, n: USize) -> MpApprox
     u: MpApprox = me_expm1(x: me_of_dec(x, n).magnitude().ldexp(k: 1, n), n)
     t: MpApprox = me_div(a: u, b: me_add(a: u, b: me_int(k: 2, n), n), n)
     return t.with_sign(x.neg)
 
-/// asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+### asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
 routine dec_eval_asinh(x: Dec, n: USize) -> MpApprox
     local ax: MpApprox = me_of_dec(x, n).magnitude()
     local one: MpApprox = me_int(k: 1, n)
@@ -643,10 +643,10 @@ routine dec_eval_asinh(x: Dec, n: USize) -> MpApprox
     else
         return me_ln(x: me_add(a: ax, b: rt, n), n).with_sign(x.neg)
 
-/// acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+### acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
 routine dec_eval_acosh(x: Dec, n: USize) -> MpApprox
     near: Bool = dec_compare_abs(x, c: 2, q: 0) < 0
     t: MpApprox = when
@@ -655,36 +655,36 @@ routine dec_eval_acosh(x: Dec, n: USize) -> MpApprox
     r: MpApprox = me_sqrt(a: me_mul(a: t, b: me_add(a: t, b: me_int(k: 2, n), n), n), n)
     return me_ln1p(t: me_add(a: t, b: r, n), n)
 
-/// atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+### atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
 routine dec_eval_atanh(x: Dec, n: USize) -> MpApprox
     ax: MpApprox = me_of_dec(x, n).magnitude()
     omx: MpApprox = dec_one_minus_abs(x, n)
     q: MpApprox = me_div(a: ax.ldexp(k: 1, n), b: omx, n)
     return me_ln1p(t: q, n).ldexp(k: -1, n).with_sign(x.neg)
 
-/// cbrt x = e^(ln|x| / 3), signed.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: cbrt x = e^(ln|x| / 3), signed.
+### cbrt x = e^(ln|x| / 3), signed.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: cbrt x = e^(ln|x| / 3), signed.
 routine dec_eval_cbrt(x: Dec, n: USize) -> MpApprox
     l: MpApprox = me_div_u64(a: dec_eval_ln(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), n), k: 3, n)
     return me_exp(x: l, n).with_sign(x.neg)
 
-// ── erf, erfc ─────────────────────────────────────────────────────────────────────────────────────
+# ── erf, erfc ─────────────────────────────────────────────────────────────────────────────────────
 
-/// erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)): positive terms, so no cancellation at any
-/// x. Once the term ratio 2x^2 / (2k + 3) is below 1/2 the rest is below the last term left out.
-/// :param ax: The magnitude of the argument.
-/// :param n: The precision in limbs.
-/// :returns: erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)).
+### erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)): positive terms, so no cancellation at any
+### x. Once the term ratio 2x^2 / (2k + 3) is below 1/2 the rest is below the last term left out.
+### :param ax: The magnitude of the argument.
+### :param n: The precision in limbs.
+### :returns: erf |x| = 2/sqrt(pi) e^(-x^2) Σ 2^k x^(2k+1) / (1 3 5 ... (2k+1)).
 routine me_erf_positive(ax: MpApprox, n: USize) -> MpApprox
     local x2: MpApprox = me_mul(a: ax, b: ax, n)
     local two: MpApprox = x2.ldexp(k: 1, n)
 
-    // the next term is term × 2x^2 / i
+    # the next term is term × 2x^2 / i
     while true with term: MpApprox = ax, sum: MpApprox = ax, i: U64 = 3
         next2: MpApprox = me_div_u64(a: me_mul(a: term, b: two, n), k: i, n)
         ratio2: B64 = two.v.to_b64(n) / (i + 2).to[B64]()
@@ -696,17 +696,17 @@ routine me_erf_positive(ax: MpApprox, n: USize) -> MpApprox
         else
             continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 2
 
-/// erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
-/// smallest term or where terms stop mattering. The rest is below the first term left out.
-/// :param ax: The magnitude of the argument.
-/// :param n: The precision in limbs.
-/// :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
+### erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
+### smallest term or where terms stop mattering. The rest is below the first term left out.
+### :param ax: The magnitude of the argument.
+### :param n: The precision in limbs.
+### :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
 routine me_erfc_asymptotic(ax: MpApprox, n: USize) -> MpApprox
     local x2: MpApprox = me_mul(a: ax, b: ax, n)
     local inv: MpApprox = me_div(a: me_int(k: 1, n), b: x2.ldexp(k: 1, n), n)
     local one: MpApprox = me_int(k: 1, n)
 
-    // term = (2k - 1)!! / (2x^2)^k, the next one term × (2k + 1) / (2x^2)
+    # term = (2k - 1)!! / (2x^2)^k, the next one term × (2k + 1) / (2x^2)
     while true with term: MpApprox = one, sum: MpApprox = one, k: U64 = 1
         next: MpApprox = me_mul(a: me_mul_u64(a: term, k: k * 2 - 1, n), b: inv, n)
         growing: Bool = mp_compare_magnitude(a: next.v, b: term.v, n) >= 0
@@ -730,13 +730,13 @@ routine me_erfc_asymptotic(ax: MpApprox, n: USize) -> MpApprox
                 return me_mul(a: sum2, b: d, n)
             else => continue with term: next, sum: me_add(a: sum, b: signed, n), k: k + 1
 
-/// erf x (complement false) or erfc x: erfc of a negative x is 1 + erf|x|, below 1/2 it is 1 - erf x, above it
-/// 1 - erf x at enough extra limbs for the cancellation (x^2 log2(e) bits), or the asymptotic series once that
-/// series alone is accurate enough (or the extra limbs would run out).
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :param complement: Whether erfc is wanted rather than erf.
-/// :returns: erf x (complement false) or erfc x.
+### erf x (complement false) or erfc x: erfc of a negative x is 1 + erf|x|, below 1/2 it is 1 - erf x, above it
+### 1 - erf x at enough extra limbs for the cancellation (x^2 log2(e) bits), or the asymptotic series once that
+### series alone is accurate enough (or the extra limbs would run out).
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :param complement: Whether erfc is wanted rather than erf.
+### :returns: erf x (complement false) or erfc x.
 routine dec_eval_erf(x: Dec, n: USize, complement: Bool) -> MpApprox
     local ax: MpApprox = me_of_dec(x, n).magnitude()
 
@@ -759,13 +759,13 @@ routine dec_eval_erf(x: Dec, n: USize, complement: Bool) -> MpApprox
                     return me_narrow(x: e, from: wide, to: n)
                 else => return me_erfc_asymptotic(ax, n)
 
-// ── gamma ─────────────────────────────────────────────────────────────────────────────────────────
+# ── gamma ─────────────────────────────────────────────────────────────────────────────────────────
 
-/// ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 +
-/// Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
-/// :param z: The argument.
-/// :param n: The precision in limbs.
-/// :returns: ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 + Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
+### ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 +
+### Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
+### :param z: The argument.
+### :param n: The precision in limbs.
+### :returns: ln Γ(z) for z past dec_stirling_floor, by Stirling's series (z - 1/2) ln z - z + ln(2 pi)/2 + Σ B_2k / (2k (2k - 1) z^(2k - 1)), whose rest is below the first term left out (z real and positive).
 routine me_lngamma_stirling(z: MpApprox, n: USize) -> MpApprox
     local inv: MpApprox = me_div(a: me_int(k: 1, n), b: z, n)
     local inv2: MpApprox = me_mul(a: inv, b: inv, n)
@@ -774,7 +774,7 @@ routine me_lngamma_stirling(z: MpApprox, n: USize) -> MpApprox
     a: MpApprox = me_mul(a: me_sub(a: z, b: half, n), b: me_ln(x: z, n), n)
     b: MpApprox = me_sub(a, b: z, n)
 
-    // power = z^-(2k + 1)
+    # power = z^-(2k + 1)
     while true with sum: MpApprox = me_add(a: b, b: me_const(i: DEC_HALF_LN_2PI, n), n), power: MpApprox = inv, k: USize = 0
         coefficient2: MpApprox = dec_stirling_coefficient(k, n)
         term2: MpApprox = me_mul(a: coefficient2, b: power, n)
@@ -784,30 +784,30 @@ routine me_lngamma_stirling(z: MpApprox, n: USize) -> MpApprox
         else
             continue with sum: me_add(a: sum, b: term2, n), power: me_mul(a: power, b: inv2, n), k: k + 1
 
-/// B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
-/// :param k: Which coefficient, from 0.
-/// :param n: The precision in limbs.
-/// :returns: B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+### B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+### :param k: Which coefficient, from 0.
+### :param n: The precision in limbs.
+### :returns: B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 routine dec_stirling_coefficient(k: USize, n: USize) -> MpApprox
     c: MpApprox = me_const(i: DEC_STIRLING.add(k), n)
     neg: Bool = k & 1 == 1
     return c.with_sign(neg)
 
-/// Where Stirling's series with its 100 terms is accurate to 64n + 20 bits: its 100th term,
-/// B_200 / (200 199 z^199), is about 2^700.8 z^-199.
-/// :param n: The precision in limbs.
-/// :returns: Where Stirling's series with its 100 terms is accurate to 64n + 20 bits.
+### Where Stirling's series with its 100 terms is accurate to 64n + 20 bits: its 100th term,
+### B_200 / (200 199 z^199), is about 2^700.8 z^-199.
+### :param n: The precision in limbs.
+### :returns: Where Stirling's series with its 100 terms is accurate to 64n + 20 bits.
 routine dec_stirling_floor(n: USize) -> B64
     bits: B64 = n.to[B64]() * 64.0 + 741.0
     return (bits / 199.0).exp2()
 
-/// Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
-/// Stirling floor, Γ(x) = Γ(x + N) / (x (x + 1) ... (x + N - 1)); for x < 0 by the reflection
-/// Γ(x) = pi / (sin(pi x) Γ(1 - x)), sin(pi x) = (-1)^k sin(pi r) with r = x - k exact in decimal.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :param log: Whether the logarithm is wanted.
-/// :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
+### Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
+### Stirling floor, Γ(x) = Γ(x + N) / (x (x + 1) ... (x + N - 1)); for x < 0 by the reflection
+### Γ(x) = pi / (sin(pi x) Γ(1 - x)), sin(pi x) = (-1)^k sin(pi r) with r = x - k exact in decimal.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :param log: Whether the logarithm is wanted.
+### :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
 routine dec_eval_gamma(x: Dec, n: USize, log: Bool) -> MpApprox
     if x.neg
         k: Dec = dec_round_int(x, mode: 4, f: dec_format128())
@@ -829,20 +829,20 @@ routine dec_eval_gamma(x: Dec, n: USize, log: Bool) -> MpApprox
     else
         return dec_gamma_positive(z: me_of_dec(x, n), n, log)
 
-/// sin(pi r) for |r| <= 1/2.
-/// :param r: The argument.
-/// :param n: The precision in limbs.
-/// :returns: sin(pi r) for |r| <= 1/2.
+### sin(pi r) for |r| <= 1/2.
+### :param r: The argument.
+### :param n: The precision in limbs.
+### :returns: sin(pi r) for |r| <= 1/2.
 routine me_sin_of_pi_times(r: MpApprox, n: USize) -> MpApprox
     t: MpApprox = me_mul(a: r, b: me_const(i: DEC_PI, n), n)
     sc: MePair = me_sincos(r: t, n)
     return sc.a
 
-/// Γ(z) or ln Γ(z) for z > 0.
-/// :param z: The argument.
-/// :param n: The precision in limbs.
-/// :param log: Whether the logarithm is wanted.
-/// :returns: Γ(z) or ln Γ(z) for z > 0.
+### Γ(z) or ln Γ(z) for z > 0.
+### :param z: The argument.
+### :param n: The precision in limbs.
+### :param log: Whether the logarithm is wanted.
+### :returns: Γ(z) or ln Γ(z) for z > 0.
 routine dec_gamma_positive(z: MpApprox, n: USize, log: Bool) -> MpApprox
     local floor: B64 = dec_stirling_floor(n)
     local zf: B64 = z.v.to_b64(n)
@@ -852,7 +852,7 @@ routine dec_gamma_positive(z: MpApprox, n: USize, log: Bool) -> MpApprox
         short => dec_gamma_shift(floor, zf)
         else => 0
 
-    // prod = z (z + 1) ... (z + i - 1)
+    # prod = z (z + 1) ... (z + i - 1)
     each i in 0 til count with prod: MpApprox = me_int(k: 1, n), at: MpApprox = z
         continue with prod: me_mul(a: prod, b: at, n), at: me_add(a: at, b: me_int(k: 1, n), n)
     then
@@ -864,18 +864,18 @@ routine dec_gamma_positive(z: MpApprox, n: USize, log: Bool) -> MpApprox
             none => return me_exp(x: lg, n)
             else => return me_div(a: me_exp(x: lg, n), b: prod, n)
 
-// ── sin, cos, tan ─────────────────────────────────────────────────────────────────────────────────
+# ── sin, cos, tan ─────────────────────────────────────────────────────────────────────────────────
 
-/// An argument reduced modulo pi/2: x = r + k pi/2 with |r| about pi/4 at most, k taken mod 4.
+### An argument reduced modulo pi/2: x = r + k pi/2 with |r| about pi/4 at most, k taken mod 4.
 record DecReduced
     k: U64
     r: MpApprox
 
-/// sin (which 0), cos (1), or tan (2) of a finite x: reduced to r and a quarter turn k, then the series.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :param which: 0 sine, 1 cosine, 2 tangent.
-/// :returns: sin (which 0), cos (1), or tan (2) of a finite x.
+### sin (which 0), cos (1), or tan (2) of a finite x: reduced to r and a quarter turn k, then the series.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :param which: 0 sine, 1 cosine, 2 tangent.
+### :returns: sin (which 0), cos (1), or tan (2) of a finite x.
 routine dec_eval_trig(x: Dec, n: USize, which: U64) -> MpApprox
     red: DecReduced = dec_reduce(x, n)
     sc: MePair = me_sincos(r: red.r, n)
@@ -886,10 +886,10 @@ routine dec_eval_trig(x: Dec, n: USize, which: U64) -> MpApprox
         1 => return c
         else => return me_div(a: s, b: c, n)
 
-/// sin(r + k pi/2) from sin r and cos r: sin r, cos r, -sin r, -cos r.
-/// :param k: The quarter turns.
-/// :param sc: Sine and cosine of the reduced argument.
-/// :returns: sin(r + k pi/2) from sin r and cos r.
+### sin(r + k pi/2) from sin r and cos r: sin r, cos r, -sin r, -cos r.
+### :param k: The quarter turns.
+### :param sc: Sine and cosine of the reduced argument.
+### :returns: sin(r + k pi/2) from sin r and cos r.
 routine dec_quadrant(k: U64, sc: MePair) -> MpApprox
     q: U64 = k & 3
     when q
@@ -898,11 +898,11 @@ routine dec_quadrant(k: U64, sc: MePair) -> MpApprox
         2 => return sc.a.negate()
         else => return sc.b.negate()
 
-/// x reduced modulo pi/2: below pi/4 as it is; below 10^38 (2^127) at three limbs more; beyond that x is an
-/// integer and the reduction is Payne and Hanek's.
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: x reduced modulo pi/2.
+### x reduced modulo pi/2: below pi/4 as it is; below 10^38 (2^127) at three limbs more; beyond that x is an
+### integer and the reduction is Payne and Hanek's.
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: x reduced modulo pi/2.
 routine dec_reduce(x: Dec, n: USize) -> DecReduced
     small: Bool = dec_compare_abs(x, c: 785, q: -3) < 0
     top: S64 = dec_digits(x.coeff) + x.exp
@@ -911,11 +911,11 @@ routine dec_reduce(x: Dec, n: USize) -> DecReduced
         top <= 38 => return dec_reduce_moderate(x, n)
         else => return dec_reduce_payne_hanek(x, n)
 
-/// k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed: |x| < 2^127 leaves r at least 64n + 60
-/// good bits however close x is to a multiple of pi/2 (the error bound shows how many).
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed.
+### k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed: |x| < 2^127 leaves r at least 64n + 60
+### good bits however close x is to a multiple of pi/2 (the error bound shows how many).
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: k = round(x 2/pi) and r = x - k pi/2 at n + 3 limbs, then narrowed.
 routine dec_reduce_moderate(x: Dec, n: USize) -> DecReduced
     local w: USize = n + 3
 
@@ -936,14 +936,14 @@ routine dec_reduce_moderate(x: Dec, n: USize) -> DecReduced
         else => quarter
     return (k: kk, r: me_narrow(x: r, from: w, to: n))
 
-/// Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q: x / (2 pi) = M Σ t_j
-/// 2^(q - j) over the bits t_j of 1/(2 pi), whose terms with j <= q are whole turns. The turn fraction f is
-/// (M W) mod 2^L / 2^L with W the bits q + 1 .. q + L of 1/(2 pi) (more bits above them only add whole turns), off
-/// by less than M 2^-L; with L at least the bits of M plus 64n + 128 that is below 2^-(64n + 128). Then k is the
-/// quarter turn nearest 4f and r = 2 pi (f - k/4).
-/// :param x: The operand.
-/// :param n: The precision in limbs.
-/// :returns: Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q.
+### Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q: x / (2 pi) = M Σ t_j
+### 2^(q - j) over the bits t_j of 1/(2 pi), whose terms with j <= q are whole turns. The turn fraction f is
+### (M W) mod 2^L / 2^L with W the bits q + 1 .. q + L of 1/(2 pi) (more bits above them only add whole turns), off
+### by less than M 2^-L; with L at least the bits of M plus 64n + 128 that is below 2^-(64n + 128). Then k is the
+### quarter turn nearest 4f and r = 2 pi (f - k/4).
+### :param x: The operand.
+### :param n: The precision in limbs.
+### :returns: Payne and Hanek's reduction of a huge x = c 10^q (q >= 0) = M 2^q with M = c 5^q.
 routine dec_reduce_payne_hanek(x: Dec, n: USize) -> DecReduced
     local big: @BigNat[800] <- .hollow()
     local window: @BigNat[800] <- .hollow()
@@ -956,7 +956,7 @@ routine dec_reduce_payne_hanek(x: Dec, n: USize) -> DecReduced
         big.mul_add(m: U64.pow(5, k.to[U32]()), addend: 0)
         continue with left: left - k
 
-    // the window: words q / 64 .. (q + L - 1) / 64 of the table, the first one most significant
+    # the window: words q / 64 .. (q + L - 1) / 64 of the table, the first one most significant
     q: S64 = x.exp
     size: S64 = big.bit_length().to[S64]()
     want: S64 = size + n.to[S64]() * 64 + 128
@@ -970,7 +970,7 @@ routine dec_reduce_payne_hanek(x: Dec, n: USize) -> DecReduced
         window.shl(64)
         window.mul_add(m: 1, addend: DEC_INV_2PI.getitem(w))
     then
-        // the fraction has 64 (last + 1) - q bits
+        # the fraction has 64 (last + 1) - q bits
         product.set_product(a: big, b: window)
         span: S64 = (last + 1).to[S64]() * 64
         frac_bits: S64 = span - x.exp
@@ -993,17 +993,17 @@ routine dec_reduce_payne_hanek(x: Dec, n: USize) -> DecReduced
         rs: MpApprox = r.with_sign(r.v.neg ^ x.neg)
         return (k: kk, r: rs)
 
-/// The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs: those bits over 2^top.
-/// :param b: The big natural.
-/// :param top: The bit just above the window.
-/// :param n: The precision in limbs.
-/// :returns: The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs.
+### The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs: those bits over 2^top.
+### :param b: The big natural.
+### :param top: The bit just above the window.
+### :param n: The precision in limbs.
+### :returns: The bits [top - 64(n + 1), top) of a big natural, as a value in [0, 1) at n limbs.
 routine dec_bignat_window(b: @BigNat[800], top: S64, n: USize) -> Mp
     local buf: @Array[U64, 41] <- MP_ZERO_BUF.peek()
     local count: USize = b.count.peek()
 
     each k in 0 to n
-        // the bit offset of limb k of the window
+        # the bit offset of limb k of the window
         base: S64 = top - (n + 1).to[S64]() * 64
         at: S64 = base + k.to[S64]() * 64
         word: U64 = dec_bignat_bits(b, count, at)
@@ -1011,11 +1011,11 @@ routine dec_bignat_window(b: @BigNat[800], top: S64, n: USize) -> Mp
     scale: S64 = (n + 1).to[S64]() * -64
     return mp_pack(value: MpUnpacked(neg: false, limbs: buf, len: n + 1, scale: scale), n)
 
-/// The 64 bits of a big natural from bit `at` up (0 outside it).
-/// :param b: The big natural.
-/// :param count: How many limbs are in use.
-/// :param at: The bit position.
-/// :returns: The 64 bits of a big natural from bit `at` up (0 outside it).
+### The 64 bits of a big natural from bit `at` up (0 outside it).
+### :param b: The big natural.
+### :param count: How many limbs are in use.
+### :param at: The bit position.
+### :returns: The 64 bits of a big natural from bit `at` up (0 outside it).
 routine dec_bignat_bits(b: @BigNat[800], count: USize, at: S64) -> U64
     local limb: S64 = at >> 6
     local off: U64 = (at & 63).to[U64]()
@@ -1027,36 +1027,36 @@ routine dec_bignat_bits(b: @BigNat[800], count: USize, at: S64) -> U64
     else
         return (low >> off) | (high << 64 - off)
 
-/// Limb i of a big natural (0 outside it).
-/// :param b: The big natural.
-/// :param count: How many limbs are in use.
-/// :param i: The index.
-/// :returns: Limb i of a big natural (0 outside it).
+### Limb i of a big natural (0 outside it).
+### :param b: The big natural.
+### :param count: How many limbs are in use.
+### :param i: The index.
+### :returns: Limb i of a big natural (0 outside it).
 routine dec_bignat_limb(b: @BigNat[800], count: USize, i: S64) -> U64
     if i >= 0 and i < count.to[S64]()
         return b.limbs[i.to[USize]()]
     else
         return 0
 
-// ── pow, atan2 ────────────────────────────────────────────────────────────────────────────────────
+# ── pow, atan2 ────────────────────────────────────────────────────────────────────────────────────
 
-/// |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not
-/// past the range: dec_pow settles those).
-/// :param x: The base.
-/// :param y: The exponent.
-/// :param n: The precision in limbs.
-/// :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
+### |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not
+### past the range: dec_pow settles those).
+### :param x: The base.
+### :param y: The exponent.
+### :param n: The precision in limbs.
+### :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
 routine dec_eval_pow(x: Dec, y: Dec, n: USize) -> MpApprox
     l: MpApprox = dec_eval_ln(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), n)
     z: MpApprox = me_mul(a: me_of_dec(x: y, n), b: l, n)
     neg: Bool = x.neg & dec_is_odd_integer(y)
     return me_exp(x: z, n).with_sign(neg)
 
-/// The angle of (x, y) for finite nonzero x and y: atan(y/x), plus or minus pi for a negative x.
-/// :param y: The ordinate.
-/// :param x: The abscissa.
-/// :param n: The precision in limbs.
-/// :returns: The angle of (x, y) for finite nonzero x and y.
+### The angle of (x, y) for finite nonzero x and y: atan(y/x), plus or minus pi for a negative x.
+### :param y: The ordinate.
+### :param x: The abscissa.
+### :param n: The precision in limbs.
+### :returns: The angle of (x, y) for finite nonzero x and y.
 routine dec_eval_atan2(y: Dec, x: Dec, n: USize) -> MpApprox
     a: MpApprox = me_atan(x: me_div(a: me_of_dec(x: y, n), b: me_of_dec(x, n), n), n)
     if x.neg
@@ -1065,14 +1065,14 @@ routine dec_eval_atan2(y: Dec, x: Dec, n: USize) -> MpApprox
     else
         return a
 
-// ── the special values ────────────────────────────────────────────────────────────────────────────
+# ── the special values ────────────────────────────────────────────────────────────────────────────
 
-/// fn(x) correctly rounded to f (fn one of the unary DEC_ codes): the special values first, as RazorForge's
-/// engines gave them, then dec_ziv.
-/// :param fn: Which function (a DEC_ code).
-/// :param x: The operand.
-/// :param f: The format the result rounds to.
-/// :returns: fn(x) correctly rounded to f (fn one of the unary DEC_ codes).
+### fn(x) correctly rounded to f (fn one of the unary DEC_ codes): the special values first, as RazorForge's
+### engines gave them, then dec_ziv.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param f: The format the result rounds to.
+### :returns: fn(x) correctly rounded to f (fn one of the unary DEC_ codes).
 routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
     local zero: Bool = x.is_zero()
     local inf: Bool = x.is_inf()
@@ -1081,7 +1081,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
     when
         x.is_nan() => return dec_nan()
         fn <= 3 =>
-            // exp, expm1, exp2, exp10: past the range an infinity, 0, or -1 for expm1
+            # exp, expm1, exp2, exp10: past the range an infinity, 0, or -1 for expm1
             limit: U128 = dec_exponential_limit(fn)
             far: Bool = inf or dec_compare_abs(x, c: limit, q: 0) > 0
             m1: Bool = fn == DEC_EXPM1
@@ -1097,7 +1097,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                 m1 & x.neg & (dec_compare_abs(x, c: 100, q: 0) > 0) => return dec_num(neg: true, coeff: 1, exp: 0)
                 else => return dec_ziv(fn, x, y: x, f)
         fn <= 7 =>
-            // log, log1p, log2, log10
+            # log, log1p, log2, log10
             if fn == DEC_LOG1P
                 below: Bool = x.neg & (dec_compare_abs(x, c: 1, q: 0) > 0)
                 at_one: Bool = x.neg & (dec_compare_abs(x, c: 1, q: 0) == 0)
@@ -1115,7 +1115,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                     ~x.neg & (dec_compare_abs(x, c: 1, q: 0) == 0) => return dec_num(neg: false, coeff: 0, exp: 0)
                     else => return dec_ziv(fn, x, y: x, f)
         fn <= 10 =>
-            // asin, acos, atan
+            # asin, acos, atan
             outside: Bool = inf or dec_compare_abs(x, c: 1, q: 0) > 0
             unit: Bool = ~x.neg & (dec_compare_abs(x, c: 1, q: 0) == 0)
             acos: Bool = fn == DEC_ACOS
@@ -1128,7 +1128,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                 zero => return x.as_result()
                 else => return dec_ziv(fn, x, y: x, f)
         fn <= 16 =>
-            // sinh, cosh, tanh, asinh, acosh, atanh
+            # sinh, cosh, tanh, asinh, acosh, atanh
             when fn
                 11 =>
                     when
@@ -1165,7 +1165,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                         zero => return x.as_result()
                         else => return dec_ziv(fn, x, y: x, f)
         fn <= 18 =>
-            // erf, erfc
+            # erf, erfc
             beyond: Bool = inf or dec_compare_abs(x, c: 20, q: 0) > 0
             tail: Bool = inf or dec_compare_abs(x, c: 130, q: 0) > 0
             if fn == DEC_ERF
@@ -1180,7 +1180,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                     ~x.neg & tail => return dec_num(neg: false, coeff: 0, exp: f.qmin)
                     else => return dec_ziv(fn, x, y: x, f)
         fn <= 20 =>
-            // tgamma, lgamma
+            # tgamma, lgamma
             tg: Bool = fn == DEC_TGAMMA
             pole: Bool = x.neg & dec_is_integer(x)
             when
@@ -1202,7 +1202,7 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
                     else
                         return dec_ziv(fn, x, y: x, f)
         fn <= 23 =>
-            // sin, cos, tan
+            # sin, cos, tan
             when
                 inf => return dec_nan()
                 zero and fn == DEC_COS => return one
@@ -1214,31 +1214,31 @@ routine dec_unary(fn: U32, x: Dec, f: DecFormat) -> Dec
             else
                 return dec_ziv(fn, x, y: x, f)
 
-/// Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
-/// :param fn: The function: DEC_EXP, DEC_EXPM1, DEC_EXP2, or DEC_EXP10.
-/// :returns: Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
+### Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
+### :param fn: The function: DEC_EXP, DEC_EXPM1, DEC_EXP2, or DEC_EXP10.
+### :returns: Past this size exp (0), expm1 (1), exp2 (2), or exp10 (3) is settled by its sign alone.
 routine dec_exponential_limit(fn: U32) -> U128
     when fn
         2 => return 22000
         3 => return 6300
         else => return 15000
 
-/// The zero Γ(x) underflows to for x below -3300 (at the format's smallest exponent), signed as sin(pi x): (-1)^k
-/// times the sign of x - k, k the integer nearest x.
-/// :param x: The operand.
-/// :param f: The format.
-/// :returns: The signed zero.
+### The zero Γ(x) underflows to for x below -3300 (at the format's smallest exponent), signed as sin(pi x): (-1)^k
+### times the sign of x - k, k the integer nearest x.
+### :param x: The operand.
+### :param f: The format.
+### :returns: The signed zero.
 routine dec_gamma_underflow(x: Dec, f: DecFormat) -> Dec
     k: Dec = dec_round_int(x, mode: 3, f: dec_format128())
     rd: Dec = dec_add(a: x, b: k.negate(), f: dec_format128())
     odd: Bool = dec_is_odd_integer(k)
     return dec_num(neg: rd.neg != odd, coeff: 0, exp: f.qmin)
 
-/// x^y correctly rounded to f, with C99's special cases.
-/// :param x: The base.
-/// :param y: The exponent.
-/// :param f: The format the result rounds to.
-/// :returns: x^y correctly rounded to f, with C99's special cases.
+### x^y correctly rounded to f, with C99's special cases.
+### :param x: The base.
+### :param y: The exponent.
+### :param f: The format the result rounds to.
+### :returns: x^y correctly rounded to f, with C99's special cases.
 routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
     local xnan: Bool = x.is_nan()
     local ynan: Bool = y.is_nan()
@@ -1282,7 +1282,7 @@ routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
                 y.neg => return dec_num(neg: false, coeff: 0, exp: 0)
                 else => return dec_inf(false)
         else =>
-            // e^z with z = y ln|x|: far past the range the result is an infinity or a zero
+            # e^z with z = y ln|x|: far past the range the result is an infinity or a zero
             z: B64 = dec_pow_size(x, y)
             rneg: Bool = x.neg & yodd
             when
@@ -1290,14 +1290,14 @@ routine dec_pow(x: Dec, y: Dec, f: DecFormat) -> Dec
                 z < -16000.0 => return dec_num(neg: rneg, coeff: 0, exp: f.qmin)
                 else => return dec_ziv(fn: DEC_POW, x, y, f)
 
-/// y ln|x| in B64, for dec_pow's test against ±16000 (e^15000 is past every format's range both ways, so an error
-/// of far less than 1000 there is harmless): ln|x| within 1/2 of 1 is ln_1p of x - 1, exact in decimal (a relative
-/// error near 2^-52 however close x is to 1), elsewhere ln of the coefficient plus the exponent times ln 10 (|ln|x||
-/// at least 0.4, the error near 2^-40 at worst); y is its coefficient times a power of ten, infinite past B64's range,
-/// where the product is then an infinity of the right sign.
-/// :param x: The base (finite, nonzero, not ±1).
-/// :param y: The exponent (finite, nonzero).
-/// :returns: y ln|x| in B64.
+### y ln|x| in B64, for dec_pow's test against ±16000 (e^15000 is past every format's range both ways, so an error
+### of far less than 1000 there is harmless): ln|x| within 1/2 of 1 is ln_1p of x - 1, exact in decimal (a relative
+### error near 2^-52 however close x is to 1), elsewhere ln of the coefficient plus the exponent times ln 10 (|ln|x||
+### at least 0.4, the error near 2^-40 at worst); y is its coefficient times a power of ten, infinite past B64's range,
+### where the product is then an infinity of the right sign.
+### :param x: The base (finite, nonzero, not ±1).
+### :param y: The exponent (finite, nonzero).
+### :returns: y ln|x| in B64.
 routine dec_pow_size(x: Dec, y: Dec) -> B64
     local ax: Dec = dec_num(neg: false, coeff: x.coeff, exp: x.exp)
 
@@ -1319,11 +1319,11 @@ routine dec_pow_size(x: Dec, y: Dec) -> B64
         else => yf
     return sy * l
 
-/// atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
-/// :param y: The ordinate.
-/// :param x: The abscissa.
-/// :param f: The format the result rounds to.
-/// :returns: atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
+### atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
+### :param y: The ordinate.
+### :param x: The abscissa.
+### :param f: The format the result rounds to.
+### :returns: atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
 routine dec_atan2(y: Dec, x: Dec, f: DecFormat) -> Dec
     when
         y.is_nan() or x.is_nan() => return dec_nan()
@@ -1345,12 +1345,12 @@ routine dec_atan2(y: Dec, x: Dec, f: DecFormat) -> Dec
                 return dec_num(neg: y.neg, coeff: 0, exp: 0)
         else => return dec_ziv(fn: DEC_ATAN2, x: y, y: x, f)
 
-/// pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f: the arctangent of an infinity, of 1, of -1,
-/// turned.
-/// :param neg: Whether the result is negative.
-/// :param which: 1 for pi, 2 for pi/4, 3 for 3 pi/4.
-/// :param f: The format the result rounds to.
-/// :returns: pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f.
+### pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f: the arctangent of an infinity, of 1, of -1,
+### turned.
+### :param neg: Whether the result is negative.
+### :param which: 1 for pi, 2 for pi/4, 3 for 3 pi/4.
+### :param f: The format the result rounds to.
+### :returns: pi (which 1), pi/4 (2), or 3 pi/4 (3), with a sign, rounded to f.
 routine dec_signed_pi(neg: Bool, which: U64, f: DecFormat) -> Dec
     unit: Dec = dec_num(neg, coeff: 1, exp: 0)
     when which
@@ -1358,40 +1358,40 @@ routine dec_signed_pi(neg: Bool, which: U64, f: DecFormat) -> Dec
         2 => return dec_ziv(fn: DEC_ATAN, x: unit, y: unit, f)
         else => return dec_ziv(fn: DEC_ATAN2, x: unit, y: dec_num(neg: true, coeff: 1, exp: 0), f)
 
-/// The value as a function result: a zero reduced to exponent 0 (its sign kept), anything else as it is.
-/// :returns: The value as a function result.
+### The value as a function result: a zero reduced to exponent 0 (its sign kept), anything else as it is.
+### :returns: The value as a function result.
 routine Dec.as_result(me: Me) -> Me
     if me.is_zero()
         return dec_num(neg: me.neg, coeff: 0, exp: 0)
     else
         return me
 
-/// How far z must move up to reach the Stirling floor, as a whole number of steps.
-/// :param floor: The Stirling floor.
-/// :param zf: z as a B64.
-/// :returns: The steps.
+### How far z must move up to reach the Stirling floor, as a whole number of steps.
+### :param floor: The Stirling floor.
+### :param zf: z as a B64.
+### :returns: The steps.
 routine dec_gamma_shift(floor: B64, zf: B64) -> U64
     gap: B64 = floor - zf.min(floor)
     return gap.floor().to[U64]() + 1
 
-/// What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).
-/// :param tie_rule: 1 half to even, 2 up, 3 down.
-/// :param int: N.
-/// :returns: 1 to round up, 0 to round down.
+### What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).
+### :param tie_rule: 1 half to even, 2 up, 3 down.
+### :param int: N.
+### :returns: 1 to round up, 0 to round down.
 routine dec_tie_step(tie_rule: U8, int: U128) -> U128
     when tie_rule
         2 => return 1
         3 => return 0
         else => return int & 1
 
-/// How fn settles a band that 1024 bits leave on a midpoint. A transcendental value of a decimal is never exactly a
-/// midpoint, but f(x) = x (1 + t) with t below 2^-1000 is that close to x, and x is a midpoint when its coefficient
-/// has one digit too many (a non-canonical encoding read at its face value): then the side is t's, whose sign each
-/// function knows (2 rounds the magnitude up, 3 down). Every other band on a midpoint is taken to be exactly on it
-/// (x^y and 2^x can be): 1, half to even.
-/// :param fn: Which function (a DEC_ code).
-/// :param x: The argument.
-/// :returns: The tie rule.
+### How fn settles a band that 1024 bits leave on a midpoint. A transcendental value of a decimal is never exactly a
+### midpoint, but f(x) = x (1 + t) with t below 2^-1000 is that close to x, and x is a midpoint when its coefficient
+### has one digit too many (a non-canonical encoding read at its face value): then the side is t's, whose sign each
+### function knows (2 rounds the magnitude up, 3 down). Every other band on a midpoint is taken to be exactly on it
+### (x^y and 2^x can be): 1, half to even.
+### :param fn: Which function (a DEC_ code).
+### :param x: The argument.
+### :returns: The tie rule.
 routine dec_tie_rule(fn: U32, x: Dec) -> U8
     local tiny: Bool = dec_digits(x.coeff) + x.exp < -150
 
@@ -1408,7 +1408,7 @@ routine dec_tie_rule(fn: U32, x: Dec) -> U8
             5 => jump sign_dependent(x.neg)
             else => return 1
 
-    // expm1 x = x + x^2/2 + ... lies above x, log1p x = x - x^2/2 + ... below it
+    # expm1 x = x + x^2/2 + ... lies above x, log1p x = x - x^2/2 + ... below it
     block sign_dependent(up: Bool)
         if up
             return 2

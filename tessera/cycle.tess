@@ -1,44 +1,44 @@
-// The cycle collector for Roamed entities, shared by the RazorForge and Suflae standard libraries: a Bacon-Rajan
-// synchronous recycler (trial deletion). Reference counting alone leaks a cycle, since the cycle keeps its own counts
-// above zero. Every strong release that leaves a count above zero reports the entity here as a possible cycle root
-// (roam.tess), and a collection pass finds which of those are reachable only from each other and frees them.
-//
-// A pass stops the world: mutators change counts under the world lock held shared, a pass holds it exclusive. The
-// thread running a pass releases objects itself (a freed entity drops its other handles), and those releases must not
-// take the lock it already holds, so the collector thread is marked.
+# The cycle collector for Roamed entities, shared by the RazorForge and Suflae standard libraries: a Bacon-Rajan
+# synchronous recycler (trial deletion). Reference counting alone leaks a cycle, since the cycle keeps its own counts
+# above zero. Every strong release that leaves a count above zero reports the entity here as a possible cycle root
+# (roam.tess), and a collection pass finds which of those are reachable only from each other and frees them.
+#
+# A pass stops the world: mutators change counts under the world lock held shared, a pass holds it exclusive. The
+# thread running a pass releases objects itself (a freed entity drops its other handles), and those releases must not
+# take the lock it already holds, so the collector thread is marked.
 
 import Standard/Alloc
 import Standard/Collections
 import Standard/Os
 
-/// Possible cycle roots, reported by strong releases.
+### Possible cycle roots, reported by strong releases.
 global ROOTS: @HeaderBuffer
-/// The children of the entity being traced, filled by its type's trace routine.
+### The children of the entity being traced, filled by its type's trace routine.
 global SCRATCH: @HeaderBuffer
 
-/// The garbage a pass found, freed once the walk is over (freeing during it would leave dangling addresses).
+### The garbage a pass found, freed once the walk is over (freeing during it would leave dangling addresses).
 global REAP: @HeaderBuffer
 
-/// Guards ROOTS, which two mutators holding the world lock shared can append to at once.
+### Guards ROOTS, which two mutators holding the world lock shared can append to at once.
 global ROOTS_LOCK: @ExclusiveLock
 
-/// The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
-/// cache. Which mutators are inside is kept per thread, in SLOTS.
+### The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
+### cache. Which mutators are inside is kept per thread, in SLOTS.
 global WORLD: @U32
 
-/// Every thread's slot, a list that only grows (a thread's slot stays after the thread ends). A pass waits on each.
+### Every thread's slot, a list that only grows (a thread's slot stays after the thread ends). A pass waits on each.
 global SLOTS: @Addr
 
-/// This thread's slot, null until its first share or release.
+### This thread's slot, null until its first share or release.
 @threadlocal
 global MY_SLOT: @Addr
-/// Whether this thread is running a pass (and so already holds the world lock exclusive).
+### Whether this thread is running a pass (and so already holds the world lock exclusive).
 @threadlocal
 global IN_COLLECTOR: @Bool
 
 preset WRITER: U32 = 0x80000000
 
-/// Set in a thread's slot by a pass waiting for that thread to leave, so only then does leaving make the wake call.
+### Set in a thread's slot by a pass waiting for that thread to leave, so only then does leaving make the wake call.
 preset WAITING: U32 = 0x40000000
 
 preset LIVE: S32 = 0
@@ -46,47 +46,47 @@ preset SCANNING: S32 = 1
 preset GARBAGE: S32 = 2
 preset SUSPECTED: S32 = 3
 
-/// One thread's part of the world lock: how deep the thread is inside (a share or release can run another one inside
-/// it, through a destroy routine), with the WAITING bit while a pass waits for it. Only its own thread changes the
-/// depth, so the cache line is not shared with other mutators.
+### One thread's part of the world lock: how deep the thread is inside (a share or release can run another one inside
+### it, through a destroy routine), with the WAITING bit while a pass waits for it. Only its own thread changes the
+### depth, so the cache line is not shared with other mutators.
 record WorldSlot
     inside: U32
     next: Addr
 
-/// A growable list of header addresses: the possible roots, one trace's children, or the garbage to free.
+### A growable list of header addresses: the possible roots, one trace's children, or the garbage to free.
 record HeaderBuffer
     items: @Addr
     count: U64
     capacity: U64
 
-/// Makes a `WorldSlot` from its fields.
-/// :param inside: Its `inside`.
-/// :param next: Its `next`.
-/// :returns: The new value.
+### Makes a `WorldSlot` from its fields.
+### :param inside: Its `inside`.
+### :param next: Its `next`.
+### :returns: The new value.
 routine WorldSlot.construct(inside: U32, next: Addr) -> Me
     return Me(inside, next)
 
-/// Releases nothing: a `WorldSlot` holds no memory of its own.
+### Releases nothing: a `WorldSlot` holds no memory of its own.
 routine WorldSlot.destruct(me: @Me) -> None
     return
 
-/// Makes a `HeaderBuffer` from its fields.
-/// :param items: Its `items`.
-/// :param count: Its `count`.
-/// :param capacity: Its `capacity`.
-/// :returns: The new value.
+### Makes a `HeaderBuffer` from its fields.
+### :param items: Its `items`.
+### :param count: Its `count`.
+### :param capacity: Its `capacity`.
+### :returns: The new value.
 routine HeaderBuffer.construct(items: @Addr, count: U64, capacity: U64) -> Me
     return Me(items, count, capacity)
 
-/// Releases nothing: a `HeaderBuffer` holds no memory of its own.
+### Releases nothing: a `HeaderBuffer` holds no memory of its own.
 routine HeaderBuffer.destruct(me: @Me) -> None
     return
 
-// ── The world lock ─────────────────────────────────────────────────────────
+# ── The world lock ─────────────────────────────────────────────────────────
 
-/// This thread's slot, made and added to SLOTS the first time.
-/// :returns: The slot.
-/// :throws: Crashes with `MemoryAllocationError` when the slot can't be allocated.
+### This thread's slot, made and added to SLOTS the first time.
+### :returns: The slot.
+### :throws: Crashes with `MemoryAllocationError` when the slot can't be allocated.
 routine my_slot() -> @WorldSlot
     mine: Addr = MY_SLOT.peek()
     if mine.to[@Byte]().is_null()
@@ -105,9 +105,9 @@ routine my_slot() -> @WorldSlot
     else
         return mine.to[@WorldSlot]()
 
-/// Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
-/// its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
-/// reads WRITER, so one of them always sees the other (both are sequentially consistent).
+### Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
+### its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
+### reads WRITER, so one of them always sees the other (both are sequentially consistent).
 routine world_enter() -> None
     if IN_COLLECTOR.peek()
         return
@@ -119,23 +119,23 @@ routine world_enter() -> None
         if state & WRITER == 0
             return
         else
-            // A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
+            # A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
             step_out(slot)
             wait_on(at: WORLD, expected: state)
             continue
     then
         return
 
-/// Leaves the world as a mutator: one step shallower in this thread's slot.
+### Leaves the world as a mutator: one step shallower in this thread's slot.
 routine world_leave() -> None
     if IN_COLLECTOR.peek()
         return
     step_out(MY_SLOT.peek().to[@WorldSlot]())
     return
 
-/// One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
-/// wakes nobody, so sharing and releasing an entity make no system call.
-/// :param slot: This thread's slot.
+### One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
+### wakes nobody, so sharing and releasing an entity make no system call.
+### :param slot: This thread's slot.
 routine step_out(slot: @WorldSlot) -> None
     previous: U32 = slot.inside.atomic_fetch_sub(1)
     if previous == WAITING.bitor(1)
@@ -145,8 +145,8 @@ routine step_out(slot: @WorldSlot) -> None
     else
         return
 
-/// Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
-/// thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
+### Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
+### thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
 routine world_stop() -> None
     while true
         state: U32 = WORLD.peek_atomic()
@@ -156,7 +156,7 @@ routine world_stop() -> None
                 is None => break
                 is U32 => continue
         else
-            // Another pass runs. Its restart wakes everyone waiting on WORLD.
+            # Another pass runs. Its restart wakes everyone waiting on WORLD.
             wait_on(at: WORLD, expected: state)
             continue
     true.poke_into(IN_COLLECTOR)
@@ -181,19 +181,19 @@ routine world_stop() -> None
     then
         return
 
-/// Restarts the world after a pass and wakes every mutator and pass waiting for it.
+### Restarts the world after a pass and wakes every mutator and pass waiting for it.
 routine world_restart() -> None
     false.poke_into(IN_COLLECTOR)
     WORLD.poke_atomic(0)
     wake_all(WORLD)
     return
 
-// ── Buffers ────────────────────────────────────────────────────────────────
+# ── Buffers ────────────────────────────────────────────────────────────────
 
-/// Appends `item` to `buffer`, growing it (to 16 items, then twice its capacity) from the C heap when it is full.
-/// :param buffer: The buffer to append to.
-/// :param item: The header address to append.
-/// :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
+### Appends `item` to `buffer`, growing it (to 16 items, then twice its capacity) from the C heap when it is full.
+### :param buffer: The buffer to append to.
+### :param item: The header address to append.
+### :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
 routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> None
     local count: U64 = buffer.count.peek()
     local capacity: U64 = buffer.capacity.peek()
@@ -213,25 +213,25 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> None
     (count + 1).poke_into(buffer.count)
     return
 
-/// Empties `buffer`, keeping its memory for the next items.
-/// :param buffer: The buffer to empty.
+### Empties `buffer`, keeping its memory for the next items.
+### :param buffer: The buffer to empty.
 routine buffer_clear(buffer: @HeaderBuffer) -> None
     0.poke_into(buffer.count)
     return
 
-/// The header at index `i` of `buffer`, unchecked.
-/// :param buffer: The buffer to read.
-/// :param i: The index, below the buffer's count.
-/// :returns: The header stored there.
+### The header at index `i` of `buffer`, unchecked.
+### :param buffer: The buffer to read.
+### :param i: The index, below the buffer's count.
+### :returns: The header stored there.
 routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
     slot: @Addr = buffer.items.peek().stride(i.to[USize]())
     item: Addr = slot.peek()
     return item.to[@RoamHeader]()
 
-/// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
-/// only from its own thread, with no mutator running).
-/// :param header: The entity's header.
-/// :throws: Crashes with `MemoryAllocationError` when growing the roots buffer fails.
+### Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
+### only from its own thread, with no mutator running).
+### :param header: The entity's header.
+### :throws: Crashes with `MemoryAllocationError` when growing the roots buffer fails.
 routine add_candidate(header: @RoamHeader) -> None
     if IN_COLLECTOR.peek()
         buffer_push(buffer: ROOTS, item: header)
@@ -242,9 +242,9 @@ routine add_candidate(header: @RoamHeader) -> None
         ROOTS_LOCK.unlock()
         return
 
-/// Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
-/// the last root into its place (the order of roots doesn't matter).
-/// :param header: The header about to be freed.
+### Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
+### the last root into its place (the order of roots doesn't matter).
+### :param header: The header about to be freed.
 routine remove_candidate(header: @RoamHeader) -> None
     unlock: Bool = when
         IN_COLLECTOR.peek() => false
@@ -258,9 +258,9 @@ routine remove_candidate(header: @RoamHeader) -> None
     else
         return
 
-/// Removes `header` from `buffer` if it is there, moving the last item into its place.
-/// :param buffer: The buffer to remove from.
-/// :param header: The header to remove.
+### Removes `header` from `buffer` if it is there, moving the last item into its place.
+### :param buffer: The buffer to remove from.
+### :param header: The header to remove.
 routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> None
     n: U64 = buffer.count.peek()
 
@@ -278,19 +278,19 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> None
     then
         return
 
-/// Called by a type's trace routine for each of the entity's Roamed fields: records that field's header as a child.
-/// :param child: The field's header.
-/// :throws: Crashes with `MemoryAllocationError` when growing the children buffer fails.
+### Called by a type's trace routine for each of the entity's Roamed fields: records that field's header as a child.
+### :param child: The field's header.
+### :throws: Crashes with `MemoryAllocationError` when growing the children buffer fails.
 @export("ingrid_cyclic_visit_child")
 routine visit_child(child: Addr) -> None
     buffer_push(buffer: SCRATCH, item: child)
     return
 
-/// Puts the children of `node` (the headers its Roamed fields hold) into `kids`, replacing what was there. A type
-/// with no trace routine has no Roamed fields and so no children.
-/// :param node: The entity whose children to list.
-/// :param kids: The list that receives the children's headers.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Puts the children of `node` (the headers its Roamed fields hold) into `kids`, replacing what was there. A type
+### with no trace routine has no Roamed fields and so no children.
+### :param node: The entity whose children to list.
+### :param kids: The list that receives the children's headers.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 @reshaping(kids)
 routine children(node: @RoamHeader, kids: @List[Addr]) -> None
     kids.clear()
@@ -307,13 +307,13 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> None
     then
         return
 
-// ── The three passes ───────────────────────────────────────────────────────
+# ── The three passes ───────────────────────────────────────────────────────
 
-/// Paints `root` and everything it reaches SCANNING, subtracting each internal edge from its target's count. What
-/// is left of a count afterwards is the references from outside the scanned graph.
-/// :param root: The possible cycle root to start from.
-/// :param alloc: The allocator for the walk's work lists.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Paints `root` and everything it reaches SCANNING, subtracting each internal edge from its target's count. What
+### is left of a count afterwards is the references from outside the scanned graph.
+### :param root: The possible cycle root to start from.
+### :param alloc: The allocator for the walk's work lists.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
@@ -347,11 +347,11 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
             drop kids
             return
 
-/// Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
-/// is garbage for now, and its children are decided the same way.
-/// :param root: The root whose graph to decide.
-/// :param alloc: The allocator for the walk's work lists.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
+### is garbage for now, and its children are decided the same way.
+### :param root: The root whose graph to decide.
+### :param alloc: The allocator for the walk's work lists.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
@@ -379,10 +379,10 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
     drop kids
     return
 
-/// Undoes the scan below a node that turned out live: paints its graph LIVE again and gives back each edge's count.
-/// :param root: The node found live.
-/// :param alloc: The allocator for the walk's work lists.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Undoes the scan below a node that turned out live: paints its graph LIVE again and gives back each edge's count.
+### :param root: The node found live.
+### :param alloc: The allocator for the walk's work lists.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
@@ -410,11 +410,11 @@ routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> None
     drop kids
     return
 
-/// Gathers the garbage reachable from `root` into REAP, painting it LIVE so no node is gathered twice. A node still
-/// in the roots buffer is left for a later pass.
-/// :param root: The root whose garbage to gather.
-/// :param alloc: The allocator for the walk's work lists.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Gathers the garbage reachable from `root` into REAP, painting it LIVE so no node is gathered twice. A node still
+### in the roots buffer is left for a later pass.
+### :param root: The root whose garbage to gather.
+### :param alloc: The allocator for the walk's work lists.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
@@ -441,9 +441,9 @@ routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
     drop kids
     return
 
-/// Runs one pass over the possible roots and frees the cyclic garbage it finds, with the world stopped.
-/// :returns: How many entities it freed.
-/// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
+### Runs one pass over the possible roots and frees the cyclic garbage it finds, with the world stopped.
+### :returns: How many entities it freed.
+### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 @export("ingrid_cyclic_collect")
 routine collect() -> U64
     local alloc: @MemoryManager <- .hollow()
@@ -453,7 +453,7 @@ routine collect() -> U64
     alloc.poke(make_c_heap_memory())
     roots.poke(.construct(alloc))
 
-    // MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.
+    # MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.
     n: U64 = ROOTS.count.peek()
     each i in 0 til n
         node: @RoamHeader = buffer_at(buffer: ROOTS, i)
@@ -463,7 +463,7 @@ routine collect() -> U64
         else
             false.poke_into(node.buffered)
     then
-        // Exactly the n roots this pass took leave the buffer: a root reported while freeing must stay for a later pass.
+        # Exactly the n roots this pass took leave the buffer: a root reported while freeing must stay for a later pass.
         remove_front(buffer: ROOTS, n)
 
         n2: USize = roots.count()
@@ -480,7 +480,7 @@ routine collect() -> U64
             root: @RoamHeader = root_address.to[@RoamHeader]()
             false.poke_into(root.buffered)
             collect_garbage(root, alloc)
-        // Frees the garbage: each entity's type tears it down, then its header goes unless a weak observer remains.
+        # Frees the garbage: each entity's type tears it down, then its header goes unless a weak observer remains.
         m: U64 = REAP.count.peek()
         each j in 0 til m
             node: @RoamHeader = buffer_at(buffer: REAP, i: j)
@@ -492,9 +492,9 @@ routine collect() -> U64
             world_restart()
             return m
 
-/// Removes the first n items of `buffer`, keeping any added after them.
-/// :param buffer: The buffer to shorten.
-/// :param n: How many items to remove from the front (all of them when `n` is at least the count).
+### Removes the first n items of `buffer`, keeping any added after them.
+### :param buffer: The buffer to shorten.
+### :param n: How many items to remove from the front (all of them when `n` is at least the count).
 routine remove_front(buffer: @HeaderBuffer, n: U64) -> None
     count: U64 = buffer.count.peek()
     if n >= count

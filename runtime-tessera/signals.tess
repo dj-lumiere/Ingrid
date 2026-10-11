@@ -1,14 +1,14 @@
-// The current process's signals for the stdlib's Signals module: when_interrupted (Ctrl-C, SIGINT) and
-// when_terminated (SIGTERM, the console closing). Not a child's signal (rf_proc_term_signal) and not SignalCaster.
-//
-// Registering a handler takes over the signal: the process no longer ends on it by itself, the RazorForge handlers
-// decide. They run outside signal context: on POSIX the signal handler only writes one byte to a pipe (the
-// self-pipe trick, async-signal-safe) and a thread of its own reads it and runs the handlers. On Windows the
-// console already calls its handler on a thread of its own.
-//
-// A handler is a RazorForge Routine value's closure box: its first word is the function, called with the box (and
-// for a context handler the context, the raw pointer of a Roamed or Guarded handle). Registration lasts the
-// process's life, so the boxes are never freed.
+# The current process's signals for the stdlib's Signals module: when_interrupted (Ctrl-C, SIGINT) and
+# when_terminated (SIGTERM, the console closing). Not a child's signal (rf_proc_term_signal) and not SignalCaster.
+#
+# Registering a handler takes over the signal: the process no longer ends on it by itself, the RazorForge handlers
+# decide. They run outside signal context: on POSIX the signal handler only writes one byte to a pipe (the
+# self-pipe trick, async-signal-safe) and a thread of its own reads it and runs the handlers. On Windows the
+# console already calls its handler on a thread of its own.
+#
+# A handler is a RazorForge Routine value's closure box: its first word is the function, called with the box (and
+# for a context handler the context, the raw pointer of a Roamed or Guarded handle). Registration lasts the
+# process's life, so the boxes are never freed.
 
 module Ingrid/Runtime
 
@@ -16,7 +16,7 @@ import Standard/Os
 
 global INTERRUPT_HANDLERS: @HandlerList
 global TERMINATE_HANDLERS: @HandlerList
-/// Guards the lists and the one-time setup.
+### Guards the lists and the one-time setup.
 global SIGNALS_LOCK: @ExclusiveLock
 global SIGNALS_INSTALLED: @Bool
 
@@ -33,33 +33,33 @@ record HandlerList
     count: USize
     cap: USize
 
-/// Makes a `HandlerEntry` from its fields.
-/// :param box: Its `box`.
-/// :param ctx: Its `ctx`.
-/// :param has_ctx: Its `has_ctx`.
-/// :returns: The new value.
+### Makes a `HandlerEntry` from its fields.
+### :param box: Its `box`.
+### :param ctx: Its `ctx`.
+### :param has_ctx: Its `has_ctx`.
+### :returns: The new value.
 routine HandlerEntry.construct(box: Addr, ctx: Addr, has_ctx: Bool) -> Me
     return Me(box, ctx, has_ctx)
 
-/// Releases nothing: a `HandlerEntry` holds no memory of its own.
+### Releases nothing: a `HandlerEntry` holds no memory of its own.
 routine HandlerEntry.destruct(me: @Me) -> None
     return
 
-/// Makes a `HandlerList` from its fields.
-/// :param items: Its `items`.
-/// :param count: Its `count`.
-/// :param cap: Its `cap`.
-/// :returns: The new value.
+### Makes a `HandlerList` from its fields.
+### :param items: Its `items`.
+### :param count: Its `count`.
+### :param cap: Its `cap`.
+### :returns: The new value.
 routine HandlerList.construct(items: @HandlerEntry, count: USize, cap: USize) -> Me
     return Me(items, count, cap)
 
-/// Releases nothing: a `HandlerList` holds no memory of its own.
+### Releases nothing: a `HandlerList` holds no memory of its own.
 routine HandlerList.destruct(me: @Me) -> None
     return
 
-/// Calls one handler: the box's first word is the function, which takes the box (and the context). A null box does
-/// nothing.
-/// :param e: The handler.
+### Calls one handler: the box's first word is the function, which takes the box (and the context). A null box does
+### nothing.
+### :param e: The handler.
 routine invoke(e: HandlerEntry) -> None
     if e.box.is_null()
         return
@@ -75,9 +75,9 @@ routine invoke(e: HandlerEntry) -> None
         call.call(e.box)
         return
 
-/// Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
-/// can't be allocated, no handler runs.
-/// :param list: The handlers to run.
+### Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
+### can't be allocated, no handler runs.
+### :param list: The handlers to run.
 routine dispatch(list: @HandlerList) -> None
     SIGNALS_LOCK.lock()
     n: USize = list.count.peek()
@@ -98,8 +98,8 @@ routine dispatch(list: @HandlerList) -> None
     SIGNALS_LOCK.unlock()
     return
 
-/// Runs the handlers of one signal.
-/// :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
+### Runs the handlers of one signal.
+### :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
 routine dispatch_which(which: S32) -> None
     list: @HandlerList = when
         which == SIG_TERMINATE => TERMINATE_HANDLERS
@@ -107,9 +107,9 @@ routine dispatch_which(which: S32) -> None
     dispatch(list)
     return
 
-/// Appends a handler, doubling the storage (from 4) when it is full. When the storage can't grow, the handler is
-/// dropped.
-/// :param entry: The handler to add.
+### Appends a handler, doubling the storage (from 4) when it is full. When the storage can't grow, the handler is
+### dropped.
+### :param entry: The handler to add.
 routine HandlerList.append(me: @Me, entry: HandlerEntry) -> None
     local n: USize = me.count.peek()
 
@@ -119,7 +119,7 @@ routine HandlerList.append(me: @Me, entry: HandlerEntry) -> None
             cap == 0 => 4
             else => cap * 2
         grown: Addr = c_realloc(me.items.peek(), ncap * sizeof[HandlerEntry]())
-        // out of memory: the registration is dropped, as registration is best-effort
+        # out of memory: the registration is dropped, as registration is best-effort
         if grown.is_null()
             return
         me.items.poke(grown.to[@HandlerEntry]())
@@ -129,10 +129,10 @@ routine HandlerList.append(me: @Me, entry: HandlerEntry) -> None
     me.count.poke(n + 1)
     return
 
-/// Adds a handler to one signal's list under the lock, and installs the signal dispatch on the first registration.
-/// :param which: `SIG_TERMINATE` for the terminate list, anything else for the interrupt list.
-/// :param entry: The handler to add.
-/// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
+### Adds a handler to one signal's list under the lock, and installs the signal dispatch on the first registration.
+### :param which: `SIG_TERMINATE` for the terminate list, anything else for the interrupt list.
+### :param entry: The handler to add.
+### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 routine register_entry(which: S32, entry: HandlerEntry) -> None
     SIGNALS_LOCK.lock()
     list: @HandlerList = when
@@ -144,31 +144,31 @@ routine register_entry(which: S32, entry: HandlerEntry) -> None
     SIGNALS_LOCK.unlock()
     return
 
-/// A Routine[(), None] handler for which: 0 interrupt (SIGINT, Ctrl-C), 1 terminate (SIGTERM, the console closing).
-/// :param which: The signal: 1 for terminate, anything else for interrupt.
-/// :param handler_box: The Routine value's closure box.
-/// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
+### A Routine[(), None] handler for which: 0 interrupt (SIGINT, Ctrl-C), 1 terminate (SIGTERM, the console closing).
+### :param which: The signal: 1 for terminate, anything else for interrupt.
+### :param handler_box: The Routine value's closure box.
+### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 @export("rf_signal_register")
 routine rf_signal_register(which: S32, handler_box: Addr) -> None
     register_entry(which, entry: HandlerEntry(box: handler_box, ctx: null, has_ctx: false))
     return
 
-/// A Routine[(Ctx,), None] handler, called with context each time the signal comes.
-/// :param which: The signal: 1 for terminate, anything else for interrupt.
-/// :param handler_box: The Routine value's closure box.
-/// :param context: The raw pointer passed to the handler.
-/// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
+### A Routine[(Ctx,), None] handler, called with context each time the signal comes.
+### :param which: The signal: 1 for terminate, anything else for interrupt.
+### :param handler_box: The Routine value's closure box.
+### :param context: The raw pointer passed to the handler.
+### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 @export("rf_signal_register_ctx")
 routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> None
     register_entry(which, entry: HandlerEntry(box: handler_box, ctx: context, has_ctx: true))
     return
 
-// -- Windows: the console's control handler ------------------------------------------
+# -- Windows: the console's control handler ------------------------------------------
 
-/// Win32's `SetConsoleCtrlHandler`: adds or removes a console control handler.
-/// :param handler: The handler.
-/// :param add: Nonzero to add, 0 to remove.
-/// :returns: Nonzero on success.
+### Win32's `SetConsoleCtrlHandler`: adds or removes a console control handler.
+### :param handler: The handler.
+### :param add: Nonzero to add, 0 to remove.
+### :returns: Nonzero on success.
 @external("c")
 @symbol("SetConsoleCtrlHandler")
 @callconv("stdcall")
@@ -176,14 +176,14 @@ routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> 
 routine c_set_console_ctrl_handler(handler: Callable[@callconv("stdcall"), (U32,), CInt],
     add: CInt) -> CInt
 
-/// On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
-/// (the end of the process) from happening.
-/// :param ctrl_type: The console event: Ctrl-C and Ctrl-Break interrupt, close, logoff, and shutdown terminate.
-/// :returns: 1 when handlers ran, 0 for any other event (the default applies).
+### On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
+### (the end of the process) from happening.
+### :param ctrl_type: The console event: Ctrl-C and Ctrl-Break interrupt, close, logoff, and shutdown terminate.
+### :returns: 1 when handlers ran, 0 for any other event (the default applies).
 @target(os: "windows")
 @callconv("stdcall")
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
-    // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
+    # CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
     when
         ctrl_type <= 1 =>
             dispatch_which(SIG_INTERRUPT)
@@ -193,23 +193,23 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
             return 1
         else => return 0
 
-/// Installs the console control handler. Called with the lock held.
+### Installs the console control handler. Called with the lock held.
 @target(os: "windows")
 routine install_signal_dispatch() -> None
     c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
     SIGNALS_INSTALLED.poke(true)
     return
 
-// -- POSIX: the self-pipe ------------------------------------------------------------
+# -- POSIX: the self-pipe ------------------------------------------------------------
 
-/// [0] read by the dispatch thread, [1] written by the signal handler.
+### [0] read by the dispatch thread, [1] written by the signal handler.
 global SELF_PIPE: @Array[CInt, 2] <- [-1, -1]
 
 preset SIGINT:  CInt = 2
 preset SIGTERM: CInt = 15
 
-/// struct sigaction, for a plain handler with SA_RESTART. Linux: handler, mask (128 bytes), flags, restorer.
-/// macOS: handler, mask (4 bytes), flags.
+### struct sigaction, for a plain handler with SA_RESTART. Linux: handler, mask (128 bytes), flags, restorer.
+### macOS: handler, mask (4 bytes), flags.
 @target(os: "linux")
 record SigAction
     handler: Callable[(CInt,), None]
@@ -223,96 +223,96 @@ record SigAction
     mask: U32
     flags: CInt
 
-/// Makes a `SigAction` from its fields.
-/// :param handler: Its `handler`.
-/// :param mask: Its `mask`.
-/// :param flags: Its `flags`.
-/// :param restorer: Its `restorer`.
-/// :returns: The new value.
+### Makes a `SigAction` from its fields.
+### :param handler: Its `handler`.
+### :param mask: Its `mask`.
+### :param flags: Its `flags`.
+### :param restorer: Its `restorer`.
+### :returns: The new value.
 @target(os: "linux")
 routine SigAction.construct(handler: Callable[(CInt,), None], mask: Array[U64, 16], flags: CInt,
     restorer: Addr) -> Me
     return Me(handler, mask, flags, restorer)
 
-/// Releases nothing: a `SigAction` holds no memory of its own.
+### Releases nothing: a `SigAction` holds no memory of its own.
 @target(os: "linux")
 routine SigAction.destruct(me: @Me) -> None
     return
 
-/// Makes a `SigAction` from its fields.
-/// :param handler: Its `handler`.
-/// :param mask: Its `mask`.
-/// :param flags: Its `flags`.
-/// :returns: The new value.
+### Makes a `SigAction` from its fields.
+### :param handler: Its `handler`.
+### :param mask: Its `mask`.
+### :param flags: Its `flags`.
+### :returns: The new value.
 @target(os: "macos")
 routine SigAction.construct(handler: Callable[(CInt,), None], mask: U32, flags: CInt) -> Me
     return Me(handler, mask, flags)
 
-/// Releases nothing: a `SigAction` holds no memory of its own.
+### Releases nothing: a `SigAction` holds no memory of its own.
 @target(os: "macos")
 routine SigAction.destruct(me: @Me) -> None
     return
 
-/// POSIX `sigaction`: sets the action for a signal.
-/// :param signo: The signal.
-/// :param action: The new action.
-/// :param old: Where the previous action goes, or null.
-/// :returns: 0 on success, -1 on error.
+### POSIX `sigaction`: sets the action for a signal.
+### :param signo: The signal.
+### :param action: The new action.
+### :param old: Where the previous action goes, or null.
+### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("sigaction")
 @target(os: not "windows")
 routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
 
-/// POSIX `sigemptyset`: clears a signal set.
-/// :param set: The set to clear.
-/// :returns: 0 on success, -1 on error.
+### POSIX `sigemptyset`: clears a signal set.
+### :param set: The set to clear.
+### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("sigemptyset")
 @target(os: not "windows")
 routine c_sigemptyset(set: Addr) -> CInt
 
-/// Linux's `SA_RESTART` flag.
-/// :returns: `0x10000000`.
+### Linux's `SA_RESTART` flag.
+### :returns: `0x10000000`.
 @target(os: "linux")
 routine sa_restart() -> CInt
     return 0x10000000
 
-/// macOS's `SA_RESTART` flag.
-/// :returns: 2.
+### macOS's `SA_RESTART` flag.
+### :returns: 2.
 @target(os: "macos")
 routine sa_restart() -> CInt
     return 2
 
-/// POSIX `pipe`: makes a pipe, its read end in `fds[0]` and its write end in `fds[1]`.
-/// :param fds: Where the two descriptors go.
-/// :returns: 0 on success, -1 on error.
+### POSIX `pipe`: makes a pipe, its read end in `fds[0]` and its write end in `fds[1]`.
+### :param fds: Where the two descriptors go.
+### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("pipe")
 @target(os: not "windows")
 private routine c_pipe(fds: @CInt) -> CInt
 
-/// glibc's `__errno_location`: the calling thread's errno.
-/// :returns: The address of errno.
+### glibc's `__errno_location`: the calling thread's errno.
+### :returns: The address of errno.
 @external("c")
 @symbol("__errno_location")
 @target(os: "linux")
 private routine c_errno_place() -> @CInt
 
-/// macOS's `__error`: the calling thread's errno.
-/// :returns: The address of errno.
+### macOS's `__error`: the calling thread's errno.
+### :returns: The address of errno.
 @external("c")
 @symbol("__error")
 @target(os: "macos")
 private routine c_errno_place() -> @CInt
 
-/// The calling thread's errno.
-/// :returns: The current errno value.
+### The calling thread's errno.
+### :returns: The current errno value.
 @target(os: not "windows")
 private routine errno() -> CInt
     return c_errno_place().peek()
 
-/// Async-signal-safe: writes the which-code byte to the self-pipe, retrying on EINTR, and returns.
-/// :param signo: The signal that came: SIGTERM writes 1, anything else 0.
+### Async-signal-safe: writes the which-code byte to the self-pipe, retrying on EINTR, and returns.
+### :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 @target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> None
     local code: U8 = when
@@ -325,8 +325,8 @@ routine posix_signal_handler(signo: CInt) -> None
     then
         return
 
-/// Reads which-codes from the pipe and runs the handlers.
-/// :param pipe: The self-pipe (SELF_PIPE), read from its first end.
+### Reads which-codes from the pipe and runs the handlers.
+### :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 @target(os: not "windows")
 routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
     local code: @U8 <- 0
@@ -343,9 +343,9 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
         else
             return
 
-/// Makes the self-pipe, starts the dispatch thread, and sets the handler for SIGINT and SIGTERM. Called with the lock
-/// held. If the pipe can't be made, nothing is installed and a later registration tries again.
-/// :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
+### Makes the self-pipe, starts the dispatch thread, and sets the handler for SIGINT and SIGTERM. Called with the lock
+### held. If the pipe can't be made, nothing is installed and a later registration tries again.
+### :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 @target(os: not "windows")
 routine install_signal_dispatch() -> None
     fds: @CInt = SELF_PIPE.to[@CInt]()
