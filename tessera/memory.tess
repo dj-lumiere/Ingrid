@@ -61,14 +61,13 @@ private routine rf_throw(error_type: CStr, message: CStr) -> Void
 /// :throws: Always crashes with `OutOfMemoryError`.
 #noreturn
 private routine out_of_memory(what: Bytes, bytes: U64) -> Void
-    block entry()
-        claim buffer: @Array[Byte, 128] <- .hollow()
-        claim out: @SliceWriter <- SliceWriter.construct(data: buffer.to[@Byte](), capacity: 127)
-        out.write("Failed to {what} {bytes} bytes")
-        text: Bytes = out.to[Bytes]()
-        terminator: @Byte = buffer.to[@Byte]().stride(text.count)
-        terminator.poke(0x00)
-        rf_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStr]())
+    claim buffer: @Array[Byte, 128] <- .hollow()
+    claim out: @SliceWriter <- SliceWriter.construct(data: buffer.to[@Byte](), capacity: 127)
+    out.write("Failed to {what} {bytes} bytes")
+    text: Bytes = out.to[Bytes]()
+    terminator: @Byte = buffer.to[@Byte]().stride(text.count)
+    terminator.poke(0x00)
+    rf_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStr]())
 
 /// Allocates `bytes` zeroed bytes from the C heap.
 /// :param bytes: How many bytes.
@@ -78,11 +77,10 @@ private routine out_of_memory(what: Bytes, bytes: U64) -> Void
 #export("rf_allocate_dynamic")
 #expensive("allocates heap memory")
 routine rf_allocate_dynamic(bytes: U64) -> Addr
-    block entry()
-        p: Addr = c_calloc(bytes.to[USize](), 1)
-        branch p.is_null()
-            ? out_of_memory(what: "allocate", bytes)
-            : return(p)
+    p: Addr = c_calloc(bytes.to[USize](), 1)
+    branch p.is_null()
+        ? out_of_memory(what: "allocate", bytes)
+        : return(p)
 
 /// Allocates `bytes` bytes from the C heap, not zeroed: the caller writes them before reading.
 /// :param bytes: How many bytes.
@@ -92,20 +90,18 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
 #export("rf_allocate_dynamic_uninit")
 #expensive("allocates heap memory")
 routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
-    block entry()
-        p: Addr = c_malloc(bytes.to[USize]())
-        branch p.is_null()
-            ? out_of_memory(what: "allocate", bytes)
-            : return(p)
+    p: Addr = c_malloc(bytes.to[USize]())
+    branch p.is_null()
+        ? out_of_memory(what: "allocate", bytes)
+        : return(p)
 
 /// Frees a block. Null is fine.
 /// :param ptr: The block to free, or null.
 #export("rf_invalidate")
 #expensive("frees heap memory")
 routine rf_invalidate(ptr: Addr) -> Void
-    block entry()
-        c_free(ptr)
-        return()
+    c_free(ptr)
+    return()
 
 /// Resizes the block at `ptr` to `bytes` bytes, keeping its contents up to the smaller size. Reallocating to 0 bytes
 /// may give null: that is a free, not a failure.
@@ -117,11 +113,10 @@ routine rf_invalidate(ptr: Addr) -> Void
 #export("rf_reallocate_dynamic")
 #expensive("reallocates heap memory")
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
-    block entry()
-        p: Addr = c_realloc(ptr: ptr, size: bytes.to[USize]())
-        branch p.is_null().bitand(bytes.ne(0))
-            ? out_of_memory(what: "reallocate to", bytes)
-            : return(p)
+    p: Addr = c_realloc(ptr: ptr, size: bytes.to[USize]())
+    branch p.is_null().bitand(bytes.ne(0))
+        ? out_of_memory(what: "reallocate to", bytes)
+        : return(p)
 
 /// Copies `bytes` bytes from `src_address` to `dst_address`. The regions may overlap. A null address or no bytes
 /// does nothing.
@@ -130,13 +125,12 @@ routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
 /// :param bytes: How many bytes.
 #export("rf_copy_bytes_at")
 routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -> Void
-    block entry()
-        no_address: Bool = src_address.eq(0).bitor(dst_address.eq(0))
-        branch no_address.bitor(bytes.eq(0))
-            ? return()
-            : continue
-        c_memmove(inttoptr[USize, Addr](dst_address), inttoptr[USize, Addr](src_address), bytes)
-        return()
+    no_address: Bool = src_address.eq(0).bitor(dst_address.eq(0))
+    branch no_address.bitor(bytes.eq(0))
+        ? return()
+        : continue
+    c_memmove(inttoptr[USize, Addr](dst_address), inttoptr[USize, Addr](src_address), bytes)
+    return()
 
 /// Fills `bytes` bytes at `dest_address` with `value`. A null address or no bytes does nothing.
 /// :param dest_address: Where to fill.
@@ -145,12 +139,11 @@ routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -
 /// :throws: Crashes with `IntegerOverflowError` when `bytes` does not fit in USize (on a 32-bit target).
 #export("rf_set_bytes_at")
 routine rf_set_bytes_at(dest_address: USize, value: U8, bytes: U64) -> Void
-    block entry()
-        branch dest_address.eq(0).bitor(bytes.eq(0))
-            ? return()
-            : continue
-        c_memset(inttoptr[USize, Addr](dest_address), value.to[CInt](), bytes.to[USize]())
-        return()
+    branch dest_address.eq(0).bitor(bytes.eq(0))
+        ? return()
+        : continue
+    c_memset(inttoptr[USize, Addr](dest_address), value.to[CInt](), bytes.to[USize]())
+    return()
 
 // -- the scratch region --------------------------------------------------------------
 //
@@ -169,8 +162,7 @@ record RegionBlock
 /// :returns: The mark, the address of this thread's top block (0 when the region is empty).
 #export("rf_region_mark")
 routine rf_region_mark() -> U64
-    block entry()
-        return(ptrtoint[@RegionBlock, U64](REGION_TOP.peek()))
+    return(ptrtoint[@RegionBlock, U64](REGION_TOP.peek()))
 
 /// Allocates `bytes` zeroed bytes in this thread's region, freed by the release to a mark taken before.
 /// :param bytes: How many bytes.
@@ -179,15 +171,14 @@ routine rf_region_mark() -> U64
 ///     plus the block header does not fit in USize.
 #export("rf_region_alloc")
 routine rf_region_alloc(bytes: U64) -> Addr
-    block entry()
-        p: Addr = c_calloc(1, sizeof[RegionBlock]().add(bytes.to[USize]()))
-        branch p.is_null()
-            ? out_of_memory(what: "allocate scratch", bytes)
-            : continue
-        node: @RegionBlock = p.to[@RegionBlock]()
-        node.prev.poke(REGION_TOP.peek())
-        REGION_TOP.poke(node)
-        return(node.stride(1))
+    p: Addr = c_calloc(1, sizeof[RegionBlock]().add(bytes.to[USize]()))
+    branch p.is_null()
+        ? out_of_memory(what: "allocate scratch", bytes)
+        : continue
+    node: @RegionBlock = p.to[@RegionBlock]()
+    node.prev.poke(REGION_TOP.peek())
+    REGION_TOP.poke(node)
+    return(node.stride(1))
 
 /// Frees every block allocated since `mark`, in this thread's region.
 /// :param mark: A mark from rf_region_mark.
@@ -195,8 +186,7 @@ routine rf_region_alloc(bytes: U64) -> Addr
 routine rf_region_release(mark: U64) -> Void
     local stop: @RegionBlock = inttoptr[U64, @RegionBlock](mark)
 
-    block entry()
-        jump next()
+    jump next()
 
     block next()
         top: @RegionBlock = REGION_TOP.peek()

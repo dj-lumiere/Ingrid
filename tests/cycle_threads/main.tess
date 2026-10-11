@@ -24,77 +24,68 @@ record Node
 
 #export("rf_current_task_id")
 routine stub_current_task_id() -> U64
-    block entry()
-        return(1)
+    return(1)
 
 #export("rf_coro_yield")
 routine stub_coro_yield() -> Void
-    block entry()
-        return()
+    return()
 
 #[export("rf_crash_exit"), noreturn]
 routine stub_crash_exit() -> Void
-    block entry()
-        exit(82)
+    exit(82)
 
 /// The entity type's trace routine: hands the collector the header its Roamed field holds.
 /// :param entity: The node.
 routine trace_node(entity: Addr) -> Void
-    block entry()
-        node: @Node = entity.to[@Node]()
-        child: Addr = node.child.peek()
-        branch child.to[@Byte]().is_null()
-            ? return()
-            : continue
-        visit_child(child)
-        return()
+    node: @Node = entity.to[@Node]()
+    child: Addr = node.child.peek()
+    branch child.to[@Byte]().is_null()
+        ? return()
+        : continue
+    visit_child(child)
+    return()
 
 /// The entity type's collector free routine: counts the node and frees it.
 /// :param entity: The node.
 routine free_node(entity: Addr) -> Void
-    block entry()
-        before: U64 = FREED.atomic_fetch_add(1)
-        claim alloc: @MemoryManager <- make_c_heap_memory()
-        deallocate(data: entity.to[@Node](), alloc)
-        return()
+    before: U64 = FREED.atomic_fetch_add(1)
+    claim alloc: @MemoryManager <- make_c_heap_memory()
+    deallocate(data: entity.to[@Node](), alloc)
+    return()
 
 /// The entity type's destroy routine, for the last strong release: frees the node without counting it.
 /// :param entity: The node.
 routine drop_node(entity: Addr) -> Void
-    block entry()
-        claim alloc: @MemoryManager <- make_c_heap_memory()
-        deallocate(data: entity.to[@Node](), alloc)
-        return()
+    claim alloc: @MemoryManager <- make_c_heap_memory()
+    deallocate(data: entity.to[@Node](), alloc)
+    return()
 
 /// A new local entity with one strong handle.
 /// :returns: Its header.
 routine new_entity() -> @RoamHeader
-    block entry()
-        claim alloc: @MemoryManager <- make_c_heap_memory()
-        node: @Node = allocate[Node](count: 1, alloc)
-        header: @RoamHeader = allocate[RoamHeader](count: 1, alloc)
-        node.child.poke(null)
-        header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
-            holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
-            free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
-        return(header)
+    claim alloc: @MemoryManager <- make_c_heap_memory()
+    node: @Node = allocate[Node](count: 1, alloc)
+    header: @RoamHeader = allocate[RoamHeader](count: 1, alloc)
+    node.child.poke(null)
+    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+        holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
+        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
+    return(header)
 
 /// Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
 /// :param owner: The entity whose field is set.
 /// :param target: The entity it points at.
 routine link(owner: @RoamHeader, target: @RoamHeader) -> Void
-    block entry()
-        node: @Node = owner.data.peek().to[@Node]()
-        roam_hold(target)
-        node.child.poke(target)
-        return()
+    node: @Node = owner.data.peek().to[@Node]()
+    roam_hold(target)
+    node.child.poke(target)
+    return()
 
 /// A worker: ROUNDS times, makes a cycle of two and lets go of it, then shares and releases its private entity.
 /// :param unused: Nothing.
 routine worker(unused: @U64) -> Void
-    block entry()
-        mine: @RoamHeader = new_entity()
-        jump round(0, mine)
+    mine: @RoamHeader = new_entity()
+    jump round(0, mine)
 
     block round(i: U64, mine: @RoamHeader)
         branch i.lt(ROUNDS)
@@ -120,10 +111,9 @@ routine worker(unused: @U64) -> Void
 /// Starts `left` more workers, runs passes until they have all finished, and waits for them.
 /// :param left: How many workers are still to start.
 routine run_workers(left: U64) -> Void
-    block entry()
-        branch left.eq(0)
-            ? collect_while_working()
-            : spawn()
+    branch left.eq(0)
+        ? collect_while_working()
+        : spawn()
 
     block spawn()
         claim alloc: @MemoryManager <- make_c_heap_memory()
@@ -142,8 +132,7 @@ routine run_workers(left: U64) -> Void
 
 /// Runs passes until one frees nothing.
 routine collect_the_rest() -> Void
-    block entry()
-        jump pass()
+    jump pass()
 
     block pass()
         freed: U64 = collect()
@@ -152,12 +141,11 @@ routine collect_the_rest() -> Void
             : pass()
 
 routine start() -> Void
-    block entry()
-        run_workers(WORKERS)
-        collect_the_rest()
-        freed: U64 = FREED.peek_atomic()
-        expected: U64 = WORKERS.mul(ROUNDS).mul(2)
-        all: Bool = freed.eq(expected)
-        left: U64 = ROOTS.count.peek()
-        Out.write("every cycle freed once: {all}, candidates left {left}\n")
-        return()
+    run_workers(WORKERS)
+    collect_the_rest()
+    freed: U64 = FREED.peek_atomic()
+    expected: U64 = WORKERS.mul(ROUNDS).mul(2)
+    all: Bool = freed.eq(expected)
+    left: U64 = ROOTS.count.peek()
+    Out.write("every cycle freed once: {all}, candidates left {left}\n")
+    return()

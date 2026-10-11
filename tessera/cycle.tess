@@ -60,11 +60,10 @@ record HeaderBuffer
 /// :returns: The slot.
 /// :throws: Crashes with `MemoryAllocationError` when the slot can't be allocated.
 routine my_slot() -> @WorldSlot
-    block entry()
-        mine: Addr = MY_SLOT.peek()
-        branch mine.to[@Byte]().is_null()
-            ? make()
-            : return(mine.to[@WorldSlot]())
+    mine: Addr = MY_SLOT.peek()
+    branch mine.to[@Byte]().is_null()
+        ? make()
+        : return(mine.to[@WorldSlot]())
 
     block make()
         claim alloc: @MemoryManager <- make_c_heap_memory()
@@ -85,12 +84,11 @@ routine my_slot() -> @WorldSlot
 /// its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
 /// reads WRITER, so one of them always sees the other (both are sequentially consistent).
 routine world_enter() -> Void
-    block entry()
-        branch IN_COLLECTOR.peek()
-            ? return()
-            : continue
-        slot: @WorldSlot = my_slot()
-        jump attempt(slot)
+    branch IN_COLLECTOR.peek()
+        ? return()
+        : continue
+    slot: @WorldSlot = my_slot()
+    jump attempt(slot)
 
     block attempt(slot: @WorldSlot)
         previous: U32 = slot.inside.atomic_fetch_add(1)
@@ -113,22 +111,20 @@ routine world_enter() -> Void
 
 /// Leaves the world as a mutator: one step shallower in this thread's slot.
 routine world_leave() -> Void
-    block entry()
-        branch IN_COLLECTOR.peek()
-            ? return()
-            : continue
-        step_out(MY_SLOT.peek().to[@WorldSlot]())
-        return()
+    branch IN_COLLECTOR.peek()
+        ? return()
+        : continue
+    step_out(MY_SLOT.peek().to[@WorldSlot]())
+    return()
 
 /// One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
 /// wakes nobody, so sharing and releasing an entity make no system call.
 /// :param slot: This thread's slot.
 routine step_out(slot: @WorldSlot) -> Void
-    block entry()
-        previous: U32 = slot.inside.atomic_fetch_sub(1)
-        branch previous.eq(WAITING.bitor(1))
-            ? wake()
-            : return()
+    previous: U32 = slot.inside.atomic_fetch_sub(1)
+    branch previous.eq(WAITING.bitor(1))
+        ? wake()
+        : return()
 
     block wake()
         before: U32 = slot.inside.atomic_fetch_and(WAITING.bitnot())
@@ -138,8 +134,7 @@ routine step_out(slot: @WorldSlot) -> Void
 /// Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
 /// thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
 routine world_stop() -> Void
-    block entry()
-        jump attempt()
+    jump attempt()
 
     block attempt()
         state: U32 = WORLD.peek_atomic()
@@ -189,11 +184,10 @@ routine world_stop() -> Void
 
 /// Restarts the world after a pass and wakes every mutator and pass waiting for it.
 routine world_restart() -> Void
-    block entry()
-        false.poke_into(IN_COLLECTOR)
-        WORLD.poke_atomic(0)
-        wake_all(WORLD)
-        return()
+    false.poke_into(IN_COLLECTOR)
+    WORLD.poke_atomic(0)
+    wake_all(WORLD)
+    return()
 
 // ── Buffers ────────────────────────────────────────────────────────────────
 
@@ -205,11 +199,10 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
     local count: U64 = buffer.count.peek()
     local capacity: U64 = buffer.capacity.peek()
 
-    block entry()
-        full: Bool = count.eq(capacity)
-        branch full
-            ? grow()
-            : put()
+    full: Bool = count.eq(capacity)
+    branch full
+        ? grow()
+        : put()
 
     block grow()
         larger: U64 = capacity.eq(0)
@@ -234,29 +227,26 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> Void
 /// Empties `buffer`, keeping its memory for the next items.
 /// :param buffer: The buffer to empty.
 routine buffer_clear(buffer: @HeaderBuffer) -> Void
-    block entry()
-        0.poke_into(buffer.count)
-        return()
+    0.poke_into(buffer.count)
+    return()
 
 /// The header at index `i` of `buffer`, unchecked.
 /// :param buffer: The buffer to read.
 /// :param i: The index, below the buffer's count.
 /// :returns: The header stored there.
 routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
-    block entry()
-        slot: @Addr = buffer.items.peek().stride(i.to[USize]())
-        item: Addr = slot.peek()
-        return(item.to[@RoamHeader]())
+    slot: @Addr = buffer.items.peek().stride(i.to[USize]())
+    item: Addr = slot.peek()
+    return(item.to[@RoamHeader]())
 
 /// Reports a possible cycle root. Mutators can report at once, so the append takes the roots lock (a pass reports
 /// only from its own thread, with no mutator running).
 /// :param header: The entity's header.
 /// :throws: Crashes with `MemoryAllocationError` when growing the roots buffer fails.
 routine add_candidate(header: @RoamHeader) -> Void
-    block entry()
-        branch IN_COLLECTOR.peek()
-            ? push()
-            : locked()
+    branch IN_COLLECTOR.peek()
+        ? push()
+        : locked()
 
     block locked()
         ROOTS_LOCK.lock()
@@ -272,10 +262,9 @@ routine add_candidate(header: @RoamHeader) -> Void
 /// the last root into its place (the order of roots doesn't matter).
 /// :param header: The header about to be freed.
 routine remove_candidate(header: @RoamHeader) -> Void
-    block entry()
-        branch IN_COLLECTOR.peek()
-            ? search(false)
-            : locked()
+    branch IN_COLLECTOR.peek()
+        ? search(false)
+        : locked()
 
     block locked()
         ROOTS_LOCK.lock()
@@ -298,8 +287,7 @@ routine remove_candidate(header: @RoamHeader) -> Void
 /// :param buffer: The buffer to remove from.
 /// :param header: The header to remove.
 routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
-    block entry()
-        jump scan(0, buffer.count.peek())
+    jump scan(0, buffer.count.peek())
 
     block scan(i: U64, n: U64)
         branch i.ge(n)
@@ -324,9 +312,8 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> Void
 /// :throws: Crashes with `MemoryAllocationError` when growing the children buffer fails.
 #[export("ingrid_cyclic_visit_child")]
 routine visit_child(child: Addr) -> Void
-    block entry()
-        buffer_push(buffer: SCRATCH, item: child)
-        return()
+    buffer_push(buffer: SCRATCH, item: child)
+    return()
 
 /// Puts the children of `node` (the headers its Roamed fields hold) into `kids`, replacing what was there. A type
 /// with no trace routine has no Roamed fields and so no children.
@@ -334,15 +321,14 @@ routine visit_child(child: Addr) -> Void
 /// :param kids: The list that receives the children's headers.
 /// :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine children(node: @RoamHeader, kids: @List[Addr]) -> Void
-    block entry()
-        kids.clear()
-        trace: Addr = node.trace_hook.peek()
-        branch trace.to[@Byte]().is_null()
-            ? return()
-            : continue
-        buffer_clear(SCRATCH)
-        run_hook(hook: trace, entity: node.data.peek())
-        jump copy(0, SCRATCH.count.peek())
+    kids.clear()
+    trace: Addr = node.trace_hook.peek()
+    branch trace.to[@Byte]().is_null()
+        ? return()
+        : continue
+    buffer_clear(SCRATCH)
+    run_hook(hook: trace, entity: node.data.peek())
+    jump copy(0, SCRATCH.count.peek())
 
     block copy(i: U64, n: U64)
         branch i.ge(n)
@@ -362,13 +348,12 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> Void
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
-    block entry()
-        branch root.state.peek().eq(SCANNING)
-            ? finish()
-            : continue
-        SCANNING.poke_into(root.state)
-        work.add_last(root)
-        jump next()
+    branch root.state.peek().eq(SCANNING)
+        ? finish()
+        : continue
+    SCANNING.poke_into(root.state)
+    work.add_last(root)
+    jump next()
 
     block next()
         branch work.is_empty()
@@ -407,9 +392,8 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> Void
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
-    block entry()
-        work.add_last(root)
-        jump next()
+    work.add_last(root)
+    jump next()
 
     block next()
         branch work.is_empty()
@@ -450,10 +434,9 @@ routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> Void
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
-    block entry()
-        LIVE.poke_into(root.state)
-        work.add_last(root)
-        jump next()
+    LIVE.poke_into(root.state)
+    work.add_last(root)
+    jump next()
 
     block next()
         branch work.is_empty()
@@ -492,9 +475,8 @@ routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> Void
     local work: @List[Addr] <- .construct(alloc)
     local kids: @List[Addr] <- .construct(alloc)
 
-    block entry()
-        work.add_last(root)
-        jump next()
+    work.add_last(root)
+    jump next()
 
     block next()
         branch work.is_empty()
@@ -531,11 +513,10 @@ routine collect() -> U64
     local alloc: @MemoryManager <- .hollow()
     local roots: @List[Addr] <- .hollow()
 
-    block entry()
-        world_stop()
-        alloc.poke(make_c_heap_memory())
-        roots.poke(.construct(alloc))
-        jump mark(0, ROOTS.count.peek())
+    world_stop()
+    alloc.poke(make_c_heap_memory())
+    roots.poke(.construct(alloc))
+    jump mark(0, ROOTS.count.peek())
 
     // MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.
     block mark(i: U64, n: U64)
@@ -601,11 +582,10 @@ routine collect() -> U64
 /// :param buffer: The buffer to shorten.
 /// :param n: How many items to remove from the front (all of them when `n` is at least the count).
 routine remove_front(buffer: @HeaderBuffer, n: U64) -> Void
-    block entry()
-        count: U64 = buffer.count.peek()
-        branch n.ge(count)
-            ? clear()
-            : shift(0, count.sub(n))
+    count: U64 = buffer.count.peek()
+    branch n.ge(count)
+        ? clear()
+        : shift(0, count.sub(n))
 
     block clear()
         buffer_clear(buffer)

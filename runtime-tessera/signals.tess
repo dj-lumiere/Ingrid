@@ -37,18 +37,17 @@ record HandlerList
 /// nothing.
 /// :param e: The handler.
 routine invoke(e: HandlerEntry) -> Void
-    block entry()
-        branch e.box.is_null()
-            ? return()
-            : continue
-        fn: Addr = e.box.to[@Addr]().peek()
-        branch e.has_ctx
-            ? with_ctx(fn)
-            : continue
-        claim plain: @Addr <- fn
-        call: Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().peek()
-        call.call(e.box)
-        return()
+    branch e.box.is_null()
+        ? return()
+        : continue
+    fn: Addr = e.box.to[@Addr]().peek()
+    branch e.has_ctx
+        ? with_ctx(fn)
+        : continue
+    claim plain: @Addr <- fn
+    call: Callable[(Addr,), Void] = plain.to[@Callable[(Addr,), Void]]().peek()
+    call.call(e.box)
+    return()
 
     block with_ctx(fn: Addr)
         claim slot: @Addr <- fn
@@ -60,20 +59,19 @@ routine invoke(e: HandlerEntry) -> Void
 /// can't be allocated, no handler runs.
 /// :param list: The handlers to run.
 routine dispatch(list: @HandlerList) -> Void
-    block entry()
-        SIGNALS_LOCK.lock()
-        n: USize = list.count.peek()
-        branch n.eq(0)
-            ? none()
-            : continue
-        bytes: USize = n.mul(sizeof[HandlerEntry]())
-        snapshot: Addr = c_malloc(bytes)
-        branch snapshot.is_null()
-            ? none()
-            : continue
-        c_memcpy(snapshot, list.items.peek(), bytes)
-        SIGNALS_LOCK.unlock()
-        jump run(snapshot.to[@HandlerEntry](), n, 0)
+    SIGNALS_LOCK.lock()
+    n: USize = list.count.peek()
+    branch n.eq(0)
+        ? none()
+        : continue
+    bytes: USize = n.mul(sizeof[HandlerEntry]())
+    snapshot: Addr = c_malloc(bytes)
+    branch snapshot.is_null()
+        ? none()
+        : continue
+    c_memcpy(snapshot, list.items.peek(), bytes)
+    SIGNALS_LOCK.unlock()
+    jump run(snapshot.to[@HandlerEntry](), n, 0)
 
     block none()
         SIGNALS_LOCK.unlock()
@@ -93,12 +91,11 @@ routine dispatch(list: @HandlerList) -> Void
 /// Runs the handlers of one signal.
 /// :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
 routine dispatch_which(which: S32) -> Void
-    block entry()
-        list: @HandlerList = which.eq(SIG_TERMINATE)
-            ? TERMINATE_HANDLERS
-            : INTERRUPT_HANDLERS
-        dispatch(list)
-        return()
+    list: @HandlerList = which.eq(SIG_TERMINATE)
+        ? TERMINATE_HANDLERS
+        : INTERRUPT_HANDLERS
+    dispatch(list)
+    return()
 
 /// Appends a handler, doubling the storage (from 4) when it is full. When the storage can't grow, the handler is
 /// dropped.
@@ -106,22 +103,21 @@ routine dispatch_which(which: S32) -> Void
 routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
     local n: USize = me.count.peek()
 
-    block entry()
-        branch n.eq(me.cap.peek())
-            ? continue
-            : put()
-        cap: USize = me.cap.peek()
-        ncap: USize = cap.eq(0)
-            ? 4
-            : cap.mul(2)
-        grown: Addr = c_realloc(ptr: me.items.peek(), size: ncap.mul(sizeof[HandlerEntry]()))
-        // out of memory: the registration is dropped, as registration is best-effort
-        branch grown.is_null()
-            ? return()
-            : continue
-        me.items.poke(grown.to[@HandlerEntry]())
-        me.cap.poke(ncap)
-        jump put()
+    branch n.eq(me.cap.peek())
+        ? continue
+        : put()
+    cap: USize = me.cap.peek()
+    ncap: USize = cap.eq(0)
+        ? 4
+        : cap.mul(2)
+    grown: Addr = c_realloc(ptr: me.items.peek(), size: ncap.mul(sizeof[HandlerEntry]()))
+    // out of memory: the registration is dropped, as registration is best-effort
+    branch grown.is_null()
+        ? return()
+        : continue
+    me.items.poke(grown.to[@HandlerEntry]())
+    me.cap.poke(ncap)
+    jump put()
 
     block put()
         slot: @HandlerEntry = me.items.peek().stride(n)
@@ -134,17 +130,16 @@ routine HandlerList.append(me: @Me, entry: HandlerEntry) -> Void
 /// :param entry: The handler to add.
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 routine register_entry(which: S32, entry: HandlerEntry) -> Void
-    block entry()
-        SIGNALS_LOCK.lock()
-        list: @HandlerList = which.eq(SIG_TERMINATE)
-            ? TERMINATE_HANDLERS
-            : INTERRUPT_HANDLERS
-        list.append(entry)
-        branch SIGNALS_INSTALLED.peek()
-            ? done()
-            : continue
-        install_signal_dispatch()
-        jump done()
+    SIGNALS_LOCK.lock()
+    list: @HandlerList = which.eq(SIG_TERMINATE)
+        ? TERMINATE_HANDLERS
+        : INTERRUPT_HANDLERS
+    list.append(entry)
+    branch SIGNALS_INSTALLED.peek()
+        ? done()
+        : continue
+    install_signal_dispatch()
+    jump done()
 
     block done()
         SIGNALS_LOCK.unlock()
@@ -156,9 +151,8 @@ routine register_entry(which: S32, entry: HandlerEntry) -> Void
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 #export("rf_signal_register")
 routine rf_signal_register(which: S32, handler_box: Addr) -> Void
-    block entry()
-        register_entry(which, entry: HandlerEntry(box: handler_box, ctx: null, has_ctx: false))
-        return()
+    register_entry(which, entry: HandlerEntry(box: handler_box, ctx: null, has_ctx: false))
+    return()
 
 /// A Routine[(Ctx,), None] handler, called with context each time the signal comes.
 /// :param which: The signal: 1 for terminate, anything else for interrupt.
@@ -167,9 +161,8 @@ routine rf_signal_register(which: S32, handler_box: Addr) -> Void
 /// :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
 #export("rf_signal_register_ctx")
 routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> Void
-    block entry()
-        register_entry(which, entry: HandlerEntry(box: handler_box, ctx: context, has_ctx: true))
-        return()
+    register_entry(which, entry: HandlerEntry(box: handler_box, ctx: context, has_ctx: true))
+    return()
 
 // -- Windows: the console's control handler ------------------------------------------
 
@@ -187,13 +180,12 @@ routine c_set_console_ctrl_handler(handler: Callable[#callconv("stdcall"), (U32,
 /// :returns: 1 when handlers ran, 0 for any other event (the default applies).
 #[target(os: "windows"), callconv("stdcall")]
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
-    block entry()
-        // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
-        closing: Bool = ctrl_type.eq(2).bitor(ctrl_type.eq(5))
-        when
-            ctrl_type.le(1) => interrupt()
-            closing.bitor(ctrl_type.eq(6)) => terminate()
-            else => return(0)
+    // CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
+    closing: Bool = ctrl_type.eq(2).bitor(ctrl_type.eq(5))
+    when
+        ctrl_type.le(1) => interrupt()
+        closing.bitor(ctrl_type.eq(6)) => terminate()
+        else => return(0)
 
     block interrupt()
         dispatch_which(SIG_INTERRUPT)
@@ -206,10 +198,9 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
 /// Installs the console control handler. Called with the lock held.
 #target(os: "windows")
 routine install_signal_dispatch() -> Void
-    block entry()
-        c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
-        SIGNALS_INSTALLED.poke(true)
-        return()
+    c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
+    SIGNALS_INSTALLED.poke(true)
+    return()
 
 // -- POSIX: the self-pipe ------------------------------------------------------------
 
@@ -252,15 +243,13 @@ routine c_sigemptyset(set: Addr) -> CInt
 /// :returns: `0x10000000`.
 #target(os: "linux")
 routine sa_restart() -> CInt
-    block entry()
-        return(0x10000000)
+    return(0x10000000)
 
 /// macOS's `SA_RESTART` flag.
 /// :returns: 2.
 #target(os: "macos")
 routine sa_restart() -> CInt
-    block entry()
-        return(2)
+    return(2)
 
 /// POSIX `pipe`: makes a pipe, its read end in `fds[0]` and its write end in `fds[1]`.
 /// :param fds: Where the two descriptors go.
@@ -282,20 +271,19 @@ private routine c_errno_place() -> @CInt
 /// :returns: The current errno value.
 #target(os: not "windows")
 private routine errno() -> CInt
-    block entry()
-        return(c_errno_place().peek())
+    return(c_errno_place().peek())
 
 /// Async-signal-safe: writes the which-code byte to the self-pipe, retrying on EINTR, and returns.
 /// :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 #target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> Void
     local code: U8 = signo.eq(SIGTERM)
+
         ? 1
         : 0
     local byte: @U8 <- code
 
-    block entry()
-        jump write()
+    jump write()
 
     block write()
         write_end: @CInt = SELF_PIPE.to[@CInt]().stride(1)
@@ -310,9 +298,8 @@ routine posix_signal_handler(signo: CInt) -> Void
 routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
     local code: @U8 <- 0
 
-    block entry()
-        rf_thread_stack_guarantee()
-        jump read()
+    rf_thread_stack_guarantee()
+    jump read()
 
     block read()
         rc: SSize = c_read(pipe.getitem(0), code.to[@Byte](), 1)
@@ -332,19 +319,18 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> Void
 /// :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 #target(os: not "windows")
 routine install_signal_dispatch() -> Void
-    block entry()
-        fds: @CInt = SELF_PIPE.to[@CInt]()
-        branch c_pipe(fds).ne(0)
-            ? return()
-            : continue
-        Thread.spawn(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE,
-            alloc: runtime_heap()).detach()
-        claim sa: @SigAction <- .hollow()
-        c_memset(sa, 0, sizeof[SigAction]())
-        sa.handler.poke(posix_signal_handler.to[Callable]())
-        c_sigemptyset(sa.mask)
-        sa.flags.poke(sa_restart())
-        c_sigaction(SIGINT, sa, null)
-        c_sigaction(SIGTERM, sa, null)
-        SIGNALS_INSTALLED.poke(true)
-        return()
+    fds: @CInt = SELF_PIPE.to[@CInt]()
+    branch c_pipe(fds).ne(0)
+        ? return()
+        : continue
+    Thread.spawn(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE,
+        alloc: runtime_heap()).detach()
+    claim sa: @SigAction <- .hollow()
+    c_memset(sa, 0, sizeof[SigAction]())
+    sa.handler.poke(posix_signal_handler.to[Callable]())
+    c_sigemptyset(sa.mask)
+    sa.flags.poke(sa_restart())
+    c_sigaction(SIGINT, sa, null)
+    c_sigaction(SIGTERM, sa, null)
+    SIGNALS_INSTALLED.poke(true)
+    return()
