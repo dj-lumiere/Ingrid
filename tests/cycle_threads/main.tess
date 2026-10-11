@@ -1,34 +1,34 @@
-// The cycle collector while other threads work: four worker threads each make two-entity cycles and let go of them,
-// and share and release a private entity between rounds, while the main thread runs pass after pass. Every cycle
-// must be freed exactly once, and no worker may touch an entity a pass is tracing (a pass stops the world through
-// each thread's slot).
-//
-// roam.tess calls two routines of the RazorForge runtime library and deadlock.tess a third, defined here so the
-// program links: the current task, the scheduler's yield, and the crash exit.
+# The cycle collector while other threads work: four worker threads each make two-entity cycles and let go of them,
+# and share and release a private entity between rounds, while the main thread runs pass after pass. Every cycle
+# must be freed exactly once, and no worker may touch an entity a pass is tracing (a pass stops the world through
+# each thread's slot).
+#
+# roam.tess calls two routines of the RazorForge runtime library and deadlock.tess a third, defined here so the
+# program links: the current task, the scheduler's yield, and the crash exit.
 
 import Standard/Alloc
 import Standard/Format
 import Standard/Os
 
-/// How many entities the collector has freed.
+### How many entities the collector has freed.
 global FREED: @U64
-/// How many workers have finished.
+### How many workers have finished.
 global DONE: @U64
 
 preset WORKERS: U64 = 4
 preset ROUNDS: U64 = 20000
 
-/// An entity: the header of the entity its one Roamed field holds (null for none).
+### An entity: the header of the entity its one Roamed field holds (null for none).
 record Node
     child: Addr
 
-/// Makes a `Node` from its fields.
-/// :param child: Its `child`.
-/// :returns: The new value.
+### Makes a `Node` from its fields.
+### :param child: Its `child`.
+### :returns: The new value.
 routine Node.construct(child: Addr) -> Me
     return Me(child)
 
-/// Releases nothing: a `Node` holds no memory of its own.
+### Releases nothing: a `Node` holds no memory of its own.
 routine Node.destruct(me: @Me) -> None
     return
 
@@ -45,8 +45,8 @@ routine stub_coro_yield() -> None
 routine stub_crash_exit() -> None
     exit(82)
 
-/// The entity type's trace routine: hands the collector the header its Roamed field holds.
-/// :param entity: The node.
+### The entity type's trace routine: hands the collector the header its Roamed field holds.
+### :param entity: The node.
 routine trace_node(entity: Addr) -> None
     node: @Node = entity.to[@Node]()
     child: Addr = node.child.peek()
@@ -55,23 +55,23 @@ routine trace_node(entity: Addr) -> None
     visit_child(child)
     return
 
-/// The entity type's collector free routine: counts the node and frees it.
-/// :param entity: The node.
+### The entity type's collector free routine: counts the node and frees it.
+### :param entity: The node.
 routine free_node(entity: Addr) -> None
     before: U64 = FREED.atomic_fetch_add(1)
     local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: entity.to[@Node](), alloc)
     return
 
-/// The entity type's destroy routine, for the last strong release: frees the node without counting it.
-/// :param entity: The node.
+### The entity type's destroy routine, for the last strong release: frees the node without counting it.
+### :param entity: The node.
 routine drop_node(entity: Addr) -> None
     local alloc: @MemoryManager <- make_c_heap_memory()
     deallocate(data: entity.to[@Node](), alloc)
     return
 
-/// A new local entity with one strong handle.
-/// :returns: Its header.
+### A new local entity with one strong handle.
+### :returns: Its header.
 routine new_entity() -> @RoamHeader
     local alloc: @MemoryManager <- make_c_heap_memory()
     node: @Node = allocate[Node](count: 1, alloc)
@@ -80,17 +80,17 @@ routine new_entity() -> @RoamHeader
     header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0, holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(), free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
     return header
 
-/// Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
-/// :param owner: The entity whose field is set.
-/// :param target: The entity it points at.
+### Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
+### :param owner: The entity whose field is set.
+### :param target: The entity it points at.
 routine link(owner: @RoamHeader, target: @RoamHeader) -> None
     node: @Node = owner.data.peek().to[@Node]()
     roam_hold(target)
     node.child.poke(target)
     return
 
-/// A worker: ROUNDS times, makes a cycle of two and lets go of it, then shares and releases its private entity.
-/// :param unused: Nothing.
+### A worker: ROUNDS times, makes a cycle of two and lets go of it, then shares and releases its private entity.
+### :param unused: Nothing.
 routine worker(unused: @U64) -> None
     mine: @RoamHeader = new_entity()
 
@@ -108,8 +108,8 @@ routine worker(unused: @U64) -> None
         before: U64 = DONE.atomic_fetch_add(1)
         return
 
-/// Starts `left` more workers, runs passes until they have all finished, and waits for them.
-/// :param left: How many workers are still to start.
+### Starts `left` more workers, runs passes until they have all finished, and waits for them.
+### :param left: How many workers are still to start.
 routine run_workers(left: U64) -> None
     if left == 0
         while DONE.peek_atomic() != WORKERS
@@ -125,7 +125,7 @@ routine run_workers(left: U64) -> None
         thread.give_back()
         return
 
-/// Runs passes until one frees nothing.
+### Runs passes until one frees nothing.
 routine collect_the_rest() -> None
     while collect() != 0
         pass
