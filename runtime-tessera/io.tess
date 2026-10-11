@@ -418,19 +418,19 @@ global PROC_ERR_LEN: @U64
 /// A subprocess to run (a command line for the shell, or a program and its arguments), and once it ran, how.
 record ProcState
     shell: Bool  // program is a command line for the platform shell
-    program: Bytes
-    args: @Bytes
+    program: Span[Byte]
+    args: @Span[Byte]
     arg_count: USize
     arg_cap: USize
-    directory: Bytes  // empty: the parent's
+    directory: Span[Byte]  // empty: the parent's
     env: @EnvVar  // overrides of the parent's environment
     env_count: USize
     env_cap: USize
     exit_status: S64
     term_signal: CInt  // the signal that stopped the child, or 0
     spawn_failed: Bool
-    output: Bytes
-    errors: Bytes
+    output: Memory[Byte]  // the captured standard output, dropped once copied out
+    errors: Memory[Byte]  // the captured standard error, dropped once copied out
 
 /// Makes a `ProcState` from its fields.
 /// :param shell: Its `shell`.
@@ -448,18 +448,17 @@ record ProcState
 /// :param output: Its `output`.
 /// :param errors: Its `errors`.
 /// :returns: The new value.
-routine ProcState.construct(shell: Bool, program: Bytes, args: @Bytes, arg_count: USize,
-    arg_cap: USize, directory: Bytes, env: @EnvVar, env_count: USize, env_cap: USize,
-    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: Bytes, errors: Bytes) -> Me
+routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte], arg_count: USize,
+    arg_cap: USize, directory: Span[Byte], env: @EnvVar, env_count: USize, env_cap: USize,
+    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: Memory[Byte],
+    errors: Memory[Byte]) -> Me
     return(Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
         exit_status, term_signal, spawn_failed, output, errors))
 
-/// Releases the memory its `program` and `directory` and `output` and `errors` hold.
+/// Drops the captured streams. The program and the directory are malloc'd copies `free_bytes` gives back.
 routine ProcState.destruct(me: @Me) -> Void
-    me.program.destruct()
-    me.directory.destruct()
-    me.output.destruct()
-    me.errors.destruct()
+    me.output.drop()
+    me.errors.drop()
     return()
 
 /// The signal that stopped this thread's last subprocess.
@@ -496,18 +495,18 @@ routine rf_proc_errors_len() -> U64
 /// :param s: The string.
 /// :param n: The length, or negative for a NUL-terminated `s`.
 /// :returns: The copy, or empty when the allocation fails.
-routine owned_copy(s: @Byte, n: S32) -> Bytes
+routine owned_copy(s: @Byte, n: S32) -> Span[Byte]
     len: USize = length_of(s, n)
     d: Addr = c_malloc(len.max(1))
     branch d.is_null()
-        ? return(Bytes.empty())
+        ? return(.hollow())
         : continue
     c_memcpy(d, s, len)
-    return(Bytes.from_ptr(data: d.to[@Byte](), count: len))
+    return(Span[Byte].construct(data: d.to[@Byte](), count: len))
 
 /// Frees the malloc'd memory of `b`.
 /// :param b: The bytes to free.
-routine free_bytes(b: Bytes) -> Void
+routine free_bytes(b: Span[Byte]) -> Void
     c_free(b.data)
     return()
 
@@ -516,7 +515,7 @@ routine free_bytes(b: Bytes) -> Void
 /// :param program: The program or command line, taken over.
 /// :returns: The new state.
 /// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-routine proc_state_new(shell: Bool, program: Bytes) -> @ProcState
+routine proc_state_new(shell: Bool, program: Span[Byte]) -> @ProcState
     st: @ProcState = zeroed[ProcState](count: 1, what: "Failed to allocate subprocess state")
     st.shell.poke(shell)
     st.program.poke(program)
@@ -534,7 +533,7 @@ routine proc_state_free(st: @ProcState) -> Void
         branch i.eq(st.arg_count.peek())
             ? env(0)
             : continue
-        arg_slot: @Bytes = st.args.peek().stride(i)
+        arg_slot: @Span[Byte] = st.args.peek().stride(i)
         free_bytes(arg_slot.peek())
         jump args(i.add(1))
 
@@ -554,24 +553,27 @@ routine proc_state_free(st: @ProcState) -> Void
         c_free(st)
         return()
 
-/// A captured stream as the caller takes it: malloc'd and NUL-terminated, or null when nothing came.
-/// :param b: The captured stream, taken over.
-/// :returns: The NUL-terminated stream, or null when it has no memory or the reallocation fails.
-routine terminated(b: Bytes) -> @Byte
+/// A malloc'd, NUL-terminated copy of the captured bytes, which are dropped: what RazorForge reads and frees.
+/// :param b: The captured bytes, taken over.
+/// :returns: The copy, or null when there is nothing captured or the copy can't be allocated.
+routine terminated(b: Memory[Byte]) -> @Byte
+    local held: @Memory[Byte] <- b
+
     branch b.data.is_null()
         ? return(null)
         : continue
     n: USize = b.count()
-    buf: Addr = c_realloc(ptr: b.data, size: n.add(1))
+    buf: Addr = c_malloc(n.add(1))
     branch buf.is_null()
         ? lost()
         : continue
-    terminator: @Byte = buf.to[@Byte]().stride(n)
-    terminator.poke(0x00)
+    c_memcpy(buf, b.data, n)
+    buf.to[@Byte]().stride(n).poke(0x00)
+    held.drop()
     return(buf.to[@Byte]())
 
     block lost()
-        c_free(b.data)
+        held.drop()
         return(null)
 
 /// Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the
@@ -580,12 +582,12 @@ routine terminated(b: Bytes) -> @Byte
 routine proc_run_blocking(st: @ProcState) -> Void
     local alloc: @MemoryManager <- make_c_heap_memory()
 
-    dir: Bytes = st.directory.peek()
+    dir: Span[Byte] = st.directory.peek()
     branch dir.is_empty()
         ? run(Unit())
         : run(dir)
 
-    block run(directory: Maybe[Bytes])
+    block run(directory: Maybe[Span[Byte]])
         options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.peek(),
             env_count: st.env_count.peek(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE,
             stderr: OutputMode.CAPTURE)
@@ -594,7 +596,7 @@ routine proc_run_blocking(st: @ProcState) -> Void
             : run_args(options)
 
     block run_args(options: ProcessOptions)
-        args: Slice[Bytes] = Slice[Bytes].construct(data: st.args.peek(),
+        args: Span[Span[Byte]] = Span[Span[Byte]].construct(data: st.args.peek(),
             count: st.arg_count.peek())
         jump ran(run_process_result(program: st.program.peek(), args, options, alloc))
 
@@ -632,11 +634,13 @@ routine proc_exec(st: @ProcState) -> S64
     req.proc.poke(st)
     io_run(req)
     PROC_SIGNAL.poke(st.term_signal.peek())
-    PROC_OUT.poke(terminated(st.output.peek()))
     output_count: USize = st.output.count()
+    PROC_OUT.poke(terminated(st.output.peek()))
+    st.output.poke(.hollow())
     PROC_OUT_LEN.poke(output_count.to[U64]())
-    PROC_ERR.poke(terminated(st.errors.peek()))
     errors_count: USize = st.errors.count()
+    PROC_ERR.poke(terminated(st.errors.peek()))
+    st.errors.poke(.hollow())
     PROC_ERR_LEN.poke(errors_count.to[U64]())
     failed: Bool = st.spawn_failed.peek()
     code: S64 = st.exit_status.peek()
@@ -680,16 +684,16 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> Void
         : continue
     doubled: USize = b.arg_cap.peek().mul(2)
     cap: USize = doubled.max(4)
-    bigger: Addr = c_realloc(ptr: b.args.peek(), size: cap.mul(sizeof[Bytes]()))
+    bigger: Addr = c_realloc(ptr: b.args.peek(), size: cap.mul(sizeof[Span[Byte]]()))
     branch bigger.is_null()
         ? return()
         : continue
-    b.args.poke(bigger.to[@Bytes]())
+    b.args.poke(bigger.to[@Span[Byte]]())
     b.arg_cap.poke(cap)
     jump put(n)
 
     block put(n: USize)
-        slot: @Bytes = b.args.peek().stride(n)
+        slot: @Span[Byte] = b.args.peek().stride(n)
         slot.poke(owned_copy(s: arg, n: arg_len))
         b.arg_count.poke(n.add(1))
         return()

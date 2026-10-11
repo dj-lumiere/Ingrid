@@ -153,8 +153,8 @@ routine rf_console_flush() -> Void
 #export("rf_console_alert")
 routine rf_console_alert(ptr: @Byte, count: USize) -> Void
     rf_console_flush()
-    on: Bytes = "\x1B[95m"
-    off: Bytes = "\x1B[0m"
+    on: Span[Byte] = "\x1B[95m"
+    off: Span[Byte] = "\x1B[0m"
     Err.write_all_result(data: on.data, count: on.count())
     Err.write_all_result(data: ptr, count)
     Err.write_all_result(data: off.data, count: off.count())
@@ -166,26 +166,29 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> Void
 /// for the terminator, and freed when that fails.
 /// :param text: The text, allocated with C's heap. It is taken over.
 /// :returns: The NUL-terminated string, or null when the reallocation fails.
-routine terminated_text(text: Bytes) -> @Byte
+routine terminated_text(text: Memory[Byte]) -> @Byte
+    local held: @Memory[Byte] <- text
+
     n: USize = text.count
-    buf: Addr = c_realloc(ptr: text.data, size: n.add(1))
+    buf: Addr = c_realloc(ptr: null, size: n.add(1))
     branch buf.is_null()
         ? lost()
         : continue
-    terminator: @Byte = buf.to[@Byte]().stride(n)
-    terminator.poke(0x00)
+    buf.to[@Byte]().copy(src: text.data, count: n)
+    buf.to[@Byte]().stride(n).poke(0x00)
+    held.drop()
     return(buf.to[@Byte]())
 
     block lost()
-        c_free(text.data)
+        held.drop()
         return(null)
 
 /// {terminated_text} of the text when there is one.
 /// :param text: The text read, or absent at the end of the input.
 /// :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
-routine terminated_option(text: Maybe[Bytes]) -> @Byte
+routine terminated_option(text: Maybe[Memory[Byte]]) -> @Byte
     when text
-        is Bytes as t => return(terminated_text(t))
+        is Memory[Byte] as t => return(terminated_text(t))
         is Unit => return(null)
 
 /// The next non-empty line from stdin, without its end, or null at the end of the input. Standard output is flushed
@@ -200,16 +203,17 @@ routine rf_console_ask_line() -> @Byte
     jump next()
 
     block next()
-        line: Maybe[Bytes] = In.read_line_checked(alloc)
+        line: Maybe[Memory[Byte]] = In.read_line_checked(alloc)
         when line
-            is Bytes as t => continue
+            is Memory[Byte] as t => continue
             is Unit => return(null)
         branch t.count.eq(0)
             ? skip(t)
             : return(terminated_text(t))
 
-    block skip(t: Bytes)
-        c_free(t.data)
+    block skip(t: Memory[Byte])
+        claim held: @Memory[Byte] <- t
+        held.drop()
         jump next()
 
 /// The next word from stdin, or null at the end of the input. Standard output is flushed first.
@@ -239,7 +243,7 @@ routine rf_console_ask_all() -> @Byte
 
 // -- the crash report's OS side ------------------------------------------------------
 
-/// Bytes on stderr as they are, with no color or newline. A null `ptr` or a `count` of 0 writes nothing.
+/// Span[Byte] on stderr as they are, with no color or newline. A null `ptr` or a `count` of 0 writes nothing.
 /// :param ptr: The bytes to write.
 /// :param count: The number of bytes.
 #export("rf_console_error")
