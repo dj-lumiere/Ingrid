@@ -18,20 +18,23 @@ import Standard/Os
 /// :param dest: Where the copy goes, large enough for it.
 /// :param src: The string to copy.
 /// :returns: `dest`.
-#[external("c"), symbol("strcpy")]
+@external("c")
+@symbol("strcpy")
 routine c_strcpy(dest: @Byte, src: @Byte) -> @Byte
 
 /// C's `strcmp`: compares two NUL-terminated strings byte by byte.
 /// :param a: The first string.
 /// :param b: The second string.
 /// :returns: Negative, zero, or positive as `a` sorts before, equal to, or after `b`.
-#[external("c"), symbol("strcmp")]
+@external("c")
+@symbol("strcmp")
 routine c_strcmp(a: @Byte, b: @Byte) -> CInt
 
 /// C's `atexit`: registers a routine to run at normal process exit.
 /// :param at_exit: The routine to run.
 /// :returns: 0 on success.
-#[external("c"), symbol("atexit")]
+@external("c")
+@symbol("atexit")
 routine c_atexit(at_exit: Callable[(), Void]) -> CInt
 
 // -- standard output -----------------------------------------------------------------
@@ -55,56 +58,66 @@ record OutputBuffer
 /// :returns: True when every show is flushed.
 routine is_stdout_interactive() -> Bool
     cached: CInt = STDOUT_INTERACTIVE.peek()
-    branch cached.ge(0)
-        ? return(cached.eq(1))
-        : continue
+    if cached >= 0
+        return cached == 1
     force: @Byte = c_getenv("RF_FLUSH_STDOUT")
-    branch force.is_null()
-        ? terminal()
-        : continue
-    branch force.peek().eq(b'1')
-        ? decide(true)
-        : terminal()
-
-    block terminal()
-        jump decide(Out.is_terminal())
+    if force.is_null()
+        interactive: Bool = Out.is_terminal()
+        flag: CInt = when
+            interactive => 1
+            else => 0
+        STDOUT_INTERACTIVE.poke(flag)
+        return interactive
+    if force.peek() == b'1'
+        interactive: Bool = true
+        flag: CInt = when
+            interactive => 1
+            else => 0
+        STDOUT_INTERACTIVE.poke(flag)
+        return interactive
+    else
+        interactive: Bool = Out.is_terminal()
+        flag: CInt = when
+            interactive => 1
+            else => 0
+        STDOUT_INTERACTIVE.poke(flag)
+        return interactive
 
     block decide(interactive: Bool)
-        flag: CInt = interactive
-            ? 1
-            : 0
+        flag: CInt = when
+            interactive => 1
+            else => 0
         STDOUT_INTERACTIVE.poke(flag)
-        return(interactive)
+        return interactive
 
 /// Gives Out what the buffer holds and empties it. The caller holds the lock.
 routine OutputBuffer.drain(me: @Me) -> Void
     n: USize = me.count.peek()
-    branch n.eq(0)
-        ? return()
-        : continue
+    if n == 0
+        return
     Out.write_all_result(data: me.bytes.to[@Byte](), count: n)
     me.count.poke(0)
-    return()
+    return
 
 /// Writes `count` bytes to standard output through the shared buffer. When they don't fit, the buffer is drained
 /// first, and bytes that fill a whole buffer go straight out. On an interactive stdout the buffer is drained after
 /// every show.
 /// :param ptr: The bytes to write.
 /// :param count: The number of bytes.
-#export("rf_console_show")
+@export("rf_console_show")
 routine rf_console_show(ptr: @Byte, count: USize) -> Void
     local out: @OutputBuffer = STDOUT
 
     out.lock.lock()
-    needed: USize = out.count.peek().add(count)
-    branch needed.gt(OUTPUT_BUFFER)
-        ? continue
-        : keep()
+    needed: USize = out.count.peek() + count
+    if not (needed > OUTPUT_BUFFER)
+        jump keep()
     out.drain()
     // What doesn't fit an empty buffer goes straight out.
-    branch count.ge(OUTPUT_BUFFER)
-        ? direct()
-        : keep()
+    if count >= OUTPUT_BUFFER
+        jump direct()
+    else
+        jump keep()
 
     block direct()
         Out.write_all_result(data: ptr, count)
@@ -112,43 +125,42 @@ routine rf_console_show(ptr: @Byte, count: USize) -> Void
 
     block keep()
         out.bytes.to[@Byte]().stride(out.count.peek()).copy(src: ptr, count)
-        next_count: USize = out.count.peek().add(count)
+        next_count: USize = out.count.peek() + count
         next_count.poke_into(out.count)
         jump done()
 
     block done()
-        branch is_stdout_interactive()
-            ? continue
-            : unlock()
+        if not is_stdout_interactive()
+            jump unlock()
         out.drain()
         jump unlock()
 
     block unlock()
         out.lock.unlock()
-        return()
+        return
 
 /// Gives standard output everything buffered so far.
-#export("rf_console_flush")
+@export("rf_console_flush")
 routine rf_console_flush() -> Void
     out: @OutputBuffer = STDOUT
     out.lock.lock()
     out.drain()
     out.lock.unlock()
-    return()
+    return
 
 /// Writes `count` bytes on stderr, in magenta. Standard output is flushed first, so the two read in the order they
 /// were written.
 /// :param ptr: The bytes to write.
 /// :param count: The number of bytes.
-#export("rf_console_alert")
+@export("rf_console_alert")
 routine rf_console_alert(ptr: @Byte, count: USize) -> Void
     rf_console_flush()
-    on: Span[Byte] = "\x1B[95m"
-    off: Span[Byte] = "\x1B[0m"
+    on: Span[Byte] = "[95m"
+    off: Span[Byte] = "[0m"
     Err.write_all_result(data: on.data, count: on.count())
     Err.write_all_result(data: ptr, count)
     Err.write_all_result(data: off.data, count: off.count())
-    return()
+    return
 
 // -- standard input ------------------------------------------------------------------
 
@@ -160,98 +172,91 @@ routine terminated_text(text: Memory[Byte]) -> @Byte
     local held: @Memory[Byte] <- text
 
     n: USize = text.count
-    buf: Addr = c_realloc(ptr: null, size: n.add(1))
-    branch buf.is_null()
-        ? lost()
-        : continue
+    buf: Addr = c_realloc(ptr: null, size: n + 1)
+    if buf.is_null()
+        held.drop()
+        return null
     buf.to[@Byte]().copy(src: text.data, count: n)
     buf.to[@Byte]().stride(n).poke(0x00)
     held.drop()
-    return(buf.to[@Byte]())
-
-    block lost()
-        held.drop()
-        return(null)
+    return buf.to[@Byte]()
 
 /// {terminated_text} of the text when there is one.
 /// :param text: The text read, or absent at the end of the input.
 /// :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
 routine terminated_option(text: Maybe[Memory[Byte]]) -> @Byte
     when text
-        is Memory[Byte] as t => return(terminated_text(t))
-        is Unit => return(null)
+        is Memory[Byte] as t => return terminated_text(t)
+        is Unit => return null
 
 /// The next non-empty line from stdin, without its end, or null at the end of the input. Standard output is flushed
 /// first.
 /// :returns: The line as a NUL-terminated string the caller frees, or null.
-#export("rf_console_ask_line")
+@export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
     local alloc: @MemoryManager <- .hollow()
 
     rf_console_flush()
     alloc.poke(heap())
-    jump next()
 
-    block next()
-        line: Maybe[Memory[Byte]] = In.read_line_checked(alloc)
-        when line
-            is Memory[Byte] as t => continue
-            is Unit => return(null)
-        branch t.count.eq(0)
-            ? skip(t)
-            : return(terminated_text(t))
-
-    block skip(t: Memory[Byte])
-        claim held: @Memory[Byte] <- t
-        held.drop()
-        jump next()
+    while true
+        line2: Maybe[Memory[Byte]] = In.read_line_checked(alloc)
+        t2: Memory[Byte] = when line2
+            is Memory[Byte] as t2 => t2
+            is Unit => return null
+        if t2.count == 0
+            local held: @Memory[Byte] <- t2
+            held.drop()
+            continue
+        else
+            return terminated_text(t2)
 
 /// The next word from stdin, or null at the end of the input. Standard output is flushed first.
 /// :returns: The word as a NUL-terminated string the caller frees, or null.
-#export("rf_console_ask_word")
+@export("rf_console_ask_word")
 routine rf_console_ask_word() -> @Byte
     rf_console_flush()
-    claim alloc: @MemoryManager <- heap()
-    return(terminated_option(In.read_word_checked(alloc)))
+    local alloc: @MemoryManager <- heap()
+    return terminated_option(In.read_word_checked(alloc))
 
 /// Up to `count` bytes from stdin, NUL-terminated. Standard output is flushed first.
 /// :param count: The most bytes to read.
 /// :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
-#export("rf_console_ask_bytes")
+@export("rf_console_ask_bytes")
 routine rf_console_ask_bytes(count: USize) -> @Byte
     rf_console_flush()
-    claim alloc: @MemoryManager <- heap()
-    return(terminated_text(In.read_count(count, alloc)))
+    local alloc: @MemoryManager <- heap()
+    return terminated_text(In.read_count(count, alloc))
 
 /// The rest of stdin, NUL-terminated. Standard output is flushed first.
 /// :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
-#export("rf_console_ask_all")
+@export("rf_console_ask_all")
 routine rf_console_ask_all() -> @Byte
     rf_console_flush()
-    claim alloc: @MemoryManager <- heap()
-    return(terminated_text(In.read_all(alloc)))
+    local alloc: @MemoryManager <- heap()
+    return terminated_text(In.read_all(alloc))
 
 // -- the crash report's OS side ------------------------------------------------------
 
 /// Span[Byte] on stderr as they are, with no color or newline. A null `ptr` or a `count` of 0 writes nothing.
 /// :param ptr: The bytes to write.
 /// :param count: The number of bytes.
-#export("rf_console_error")
+@export("rf_console_error")
 routine rf_console_error(ptr: @Byte, count: USize) -> Void
-    branch ptr.is_null().bitor(count.eq(0))
-        ? return()
-        : continue
+    if ptr.is_null() or count == 0
+        return
     Err.write_all_result(data: ptr, count)
-    return()
+    return
 
 /// Flushes stdout, so a program's output appears before the crash report that follows it.
-#export("rf_flush_output")
+@export("rf_flush_output")
 routine rf_flush_output() -> Void
     rf_console_flush()
-    return()
+    return
 
 /// Ends the program with the crash status, after the report.
-#[export("rf_crash_exit"), noreturn]
+@export("rf_crash_exit")
+@noreturn
 routine rf_crash_exit() -> Void
     rf_console_flush()
     exit(CRASH_STATUS)
@@ -260,49 +265,49 @@ routine rf_crash_exit() -> Void
 
 /// Process start-up: the I/O threads start on the main thread, standard output's buffer is flushed at exit, and
 /// stderr takes ANSI colors (on Windows a console needs asking).
-#export("rf_runtime_init")
+@export("rf_runtime_init")
 routine rf_runtime_init() -> Void
     rf_io_runtime_init()
     c_atexit(rf_console_flush.to[Callable]())
     Err.enable_colors()
-    return()
+    return
 
 /// Sets the exit status the program ends with when its `start` returns: RazorForge's and Suflae's `set_exit_code`.
 /// The last store wins (Standard/Os keeps it in one atomic value).
 /// :param code: The exit status, 0 for success.
-#export("rf_set_exit_code")
+@export("rf_set_exit_code")
 routine rf_set_exit_code(code: S32) -> Void
     set_exit_code(code)
-    return()
+    return
 
 /// The exit status the program ends with when its `start` returns: what `rf_set_exit_code` stored last, 0 when
 /// nothing did. The builder's `main` returns it after `start`.
 /// :returns: The status.
-#export("rf_exit_code")
+@export("rf_exit_code")
 routine rf_exit_code() -> S32
-    return(exit_code())
+    return exit_code()
 
 // -- C strings -----------------------------------------------------------------------
 
 /// The length of a NUL-terminated string.
 /// :param cstr: The string.
 /// :returns: The number of bytes before the terminator.
-#export("rf_cstr_count")
+@export("rf_cstr_count")
 routine rf_cstr_count(cstr: @Byte) -> USize
-    return(c_strlen(cstr))
+    return c_strlen(cstr)
 
 /// Copies the NUL-terminated string at `src`, terminator included, to `dest`.
 /// :param dest: Where the copy goes, large enough for it.
 /// :param src: The string to copy.
 /// :returns: `dest`.
-#export("rf_cstr_copy")
+@export("rf_cstr_copy")
 routine rf_cstr_copy(dest: @Byte, src: @Byte) -> @Byte
-    return(c_strcpy(dest, src))
+    return c_strcpy(dest, src)
 
 /// Compares two NUL-terminated strings byte by byte.
 /// :param a: The first string.
 /// :param b: The second string.
 /// :returns: Negative, zero, or positive as `a` sorts before, equal to, or after `b`.
-#export("rf_cstr_compare")
+@export("rf_cstr_compare")
 routine rf_cstr_compare(a: @Byte, b: @Byte) -> S32
-    return(c_strcmp(a, b))
+    return c_strcmp(a, b)

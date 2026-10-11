@@ -29,28 +29,33 @@ private record TraceFrame
 /// :param column: Its `column`.
 /// :returns: The new value.
 private routine TraceFrame.construct(routine_name: Addr, file: Addr, line: S32, column: S32) -> Me
-    return(Me(routine_name, file, line, column))
+    return Me(routine_name, file, line, column)
 
 /// Releases nothing: a `TraceFrame` holds no memory of its own.
 private routine TraceFrame.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// Flushes standard output, so what the program printed comes before the report.
-#[external("c"), symbol("rf_flush_output")]
+@external("c")
+@symbol("rf_flush_output")
 private routine rf_flush_output() -> Void
 
 /// Exits with the crash status.
-#[external("c"), symbol("rf_crash_exit"), noreturn]
+@external("c")
+@symbol("rf_crash_exit")
+@noreturn
 private routine rf_crash_exit() -> Void
 
 /// How many frames the calling thread's crash trace has pushed (0 for a build that keeps no trace).
 /// :returns: The trace's depth.
-#[external("c"), symbol("_rf_trace_get_depth_shared")]
+@external("c")
+@symbol("_rf_trace_get_depth_shared")
 private routine trace_depth() -> S32
 
 /// The calling thread's 32 trace frames, a ring: the most recent is at (depth - 1) mod 32.
 /// :returns: The address of the first of the 32 frames.
-#[external("c"), symbol("_rf_trace_get_frames_shared")]
+@external("c")
+@symbol("_rf_trace_get_frames_shared")
 private routine trace_frames() -> @TraceFrame
 
 /// Reports a crash and exits with the crash status (82): flushes standard output, then writes to standard error, in
@@ -59,30 +64,26 @@ private routine trace_frames() -> @TraceFrame
 /// :param name: The crash's name, such as `IntegerOverflowError`.
 /// :param message: What went wrong.
 /// :param place: Where it happened, or null when that isn't known.
-#[export("tessera_crash_handler"), noreturn]
+@export("tessera_crash_handler")
+@noreturn
 routine crash_handler(name: Span[Byte], message: Span[Byte], place: @SourceLocation) -> Void
     rf_flush_output()
-    Err.write("\x1B[91m")
+    Err.write("[91m")
     write_title(name)
     Err.write(": {message}")
-    jump where()
-
-    block where()
-        nowhere: Bool = place.is_null()
-        branch nowhere
-            ? newline()
-            : continue
-        file: Span[Byte] = place.file.peek()
-        line: U32 = place.line.peek()
-        column: U32 = place.column.peek()
-        Err.write("\nat {file}:{line}:{column}")
-        jump newline()
-
-    block newline()
+    if place.is_null()
         Err.write("\n")
         write_trace()
-        Err.write("\x1B[0m")
+        Err.write("[0m")
         rf_crash_exit()
+    file: Span[Byte] = place.file.peek()
+    line: U32 = place.line.peek()
+    column: U32 = place.column.peek()
+    Err.write("\nat {file}:{line}:{column}")
+    Err.write("\n")
+    write_trace()
+    Err.write("[0m")
+    rf_crash_exit()
 
 /// Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
 /// "Integer overflow error" (a space before each capital after the first, which becomes lowercase). One byte at a
@@ -91,55 +92,47 @@ routine crash_handler(name: Span[Byte], message: Span[Byte], place: @SourceLocat
 routine write_title(name: Span[Byte]) -> Void
     local one: @U8 <- 0
 
-    jump next(0)
-
-    block next(i: USize)
-        branch i.lt(name.count)
-            ? letter(i)
-            : return()
-
-    block letter(i: USize)
+    each i in 0 til name.count
         c: U8 = name.byte_at(i)
-        capital: Bool = c.ge(65).bitand(c.le(90))
-        new_word: Bool = capital.bitand(i.gt(0))
-        branch new_word
-            ? word(i, c)
-            : put(i, c)
-
-    block word(i: USize, c: U8)
-        one.poke(32)
+        capital: Bool = c >= 65 and c <= 90
+        new_word: Bool = capital and i > 0
+        c2: U8 = when
+            new_word =>
+                one.poke(32)
+                Err.writer().write_bytes(data: one.to[@Byte](), count: 1)
+                becomes c + 32
+            else => c
+        one.poke(c2)
         Err.writer().write_bytes(data: one.to[@Byte](), count: 1)
-        jump put(i, c.add(32))
-
-    block put(i: USize, c: U8)
-        one.poke(c)
-        Err.writer().write_bytes(data: one.to[@Byte](), count: 1)
-        jump next(i.add(1))
+    then
+        return
 
 /// A stack overflow, reported like any crash (exit status 82): which routines kept calling, then the trace (which
 /// says how deep the calls went). The runtime's fault handler calls it on the faulting thread, in the stack the
 /// system keeps back for it.
 /// :param stack_size: The size of the stack the calls used up, in bytes. The report does not show it: the size of the
 ///     stack says nothing about the program's mistake.
-#[export("tessera_stack_overflow_report"), noreturn]
+@export("tessera_stack_overflow_report")
+@noreturn
 routine stack_overflow_report(stack_size: U64) -> Void
     rf_flush_output()
-    Err.write("\x1B[91mStack overflow error: ")
+    Err.write("[91mStack overflow error: ")
     write_deep_calls()
     write_trace()
-    Err.write("\x1B[0m")
+    Err.write("[0m")
     rf_crash_exit()
 
 /// Suflae's report for the same event: Suflae has no "stack" in its vocabulary, so it is an out of memory error that
 /// says which routines kept calling.
 /// :param memory_size: The size of the memory the calls used up, in bytes. Not shown, like the stack's size.
-#[export("tessera_deep_calls_report"), noreturn]
+@export("tessera_deep_calls_report")
+@noreturn
 routine deep_calls_report(memory_size: U64) -> Void
     rf_flush_output()
-    Err.write("\x1B[91mOut of memory error: ")
+    Err.write("[91mOut of memory error: ")
     write_deep_calls()
     write_trace()
-    Err.write("\x1B[0m")
+    Err.write("[0m")
     rf_crash_exit()
 
 /// The sentence of a call-depth crash: the routine that called itself too many times before returning, or the
@@ -153,18 +146,19 @@ routine write_deep_calls() -> Void
 
     // the repeating run may start a few frames below the most recent one
     block start_at(start: S32)
-        branch start.gt(CYCLE_MAX_START)
-            ? unknown()
-            : continue
+        if start > CYCLE_MAX_START
+            jump unknown()
         period: S32 = cycle_period(depth, shown, start)
-        branch period.gt(0)
-            ? found(start, period)
-            : start_at(start.add(1))
+        if period > 0
+            jump found(start, period)
+        else
+            jump start_at(start + 1)
 
     block found(start: S32, period: S32)
-        branch one_routine(depth, start, period)
-            ? itself(start)
-            : each_other(start, period)
+        if one_routine(depth, start, period)
+            jump itself(start)
+        else
+            jump each_other(start, period)
 
     block itself(start: S32)
         name: Span[Byte] = frame_name(depth, k: start)
@@ -172,24 +166,21 @@ routine write_deep_calls() -> Void
         jump advice()
 
     block each_other(start: S32, period: S32)
-        last: S32 = start.add(period).sub(1)
-        jump name(start, last)
+        jump name(start, start + period - 1)
 
     // the names in the run, most recent first: "a and b", "a, b and c"
     block name(k: S32, last: S32)
         n: Span[Byte] = frame_name(depth, k)
-        branch k.eq(last)
-            ? final_name(n)
-            : continue
-        branch k.add(1).eq(last)
-            ? before_last(k, last, n)
-            : continue
+        if k == last
+            jump final_name(n)
+        if k + 1 == last
+            jump before_last(k, last, n)
         Err.write("{n}, ")
-        jump name(k.add(1), last)
+        jump name(k + 1, last)
 
     block before_last(k: S32, last: S32, n: Span[Byte])
         Err.write("{n} and ")
-        jump name(k.add(1), last)
+        jump name(k + 1, last)
 
     block final_name(n: Span[Byte])
         Err.write("{n} called each other too many times before returning. ")
@@ -201,17 +192,17 @@ routine write_deep_calls() -> Void
 
     block advice()
         Err.write("Make the recursion shallower, or turn it into a loop.\n")
-        return()
+        return
 
 /// The k-th most recent frame of the calling thread's crash trace (0 is the most recent, below 32).
 /// :param depth: The trace's depth.
 /// :param k: How far back the frame is.
 /// :returns: The frame.
 routine recent_frame(depth: S32, k: S32) -> @TraceFrame
-    back: S32 = depth.sub_wrap(1).sub_wrap(k)
-    slot: USize = back.bitand(31).to[USize]()
+    back: S32 = depth -% 1 -% k
+    slot: USize = (back & 31).to[USize]()
     at: @TraceFrame = trace_frames().stride(slot)
-    return(at)
+    return at
 
 /// Whether two frames are the same call: the same routine, stopped at the same line.
 /// :param a: One frame.
@@ -220,9 +211,9 @@ routine recent_frame(depth: S32, k: S32) -> @TraceFrame
 routine same_call(a: @TraceFrame, b: @TraceFrame) -> Bool
     a_routine: U64 = ptrtoint[Addr, U64](a.routine_name.peek())
     b_routine: U64 = ptrtoint[Addr, U64](b.routine_name.peek())
-    same_routine: Bool = a_routine.eq(b_routine)
-    same_line: Bool = a.line.peek().eq(b.line.peek())
-    return(same_routine.bitand(same_line))
+    same_routine: Bool = a_routine == b_routine
+    same_line: Bool = a.line.peek() == b.line.peek()
+    return same_routine and same_line
 
 /// The shortest run of calls that repeats from frame `start` down through every frame the trace kept, at least twice
 /// over, or 0 when none does.
@@ -231,25 +222,22 @@ routine same_call(a: @TraceFrame, b: @TraceFrame) -> Bool
 /// :param start: The most recent frame of the run.
 /// :returns: The run's length, or 0.
 routine cycle_period(depth: S32, shown: S32, start: S32) -> S32
-    jump try_period(1)
-
-    block try_period(period: S32)
-        branch period.gt(CYCLE_MAX_PERIOD)
-            ? return(0)
-            : continue
+    while period <= CYCLE_MAX_PERIOD with period: S32 = 1
         // the frames compared against the run must hold it at least twice
-        branch shown.sub(start).lt(period.mul(3))
-            ? return(0)
-            : continue
-        jump compare(period, start)
+        if shown - start < period * 3
+            return 0
 
-    block compare(period: S32, k: S32)
-        branch k.add(period).ge(shown)
-            ? return(period)
-            : continue
-        branch same_call(a: recent_frame(depth, k), b: recent_frame(depth, k: k.add(period)))
-            ? compare(period, k.add(1))
-            : try_period(period.add(1))
+        while k + period < shown with k: S32 = start
+            if same_call(a: recent_frame(depth, k), b: recent_frame(depth, k: k + period))
+                continue with k: k + 1
+            else
+                break
+        then
+            return period
+
+        continue with period: period + 1
+    then
+        return 0
 
 /// Whether every call in the run is the same routine (a routine that calls itself from two places, such as a tree
 /// walk's two halves).
@@ -260,16 +248,14 @@ routine cycle_period(depth: S32, shown: S32, start: S32) -> S32
 routine one_routine(depth: S32, start: S32, period: S32) -> Bool
     local first: U64 = ptrtoint[Addr, U64](recent_frame(depth, k: start).routine_name.peek())
 
-    jump check(start.add(1))
-
-    block check(k: S32)
-        branch k.ge(start.add(period))
-            ? return(true)
-            : continue
+    each k in start + 1 til start + period
         routine_address: U64 = ptrtoint[Addr, U64](recent_frame(depth, k).routine_name.peek())
-        branch routine_address.eq(first)
-            ? check(k.add(1))
-            : return(false)
+        if routine_address == first
+            continue
+        else
+            return false
+    then
+        return true
 
 /// A frame's routine name without its parameter list: `OverflowRf.dive(Core.S64)` is `OverflowRf.dive`.
 /// :param depth: The trace's depth.
@@ -279,16 +265,14 @@ routine frame_name(depth: S32, k: S32) -> Span[Byte]
     local routine_ptr: @CChar = recent_frame(depth, k).routine_name.peek().to[@CChar]()
     local name: Span[Byte] = routine_ptr.to[CStr]().getview()
 
-    jump scan(0)
-
-    block scan(i: USize)
-        branch i.eq(name.count())
-            ? return(name)
-            : continue
+    each i in 0 til name.count()
         // '('
-        branch name.byte_at(i).eq(40)
-            ? return(name.slice(start: 0, end: i))
-            : scan(i.add(1))
+        if name.byte_at(i) == 40
+            return name.slice(start: 0, end: i)
+        else
+            continue
+    then
+        return name
 
 /// The calling thread's crash trace, most recent frame first: the last 32 frames, and how many there were in all when
 /// there were more. Nothing for a build that keeps no trace.
@@ -296,21 +280,14 @@ routine write_trace() -> Void
     local depth: S32 = trace_depth()
     local shown: S32 = depth.min(32)
 
-    empty: Bool = depth.le(0)
-    branch empty
-        ? finish()
-        : continue
+    if depth <= 0
+        // The frames, most recent first.
+        // A trace keeps 32 frames, and says how many there were in all when there were more.
+        return
     Err.write("Stack trace:\n")
-    jump frame(0)
-
-    // The frames, most recent first.
-    block frame(i: S32)
-        done: Bool = i.ge(shown)
-        branch done
-            ? total()
-            : continue
-        back: S32 = depth.sub_wrap(1).sub_wrap(i)
-        slot: USize = back.bitand(31).to[USize]()
+    each i in 0 til shown
+        back: S32 = depth -% 1 -% i
+        slot: USize = (back & 31).to[USize]()
         frames: @TraceFrame = trace_frames()
         at: @TraceFrame = frames.stride(slot)
         routine_ptr: @CChar = at.routine_name.peek().to[@CChar]()
@@ -320,16 +297,7 @@ routine write_trace() -> Void
         line: S32 = at.line.peek()
         column: S32 = at.column.peek()
         Err.write("  {i}: at {routine_name} ({file}:{line}:{column})\n")
-        jump frame(i.add(1))
-
-    // A trace keeps 32 frames, and says how many there were in all when there were more.
-    block total()
-        more: Bool = depth.gt(32)
-        branch more
-            ? continue
-            : finish()
-        Err.write("  ... ({depth} frames total)\n")
-        jump finish()
-
-    block finish()
-        return()
+    if not (depth > 32)
+        return
+    Err.write("  ... ({depth} frames total)\n")
+    return

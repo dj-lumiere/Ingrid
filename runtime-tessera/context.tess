@@ -10,29 +10,29 @@ record ContextRuntime
 /// The name of the context-switch backend. Coroutines switch through Standard/Fiber's switch_stack, on every
 /// operating system.
 /// :returns: `"tessera"`.
-#export("rf_context_backend_name")
+@export("rf_context_backend_name")
 routine rf_context_backend_name() -> CStr
-    return("tessera")
+    return "tessera"
 
 /// Whether the context-switch backend is available.
 /// :returns: Always 1 (available).
-#export("rf_context_backend_state")
+@export("rf_context_backend_state")
 routine rf_context_backend_state() -> CInt
-    return(1)
+    return 1
 
 /// Creates the placeholder runtime object the older context entry points pass around.
 /// :returns: A zeroed `ContextRuntime`.
 /// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-#export("rf_context_runtime_create")
+@export("rf_context_runtime_create")
 routine rf_context_runtime_create() -> @ContextRuntime
-    return(zeroed[ContextRuntime](count: 1, what: "Failed to allocate context runtime"))
+    return zeroed[ContextRuntime](count: 1, what: "Failed to allocate context runtime")
 
 /// Frees a runtime object from {rf_context_runtime_create}.
 /// :param runtime: The runtime object to free.
-#export("rf_context_runtime_destroy")
+@export("rf_context_runtime_destroy")
 routine rf_context_runtime_destroy(runtime: @ContextRuntime) -> Void
     c_free(runtime)
-    return()
+    return
 
 /// Runs the routine to completion on the calling thread (coroutines go through rf_coro_create / rf_sched_spawn).
 /// :param runtime: The runtime object, unused.
@@ -40,35 +40,30 @@ routine rf_context_runtime_destroy(runtime: @ContextRuntime) -> Void
 /// :param userdata: The argument passed to `entry`.
 /// :param stack_size: The requested stack size, unused.
 /// :returns: 1 when `entry` ran, 0 when `entry` is null.
-#export("rf_context_runtime_spawn")
+@export("rf_context_runtime_spawn")
 routine rf_context_runtime_spawn(runtime: @ContextRuntime, entry: Callable[(Addr,), Void],
     userdata: Addr, stack_size: USize) -> CInt
-    branch entry.addr().is_null()
-        ? return(0)
-        : continue
+    if entry.addr().is_null()
+        return 0
     entry.call(userdata)
-    return(1)
+    return 1
 
 /// Blocks the calling thread for `duration_seconds` plus `duration_nanoseconds`, on the monotonic clock. A negative
 /// `duration_seconds` returns at once.
 /// :param duration_seconds: The whole seconds to wait.
 /// :param duration_nanoseconds: The extra nanoseconds to wait.
-#export("rf_waitfor_duration")
+@export("rf_waitfor_duration")
 routine rf_waitfor_duration(duration_seconds: S64, duration_nanoseconds: U32) -> Void
     local never: @U32 <- 0
 
-    branch duration_seconds.lt(0)
-        ? return()
-        : continue
-    seconds_ns: U64 = duration_seconds.to[U64]().mul_clamp(1000000000)
-    span: U64 = seconds_ns.add_clamp(duration_nanoseconds.to[U64]())
-    deadline: U64 = monotonic_ns().add_clamp(span)
-    jump wait(deadline)
+    if duration_seconds < 0
+        return
+    seconds_ns: U64 = duration_seconds.to[U64]() *^ 1000000000
+    span: U64 = seconds_ns +^ duration_nanoseconds.to[U64]()
 
-    block wait(deadline: U64)
-        now: U64 = monotonic_ns()
-        branch now.ge(deadline)
-            ? return()
-            : continue
-        wait_on_for(at: never, expected: 0, timeout_ns: deadline.sub(now))
-        jump wait(deadline)
+    deadline: U64 = monotonic_ns() +^ span
+
+    while monotonic_ns() < deadline
+        wait_on_for(at: never, expected: 0, timeout_ns: deadline - now)
+    then
+        return

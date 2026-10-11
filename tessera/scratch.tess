@@ -11,7 +11,7 @@
 // The arena is the running thread's, one call at a time: an engine call doesn't start another one.
 
 /// This thread's arena.
-#threadlocal
+@threadlocal
 global ARENA: @Arena
 
 /// The arena of the call running on this thread: the buffer its caller handed over and how much is taken.
@@ -39,16 +39,16 @@ private record Arena
 /// :returns: The new value.
 private routine Arena.construct(base: @U64, top: U64, cap: U64, need: U64, exhausted: Bool,
     peak: U64) -> Me
-    return(Me(base, top, cap, need, exhausted, peak))
+    return Me(base, top, cap, need, exhausted, peak)
 
 /// Releases nothing: a `Arena` holds no memory of its own.
 private routine Arena.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// Starts a call's arena on a buffer of `limbs` limbs at `base`, with nothing taken.
 /// :param base: The buffer the caller hands over (anything when `limbs` is 0).
 /// :param limbs: How many limbs the buffer has.
-#export("ingrid_scratch_open")
+@export("ingrid_scratch_open")
 routine scratch_open(base: @U64, limbs: U64) -> Void
     ARENA.base.poke(base)
     ARENA.top.poke(0)
@@ -56,80 +56,76 @@ routine scratch_open(base: @U64, limbs: U64) -> Void
     ARENA.need.poke(0)
     ARENA.exhausted.poke(false)
     ARENA.peak.poke(0)
-    return()
+    return
 
 /// Ends the call's arena: nothing can be taken from it until the next call opens one.
 /// :returns: 0 when every admission fit, else the limbs the call needs at least, what its retry hands over.
-#export("ingrid_scratch_close")
+@export("ingrid_scratch_close")
 routine scratch_close() -> U64
     exhausted: Bool = ARENA.exhausted.peek()
     need: U64 = ARENA.need.peek()
     ARENA.top.poke(0)
     ARENA.cap.poke(0)
-    branch exhausted
-        ? return(need.max(1))
-        : return(0)
+    if exhausted
+        return need.max(1)
+    else
+        return 0
 
 /// Says whether `limbs` more limbs fit, before an operation takes them. A refusal exhausts the call: every later
 /// admission is refused too, and the call reports what it needed.
 /// :param limbs: The most the operation takes.
 /// :returns: True when they fit and the call isn't exhausted.
-#export("ingrid_scratch_admit")
+@export("ingrid_scratch_admit")
 routine scratch_admit(limbs: U64) -> Bool
-    branch ARENA.exhausted.peek()
-        ? return(false)
-        : continue
+    if ARENA.exhausted.peek()
+        return false
     top: U64 = ARENA.top.peek()
-    room: U64 = ARENA.cap.peek().sub(top)
-    branch limbs.le(room)
-        ? return(true)
-        : continue
+    room: U64 = ARENA.cap.peek() - top
+    if limbs <= room
+        return true
     ARENA.exhausted.poke(true)
-    ARENA.need.poke(top.add_clamp(limbs))
-    return(false)
+    ARENA.need.poke(top +^ limbs)
+    return false
 
 /// True once an admission of this call was refused: the result is a placeholder, and loops that wait for a value
 /// stop.
 /// :returns: Whether the call is exhausted.
-#export("ingrid_scratch_exhausted")
+@export("ingrid_scratch_exhausted")
 routine scratch_exhausted() -> Bool
-    return(ARENA.exhausted.peek())
+    return ARENA.exhausted.peek()
 
 /// Takes `limbs` zeroed limbs from the arena, which an admission has made room for.
 /// :param limbs: How many limbs.
 /// :returns: The first of them.
 /// :throws: Crashes with `MemoryError` when they don't fit: the engine admitted less than it takes.
-#export("ingrid_scratch_take")
+@export("ingrid_scratch_take")
 routine scratch_take(limbs: U64) -> @U64
     top: U64 = ARENA.top.peek()
-    room: U64 = ARENA.cap.peek().sub(top)
-    fits: Bool = limbs.le(room)
-    branch fits
-        ? continue
-        : crash(name: "MemoryError",
-            message: "The arbitrary-precision engine took more scratch than it admitted.")
+    room: U64 = ARENA.cap.peek() - top
+    if not (limbs <= room)
+        crash(name: "MemoryError", message: "The arbitrary-precision engine took more scratch than it admitted.")
     first: @U64 = ARENA.base.peek().stride(top.to[USize]())
     first.zeroinit(limbs.to[USize]())
-    next: U64 = top.add(limbs)
+    next: U64 = top + limbs
     ARENA.top.poke(next)
     next.max(ARENA.peak.peek()).poke_into(ARENA.peak)
-    return(first)
+    return first
 
 /// The arena's top, to give back everything taken after it with `ingrid_scratch_release`.
 /// :returns: How many limbs are taken.
-#export("ingrid_scratch_mark")
+@export("ingrid_scratch_mark")
 routine scratch_mark() -> U64
-    return(ARENA.top.peek())
+    return ARENA.top.peek()
 
 /// Gives back every limb taken since `mark`.
 /// :param mark: A top from `ingrid_scratch_mark` of this call.
-#export("ingrid_scratch_release")
+@export("ingrid_scratch_release")
 routine scratch_release(mark: U64) -> Void
     ARENA.top.poke(mark)
-    return()
+    return
 
 /// The most limbs the last call on this thread had taken at once, also after it closed: what its buffer had to hold.
 /// :returns: The call's high-water mark, in limbs.
-#export("ingrid_scratch_peak")
+@export("ingrid_scratch_peak")
 routine scratch_peak() -> U64
-    return(ARENA.peak.peek())
+    return ARENA.peak.peek()

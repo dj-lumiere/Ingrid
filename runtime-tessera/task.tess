@@ -18,7 +18,7 @@ global NEXT_TASK_ID: @U64 <- 1
 global LIVE_TASKS: @U64
 
 /// The threaded task running on this thread, or null.
-#threadlocal
+@threadlocal
 global CURRENT_TASK: @@Task
 
 // rf_task_kind, rf_task_status, rf_task_completion_kind (razorforge_runtime.h).
@@ -79,11 +79,11 @@ record ThreadedStart
 /// :param task: Its `task`.
 /// :returns: The new value.
 routine TaskNode.construct(next: @Me, task: @Task) -> Me
-    return(Me(next, task))
+    return Me(next, task)
 
 /// Releases nothing: a `TaskNode` holds no memory of its own.
 routine TaskNode.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// Makes a `Task` from its fields.
 /// :param kind: Its `kind`.
@@ -120,15 +120,11 @@ routine Task.construct(kind: U32, status: U32, completion_seq: U64, completion: 
     dependents_tail: @TaskNode, prerequisite_count: U32, prerequisites_remaining: U32, task_id: U64,
     coro_lock: ExclusiveLock, coro_sched: @Sched, coro_waiter: @Coro, race_sched: @Sched,
     race_waiter: @Coro, counted: U32) -> Me
-    return(Me(kind, status, completion_seq, completion, value_payload, error_payload,
-        cancel_requested, result_consumed, detached, worker_exited, consumer_released, reaped, done,
-        execution_backend, wait_backend, dependents_head, dependents_tail, prerequisite_count,
-        prerequisites_remaining, task_id, coro_lock, coro_sched, coro_waiter, race_sched,
-        race_waiter, counted))
+    return Me(kind, status, completion_seq, completion, value_payload, error_payload, cancel_requested, result_consumed, detached, worker_exited, consumer_released, reaped, done, execution_backend, wait_backend, dependents_head, dependents_tail, prerequisite_count, prerequisites_remaining, task_id, coro_lock, coro_sched, coro_waiter, race_sched, race_waiter, counted)
 
 /// Releases nothing: a `Task` holds no memory of its own.
 routine Task.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// Makes a `ThreadedStart` from its fields.
 /// :param task: Its `task`.
@@ -136,33 +132,32 @@ routine Task.destruct(me: @Me) -> Void
 /// :param userdata: Its `userdata`.
 /// :returns: The new value.
 routine ThreadedStart.construct(task: @Task, entry: Callable[(Addr,), Void], userdata: Addr) -> Me
-    return(Me(task, entry, userdata))
+    return Me(task, entry, userdata)
 
 /// Releases nothing: a `ThreadedStart` holds no memory of its own.
 routine ThreadedStart.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// The threaded task running on this thread.
 /// :returns: The task, or null outside a threaded task's thread.
-#noinline
+@noinline
 routine current_task() -> @Task
     t: @Task = CURRENT_TASK.peek()
-    return(t)
+    return t
 
 /// Whether the task has completed: its status is `TASK_COMPLETED` and its completion is in.
 /// :returns: True once completed.
 routine Task.is_completed(me: @Me) -> Bool
-    done: Bool = me.status.peek_atomic().eq(TASK_COMPLETED)
-    return(done.bitand(me.completion.peek().ne(COMPLETION_PENDING)))
+    done: Bool = me.status.peek_atomic() == TASK_COMPLETED
+    return done and me.completion.peek() != COMPLETION_PENDING
 
 /// Stamps the completion order once, before the status says COMPLETED, so a racer that sees COMPLETED sees the
 /// stamp.
 routine Task.stamp(me: @Me) -> Void
-    branch me.completion_seq.peek_atomic().eq(U64.MAX)
-        ? continue
-        : return()
+    if not (me.completion_seq.peek_atomic() == U64.MAX)
+        return
     me.completion_seq.poke_atomic(next_completion_seq())
-    return()
+    return
 
 /// The completion is in: a coroutine waiting for it is woken, a race! over it re-polls, and a thread waiting in
 /// rf_task_wait returns.
@@ -175,25 +170,21 @@ routine Task.signal_completion(me: @Me) -> Void
     me.coro_sched.poke(null)
     me.coro_waiter.poke(null)
     me.coro_lock.unlock()
-    branch sched.is_null()
-        ? race(race_sched, race_waiter)
-        : continue
+    if sched.is_null()
+        jump race(race_sched, race_waiter)
     // the waiter's promise of a wake from this thread is kept
     rf_sched_disarm_cross_waker(sched)
-    branch waiter.is_null()
-        ? race(race_sched, race_waiter)
-        : continue
+    if waiter.is_null()
+        jump race(race_sched, race_waiter)
     rf_sched_wake(s: sched, c: waiter)
     jump race(race_sched, race_waiter)
 
     // Left registered, so a later spurious wake is harmless, and race! clears it when it is over.
     block race(race_sched: @Sched, race_waiter: @Coro)
-        branch race_sched.is_null()
-            ? threads()
-            : continue
-        branch race_waiter.is_null()
-            ? signal(race_sched)
-            : continue
+        if race_sched.is_null()
+            jump threads()
+        if race_waiter.is_null()
+            jump signal(race_sched)
         rf_sched_wake(s: race_sched, c: race_waiter)
         jump threads()
 
@@ -204,40 +195,37 @@ routine Task.signal_completion(me: @Me) -> Void
     block threads()
         me.done.poke_atomic(1)
         wake_all(me.done)
-        return()
+        return
 
 /// Registers (s not null) or clears the scheduler of a race! over a set that has this task, and its coroutine
 /// (null for a thread racer). A null `task` does nothing.
 /// :param task: The task.
 /// :param s: The race's scheduler, or null to clear.
 /// :param coro: The race's coroutine, or null.
-#export("rf_task_race_register")
+@export("rf_task_race_register")
 routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.coro_lock.lock()
     task.race_sched.poke(s)
     task.race_waiter.poke(coro)
     task.coro_lock.unlock()
-    return()
+    return
 
 /// The running coroutine waits for task: 1 if it is complete already (read it, don't park), 0 if registered (park
 /// with rf_sched_park_external, and the completion wakes it). Outside a scheduler-driven coroutine 1, so the caller
 /// waits blocking.
 /// :param task: The task, or null.
 /// :returns: 1 when it is complete (or `task` is null, or outside a coroutine), 0 when registered.
-#export("rf_task_await_coro")
+@export("rf_task_await_coro")
 routine rf_task_await_coro(task: @Task) -> U32
-    branch task.is_null()
-        ? return(1)
-        : continue
+    if task.is_null()
+        return 1
     sched: @Sched = rf_sched_current()
     this_coro: @Coro = current_coro()
-    branch sched.is_null().bitor(this_coro.is_null())
-        ? return(1)
-        : continue
-    return(task.register_waiter(sched, waiter: this_coro))
+    if sched.is_null() or this_coro.is_null()
+        return 1
+    return task.register_waiter(sched, waiter: this_coro)
 
 /// rf_task_await_coro bounded by timeout_ns: 1 completed, 0 timed out, 2 not in a scheduler-driven coroutine (the
 /// caller waits blocking with the deadline). On a timeout the registration is taken back, so a later completion
@@ -245,29 +233,24 @@ routine rf_task_await_coro(task: @Task) -> U32
 /// :param task: The task, or null.
 /// :param timeout_ns: The longest wait, in nanoseconds.
 /// :returns: 1 completed (or `task` is null), 0 timed out, 2 not in a scheduler-driven coroutine.
-#export("rf_task_await_coro_deadline")
+@export("rf_task_await_coro_deadline")
 routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
-    branch task.is_null()
-        ? return(1)
-        : continue
+    if task.is_null()
+        return 1
     sched: @Sched = rf_sched_current()
     this_coro: @Coro = current_coro()
-    branch sched.is_null().bitor(this_coro.is_null())
-        ? return(2)
-        : continue
-    deadline: U64 = monotonic_ns().add_clamp(timeout_ns)
-    jump register(sched, this_coro, deadline)
+    if sched.is_null() or this_coro.is_null()
+        return 2
 
-    block register(sched: @Sched, this_coro: @Coro, deadline: U64)
-        branch task.register_waiter(sched, waiter: this_coro).eq(1)
-            ? return(1)
-            : continue
+    deadline: U64 = monotonic_ns() +^ timeout_ns
+
+    while task.register_waiter(sched, waiter: this_coro) != 1
         now: U64 = monotonic_ns()
-        branch now.ge(deadline)
-            ? return(task.withdraw_waiter(sched, waiter: this_coro))
-            : continue
-        rf_sched_park_deadline(deadline.sub(now))
-        jump register(sched, this_coro, deadline)
+        if now >= deadline
+            return task.withdraw_waiter(sched, waiter: this_coro)
+        rf_sched_park_deadline(deadline - now)
+    then
+        return 1
 
 /// Registers waiter to be woken when the task completes, under the task's lock: 1 if it is complete already (read
 /// it, don't park), 0 once registered. The first registration promises a wake from another thread
@@ -277,9 +260,8 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 /// :returns: 1 when complete already, 0 once registered.
 routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     me.coro_lock.lock()
-    branch me.is_completed()
-        ? finish(1, false)
-        : continue
+    if me.is_completed()
+        jump finish(1, false)
     arm: Bool = me.coro_sched.peek().is_null()
     me.coro_sched.poke(sched)
     me.coro_waiter.poke(waiter)
@@ -287,11 +269,10 @@ routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
 
     block finish(complete: U32, arm: Bool)
         me.coro_lock.unlock()
-        branch arm
-            ? continue
-            : return(complete)
+        if not arm
+            return complete
         rf_sched_arm_cross_waker(sched)
-        return(complete)
+        return complete
 
 /// The deadline passed: 1 for a value that just came in, else 0 with waiter's registration taken back (and its
 /// promised wake withdrawn after the lock is given back).
@@ -300,67 +281,64 @@ routine Task.register_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
 /// :returns: 1 when the task completed meanwhile, else 0.
 routine Task.withdraw_waiter(me: @Me, sched: @Sched, waiter: @Coro) -> U32
     me.coro_lock.lock()
-    branch me.is_completed()
-        ? finish(1, false)
-        : continue
+    if me.is_completed()
+        jump finish(1, false)
     mine: Bool = me.coro_waiter.peek().ptr_eq(waiter)
-    disarm: Bool = mine.bitand(me.coro_sched.peek().is_not_null())
-    branch mine
-        ? continue
-        : finish(0, disarm)
+    disarm: Bool = mine and me.coro_sched.peek().is_not_null()
+    if not mine
+        jump finish(0, disarm)
     me.coro_sched.poke(null)
     me.coro_waiter.poke(null)
     jump finish(0, disarm)
 
     block finish(complete: U32, disarm: Bool)
         me.coro_lock.unlock()
-        branch disarm
-            ? continue
-            : return(complete)
+        if not disarm
+            return complete
         rf_sched_disarm_cross_waker(sched)
-        return(complete)
+        return complete
 
 /// The name of a task kind.
 /// :param kind: A `TASK_SUSPENDED` / `TASK_THREADED` value.
 /// :returns: `suspended`, `threaded`, or `unknown`.
-#export("rf_task_kind_name")
+@export("rf_task_kind_name")
 routine rf_task_kind_name(kind: U32) -> CStr
     when
-        kind.eq(TASK_SUSPENDED) => return("suspended")
-        kind.eq(TASK_THREADED) => return("threaded")
-        else => return("unknown")
+        kind == TASK_SUSPENDED => return "suspended"
+        kind == TASK_THREADED => return "threaded"
+        else => return "unknown"
 
 /// The name of a task status.
 /// :param status: A `TASK_` status value.
 /// :returns: `new`, `ready`, `running`, `parked`, `completed`, or `unknown`.
-#export("rf_task_status_name")
+@export("rf_task_status_name")
 routine rf_task_status_name(status: U32) -> CStr
     when
-        status.eq(TASK_NEW) => return("new")
-        status.eq(TASK_READY) => return("ready")
-        status.eq(TASK_RUNNING) => return("running")
-        status.eq(TASK_PARKED) => return("parked")
-        status.eq(TASK_COMPLETED) => return("completed")
-        else => return("unknown")
+        status == TASK_NEW => return "new"
+        status == TASK_READY => return "ready"
+        status == TASK_RUNNING => return "running"
+        status == TASK_PARKED => return "parked"
+        status == TASK_COMPLETED => return "completed"
+        else => return "unknown"
 
 /// The name of a completion kind.
 /// :param kind: A `COMPLETION_` value.
 /// :returns: `pending`, `value`, `error`, `cancelled`, `timeout`, or `unknown`.
-#export("rf_task_completion_name")
+@export("rf_task_completion_name")
 routine rf_task_completion_name(kind: U32) -> CStr
     when
-        kind.eq(COMPLETION_PENDING) => return("pending")
-        kind.eq(COMPLETION_VALUE) => return("value")
-        kind.eq(COMPLETION_ERROR) => return("error")
-        kind.eq(COMPLETION_CANCELLED) => return("cancelled")
-        kind.eq(COMPLETION_TIMEOUT) => return("timeout")
-        else => return("unknown")
+        kind == COMPLETION_PENDING => return "pending"
+        kind == COMPLETION_VALUE => return "value"
+        kind == COMPLETION_ERROR => return "error"
+        kind == COMPLETION_CANCELLED => return "cancelled"
+        kind == COMPLETION_TIMEOUT => return "timeout"
+        else => return "unknown"
 
 /// Creates a new task with the next task id.
 /// :param kind: `TASK_SUSPENDED` (a coroutine) or `TASK_THREADED`.
 /// :returns: The task, `TASK_NEW` and pending.
 /// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-#export("rf_task_create")
+@export("rf_task_create")
 routine rf_task_create(kind: U32) -> @Task
     task: @Task = zeroed[Task](count: 1, what: "Failed to allocate task")
     task.kind.poke(kind)
@@ -368,211 +346,189 @@ routine rf_task_create(kind: U32) -> @Task
     task.task_id.poke(NEXT_TASK_ID.atomic_fetch_add(1))
     task.counted.poke(1)
     LIVE_TASKS.atomic_fetch_add(1)
-    return(task)
+    return task
 
 /// Takes the task out of LIVE_TASKS, once: at its completion, or when it is freed without having completed.
 routine Task.uncount(me: @Me) -> Void
     was: U32 = me.counted.atomic_swap(0)
-    branch was.eq(1)
-        ? continue
-        : return()
+    if not (was == 1)
+        return
     LIVE_TASKS.atomic_fetch_sub(1)
-    return()
+    return
 
 /// Frees the task with a result nobody took (a deadline give-up, a race! loser) and the dependents list. The error
 /// payload is not freed.
 routine Task.free(me: @Me) -> Void
     me.uncount()
     payload: Addr = me.value_payload.peek()
-    branch payload.is_null()
-        ? nodes(me.dependents_head.peek())
-        : continue
+    if payload.is_null()
+        jump nodes(me.dependents_head.peek())
     c_free(payload)
     me.value_payload.poke(null)
     jump nodes(me.dependents_head.peek())
 
     block nodes(node: @TaskNode)
-        branch node.is_null()
-            ? done()
-            : continue
+        if node.is_null()
+            jump done()
         next: @TaskNode = node.next.peek()
         c_free(node)
         jump nodes(next)
 
     block done()
         c_free(me)
-        return()
+        return
 
 /// Frees a task at once, with its untaken result and dependents list. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_destroy")
+@export("rf_task_destroy")
 routine rf_task_destroy(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.free()
-    return()
+    return
 
 /// The consuming retrieve! is done with the task (called once): it is freed now if its thread has exited, else by
 /// its thread. A coroutine task has no thread and is freed at once. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_release")
+@export("rf_task_release")
 routine rf_task_release(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
-    branch task.kind.peek().eq(TASK_THREADED)
-        ? continue
-        : free()
+    if task.is_null()
+        return
+    if not (task.kind.peek() == TASK_THREADED)
+        jump free()
     task.coro_lock.lock()
     task.consumer_released.poke(true)
-    reap: Bool = task.worker_exited.peek().bitand(task.reaped.peek().bitnot())
-    branch reap
-        ? continue
-        : unlocked(false)
+    if not (task.worker_exited.peek() & ~task.reaped.peek())
+        jump unlocked(false)
     task.reaped.poke(true)
     jump unlocked(true)
 
     block unlocked(reap: Bool)
         task.coro_lock.unlock()
-        branch reap
-            ? free()
-            : return()
+        if reap
+            jump free()
+        else
+            return
 
     block free()
         task.free()
-        return()
+        return
 
 /// A task's id.
 /// :param task: The task, or null.
 /// :returns: The id, 0 for a null `task`.
-#export("rf_task_id")
+@export("rf_task_id")
 routine rf_task_id(task: @Task) -> U64
-    branch task.is_null()
-        ? return(0)
-        : return(task.task_id.peek())
+    if task.is_null()
+        return 0
+    else
+        return task.task_id.peek()
 
 /// A task's kind.
 /// :param task: The task, or null.
 /// :returns: `TASK_SUSPENDED` or `TASK_THREADED`, `TASK_SUSPENDED` for a null `task`.
-#export("rf_task_kind_get")
+@export("rf_task_kind_get")
 routine rf_task_kind_get(task: @Task) -> U32
-    branch task.is_null()
-        ? return(TASK_SUSPENDED)
-        : return(task.kind.peek())
+    if task.is_null()
+        return TASK_SUSPENDED
+    else
+        return task.kind.peek()
 
 /// A task's status.
 /// :param task: The task, or null.
 /// :returns: A `TASK_` status, `TASK_COMPLETED` for a null `task`.
-#export("rf_task_status_get")
+@export("rf_task_status_get")
 routine rf_task_status_get(task: @Task) -> U32
-    branch task.is_null()
-        ? return(TASK_COMPLETED)
-        : return(task.status.peek_atomic())
+    if task.is_null()
+        return TASK_COMPLETED
+    else
+        return task.status.peek_atomic()
 
 /// A task's completion stamp.
 /// :param task: The task, or null.
 /// :returns: The stamp, or `U64.MAX` before it completes or for a null `task`.
-#export("rf_task_completion_seq")
+@export("rf_task_completion_seq")
 routine rf_task_completion_seq(task: @Task) -> U64
-    branch task.is_null()
-        ? return(U64.MAX)
-        : return(task.completion_seq.peek_atomic())
+    if task.is_null()
+        return U64.MAX
+    else
+        return task.completion_seq.peek_atomic()
 
 /// How a task completed.
 /// :param task: The task, or null.
 /// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
-#export("rf_task_completion_kind_get")
+@export("rf_task_completion_kind_get")
 routine rf_task_completion_kind_get(task: @Task) -> U32
-    branch task.is_null()
-        ? return(COMPLETION_ERROR)
-        : return(task.completion.peek())
+    if task.is_null()
+        return COMPLETION_ERROR
+    else
+        return task.completion.peek()
 
 /// Hands the boxed result to the caller, who frees it: the task no longer owns it.
 /// :param task: The task, or null.
 /// :returns: The result box, or null.
-#export("rf_task_result_payload")
+@export("rf_task_result_payload")
 routine rf_task_result_payload(task: @Task) -> Addr
-    branch task.is_null()
-        ? return(null)
-        : continue
+    if task.is_null()
+        return null
     payload: Addr = task.value_payload.peek()
     task.value_payload.poke(null)
-    return(payload)
+    return payload
 
 /// A task's error payload, still the task's.
 /// :param task: The task, or null.
 /// :returns: The error payload, or null.
-#export("rf_task_error_payload")
+@export("rf_task_error_payload")
 routine rf_task_error_payload(task: @Task) -> Addr
-    branch task.is_null()
-        ? return(null)
-        : return(task.error_payload.peek())
+    if task.is_null()
+        return null
+    else
+        return task.error_payload.peek()
 
 /// Waits (blocking the thread) until a threaded task completes: how it completed. A coroutine task isn't waited for.
 /// :param task: The task, or null.
 /// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
-#export("rf_task_wait")
+@export("rf_task_wait")
 routine rf_task_wait(task: @Task) -> U32
-    branch task.is_null()
-        ? return(COMPLETION_ERROR)
-        : continue
-    branch task.kind.peek().eq(TASK_THREADED)
-        ? wait()
-        : report()
-
-    block wait()
-        branch task.is_completed()
-            ? report()
-            : continue
-        branch here_has_live()
-            ? here()
-            : continue
-        wait_on(at: task.done, expected: 0)
-        jump wait()
-
-    // This thread's start_here() jobs go on while it waits for the thread.
-    block here()
-        branch run_here_ready()
-            ? wait()
-            : continue
-        wait_on_for(at: task.done, expected: 0, timeout_ns: HERE_POLL_NS)
-        jump wait()
-
-    block report()
-        return(task.completion.peek())
+    if task.is_null()
+        return COMPLETION_ERROR
+    if task.kind.peek() == TASK_THREADED
+        until task.is_completed()
+            if here_has_live()
+                // This thread's start_here() jobs go on while it waits for the thread.
+                if run_here_ready()
+                    continue
+                wait_on_for(at: task.done, expected: 0, timeout_ns: HERE_POLL_NS)
+                continue
+            wait_on(at: task.done, expected: 0)
+        then
+            return task.completion.peek()
+    else
+        return task.completion.peek()
 
 /// rf_task_wait for at most timeout_seconds and timeout_nanoseconds: COMPLETION_TIMEOUT if it didn't complete.
 /// :param task: The task, or null.
 /// :param timeout_seconds: The whole seconds to wait, a negative value counting as 0.
 /// :param timeout_nanoseconds: The extra nanoseconds to wait.
 /// :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
-#export("rf_task_wait_within")
+@export("rf_task_wait_within")
 routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanoseconds: U32) -> U32
-    branch task.is_null()
-        ? return(COMPLETION_ERROR)
-        : continue
-    branch task.is_completed().bitor(task.kind.peek().ne(TASK_THREADED))
-        ? report()
-        : continue
+    if task.is_null()
+        return COMPLETION_ERROR
+    if task.is_completed() or task.kind.peek() != TASK_THREADED
+        return task.completion.peek()
     secs: U64 = timeout_seconds.max(0).to[U64]()
-    span: U64 = secs.mul_clamp(1000000000).add_clamp(timeout_nanoseconds.to[U64]())
-    deadline: U64 = monotonic_ns().add_clamp(span)
-    jump wait(deadline)
+    span: U64 = secs *^ 1000000000 +^ timeout_nanoseconds.to[U64]()
 
-    block wait(deadline: U64)
-        branch task.is_completed()
-            ? report()
-            : continue
+    deadline: U64 = monotonic_ns() +^ span
+
+    until task.is_completed()
         now: U64 = monotonic_ns()
-        branch now.ge(deadline)
-            ? return(COMPLETION_TIMEOUT)
-            : continue
-        wait_on_for(at: task.done, expected: 0, timeout_ns: deadline.sub(now))
-        jump wait(deadline)
-
-    block report()
-        return(task.completion.peek())
+        if now >= deadline
+            return COMPLETION_TIMEOUT
+        wait_on_for(at: task.done, expected: 0, timeout_ns: deadline - now)
+    then
+        return task.completion.peek()
 
 /// A threaded task's thread: frees its start data, runs the routine as the current task, then, as its final act,
 /// frees the task when the consumer is done with it or it is detached (with a detached task's result box).
@@ -594,37 +550,34 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
     block reap(task: @Task)
         task.coro_lock.lock()
         task.worker_exited.poke(true)
-        owner: Bool = task.consumer_released.peek().bitor(task.detached.peek())
-        reap: Bool = owner.bitand(task.reaped.peek().bitnot())
-        branch reap
-            ? continue
-            : unlocked(task, false, null)
+        owner: Bool = task.consumer_released.peek() | task.detached.peek()
+        if not (owner & ~task.reaped.peek())
+            jump unlocked(task, false, null)
         task.reaped.poke(true)
-        box: Addr = task.detached.peek()
-            ? task.value_payload.peek()
-            : null
-        branch box.is_null()
-            ? unlocked(task, true, null)
-            : continue
+        box: Addr = when
+            task.detached.peek() => task.value_payload.peek()
+            else => null
+        if box.is_null()
+            jump unlocked(task, true, null)
         task.value_payload.poke(null)
         jump unlocked(task, true, box)
 
     block unlocked(task: @Task, reap: Bool, box: Addr)
         task.coro_lock.unlock()
-        branch box.is_null()
-            ? finish(task, reap)
-            : invalidate(task, reap, box)
+        if box.is_null()
+            jump finish(task, reap)
+        else
+            jump invalidate(task, reap, box)
 
     block invalidate(task: @Task, reap: Bool, box: Addr)
         rf_invalidate(box)
         jump finish(task, reap)
 
     block finish(task: @Task, reap: Bool)
-        branch reap
-            ? continue
-            : return()
+        if not reap
+            return
         task.free()
-        return()
+        return
 
 /// Starts a threaded task's routine on a thread of its own: 1, or 0 for a task that can't. A task already started
 /// isn't started again (the first verb that runs it starts it).
@@ -634,58 +587,49 @@ routine threaded_task_main(start: @ThreadedStart) -> Void
 /// :returns: 1 when started (or already started without an error), 0 for a null, non-threaded, or failed task.
 /// :throws: Crashes with `OutOfMemoryError` when the start data can't be allocated, and with `TaskSpawnError` when
 ///     the thread can't be started.
-#export("rf_task_spawn_threaded")
+@export("rf_task_spawn_threaded")
 routine rf_task_spawn_threaded(task: @Task, entry: Callable[(Addr,), Void], userdata: Addr) -> CInt
-    branch task.is_null().bitor(entry.addr().is_null())
-        ? return(0)
-        : continue
-    branch task.kind.peek().eq(TASK_THREADED)
-        ? continue
-        : return(0)
-    branch task.status.peek_atomic().eq(TASK_NEW)
-        ? continue
-        : started()
-    start: @ThreadedStart = zeroed[ThreadedStart](count: 1,
-        what: "Failed to allocate thread start data")
+    if task.is_null() or entry.addr().is_null()
+        return 0
+    if not (task.kind.peek() == TASK_THREADED)
+        return 0
+    if not (task.status.peek_atomic() == TASK_NEW)
+        if task.completion.peek() == COMPLETION_ERROR
+            return 0
+        else
+            return 1
+    start: @ThreadedStart = zeroed[ThreadedStart](count: 1, what: "Failed to allocate thread start data")
     start.poke(ThreadedStart(task: task, entry: entry, userdata: userdata))
     task.status.poke_atomic(TASK_READY)
     DEFAULT_THREADS.launch_unwatched(entry: threaded_task_main.to[Callable](), arg: start)
-    return(1)
-
-    block started()
-        branch task.completion.peek().eq(COMPLETION_ERROR)
-            ? return(0)
-            : return(1)
+    return 1
 
 /// Marks a task `TASK_READY`. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_mark_ready")
+@export("rf_task_mark_ready")
 routine rf_task_mark_ready(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.status.poke_atomic(TASK_READY)
-    return()
+    return
 
 /// Marks a task `TASK_RUNNING`. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_mark_running")
+@export("rf_task_mark_running")
 routine rf_task_mark_running(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.status.poke_atomic(TASK_RUNNING)
-    return()
+    return
 
 /// Marks a task `TASK_PARKED`. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_mark_parked")
+@export("rf_task_mark_parked")
 routine rf_task_mark_parked(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.status.poke_atomic(TASK_PARKED)
-    return()
+    return
 
 /// Completes the task with how and the payloads, stamped first, then wakes its waiters.
 /// :param how: A `COMPLETION_` value.
@@ -699,290 +643,256 @@ routine Task.complete(me: @Me, how: U32, value: Addr, error: Addr) -> Void
     me.error_payload.poke(error)
     me.status.poke_atomic(TASK_COMPLETED)
     me.signal_completion()
-    return()
+    return
 
 /// A detached coroutine task (execute()) has no consumer: its result box and the task are freed here. A detached
 /// threaded task is freed by its thread instead, which still touches it after this. Otherwise the task completes
 /// with the value. A null `task` does nothing.
 /// :param task: The task.
 /// :param result_payload: The result box, or null.
-#export("rf_task_complete_value")
+@export("rf_task_complete_value")
 routine rf_task_complete_value(task: @Task, result_payload: Addr) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
-    free: Bool = task.detached.peek().bitand(task.kind.peek().eq(TASK_SUSPENDED))
-    branch free
-        ? detached()
-        : continue
+    if task.is_null()
+        return
+    if task.detached.peek() & (task.kind.peek() == TASK_SUSPENDED)
+        if not result_payload.is_null()
+            rf_invalidate(result_payload)
+            task.free()
+            return
+        task.free()
+        return
     task.complete(how: COMPLETION_VALUE, value: result_payload, error: null)
-    return()
-
-    block detached()
-        branch result_payload.is_null()
-            ? continue
-            : invalidate()
-        task.free()
-        return()
-
-    block invalidate()
-        rf_invalidate(result_payload)
-        task.free()
-        return()
+    return
 
 /// execute(): the task frees itself when it completes. A threaded task's thread is already running, so this agrees
 /// with its final act under the lock: if it already exited, the task is freed here. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_set_detached")
+@export("rf_task_set_detached")
 routine rf_task_set_detached(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.coro_lock.lock()
     task.detached.poke(true)
-    threaded: Bool = task.kind.peek().eq(TASK_THREADED)
-    exited: Bool = threaded.bitand(task.worker_exited.peek())
-    reap: Bool = exited.bitand(task.reaped.peek().bitnot())
-    branch reap
-        ? continue
-        : unlock()
+    threaded: Bool = task.kind.peek() == TASK_THREADED
+    exited: Bool = threaded & task.worker_exited.peek()
+    if not (exited & ~task.reaped.peek())
+        task.coro_lock.unlock()
+        return
     task.reaped.poke(true)
     task.coro_lock.unlock()
     payload: Addr = task.value_payload.peek()
     task.value_payload.poke(null)
-    branch payload.is_null()
-        ? free()
-        : continue
-    rf_invalidate(payload)
-    jump free()
-
-    block unlock()
-        task.coro_lock.unlock()
-        return()
-
-    block free()
+    if payload.is_null()
         task.free()
-        return()
+        return
+    rf_invalidate(payload)
+    task.free()
+    return
 
 /// Whether a task is detached.
 /// :param task: The task, or null.
 /// :returns: 1 when detached, else 0 (0 for a null `task`).
-#export("rf_task_is_detached")
+@export("rf_task_is_detached")
 routine rf_task_is_detached(task: @Task) -> U8
-    branch task.is_null()
-        ? return(0)
-        : continue
-    branch task.detached.peek()
-        ? return(1)
-        : return(0)
+    if task.is_null()
+        return 0
+    if task.detached.peek()
+        return 1
+    else
+        return 0
 
 /// Completes a task with an error and wakes its waiters. A null `task` does nothing.
 /// :param task: The task.
 /// :param error_payload: The error payload.
-#export("rf_task_complete_error")
+@export("rf_task_complete_error")
 routine rf_task_complete_error(task: @Task, error_payload: Addr) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.complete(how: COMPLETION_ERROR, value: null, error: error_payload)
-    return()
+    return
 
 /// Completes a task as cancelled and wakes its waiters. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_complete_cancelled")
+@export("rf_task_complete_cancelled")
 routine rf_task_complete_cancelled(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.complete(how: COMPLETION_CANCELLED, value: null, error: null)
-    return()
+    return
 
 /// Completes a task as timed out and wakes its waiters. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_complete_timeout")
+@export("rf_task_complete_timeout")
 routine rf_task_complete_timeout(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.complete(how: COMPLETION_TIMEOUT, value: null, error: null)
-    return()
+    return
 
 /// Asks a task to stop: a flag its routine reads with rf_cancel_requested. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_request_cancel")
+@export("rf_task_request_cancel")
 routine rf_task_request_cancel(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.cancel_requested.poke_atomic(1)
-    return()
+    return
 
 /// Whether a task was asked to stop.
 /// :param task: The task, or null.
 /// :returns: True when cancellation was requested, false for a null `task`.
-#export("rf_task_is_cancel_requested")
+@export("rf_task_is_cancel_requested")
 routine rf_task_is_cancel_requested(task: @Task) -> Bool
-    branch task.is_null()
-        ? return(false)
-        : return(task.cancel_requested.peek_atomic().eq(1))
+    if task.is_null()
+        return false
+    else
+        return task.cancel_requested.peek_atomic() == 1
 
 /// Whether the agent running on this thread (a coroutine, or a threaded task's thread) has been asked to stop.
 /// :returns: 1 when asked, else 0 (0 on a plain thread).
-#export("rf_cancel_requested")
+@export("rf_cancel_requested")
 routine rf_cancel_requested() -> U32
     this_coro: @Coro = current_coro()
-    branch this_coro.is_null()
-        ? thread()
-        : return(rf_coro_is_cancel_requested(this_coro))
-
-    block thread()
+    if this_coro.is_null()
         task: @Task = current_task()
-        branch task.is_null()
-            ? return(0)
-            : return(task.cancel_requested.peek_atomic())
+        if task.is_null()
+            return 0
+        else
+            return task.cancel_requested.peek_atomic()
+    else
+        return rf_coro_is_cancel_requested(this_coro)
 
 /// Records that a task's result was taken. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_mark_result_consumed")
+@export("rf_task_mark_result_consumed")
 routine rf_task_mark_result_consumed(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.result_consumed.poke(true)
-    return()
+    return
 
 /// Whether a task's result was taken.
 /// :param task: The task, or null.
 /// :returns: True when taken, false for a null `task`.
-#export("rf_task_is_result_consumed")
+@export("rf_task_is_result_consumed")
 routine rf_task_is_result_consumed(task: @Task) -> Bool
-    branch task.is_null()
-        ? return(false)
-        : return(task.result_consumed.peek())
+    if task.is_null()
+        return false
+    else
+        return task.result_consumed.peek()
 
 /// Stores an execution backend pointer on a task. A null `task` does nothing.
 /// :param task: The task.
 /// :param backend: The backend pointer.
-#export("rf_task_attach_execution_backend")
+@export("rf_task_attach_execution_backend")
 routine rf_task_attach_execution_backend(task: @Task, backend: Addr) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.execution_backend.poke(backend)
-    return()
+    return
 
 /// A task's execution backend pointer.
 /// :param task: The task, or null.
 /// :returns: The pointer, or null.
-#export("rf_task_execution_backend")
+@export("rf_task_execution_backend")
 routine rf_task_execution_backend(task: @Task) -> Addr
-    branch task.is_null()
-        ? return(null)
-        : return(task.execution_backend.peek())
+    if task.is_null()
+        return null
+    else
+        return task.execution_backend.peek()
 
 /// Stores a wait backend pointer on a task. A null `task` does nothing.
 /// :param task: The task.
 /// :param backend: The backend pointer.
-#export("rf_task_attach_wait_backend")
+@export("rf_task_attach_wait_backend")
 routine rf_task_attach_wait_backend(task: @Task, backend: Addr) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
+    if task.is_null()
+        return
     task.wait_backend.poke(backend)
-    return()
+    return
 
 /// A task's wait backend pointer.
 /// :param task: The task, or null.
 /// :returns: The pointer, or null.
-#export("rf_task_wait_backend")
+@export("rf_task_wait_backend")
 routine rf_task_wait_backend(task: @Task) -> Addr
-    branch task.is_null()
-        ? return(null)
-        : return(task.wait_backend.peek())
+    if task.is_null()
+        return null
+    else
+        return task.wait_backend.peek()
 
 /// Adds one prerequisite to a task's count and to those remaining. A null `task` does nothing.
 /// :param task: The task.
-#export("rf_task_add_prerequisite")
+@export("rf_task_add_prerequisite")
 routine rf_task_add_prerequisite(task: @Task) -> Void
-    branch task.is_null()
-        ? return()
-        : continue
-    next_prerequisite_count: U32 = task.prerequisite_count.peek().add(1)
+    if task.is_null()
+        return
+    next_prerequisite_count: U32 = task.prerequisite_count.peek() + 1
     next_prerequisite_count.poke_into(task.prerequisite_count)
-    next_prerequisites_remaining: U32 = task.prerequisites_remaining.peek().add(1)
+    next_prerequisites_remaining: U32 = task.prerequisites_remaining.peek() + 1
     next_prerequisites_remaining.poke_into(task.prerequisites_remaining)
-    return()
+    return
 
 /// Appends `dependent` to the task's dependents list. A null `task` or `dependent` does nothing.
 /// :param task: The task.
 /// :param dependent: The task that waits for it.
 /// :throws: Crashes with `OutOfMemoryError` when the list node can't be allocated.
-#export("rf_task_add_dependent")
+@export("rf_task_add_dependent")
 routine rf_task_add_dependent(task: @Task, dependent: @Task) -> Void
-    branch task.is_null().bitor(dependent.is_null())
-        ? return()
-        : continue
+    if task.is_null() or dependent.is_null()
+        return
     node: @TaskNode = zeroed[TaskNode](count: 1, what: "Failed to allocate task queue node")
     node.task.poke(dependent)
     tail: @TaskNode = task.dependents_tail.peek()
-    branch tail.is_null()
-        ? first(node)
-        : continue
-    tail.next.poke(node)
-    task.dependents_tail.poke(node)
-    return()
-
-    block first(node: @TaskNode)
+    if tail.is_null()
         task.dependents_head.poke(node)
         task.dependents_tail.poke(node)
-        return()
+        return
+    tail.next.poke(node)
+    task.dependents_tail.poke(node)
+    return
 
 /// A task's prerequisite count.
 /// :param task: The task, or null.
 /// :returns: The count, 0 for a null `task`.
-#export("rf_task_prerequisite_count")
+@export("rf_task_prerequisite_count")
 routine rf_task_prerequisite_count(task: @Task) -> U32
-    branch task.is_null()
-        ? return(0)
-        : return(task.prerequisite_count.peek())
+    if task.is_null()
+        return 0
+    else
+        return task.prerequisite_count.peek()
 
 /// A task's prerequisites not finished yet.
 /// :param task: The task, or null.
 /// :returns: The count, 0 for a null `task`.
-#export("rf_task_prerequisites_remaining")
+@export("rf_task_prerequisites_remaining")
 routine rf_task_prerequisites_remaining(task: @Task) -> U32
-    branch task.is_null()
-        ? return(0)
-        : return(task.prerequisites_remaining.peek())
+    if task.is_null()
+        return 0
+    else
+        return task.prerequisites_remaining.peek()
 
 /// One prerequisite finished: true once none remain (the task is ready, and a `TASK_NEW` one is marked
 /// `TASK_READY`). A failed one cancels the task.
 /// :param task: The task, or null.
 /// :param success: Whether the prerequisite succeeded.
 /// :returns: True once none remain, false otherwise, after a failure, or for a null `task`.
-#export("rf_task_prerequisite_complete")
+@export("rf_task_prerequisite_complete")
 routine rf_task_prerequisite_complete(task: @Task, success: Bool) -> Bool
-    branch task.is_null()
-        ? return(false)
-        : continue
-    branch success
-        ? continue
-        : failed()
-    remaining: U32 = task.prerequisites_remaining.peek()
-    left: U32 = remaining.sub_clamp(1)
-    task.prerequisites_remaining.poke(left)
-    branch left.eq(0)
-        ? continue
-        : return(false)
-    branch task.status.peek_atomic().eq(TASK_NEW)
-        ? continue
-        : return(true)
-    task.status.poke_atomic(TASK_READY)
-    return(true)
-
-    block failed()
+    if task.is_null()
+        return false
+    if not success
         task.stamp()
         task.completion.poke(COMPLETION_CANCELLED)
         task.status.poke_atomic(TASK_COMPLETED)
         task.signal_completion()
-        return(false)
+        return false
+    remaining: U32 = task.prerequisites_remaining.peek()
+    left: U32 = remaining -^ 1
+    task.prerequisites_remaining.poke(left)
+    if not (left == 0)
+        return false
+    if not (task.status.peek_atomic() == TASK_NEW)
+        return true
+    task.status.poke_atomic(TASK_READY)
+    return true

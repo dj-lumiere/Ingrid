@@ -23,120 +23,109 @@ record Monitor
 /// :returns: The new value.
 routine Monitor.construct(lock: ExclusiveLock, cond: SignalCaster, waiters: @ChannelWaiter,
     refcount: U32) -> Me
-    return(Me(lock, cond, waiters, refcount))
+    return Me(lock, cond, waiters, refcount)
 
 /// Releases nothing: a `Monitor` holds no memory of its own.
 routine Monitor.destruct(me: @Me) -> Void
-    return()
+    return
 
 /// Creates a SignalCaster monitor with one handle.
 /// :returns: The new monitor.
 /// :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-#export("rf_signal_create")
+@export("rf_signal_create")
 routine rf_signal_create() -> @Monitor
     sig: @Monitor = zeroed[Monitor](count: 1, what: "failed to allocate SignalCaster")
     sig.refcount.poke(1)
-    return(sig)
+    return sig
 
 /// Adds a handle to the monitor, under its lock. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_add_ref")
+@export("rf_signal_add_ref")
 routine rf_signal_add_ref(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.lock.lock()
-    next_refcount: U32 = sig.refcount.peek().add(1)
+    next_refcount: U32 = sig.refcount.peek() + 1
     next_refcount.poke_into(sig.refcount)
     sig.lock.unlock()
-    return()
+    return
 
 /// Drops a handle. The monitor is freed with the last. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_drop")
+@export("rf_signal_drop")
 routine rf_signal_drop(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.lock.lock()
     refs: U32 = sig.refcount.peek()
-    left: U32 = refs.sub_clamp(1)
+    left: U32 = refs -^ 1
     sig.refcount.poke(left)
     sig.lock.unlock()
-    branch left.eq(0)
-        ? continue
-        : return()
+    if not (left == 0)
+        return
     c_free(sig)
-    return()
+    return
 
 /// Takes the monitor lock. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_lock")
+@export("rf_signal_lock")
 routine rf_signal_lock(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.lock.lock()
-    return()
+    return
 
 /// Releases the monitor lock. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_unlock")
+@export("rf_signal_unlock")
 routine rf_signal_unlock(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.lock.unlock()
-    return()
+    return
 
 /// Waits for a cast, holding the monitor lock: releases it, suspends, and takes it again. A coroutine parks on the
 /// scheduler, a plain thread waits on the condition. A null `sig` returns at once.
 /// :param sig: The monitor, its lock held by the caller.
-#export("rf_signal_wait")
+@export("rf_signal_wait")
 routine rf_signal_wait(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sched: @Sched = rf_sched_current()
     coro: @Coro = current_coro()
-    branch sched.is_null().bitor(coro.is_null())
-        ? thread()
-        : continue
-    // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+    if sched.is_null() or coro.is_null()
+        // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+        // a cast may come from another thread: not a deadlock meanwhile
+        sig.cond.wait(sig.lock)
+        return
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a monitor waiter")
     node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
     sig.lock.unlock()
-    // a cast may come from another thread: not a deadlock meanwhile
     rf_sched_arm_cross_waker(sched)
     rf_sched_park_external()
     rf_sched_disarm_cross_waker(sched)
     sig.lock.lock()
     unlink(list: sig.waiters, node)
     c_free(node)
-    return()
-
-    block thread()
-        sig.cond.wait(sig.lock)
-        return()
+    return
 
 /// rf_signal_wait for at most timeout_ns: 1 if woken before the deadline (check the condition again), 0 if it
 /// passed. A null `sig` returns 0 at once.
 /// :param sig: The monitor, its lock held by the caller.
 /// :param timeout_ns: The longest wait, in nanoseconds.
 /// :returns: 1 when woken before the deadline, 0 when it passed.
-#export("rf_signal_wait_deadline")
+@export("rf_signal_wait_deadline")
 routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
-    branch sig.is_null()
-        ? return(0)
-        : continue
-    deadline: U64 = monotonic_ns().add_clamp(timeout_ns)
+    if sig.is_null()
+        return 0
+    deadline: U64 = monotonic_ns() +^ timeout_ns
     sched: @Sched = rf_sched_current()
     coro: @Coro = current_coro()
-    branch sched.is_null().bitor(coro.is_null())
-        ? thread(deadline)
-        : continue
-    // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+    if sched.is_null() or coro.is_null()
+        // The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
+        in_time: Bool = sig.cond.wait_until(mutex: sig.lock, deadline_ns: deadline)
+        return in_time.to[U32]()
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1, what: "Failed to allocate a monitor waiter")
     node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
@@ -145,63 +134,43 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
     sig.lock.lock()
     unlink(list: sig.waiters, node)
     c_free(node)
-    jump result(deadline)
-
-    block thread(deadline: U64)
-        in_time: Bool = sig.cond.wait_until(mutex: sig.lock, deadline_ns: deadline)
-        return(in_time.to[U32]())
-
-    block result(deadline: U64)
-        branch monotonic_ns().ge(deadline)
-            ? return(0)
-            : return(1)
+    if monotonic_ns() >= deadline
+        return 0
+    else
+        return 1
 
 /// Wakes one waiter: a parked coroutine if there is one, else a thread. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_cast_one")
+@export("rf_signal_cast_one")
 routine rf_signal_cast_one(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.cast_one()
-    return()
+    return
 
 /// rf_signal_cast_one on a monitor that is there, under its lock.
 routine Monitor.cast_one(me: @Me) -> Void
     me.lock.lock()
     w: @ChannelWaiter = me.waiters.peek()
-    branch w.is_null()
-        ? thread()
-        : continue
-    rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
-    jump finish()
-
-    block thread()
+    if w.is_null()
         me.cond.cast_one()
-        jump finish()
-
-    block finish()
         me.lock.unlock()
-        return()
+        return
+    rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
+    me.lock.unlock()
+    return
 
 /// Wakes every waiter: each parked coroutine and every waiting thread. A null `sig` does nothing.
 /// :param sig: The monitor.
-#export("rf_signal_cast_all")
+@export("rf_signal_cast_all")
 routine rf_signal_cast_all(sig: @Monitor) -> Void
-    branch sig.is_null()
-        ? return()
-        : continue
+    if sig.is_null()
+        return
     sig.lock.lock()
-    jump next(sig.waiters.peek())
 
-    block next(w: @ChannelWaiter)
-        branch w.is_null()
-            ? done()
-            : continue
+    until w.is_null() with w: @ChannelWaiter = sig.waiters.peek()
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
-        jump next(w.next.peek())
-
-    block done()
-        sig.cond.cast_all()
-        sig.lock.unlock()
-        return()
+        continue with w: w.next.peek()
+    sig.cond.cast_all()
+    sig.lock.unlock()
+    return
