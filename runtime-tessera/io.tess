@@ -369,8 +369,10 @@ record ProcState
     exit_status: S64
     term_signal: CInt  # the signal that stopped the child, or 0
     spawn_failed: Bool
-    output: Memory[Byte]  # the captured standard output, dropped once copied out
-    errors: Memory[Byte]  # the captured standard error, dropped once copied out
+    output: @Byte  # a malloc'd, NUL-terminated copy of the captured standard output, or null
+    output_count: USize
+    errors: @Byte  # a malloc'd, NUL-terminated copy of the captured standard error, or null
+    errors_count: USize
 
 ### Makes a `ProcState` from its fields.
 ### :param shell: Its `shell`.
@@ -386,19 +388,19 @@ record ProcState
 ### :param term_signal: Its `term_signal`.
 ### :param spawn_failed: Its `spawn_failed`.
 ### :param output: Its `output`.
+### :param output_count: Its `output_count`.
 ### :param errors: Its `errors`.
+### :param errors_count: Its `errors_count`.
 ### :returns: The new value.
 routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte], arg_count: USize,
     arg_cap: USize, directory: Span[Byte], env: @EnvVar, env_count: USize, env_cap: USize,
-    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: Memory[Byte],
-    errors: Memory[Byte]) -> Me
+    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: USize,
+    errors: @Byte, errors_count: USize) -> Me
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
-        exit_status, term_signal, spawn_failed, output, errors)
+        exit_status, term_signal, spawn_failed, output, output_count, errors, errors_count)
 
-### Drops the captured streams. The program and the directory are malloc'd copies `free_bytes` gives back.
+### Releases nothing: the captured copies go to the caller, and proc_state_free gives back the strings.
 routine ProcState.destruct(me: @Me) -> None
-    me.output.destruct()
-    me.errors.destruct()
     return
 
 ### The signal that stopped this thread's last subprocess.
@@ -481,22 +483,33 @@ routine proc_state_free(st: @ProcState) -> None
     c_free(st)
     return
 
-### A malloc'd, NUL-terminated copy of the captured bytes, which are dropped: what RazorForge reads and frees.
-### :param b: The captured bytes, taken over.
+### A malloc'd, NUL-terminated copy of the captured bytes: what RazorForge reads and frees.
+### :param b: The captured bytes.
 ### :returns: The copy, or null when there is nothing captured or the copy can't be allocated (or nothing was).
-routine terminated(b: Memory[Byte]) -> @Byte
-    local held: @Memory[Byte] <- b
+routine terminated(b: @Memory[Byte]) -> @Byte
+    data: @Byte = b.data.peek()
+    if data.is_null()
+        return null
+    n: USize = b.count()
+    buf: Addr = c_malloc(n + 1)
+    if buf.is_null()
+        return null
+    c_memcpy(buf, data, n)
+    buf.to[@Byte]().stride(n).poke(0x00)
+    return buf.to[@Byte]()
 
-    if not b.data.is_null()
-        n: USize = b.count()
-        buf: Addr = c_malloc(n + 1)
-        if not buf.is_null()
-            c_memcpy(buf, b.data, n)
-            buf.to[@Byte]().stride(n).poke(0x00)
-            drop held
-            return buf.to[@Byte]()
-    drop held
-    return null
+### Runs the prepared subprocess with `options`, through the shell or not as the state says.
+### :param st: The prepared state.
+### :param options: The directory, environment, and standard streams.
+### :param alloc: The allocator for the captured streams.
+### :returns: The run's output, or why it couldn't start.
+routine run_state(st: @ProcState, options: ProcessOptions,
+    alloc: @MemoryManager) -> Result[ProcessOutput, ProcessError]
+    if st.shell.peek()
+        return run_shell_result(command: st.program.peek(), options, alloc)
+    args: Span[Span[Byte]] = Span[Span[Byte]].construct(data: st.args.peek(),
+        count: st.arg_count.peek())
+    return run_process_result(program: st.program.peek(), args, options, alloc)
 
 ### Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the
 ### exit status, the signal that stopped it, or that it couldn't start.
@@ -511,17 +524,15 @@ routine proc_run_blocking(st: @ProcState) -> None
     options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.peek(),
         env_count: st.env_count.peek(), stdin: InputMode.NULL, stdout: OutputMode.CAPTURE,
         stderr: OutputMode.CAPTURE)
-    r: Result[ProcessOutput, ProcessError] = when
-        st.shell.peek() => run_shell_result(command: st.program.peek(), options, alloc)
-        else =>
-            args: Span[Span[Byte]] = Span[Span[Byte]].construct(data: st.args.peek(),
-                count: st.arg_count.peek())
-            becomes run_process_result(program: st.program.peek(), args, options, alloc)
-    when r
+    when run_state(st, options, alloc)
         is ProcessOutput as out =>
-            st.output.poke(out.stdout)
-            st.errors.poke(out.stderr)
-            when out.status
+            st.output.poke(terminated(out.stdout))
+            st.output_count.poke(out.stdout.count())
+            st.errors.poke(terminated(out.stderr))
+            st.errors_count.poke(out.stderr.count())
+            status: ExitStatus = out.status.peek()
+            drop out
+            when status
                 is Exited as ended =>
                     st.exit_status.poke(ended.code.to[S64]())
                     return
@@ -544,14 +555,10 @@ routine proc_exec(st: @ProcState) -> S64
     req.proc.poke(st)
     io_run(req)
     PROC_SIGNAL.poke(st.term_signal.peek())
-    output_count: USize = st.output.count()
-    PROC_OUT.poke(terminated(st.output.peek()))
-    st.output.poke(.hollow())
-    PROC_OUT_LEN.poke(output_count.to[U64]())
-    errors_count: USize = st.errors.count()
-    PROC_ERR.poke(terminated(st.errors.peek()))
-    st.errors.poke(.hollow())
-    PROC_ERR_LEN.poke(errors_count.to[U64]())
+    PROC_OUT.poke(st.output.peek())
+    PROC_OUT_LEN.poke(st.output_count.peek().to[U64]())
+    PROC_ERR.poke(st.errors.peek())
+    PROC_ERR_LEN.poke(st.errors_count.peek().to[U64]())
     failed: Bool = st.spawn_failed.peek()
     code: S64 = st.exit_status.peek()
     proc_state_free(st)

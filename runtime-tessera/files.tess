@@ -65,30 +65,16 @@ routine bytes_result(s: @Byte, len: USize) -> @Byte
     terminator.poke(0x00)
     return result(buf: buf.to[@Byte](), len)
 
-### A Directory's path copied into a malloc'd, NUL-terminated buffer, as the result. The directory's own memory is
-### dropped.
-### :param r: The directory, or the failure.
+### A path copied into a malloc'd, NUL-terminated buffer, as the result. The path's own memory is dropped.
+### :param r: The path's memory, or the failure.
 ### :returns: The path, or null (length 0) on a failure.
-routine path_result(r: Result[Directory, FsError]) -> @Byte
-    d: Directory = when r
-        is Directory as d => d
+routine path_result(r: Result[Memory[Byte], FsError]) -> @Byte
+    when steal r
+        is Memory[Byte] as path =>
+            copied: @Byte = bytes_result(s: path.data.peek(), len: path.count())
+            drop path
+            return copied
         is FsError => return no_result()
-    local held: @Directory <- d
-    copied: @Byte = bytes_result(s: d.path.data, len: d.path.count)
-    drop held
-    return copied
-
-### A File's path copied into a malloc'd, NUL-terminated buffer, as the result. The file's own memory is dropped.
-### :param r: The file, or the failure.
-### :returns: The path, or null (length 0) on a failure.
-routine file_path_result(r: Result[File, FsError]) -> @Byte
-    f: File = when r
-        is File as f => f
-        is FsError => return no_result()
-    local held: @File <- f
-    copied: @Byte = bytes_result(s: f.path.data, len: f.path.count)
-    drop held
-    return copied
 
 ### The malloc heap as an MemoryManager, so what Standard/Os hands back is freed by rf_invalidate.
 ### :returns: The C heap allocator.
@@ -474,22 +460,19 @@ routine rf_file_is_eof(fd: S32) -> Bool
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     local alloc: @MemoryManager <- heap()
 
-    r: Result[Memory[Byte], FsError] = File.at(cpath.to[CStr]().getview()).read_all_result(alloc)
-    text: Memory[Byte] = when r
-        is Memory[Byte] as text => text
+    when File.at(cpath.to[CStr]().getview()).read_all_result(alloc)
+        is Memory[Byte] as text =>
+            n: USize = text.count()
+            buf: Addr = c_realloc(null, n + 1)
+            if buf.is_null()
+                drop text
+                return -1
+            buf.to[@Byte]().copy(src: text.data.peek(), count: n)
+            buf.to[@Byte]().stride(n).poke(0x00)
+            drop text
+            data.poke(buf.to[@Byte]())
+            return n.to[S64]()
         is FsError => return -1
-    local held: @Memory[Byte] <- text
-    n: USize = text.count
-    buf: Addr = c_realloc(null, n + 1)
-    if buf.is_null()
-        drop held
-        return -1
-    else
-        buf.to[@Byte]().copy(src: text.data, count: n)
-        buf.to[@Byte]().stride(n).poke(0x00)
-        drop held
-        data.poke(buf.to[@Byte]())
-        return n.to[S64]()
 
 ### `len` bytes of `data` as the NUL-terminated path's whole file: `len`, or -1.
 ### :param cpath: The NUL-terminated path.
@@ -966,7 +949,7 @@ routine rf_fs_touch(path: @Byte, len: S32) -> S32
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(File.at(path_of(path, len)).absolute_result(alloc))
+    return path_result(File.at(path_of(path, len)).absolute_result(alloc))
 
 ### The path with links, ".", and ".." resolved. It must exist.
 ### :param path: The path.
@@ -976,7 +959,7 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(File.at(path_of(path, len)).canonical_result(alloc))
+    return path_result(File.at(path_of(path, len)).canonical_result(alloc))
 
 ### Makes the file exactly size bytes, creating, extending (zeros) or truncating it: 0, or -1.
 ### :param path: The path.

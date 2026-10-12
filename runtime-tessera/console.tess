@@ -144,25 +144,23 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> None
 ### :param text: The text, allocated with C's heap. It is taken over.
 ### :returns: The NUL-terminated string, or null when the reallocation fails.
 routine terminated_text(text: Memory[Byte]) -> @Byte
-    local held: @Memory[Byte] <- text
-
-    n: USize = text.count
+    n: USize = text.count()
     buf: Addr = c_realloc(null, n + 1)
     if buf.is_null()
-        drop held
+        drop text
         return null
     else
-        buf.to[@Byte]().copy(src: text.data, count: n)
+        buf.to[@Byte]().copy(src: text.data.peek(), count: n)
         buf.to[@Byte]().stride(n).poke(0x00)
-        drop held
+        drop text
         return buf.to[@Byte]()
 
 ### {terminated_text} of the text when there is one.
 ### :param text: The text read, or absent at the end of the input.
 ### :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
 routine terminated_option(text: Maybe[Memory[Byte]]) -> @Byte
-    when text
-        is Memory[Byte] as t => return terminated_text(t)
+    when steal text
+        is Memory[Byte] as t => return terminated_text(steal t)
         is None => return null
 
 ### The next non-empty line from stdin, without its end, or null at the end of the input. Standard output is flushed
@@ -176,16 +174,14 @@ routine rf_console_ask_line() -> @Byte
     alloc.poke(heap())
 
     while true
-        line2: Maybe[Memory[Byte]] = In.read_line_checked(alloc)
-        t2: Memory[Byte] = when line2
-            is Memory[Byte] as t2 => t2
+        when In.read_line_checked(alloc)
+            is Memory[Byte] as t2 =>
+                if t2.count() == 0
+                    drop t2
+                    continue
+                else
+                    return terminated_text(steal t2)
             is None => return null
-        if t2.count == 0
-            local held: @Memory[Byte] <- t2
-            drop held
-            continue
-        else
-            return terminated_text(t2)
 
 ### The next word from stdin, or null at the end of the input. Standard output is flushed first.
 ### :returns: The word as a NUL-terminated string the caller frees, or null.
