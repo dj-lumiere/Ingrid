@@ -112,71 +112,51 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 ###     allocated.
 @export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
-    index: USize = control.index.peek_atomic()
-    if index == 0
-        jump assign()
-    else
-        jump array(index)
-
-    block assign()
-        EMUTLS_LOCK.lock()
-        current: USize = control.index.peek()
-        if not (current == 0)
-            jump assigned(current)
-        next: USize = EMUTLS_NEXT.peek() + 1
-        EMUTLS_NEXT.poke(next)
-        control.index.poke_atomic(next)
-        jump assigned(next)
-
-    block assigned(index: USize)
-        EMUTLS_LOCK.unlock()
-        jump array(index)
-
-    block array(index: USize)
-        arr: @EmutlsArray = EMUTLS.peek()
-        if arr.is_null()
-            jump fresh(index)
-        else
-            jump sized(arr, index)
-
-    block fresh(index: USize)
-        made: @EmutlsArray = zeroed[EmutlsArray](count: 1, what: "Failed to allocate thread-local storage")
-        EMUTLS.poke(made)
-        jump sized(made, index)
-
-    block sized(arr: @EmutlsArray, index: USize)
-        have: USize = arr.size.peek()
-        if not (have < index)
-            jump object(arr, index)
+    seen: USize = control.index.peek_atomic()
+    index: USize = when
+        seen == 0 =>
+            EMUTLS_LOCK.lock()
+            current: USize = control.index.peek()
+            assigned: USize = when
+                current != 0 => current
+                else =>
+                    next: USize = EMUTLS_NEXT.peek() + 1
+                    EMUTLS_NEXT.poke(next)
+                    control.index.poke_atomic(next)
+                    becomes next
+            EMUTLS_LOCK.unlock()
+            becomes assigned
+        else => seen
+    known: @EmutlsArray = EMUTLS.peek()
+    arr: @EmutlsArray = when
+        known.is_null() =>
+            fresh: @EmutlsArray = zeroed[EmutlsArray](count: 1,
+                what: "Failed to allocate thread-local storage")
+            EMUTLS.poke(fresh)
+            becomes fresh
+        else => known
+    have: USize = arr.size.peek()
+    if have < index
         grown: Addr = c_realloc(arr.data.peek(), index * sizeof[Addr]())
         if grown.is_null()
             rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow thread-local storage")
-        c_memset(grown.to[@Byte]().stride(have * sizeof[Addr]()), 0, (index - have) * sizeof[Addr]())
+        c_memset(grown.to[@Byte]().stride(have * sizeof[Addr]()), 0,
+            (index - have) * sizeof[Addr]())
         arr.data.poke(grown.to[@Addr]())
         arr.size.poke(index)
-        jump object(arr, index)
-
-    block object(arr: @EmutlsArray, index: USize)
-        slot: @Addr = arr.data.peek().stride(index - 1)
-        obj: Addr = slot.peek()
-        if obj.is_null()
-            jump make(slot)
-        else
-            return obj
-
-    block make(slot: @Addr)
-        size: USize = control.size.peek()
-        made: Addr = aligned_alloc(size, align: control.align.peek())
-        if made.is_null()
-            rf_throw(error_type: "OutOfMemoryError", message: "Failed to allocate a thread-local variable")
-        init: Addr = control.value.peek()
-        if init.is_null()
-            jump zero(slot, made, size)
-        c_memcpy(made, init, size)
-        slot.poke(made)
-        return made
-
-    block zero(slot: @Addr, made: Addr, size: USize)
+    slot: @Addr = arr.data.peek().stride(index - 1)
+    obj: Addr = slot.peek()
+    if not obj.is_null()
+        return obj
+    size: USize = control.size.peek()
+    made: Addr = aligned_alloc(size, align: control.align.peek())
+    if made.is_null()
+        rf_throw(error_type: "OutOfMemoryError",
+            message: "Failed to allocate a thread-local variable")
+    init: Addr = control.value.peek()
+    if init.is_null()
         c_memset(made, 0, size)
-        slot.poke(made)
-        return made
+    else
+        c_memcpy(made, init, size)
+    slot.poke(made)
+    return made

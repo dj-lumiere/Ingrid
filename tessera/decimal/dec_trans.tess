@@ -123,20 +123,15 @@ routine me_exp(x: MpApprox, n: USize) -> MpApprox
     local small: MpApprox = me_sub(a: x, b: ln2k, n).ldexp(k: -s, n)
     local one: MpApprox = me_int(k: 1, n)
 
-    jump series(small, me_add(a: one, b: small, n), 2)
-
-    block series(term: MpApprox, sum: MpApprox, i: U64)
-        next: MpApprox = me_div_u64(a: me_mul(a: term, b: small, n), k: i, n)
-        if me_is_negligible(term: next, sum, n)
-            jump square(me_plus_abs(s: sum, e: next.v.exp + 1, n), 0)
+    while true with term: MpApprox = small, sum: MpApprox = me_add(a: one, b: small, n), i: U64 = 2
+        next2: MpApprox = me_div_u64(a: me_mul(a: term, b: small, n), k: i, n)
+        if me_is_negligible(term: next2, sum, n)
+            each j in 0 til s with e: MpApprox = me_plus_abs(s: sum, e: next2.v.exp + 1, n)
+                continue with e: me_mul(a: e, b: e, n)
+            then
+                return e.ldexp(k, n)
         else
-            jump series(next, me_add(a: sum, b: next, n), i + 1)
-
-    block square(e: MpApprox, j: S64)
-        if j >= s
-            return e.ldexp(k, n)
-        else
-            jump square(me_mul(a: e, b: e, n), j + 1)
+            continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 1
 
 ### e^x - 1: below 1/16 its own series x + x^2/2 + ..., which keeps the relative accuracy near 0, else e^x - 1.
 ### :param x: The operand.
@@ -220,24 +215,22 @@ routine me_sincos(r: MpApprox, n: USize) -> MePair
     local r2: MpApprox = me_mul(a: r, b: r, n)
     local one: MpApprox = me_int(k: 1, n)
 
-    jump sine(r, r, 1)
-
     # term = r^(2i - 1) / (2i - 1)!, signs alternating
-    block sine(term: MpApprox, sum: MpApprox, i: U64)
-        div: U64 = i * 2 * (i * 2 + 1)
-        next: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div, n).negate()
-        if me_is_negligible(term: next, sum, n)
-            jump cosine(me_plus_abs(s: sum, e: next.v.exp, n), one, one, 1)
-        else
-            jump sine(next, me_add(a: sum, b: next, n), i + 1)
+    while true with term: MpApprox = r, sum: MpApprox = r, i: U64 = 1
+        div2: U64 = i * 2 * (i * 2 + 1)
+        next2: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div2, n).negate()
+        if me_is_negligible(term: next2, sum, n)
+            s: MpApprox = me_plus_abs(s: sum, e: next2.v.exp, n)
 
-    block cosine(s: MpApprox, term: MpApprox, sum: MpApprox, i: U64)
-        div: U64 = (i * 2 - 1) * (i * 2)
-        next: MpApprox = me_div_u64(a: me_mul(a: term, b: r2, n), k: div, n).negate()
-        if me_is_negligible(term: next, sum, n)
-            return (a: s, b: me_plus_abs(s: sum, e: next.v.exp, n))
+            while true with term2: MpApprox = one, sum2: MpApprox = one, i2: U64 = 1
+                div3: U64 = (i2 * 2 - 1) * (i2 * 2)
+                next3: MpApprox = me_div_u64(a: me_mul(a: term2, b: r2, n), k: div3, n).negate()
+                if me_is_negligible(term: next3, sum: sum2, n)
+                    return (a: s, b: me_plus_abs(s: sum2, e: next3.v.exp, n))
+                else
+                    continue with term2: next3, sum2: me_add(a: sum2, b: next3, n), i2: i2 + 1
         else
-            jump cosine(s, next, me_add(a: sum, b: next, n), i + 1)
+            continue with term: next2, sum: me_add(a: sum, b: next2, n), i: i + 1
 
 ### atan d for |d| below 2^-8 by its series d - d^3/3 + ..., the rest below the first term left out.
 ### :param d: The argument, below 2^-8 in magnitude.
@@ -366,30 +359,22 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
     top: B64 = ay.v.top_b64(n)
     lg: B64 = top.log10() + y.v.exp.to[B64]() * 0.3010299956639812
     a: S64 = lg.floor().to[S64]()
-    jump at((a - p + 1).max(f.qmin), 0)
 
     # the digits at exponent q: z = |y| 10^-q
-    block at(q: S64, tries: S64)
+    while true with q: S64 = (a - p + 1).max(f.qmin), tries: S64 = 0
         if q > f.qmax + 2
             return (ok: true, d: dec_inf(neg))
-        else
-            jump scale(q, tries)
-
-    block scale(q: S64, tries: S64)
-        jump split(q, tries, me_scale10(x: ay, k: -q, n))
-
-    block split(q: S64, tries: S64, z: MpApprox)
+        z: MpApprox = me_scale10(x: ay, k: -q, n)
         int: U128 = mp_floor_u128(x: z.v, n)
         big: Bool = int >= dec_p10_128(p)
         tiny: Bool = int < dec_p10_128(p - 1) and q > f.qmin
         last: Bool = tries >= 3
-        when
-            not last and big => jump at(q + 1, tries + 1)
-            not last and tiny => jump at(q - 1, tries + 1)
-            else => jump decide(q, z, int)
+        if not last and big
+            continue with q: q + 1, tries: tries + 1
+        if not last and tiny
+            continue with q: q - 1, tries: tries + 1
 
-    # the fraction against 1/2, with the band: |z| err 2^-64n
-    block decide(q: S64, z: MpApprox, int: U128)
+        # the fraction against 1/2, with the band: |z| err 2^-64n
         frac: Mp = mp_sub(a: z.v, b: mp_of_u128(v: int, scale: 0, n), n)
         half: Mp = mp_of_u128(v: 1, scale: -1, n)
         d: B64 = mp_sub(a: frac, b: half, n).to_b64(n)
@@ -397,12 +382,11 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: USize, tie_rule: U8) -> DecTr
         band: B64 = zf * z.relative(n) * 2.0
         clear: Bool = d.abs() > band and band < 0.25
         up: Bool = d > 0.0
-        when
-            clear => jump result(q, int + up.to[U128]())
-            tie_rule != 0 and not clear => jump result(q, int + dec_tie_step(tie_rule, int))
+        c: U128 = when
+            clear => int + up.to[U128]()
+            tie_rule != 0 and not clear => int + dec_tie_step(tie_rule, int)
             else => return (ok: false, d: dec_nan())
 
-    block result(q: S64, c: U128)
         carry: Bool = c == dec_p10_128(p)
         cc: U128 = when
             carry => dec_p10_128(p - 1)
@@ -1396,21 +1380,20 @@ routine dec_tie_rule(fn: U32, x: Dec) -> U8
     local tiny: Bool = dec_digits(x.coeff) + x.exp < -150
 
     if tiny
-        jump side()
-    else
-        return 1
-
-    block side()
         when fn
             8, 11, 16, 23 => return 2
             10, 13, 14, 21 => return 3
-            1 => jump sign_dependent(~x.neg)
-            5 => jump sign_dependent(x.neg)
+            1 =>
+                # expm1 x = x + x^2/2 + ... lies above x, log1p x = x - x^2/2 + ... below it
+                if ~x.neg
+                    return 2
+                else
+                    return 3
+            5 =>
+                if x.neg
+                    return 2
+                else
+                    return 3
             else => return 1
-
-    # expm1 x = x + x^2/2 + ... lies above x, log1p x = x - x^2/2 + ... below it
-    block sign_dependent(up: Bool)
-        if up
-            return 2
-        else
-            return 3
+    else
+        return 1

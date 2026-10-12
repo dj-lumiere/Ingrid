@@ -268,24 +268,22 @@ routine we_sincos_series(r: We) -> WePair
     local r2: We = we_mul(a: r, b: r)
     local one: We = we_int(1)
 
-    jump sine(r, r, 1)
-
     # term = r^(2i - 1) / (2i - 1)!, signs alternating
-    block sine(term: We, sum: We, i: U64)
-        div: U64 = i * 2 * (i * 2 + 1)
-        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
-        if we_is_negligible(term: next, sum)
-            jump cosine(we_plus_abs(s: sum, e: next.v.exp), one, one, 1)
-        else
-            jump sine(next, we_add(a: sum, b: next), i + 1)
+    while true with term: We = r, sum: We = r, i: U64 = 1
+        div2: U64 = i * 2 * (i * 2 + 1)
+        next2: We = we_div_u64(a: we_mul(a: term, b: r2), k: div2).negate()
+        if we_is_negligible(term: next2, sum)
+            s: We = we_plus_abs(s: sum, e: next2.v.exp)
 
-    block cosine(s: We, term: We, sum: We, i: U64)
-        div: U64 = (i * 2 - 1) * (i * 2)
-        next: We = we_div_u64(a: we_mul(a: term, b: r2), k: div).negate()
-        if we_is_negligible(term: next, sum)
-            return (a: s, b: we_plus_abs(s: sum, e: next.v.exp))
+            while true with term2: We = one, sum2: We = one, i2: U64 = 1
+                div3: U64 = (i2 * 2 - 1) * (i2 * 2)
+                next3: We = we_div_u64(a: we_mul(a: term2, b: r2), k: div3).negate()
+                if we_is_negligible(term: next3, sum: sum2)
+                    return (a: s, b: we_plus_abs(s: sum2, e: next3.v.exp))
+                else
+                    continue with term2: next3, sum2: we_add(a: sum2, b: next3), i2: i2 + 1
         else
-            jump cosine(s, next, we_add(a: sum, b: next), i + 1)
+            continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 1
 
 ### sin r and cos r for |r| <= 0.8: r = c + s with c = j/64 and |s| <= 1/128, exactly in fixed point, sin s = s P(s^2)
 ### and cos s = Q(s^2) by Horner's scheme in fixed point, then sin r = sin c cos s + cos c sin s and cos r = cos c cos s
@@ -720,28 +718,13 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
     base: We = we_add(a: b, b: we_const(DEC_HALF_LN_2PI))
     scale: B64 = b64_pow2(-(bits + 8)) * zf
     limit: B64 = base.v.to_b64().abs() * scale
-    jump count(base, limit, 1, wf, we_const(DEC_STIRLING).v.to_b64().abs(), 0.0)
+    top, rest, total, weighted = we_stirling_terms(limit, wf)
 
-    # T_k = |c_k| w^k (1.01): the terms 0 .. k - 1 are in when T_k falls below the limit
-    block count(base: We, limit: B64, k: USize, power: B64, total: B64, weighted: B64)
-        ck: B64 = we_const(DEC_STIRLING.add(k)).v.to_b64().abs()
-        tk: B64 = ck * power * 1.01
-        last: Bool = k + 1 >= DEC_STIRLING_TERMS
-        if tk < limit or last
-            jump horner(base, k - 1, tk, total, weighted)
-        else
-            jump count(base, limit, k + 1, power * wf, total + tk, weighted + k.to[B64]() * tk)
-
-    block horner(base: We, top: USize, rest: B64, total: B64, weighted: B64)
-        jump step(base, top, rest, total, weighted, top, wide_stirling_coefficient(top).v)
-
-    block step(base: We, top: USize, rest: B64, total: B64, weighted: B64, k: USize, acc: W)
-        if k == 0
-            jump sum(base, top, rest, total, weighted, acc)
-        else
-            jump step(base, top, rest, total, weighted, k - 1, w_add(a: wide_stirling_coefficient(k - 1).v, b: w_mul(a: w.v, b: acc)))
-
-    block sum(base: We, top: USize, rest: B64, total: B64, weighted: B64, p: W)
+    # P(w) by Horner's scheme from c_top down to c_0
+    until k == 0 with k: USize = top, acc: W = wide_stirling_coefficient(top).v
+        continue with k: k - 1, acc: w_add(a: wide_stirling_coefficient(k - 1).v,
+            b: w_mul(a: w.v, b: acc))
+    then
         c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
         low: B64 = c0 - (total - c0) * 1.01
         n: B64 = top.to[B64]()
@@ -750,7 +733,7 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
         pe: B64 = when
             low > 0.0 => spread / low * 1.02 + 2.0
             else => B64.from_bits(0x7FF0000000000000)
-        s: We = we_mul(a: inv, b: (v: p, err: pe))
+        s: We = we_mul(a: inv, b: (v: acc, err: pe))
         r: We = we_add(a: base, b: s)
         tail: B64 = rest / zf * 1.02
         hb: U64 = tail.bits() >> 52
@@ -759,6 +742,22 @@ routine we_lngamma_stirling(z: We, bits: S64) -> We
             return r
         else
             return we_plus_abs(s: r, e)
+
+### How many Stirling terms ln Γ sums, from B64 estimates T_k = |c_k| w^k (with a margin): the terms 0 .. k - 1
+### are in when T_k falls below the limit, or when c_k is the table's last coefficient.
+### :param limit: The bound T_k must fall below, 2^-(bits + 8) of the sum.
+### :param wf: The estimate of w = 1/z^2, with its margin.
+### :returns: The index of the last term in (N), the first term left out (T_(N+1)), Σ T_k, and Σ k T_k over the
+###     terms in.
+private routine we_stirling_terms(limit: B64, wf: B64) -> (USize, B64, B64, B64)
+    # T_k = |c_k| w^k (1.01): the terms 0 .. k - 1 are in when T_k falls below the limit
+    while true with k: USize = 1, power: B64 = wf, total: B64 = we_const(DEC_STIRLING).v.to_b64().abs(), weighted: B64 = 0.0
+        ck: B64 = we_const(DEC_STIRLING.add(k)).v.to_b64().abs()
+        tk: B64 = ck * power * 1.01
+        last: Bool = k + 1 >= DEC_STIRLING_TERMS
+        if tk < limit or last
+            return (k - 1, tk, total, weighted)
+        continue with k: k + 1, power: power * wf, total: total + tk, weighted: weighted + k.to[B64]() * tk
 
 ### B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 ### :param k: Which coefficient, from 0.
@@ -933,67 +932,54 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
     t: B64 = ay.v.top_b64()
     lg: B64 = y.v.exp.to[B64]() * 0.3010299956639812 + (t - 1.0) * 0.6
     a: S64 = lg.floor().to[S64]()
-    jump at((a - p + 1).max(f.qmin), 0)
 
     # the digits at exponent q: z = |y| 10^-q
-    block at(q: S64, tries: S64)
+    while true with q: S64 = (a - p + 1).max(f.qmin), tries: S64 = 0
         if q > f.qmax + 2
             return (ok: true, d: dec_inf(neg))
-        else
-            jump scale(q, tries)
 
-    # 10^-q up to 10^38 is an exact integer: one product
-    block scale(q: S64, tries: S64)
+        # 10^-q up to 10^38 is an exact integer: one product
         k: S64 = -q
-        if k >= 1 and k <= 38
-            jump split(q, tries, we_mul(a: ay, b: we_of_u128(dec_p10_128(k))))
-        else
-            jump split(q, tries, we_scale10(x: ay, k))
+        z: We = when
+            k >= 1 and k <= 38 => we_mul(a: ay, b: we_of_u128(dec_p10_128(k)))
+            else => we_scale10(x: ay, k)
 
-    block split(q: S64, tries: S64, z: We)
         int: U128 = w_floor_u128(z.v)
         big: Bool = int >= dec_p10_128(p)
         tiny: Bool = int < dec_p10_128(p - 1) and q > f.qmin
         last: Bool = tries >= 3
-        when
-            not last and big => jump at(q + 1, tries + 1)
-            not last and tiny => jump at(q - 1, tries + 1)
-            else => jump decide(q, z, int)
+        if not last and big
+            continue with q: q + 1, tries: tries + 1
+        if not last and tiny
+            continue with q: q - 1, tries: tries + 1
 
-    # s bits of the mantissa lie below the binary point: from 64 to 191 of them the fraction is those bits
-    block decide(q: S64, z: We, int: U128)
-        s: S64 = U64.to[S64](192) - z.v.exp
-        if s >= 64 and s <= 191
-            jump fraction(q, z, int, s.to[U64]())
-        else
-            jump general(q, z, int)
+        # `below` bits of the mantissa lie below the binary point: from 64 to 191 of them the fraction is those
+        # bits
+        below: S64 = U64.to[S64](192) - z.v.exp
+        c: U128 = when
+            below >= 64 and below <= 191 =>
+                s: U64 = below.to[U64]()
+                frac: X = w_fraction(x: z.v, s)
+                half: X = x_power(s - 1)
+                above: Bool = x_compare(a: frac, b: half) >= 0
+                dist: X = when
+                    above => x_sub(a: frac, b: half)
+                    else => x_sub(a: half, b: frac)
+                band: B64 = z.err * 2.0 + 4.0
+                if not (x_to_b64(dist) * 0.999 > band)
+                    return (ok: false, d: dec_nan())
+                becomes int + above.to[U128]()
+            else =>
+                # the fraction against 1/2 in W arithmetic, with the band |z| err 2^-192
+                frac: W = w_sub(a: z.v, b: w_of_u128(v: int, scale: 0))
+                half: W = w_of_u128(v: 1, scale: -1)
+                d: B64 = w_sub(a: frac, b: half).to_b64()
+                zf: B64 = z.v.to_b64()
+                band: B64 = zf * z.relative() * 2.0
+                if not (d.abs() > band and band < 0.25)
+                    return (ok: false, d: dec_nan())
+                becomes int + (d > 0.0).to[U128]()
 
-    block fraction(q: S64, z: We, int: U128, s: U64)
-        frac: X = w_fraction(x: z.v, s)
-        half: X = x_power(s - 1)
-        above: Bool = x_compare(a: frac, b: half) >= 0
-        dist: X = when
-            above => x_sub(a: frac, b: half)
-            else => x_sub(a: half, b: frac)
-        band: B64 = z.err * 2.0 + 4.0
-        if x_to_b64(dist) * 0.999 > band
-            jump result(q, int + above.to[U128]())
-        else
-            return (ok: false, d: dec_nan())
-
-    # the fraction against 1/2 in W arithmetic, with the band |z| err 2^-192
-    block general(q: S64, z: We, int: U128)
-        frac: W = w_sub(a: z.v, b: w_of_u128(v: int, scale: 0))
-        half: W = w_of_u128(v: 1, scale: -1)
-        d: B64 = w_sub(a: frac, b: half).to_b64()
-        zf: B64 = z.v.to_b64()
-        band: B64 = zf * z.relative() * 2.0
-        if d.abs() > band and band < 0.25
-            jump result(q, int + (d > 0.0).to[U128]())
-        else
-            return (ok: false, d: dec_nan())
-
-    block result(q: S64, c: U128)
         carry: Bool = c == dec_p10_128(p)
         cc: U128 = when
             carry => dec_p10_128(p - 1)

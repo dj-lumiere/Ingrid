@@ -186,42 +186,34 @@ private routine wait_for_winner(r: @Race) -> SSize
     s.lock.lock()
     next_waiters: SSize = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
-    if this_coro.is_null()
-        jump poll()
-    r.await_coros(awaiter: this_coro, set: true)
-    jump poll()
+    if not this_coro.is_null()
+        r.await_coros(awaiter: this_coro, set: true)
 
-    block poll()
-        winner: SSize = r.winner()
-        if winner >= 0
-            jump over(winner)
-        if this_coro.is_null()
-            jump blocking()
-        # A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
-        s.lock.unlock()
-        rf_sched_park_external()
-        s.lock.lock()
-        jump poll()
-
-    block blocking()
-        s.block_wait()
-        jump poll()
-
-    block over(winner: SSize)
-        if not this_coro.is_null()
-            jump clear(winner)
-        jump finish(winner)
-
-    block clear(winner: SSize)
-        r.await_coros(awaiter: this_coro, set: false)
-        jump finish(winner)
-
-    block finish(winner: SSize)
-        remaining_waiters: SSize = s.waiters.peek() - 1
-        remaining_waiters.poke_into(s.waiters)
-        s.lock.unlock()
-        r.register(s, coro: null, on: false)
-        return winner
+    while true
+        winner2: SSize = r.winner()
+        if winner2 >= 0
+            # A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
+            if not this_coro.is_null()
+                r.await_coros(awaiter: this_coro, set: false)
+                remaining_waiters: SSize = s.waiters.peek() - 1
+                remaining_waiters.poke_into(s.waiters)
+                s.lock.unlock()
+                r.register(s, coro: null, on: false)
+                return winner2
+            else
+                remaining_waiters: SSize = s.waiters.peek() - 1
+                remaining_waiters.poke_into(s.waiters)
+                s.lock.unlock()
+                r.register(s, coro: null, on: false)
+                return winner2
+        else if this_coro.is_null()
+            s.block_wait()
+            continue
+        else
+            s.lock.unlock()
+            rf_sched_park_external()
+            s.lock.lock()
+            continue
 
 ### Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.
 ### :param r: The race to free.

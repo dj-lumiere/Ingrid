@@ -317,51 +317,41 @@ routine dec_quantize(a: Dec, b: Dec, f: DecFormat) -> Dec
 routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
     local mul: U256 = (near.to[U64]() + 1).to[U256]()
 
-    if x.exp >= y.exp
-        jump down(y.coeff.to[U256]() * mul, x.coeff.to[U256]() % (y.coeff.to[U256]() * mul), x.exp - y.exp)
-    else
-        jump up()
-
-    # r = X mod M, d digits of X still to bring in
-    block down(m: U256, r: U256, d: S64)
-        k: S64 = d.min(38)
-        if d <= 0
-            jump settle(r, y.coeff.to[U256](), y.exp)
-        else
-            jump down(m, r * dec_p10(k) % m, d - k)
-
-    block up()
-        d: S64 = y.exp - x.exp
-        if d > 38
-            return dec_num(neg: x.neg, coeff: x.coeff, exp: x.exp)
-        else
-            jump aligned(y.coeff.to[U256]() * dec_p10(d))
-
-    block aligned(yy: U256)
-        m: U256 = yy * mul
-        xx: U256 = x.coeff.to[U256]()
-        r: U256 = when
-            xx >= m => xx % m
-            else => xx
-        jump settle(r, yy, x.exp)
-
-    block settle(r: U256, yy: U256, e: S64)
-        if near
-            jump nearest(r, yy, e)
-        else
-            return dec_num(neg: x.neg, coeff: r.to[U128](), exp: e)
+    # the remainder r, the aligned Y, and the exponent e they are at
+    settled: (U256, U256, S64) = when
+        x.exp >= y.exp =>
+            # r = X mod M, d digits of X still to bring in
+            m: U256 = y.coeff.to[U256]() * mul
+            while d > 0 with r: U256 = x.coeff.to[U256]() % m, d: S64 = x.exp - y.exp
+                k: S64 = d.min(38)
+                continue with r: r * dec_p10(k) % m, d: d - k
+            then
+                becomes (r, y.coeff.to[U256](), y.exp)
+        else =>
+            d: S64 = y.exp - x.exp
+            if d > 38
+                return dec_num(neg: x.neg, coeff: x.coeff, exp: x.exp)
+            yy: U256 = y.coeff.to[U256]() * dec_p10(d)
+            m: U256 = yy * mul
+            xx: U256 = x.coeff.to[U256]()
+            r: U256 = when
+                xx >= m => xx % m
+                else => xx
+            becomes (r, yy, x.exp)
+    r, yy, e = settled
+    if not near
+        return dec_num(neg: x.neg, coeff: r.to[U128](), exp: e)
 
     # r is X mod 2Y: past Y the quotient is odd
-    block nearest(r: U256, yy: U256, e: S64)
-        odd: Bool = r >= yy
-        rr: U256 = when
-            odd => r -% yy
-            else => r
-        twice: U256 = rr << 1
-        if twice > yy or (twice == yy and odd)
-            return dec_num(neg: ~x.neg, coeff: (yy - rr).to[U128](), exp: e)
-        else
-            return dec_num(neg: x.neg, coeff: rr.to[U128](), exp: e)
+    odd: Bool = r >= yy
+    rr: U256 = when
+        odd => r -% yy
+        else => r
+    twice: U256 = rr << 1
+    if twice > yy or (twice == yy and odd)
+        return dec_num(neg: ~x.neg, coeff: (yy - rr).to[U128](), exp: e)
+    else
+        return dec_num(neg: x.neg, coeff: rr.to[U128](), exp: e)
 
 ### Whether fmod or the remainder of x by y is a NaN: a NaN in, an infinite x, or a zero y.
 ### :param x: The operand.

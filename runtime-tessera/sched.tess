@@ -167,29 +167,24 @@ routine Deque.push_bottom(me: @Me, c: @Coro) -> None
     me.lock.lock()
     used: USize = me.bottom.peek() - me.top.peek()
     if used == me.cap.peek()
-        jump grow()
-    else
-        jump put()
-
-    block grow()
         n: USize = me.cap.peek()
-        jump copy(n, zeroed[@Coro](count: n * 2, what: "Failed to grow worker run deque"), 0)
 
-    block copy(n: USize, nb: @@Coro, i: USize)
-        if i == n
-            jump install(n, nb)
-        nb.stride(i).poke(me.slot(me.top.peek() + i).peek())
-        jump copy(n, nb, i + 1)
+        nb: @@Coro = zeroed[@Coro](count: n * 2, what: "Failed to grow worker run deque")
 
-    block install(n: USize, nb: @@Coro)
-        c_free(me.buf.peek())
-        me.buf.poke(nb)
-        me.cap.poke(n * 2)
-        me.top.poke(0)
-        me.bottom.poke(n)
-        jump put()
-
-    block put()
+        each i in 0 til n
+            nb.stride(i).poke(me.slot(me.top.peek() + i).peek())
+        then
+            c_free(me.buf.peek())
+            me.buf.poke(nb)
+            me.cap.poke(n * 2)
+            me.top.poke(0)
+            me.bottom.poke(n)
+            me.slot(me.bottom.peek()).poke(c)
+            next_bottom: USize = me.bottom.peek() + 1
+            next_bottom.poke_into(me.bottom)
+            me.lock.unlock()
+            return
+    else
         me.slot(me.bottom.peek()).poke(c)
         next_bottom: USize = me.bottom.peek() + 1
         next_bottom.poke_into(me.bottom)
@@ -235,34 +230,25 @@ routine Deque.steal_top(me: @Me) -> @Coro
 ### :returns: True when it was in the deque.
 routine Deque.remove(me: @Me, c: @Coro) -> Bool
     me.lock.lock()
-    jump look(me.bottom.peek() - me.top.peek(), 0)
-
-    block look(n: USize, i: USize)
-        if i == n
-            jump finish(false)
+    n: USize = me.bottom.peek() - me.top.peek()
+    each i in 0 til n
         top: USize = me.top.peek()
         occupant: @Coro = me.slot(top + i).peek()
         if occupant === c
-            jump shift(n, i)
-        else
-            jump look(n, i + 1)
-
-    block shift(n: USize, j: USize)
-        top: USize = me.top.peek()
-        if j + 1 >= n
-            jump drop()
-        me.slot(top + j).poke(me.slot(top + j + 1).peek())
-        jump shift(n, j + 1)
-
-    block drop()
-        b: USize = me.bottom.peek() - 1
-        me.bottom.poke(b)
-        me.slot(b).poke(null)
-        jump finish(true)
-
-    block finish(found: Bool)
+            # close the gap: every later coroutine moves one slot toward the top
+            while j + 1 < n with j: USize = i
+                base: USize = me.top.peek()
+                me.slot(base + j).poke(me.slot(base + j + 1).peek())
+                continue with j: j + 1
+            then
+                b: USize = me.bottom.peek() - 1
+                me.bottom.poke(b)
+                me.slot(b).poke(null)
+                me.lock.unlock()
+                return true
+    then
         me.lock.unlock()
-        return found
+        return false
 
 # -- the injector and the ready routing (callers hold the scheduler lock) ------------
 
@@ -688,8 +674,7 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
         notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
         id: SSize = worker_id()
         deques: @Deque = me.deques.peek()
-        has_deque: Bool = id >= 0 and deques.is_not_null()
-        if has_deque and (notified or intent == PARK_YIELD)
+        if id >= 0 and deques.is_not_null() and (notified or intent == PARK_YIELD)
             c.sched_state.poke_atomic(SCHED_QUEUED)
             deques.stride(id).push_bottom(c)
             return
@@ -713,10 +698,6 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
                     c.sched_state.poke_atomic(SCHED_IDLE)
                     me.lock.unlock()
                     return
-
-    block unlock()
-        me.lock.unlock()
-        return
 
 ### One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
 ### :returns: The coroutine, or null.
@@ -1130,71 +1111,57 @@ routine rf_sched_run_until_default(target: @Coro) -> None
 ### :param c: The coroutine.
 ### :returns: True when it was queued or on a timer.
 routine Sched.remove_locked(me: @Me, c: @Coro) -> Bool
-    jump scan(null, me.injector_head.peek())
+    removed: Bool = me.unqueue_injected(c) or me.unqueue_timer(c) or me.unqueue_deques(c)
+    if not removed
+        return false
+    remaining_live: SSize = me.live.peek() - 1
+    remaining_live.poke_into(me.live)
+    return true
 
-    block scan(prev: @Coro, at: @Coro)
-        if at.is_null()
-            jump timers()
+### Unlinks c from the injector, now IDLE, when it is there. The caller holds the lock.
+### :param c: The coroutine.
+### :returns: True when it was in the injector.
+private routine Sched.unqueue_injected(me: @Me, c: @Coro) -> Bool
+    while at.is_not_null() with prev: @Coro = null, at: @Coro = me.injector_head.peek()
         if at === c
-            jump unlink(prev)
-        else
-            jump scan(at, at.sched_next.peek())
+            next: @Coro = c.sched_next.peek()
+            if prev.is_null()
+                me.injector_head.poke(next)
+            else
+                prev.sched_next.poke(next)
+            if me.injector_tail.peek() === c
+                me.injector_tail.poke(prev)
+            c.sched_next.poke(null)
+            c.sched_state.poke_atomic(SCHED_IDLE)
+            return true
+        continue with prev: at, at: at.sched_next.peek()
+    then
+        return false
 
-    block unlink(prev: @Coro)
-        next: @Coro = c.sched_next.peek()
-        if prev.is_null()
-            jump head(next)
-        else
-            jump middle(prev, next)
+### Takes c off the timers when it is on one. The caller holds the lock.
+### :param c: The coroutine.
+### :returns: True when a timer was taken off.
+private routine Sched.unqueue_timer(me: @Me, c: @Coro) -> Bool
+    if c.timer_idx.peek() < 0
+        return false
+    before: SSize = me.timer_count.peek()
+    me.unlink_timer(c)
+    return me.timer_count.peek() < before
 
-    block head(next: @Coro)
-        me.injector_head.poke(next)
-        jump tail(null)
-
-    block middle(prev: @Coro, next: @Coro)
-        prev.sched_next.poke(next)
-        jump tail(prev)
-
-    block tail(prev: @Coro)
-        if me.injector_tail.peek() !== c
-            jump unlinked()
-        me.injector_tail.poke(prev)
-        jump unlinked()
-
-    block unlinked()
-        c.sched_next.poke(null)
-        c.sched_state.poke_atomic(SCHED_IDLE)
-        jump found()
-
-    block timers()
-        if not (c.timer_idx.peek() >= 0)
-            jump deques()
-        before: SSize = me.timer_count.peek()
-        me.unlink_timer(c)
-        if me.timer_count.peek() < before
-            jump found()
-        else
-            jump deques()
-
-    block deques()
-        d: @Deque = me.deques.peek()
-        if d.is_null()
-            return false
-        else
-            jump deque(d, 0)
-
-    block deque(d: @Deque, i: SSize)
-        if i == me.workers_total.peek()
-            return false
-        if not d.stride(i).remove(c)
-            jump deque(d, i + 1)
-        c.sched_state.poke_atomic(SCHED_IDLE)
-        jump found()
-
-    block found()
-        remaining_live: SSize = me.live.peek() - 1
-        remaining_live.poke_into(me.live)
-        return true
+### Takes c out of the first worker deque that holds it, now IDLE. The caller holds the lock.
+### :param c: The coroutine.
+### :returns: True when a deque held it.
+private routine Sched.unqueue_deques(me: @Me, c: @Coro) -> Bool
+    d: @Deque = me.deques.peek()
+    if d.is_null()
+        return false
+    while i != me.workers_total.peek() with i: SSize = 0
+        if d.stride(i).remove(c)
+            c.sched_state.poke_atomic(SCHED_IDLE)
+            return true
+        continue with i: i + 1
+    then
+        return false
 
 ### Takes c off the scheduler it was spawned on (the process pool when it was never spawned) before rf_coro_abandon
 ### frees a coroutine spawned and never retrieved.

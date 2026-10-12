@@ -90,76 +90,58 @@ routine dec_from_binary(bits: U128, f: DecFormat) -> Dec
 
     top: Bool = biased == 0x7FFF
     nan: Bool = top and fraction != 0
-    when
-        nan => return dec_nan()
-        top => return dec_inf(neg)
-        biased == 0 and fraction == 0 => return dec_num(neg, coeff: 0, exp: 0)
-        else => jump finite()
+    if nan
+        return dec_nan()
+    if top
+        return dec_inf(neg)
+    if biased == 0 and fraction == 0
+        return dec_num(neg, coeff: 0, exp: 0)
 
     # |x| = m 2^e: an integer m 2^e for e >= 0, else m 5^-e × 10^e
-    block finite()
-        subnormal: Bool = biased == 0
-        hidden: U128 = when
-            subnormal => 0
-            else => U128.shl(1, 112)
-        e: S64 = biased.max(1) - 16495
-        big.set(fraction | hidden)
-        if e >= 0
-            jump scaled_up(e)
-        else
-            jump fives(-e, e)
-
-    block scaled_up(e: S64)
-        big.shl(e.to[USize]())
-        jump digits(0)
-
-    # times 5^left, 27 fives (5^27 < 2^63) at a time
-    block fives(left: S64, e: S64)
-        done: Bool = left == 0
-        k: S64 = left.min(27)
-        if done
-            jump digits(e)
-        else
-            jump five(left, k, e)
-
-    block five(left: S64, k: S64, e: S64)
-        power: U64 = U64.pow(5, k.to[U32]())
-        big.mul_add(m: power, addend: 0)
-        jump fives(left - k, e)
+    subnormal: Bool = biased == 0
+    hidden: U128 = when
+        subnormal => 0
+        else => U128.shl(1, 112)
+    e: S64 = biased.max(1) - 16495
+    big.set(fraction | hidden)
+    q: S64 = when
+        e >= 0 =>
+            big.shl(e.to[USize]())
+            becomes 0
+        else =>
+            # times 5^left, 27 fives (5^27 < 2^63) at a time
+            until left == 0 with left: S64 = -e
+                step: S64 = left.min(27)
+                power: U64 = U64.pow(5, step.to[U32]())
+                big.mul_add(m: power, addend: 0)
+                continue with left: left - step
+            becomes e
 
     # value = big × 10^q: keep p + 2 or p + 3 digits, the rest as a sticky digit
-    block digits(q: S64)
-        width: S64 = big.bit_length().to[S64]()
-        guess: S64 = (width * 1233 >> 12) + 1
-        k: S64 = guess - f.digits - 2
-        if k <= 0
-            jump exact(q)
-        else
-            jump divide(q, k)
-
-    block exact(q: S64)
+    width: S64 = big.bit_length().to[S64]()
+    guess: S64 = (width * 1233 >> 12) + 1
+    k: S64 = guess - f.digits - 2
+    if k <= 0
         low: U128 = big.limbs[0].to[U128]()
         high: U128 = big.limbs[1].to[U128]()
         many: Bool = big.count.peek() >= 2
-        top: U128 = when
+        upper: U128 = when
             many => high
             else => 0
         some: Bool = big.count.peek() >= 1
-        bottom: U128 = when
+        lower: U128 = when
             some => low
             else => 0
-        value: U128 = (top << 64) | bottom
+        value: U128 = (upper << 64) | lower
         return dec_round_reduced(neg, coeff: value.to[U256](), exp: q, f)
-
-    block divide(q: S64, k: S64)
-        one: U64 = 1
-        divisor.set(one)
-        divisor.mul_pow10(k.to[USize]())
-        quotient: U128 = big.div_small(divisor, scratch, bits: 127)
-        rest: Bool = not big.is_zero()
-        sticky: U256 = rest.to[U64]().to[U256]()
-        coeff: U256 = quotient.to[U256]() * 10 + sticky
-        return dec_round_reduced(neg, coeff, exp: q + k - 1, f)
+    one: U64 = 1
+    divisor.set(one)
+    divisor.mul_pow10(k.to[USize]())
+    quotient: U128 = big.div_small(divisor, scratch, bits: 127)
+    rest: Bool = not big.is_zero()
+    sticky: U256 = rest.to[U64]().to[U256]()
+    coeff: U256 = quotient.to[U256]() * 10 + sticky
+    return dec_round_reduced(neg, coeff, exp: q + k - 1, f)
 
 ### (-1)^neg × coeff × 10^exp rounded to f and then reduced: trailing zeros of the rounded coefficient stripped
 ### whether the rounding was exact or not (RazorForge's form for a function result), as far as qmax allows.

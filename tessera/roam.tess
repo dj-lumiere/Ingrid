@@ -114,43 +114,30 @@ routine roam_hold(header: @RoamHeader) -> None
 routine roam_unhold(header: @RoamHeader) -> None
     world_enter()
     escaped: Bool = header.escaped.peek_atomic() == 1
-    escaped2: Bool = when
+    was_last: Bool = when
         escaped =>
             previous: U64 = header.count.atomic_fetch_sub(1)
-            if previous == 1
-                becomes true
-            else
-                # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
-                mark_candidate(header)
-                world_leave()
-                return
+            becomes previous == 1
         else =>
             remaining: U64 = header.count.peek() - 1
             remaining.poke_into(header.count)
-            if remaining == 0
-                becomes false
-            else
-                mark_candidate(header)
-                world_leave()
-                return
+            becomes remaining == 0
+    if not was_last
+        mark_candidate(header)
+        world_leave()
+        return
+    # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
     if header.buffered.peek()
         remove_candidate(header)
     run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
     header.dead.poke_atomic(1)
     weak: U64 = when
-        escaped2 => header.weak.peek_atomic()
+        escaped => header.weak.peek_atomic()
         else => header.weak.peek()
     if weak == 0
         free_header_memory(header)
-        world_leave()
-        return
-    else
-        world_leave()
-        return
-
-    block done()
-        world_leave()
-        return
+    world_leave()
+    return
 
 ### Takes the entity out of its only handle: frees the header and hands back the entity's address, so a new handle
 ### can own it. Only an entity nothing else reaches can leave, one strong handle and no weak observer. Anything more

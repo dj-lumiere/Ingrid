@@ -344,73 +344,57 @@ routine dec_finish(value: DecExact, f: DecFormat) -> Dec
     if coeff == 0
         return dec_num(neg, coeff: 0, exp: pref.max(qmin).min(qmax))
     else
-        jump count()
-
-    block count()
         nd: S64 = dec_digits256(coeff)
         excess: S64 = nd - p
         dropped: S64 = excess.max(qmin - exp)
-        when
-            dropped >= nd => jump vanish(nd, dropped)
-            dropped > 0 => jump round(dropped)
-            else => jump settle(coeff.to[U128](), exp, false)
-
-    # every digit goes: 1 only above half of 10^drop (exactly half ties to the even 0)
-    block vanish(nd: S64, dropped: S64)
-        half: U256 = dec_p10(nd - 1) * 5
-        above: Bool = dropped == nd and coeff > half
-        jump settle(above.to[U128](), exp + dropped, true)
-
-    block round(dropped: S64)
-        unit: U256 = dec_p10(dropped)
-        q: U256 = dec_div_p10_256(x: coeff, k: dropped)
-        r: U256 = coeff - q *% unit
-        twice: U256 = r << 1
-        odd: Bool = q & 1 == 1
-        up: Bool = twice > unit or (twice == unit and odd)
-        q2: U128 = q.to[U128]() + up.to[U128]()
-        carry: Bool = q2 == dec_p10_128(p)
-        # rounding up 99...9 gives 10^p: one digit too many, all zeros
-        q3: U128 = when
-            carry => dec_p10_128(p - 1)
-            else => q2
-        jump settle(q3, exp + dropped + carry.to[S64](), r != 0)
-
-    # c has at most p digits
-    block settle(c: U128, e: S64, inexact: Bool)
+        values: (U128, S64, Bool) = when
+            dropped >= nd =>
+                # every digit goes: 1 only above half of 10^drop (exactly half ties to the even 0)
+                half: U256 = dec_p10(nd - 1) * 5
+                above: Bool = dropped == nd and coeff > half
+                becomes (above.to[U128](), exp + dropped, true)
+            dropped > 0 =>
+                unit: U256 = dec_p10(dropped)
+                q: U256 = dec_div_p10_256(x: coeff, k: dropped)
+                r: U256 = coeff - q *% unit
+                twice: U256 = r << 1
+                odd: Bool = q & 1 == 1
+                up: Bool = twice > unit or (twice == unit and odd)
+                q2: U128 = q.to[U128]() + up.to[U128]()
+                carry: Bool = q2 == dec_p10_128(p)
+                # rounding up 99...9 gives 10^p: one digit too many, all zeros
+                q3: U128 = when
+                    carry => dec_p10_128(p - 1)
+                    else => q2
+                becomes (q3, exp + dropped + carry.to[S64](), r != 0)
+            else => (coeff.to[U128](), exp, false)
+        c, e, inexact = values
+        # c has at most p digits
         zero: Bool = c == 0
         target: S64 = pref.min(qmax)
-        when
+        values2: (U128, S64) = when
             zero => return dec_num(neg, coeff: 0, exp: e)
-            not inexact and e < target => jump stripped(c, e, target)
-            else => jump pad(c, e)
-
-    block stripped(c: U128, e: S64, target: S64)
-        tz: S64 = dec_trailing_zeros(c, cap: target - e)
-        jump pad(dec_div_p10(x: c, k: tz), e + tz)
-
-    # toward pref while the coefficient has room, never below qmin
-    block pad(c: U128, e: S64)
-        room: S64 = p - dec_digits(c)
-        k: S64 = (e - pref).min(room).min(e - qmin)
-        if k > 0
-            jump range(c * dec_p10_128(k), e - k)
+            not inexact and e < target =>
+                tz: S64 = dec_trailing_zeros(c, cap: target - e)
+                becomes (dec_div_p10(x: c, k: tz), e + tz)
+            else => (c, e)
+        c2, e2 = values2
+        # toward pref while the coefficient has room, never below qmin
+        room: S64 = p - dec_digits(c2)
+        k: S64 = (e2 - pref).min(room).min(e2 - qmin)
+        values3: (U128, S64) = when
+            k > 0 => (c2 * dec_p10_128(k), e2 - k)
+            else => (c2, e2)
+        c3, e3 = values3
+        # above qmax: zeros appended down to qmax, if the coefficient has room for them
+        if e3 > qmax
+            spread: S64 = e3 - qmax
+            if dec_digits(c3) + spread <= p
+                return dec_num(neg, coeff: c3 * dec_p10_128(spread), exp: qmax)
+            else
+                return dec_inf(neg)
         else
-            jump range(c, e)
-
-    # above qmax: zeros appended down to qmax, if the coefficient has room for them
-    block range(c: U128, e: S64)
-        if e > qmax
-            jump clamp(c, e)
-        else
-            return dec_num(neg, coeff: c, exp: e)
-
-    block clamp(c: U128, e: S64)
-        spread: S64 = e - qmax
-        if dec_digits(c) + spread <= p
-            return dec_num(neg, coeff: c * dec_p10_128(spread), exp: qmax)
-        else
-            return dec_inf(neg)
+            return dec_num(neg, coeff: c3, exp: e3)
 
 ### A value of another width rounded to f, its exponent kept when the digits allow (the narrowing of an arithmetic
 ### result, which keeps the exponent the wider operation chose). Specials pass through.
@@ -707,14 +691,18 @@ routine dec_compare_magnitude(ca: U128, ea: S64, cb: U128, eb: S64) -> S64
     when
         adj_a < adj_b => return -1
         adj_a > adj_b => return 1
-        ea > eb => jump compare(ca * dec_p10_128(ea - eb), cb)
-        else => jump compare(ca, cb * dec_p10_128(eb - ea))
-
-    block compare(x: U128, y: U128)
-        when
-            x < y => return -1
-            x > y => return 1
-            else => return 0
+        ea > eb =>
+            x: U128 = ca * dec_p10_128(ea - eb)
+            when
+                x < cb => return -1
+                x > cb => return 1
+                else => return 0
+        else =>
+            y: U128 = cb * dec_p10_128(eb - ea)
+            when
+                ca < y => return -1
+                ca > y => return 1
+                else => return 0
 
 ### The order of a and b: -1, 0, or 1 as a is below, equal to, or above b (+0 and -0 are equal, and so are the
 ### members of a cohort), 2 when either is a NaN.

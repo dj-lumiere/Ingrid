@@ -138,57 +138,32 @@ routine write_deep_calls() -> None
     local depth: S32 = trace_depth()
     local shown: S32 = depth.min(32)
 
-    jump start_at(0)
-
     # the repeating run may start a few frames below the most recent one
-    block start_at(start: S32)
-        if start > CYCLE_MAX_START
-            jump unknown()
+    while start <= CYCLE_MAX_START with start: S32 = 0
         period: S32 = cycle_period(depth, shown, start)
         if period > 0
-            jump found(start, period)
-        else
-            jump start_at(start + 1)
-
-    block found(start: S32, period: S32)
-        if one_routine(depth, start, period)
-            jump itself(start)
-        else
-            jump each_other(start, period)
-
-    block itself(start: S32)
-        name: Span[Byte] = frame_name(depth, k: start)
-        Err.write("{name} called itself too many times before returning. ")
-        jump advice()
-
-    block each_other(start: S32, period: S32)
-        jump name(start, start + period - 1)
-
-    # the names in the run, most recent first: "a and b", "a, b and c"
-    block name(k: S32, last: S32)
-        n: Span[Byte] = frame_name(depth, k)
-        if k == last
-            jump final_name(n)
-        if k + 1 == last
-            jump before_last(k, last, n)
-        Err.write("{n}, ")
-        jump name(k + 1, last)
-
-    block before_last(k: S32, last: S32, n: Span[Byte])
-        Err.write("{n} and ")
-        jump name(k + 1, last)
-
-    block final_name(n: Span[Byte])
-        Err.write("{n} called each other too many times before returning. ")
-        jump advice()
-
-    block unknown()
+            if one_routine(depth, start, period)
+                name: Span[Byte] = frame_name(depth, k: start)
+                Err.write("{name} called itself too many times before returning. ")
+            else
+                # the names in the run, most recent first: "a and b", "a, b and c"
+                last: S32 = start + period - 1
+                while k < last with k: S32 = start
+                    n: Span[Byte] = frame_name(depth, k)
+                    if k + 1 == last
+                        Err.write("{n} and ")
+                    else
+                        Err.write("{n}, ")
+                    continue with k: k + 1
+                then
+                    final: Span[Byte] = frame_name(depth, k)
+                    Err.write("{final} called each other too many times before returning. ")
+            break
+        continue with start: start + 1
+    then
         Err.write("the routine calls went too deep before returning. ")
-        jump advice()
-
-    block advice()
-        Err.write("Make the recursion shallower, or turn it into a loop.\n")
-        return
+    Err.write("Make the recursion shallower, or turn it into a loop.\n")
+    return
 
 ### The k-th most recent frame of the calling thread's crash trace (0 is the most recent, below 32).
 ### :param depth: The trace's depth.

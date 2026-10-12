@@ -224,49 +224,51 @@ routine print_platform_stack(fault: U64) -> None
     max_name_field: @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to[@U32]()
     max_name_field.poke(MAX_SYM_NAME)
     Err.write("Stack trace:\n")
-    if fault == 0 or c_sym_from_addr(process, fault, null, sym) == 0
-        jump frame(0, 0)
-    jump seek(0, sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek())
-
     # the first frame in the routine that faulted, or every frame when none is
-    block seek(i: U32, start: U64)
-        if i == frames
-            jump frame(0, 0)
-        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
-        if c_sym_from_addr(process, address, null, sym) == 0
-            jump seek(i + 1, start)
-        if sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek() == start
-            jump frame(i, 0)
-        else
-            jump seek(i + 1, start)
+    first: U32 = when
+        fault == 0 or c_sym_from_addr(process, fault, null, sym) == 0 => 0
+        else => first_frame_in(process, stack, frames, sym)
 
     # frame i of the capture, written as the n-th of the trace
-    block frame(i: U32, n: U32)
-        if i == frames
-            return
+    while i != frames with i: U32 = first, n: U32 = 0
         address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
-        if c_sym_from_addr(process, address, null, sym) != 0
-            jump named(i, n, address)
-        Err.write("  {n}: at 0x")
-        write_hex(value: address, digits: 16, upper: false)
-        Err.write("\n")
-        jump frame(i + 1, n + 1)
-
-    block named(i: U32, n: U32, address: U64)
+        if c_sym_from_addr(process, address, null, sym) == 0
+            Err.write("  {n}: at 0x")
+            write_hex(value: address, digits: 16, upper: false)
+            Err.write("\n")
+            continue with i: i + 1, n: n + 1
         symbol_name: @Byte = sym.stride(SYMBOL_INFO_NAME)
         name: Span[Byte] = symbol_name.to[CStr]().getview()
         line.to[@U32]().poke(IMAGEHLP_LINE64_SIZE)
         # a return address points past its call: one byte back is the call's own line
         if c_sym_get_line_from_addr64(process, address - 1, line_offset, line) != 0
-            jump with_line(i, n, name)
-        Err.write("  {n}: at {name}\n")
-        jump frame(i + 1, n + 1)
+            file_name_text: @Byte = line.stride(LINE_FILE_NAME).to[@@Byte]().peek()
+            file_name: Span[Byte] = file_name_text.to[CStr]().getview()
+            line_number: U32 = line.stride(LINE_NUMBER).to[@U32]().peek()
+            Err.write("  {n}: at {name} ({file_name}:{line_number})\n")
+        else
+            Err.write("  {n}: at {name}\n")
+        continue with i: i + 1, n: n + 1
+    return
 
-    block with_line(i: U32, n: U32, name: Span[Byte])
-        file_name: Span[Byte] = line.stride(LINE_FILE_NAME).to[@@Byte]().peek().to[CStr]().getview()
-        line_number: U32 = line.stride(LINE_NUMBER).to[@U32]().peek()
-        Err.write("  {n}: at {name} ({file_name}:{line_number})\n")
-        jump frame(i + 1, n + 1)
+### The capture index of the first frame in the routine that faulted, or 0 when no frame is in it. `sym` holds the
+### faulting address's symbol on entry, and each frame's lookup is written into it.
+### :param process: The process.
+### :param stack: The captured return addresses.
+### :param frames: The number of captured addresses.
+### :param sym: The SYMBOL_INFO holding the faulting routine's symbol, reused for each lookup.
+### :returns: The index of the first frame in the faulting routine, or 0.
+@target(os: "windows")
+private routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @Byte) -> U32
+    start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek()
+    while i != frames with i: U32 = 0
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
+        if c_sym_from_addr(process, address, null, sym) != 0
+            if sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek() == start
+                return i
+        continue with i: i + 1
+    then
+        return 0
 
 # -- the platform stack: POSIX -------------------------------------------------------
 

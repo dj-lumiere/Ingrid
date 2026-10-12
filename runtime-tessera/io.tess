@@ -144,30 +144,21 @@ routine io_do_work(req: @IoReq) -> None
 ### An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
 ### :param lock: The lock the request queue is kept under (IO_LOCK).
 routine io_thread_main(lock: @ExclusiveLock) -> None
-    rf_thread_stack_guarantee()
-    lock.lock()
-    jump look()
-
-    block look()
-        req: @IoReq = IO_HEAD.peek()
-        if req.is_null()
-            jump sleep()
-        next: @IoReq = req.qnext.peek()
-        IO_HEAD.poke(next)
-        if not next.is_null()
-            jump run(req)
-        IO_TAIL.poke(null)
-        jump run(req)
-
-    block sleep()
-        IO_WORK.wait(lock)
-        jump look()
-
-    block run(req: @IoReq)
-        lock.unlock()
-        io_do_work(req)
-        rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
-        jump entry()
+    while true
+        rf_thread_stack_guarantee()
+        lock.lock()
+        # wait until a request is queued, then take the first one
+        while req.is_null() with req: @IoReq = IO_HEAD.peek()
+            IO_WORK.wait(lock)
+            continue with req: IO_HEAD.peek()
+        then
+            next: @IoReq = req.qnext.peek()
+            IO_HEAD.poke(next)
+            if next.is_null()
+                IO_TAIL.poke(null)
+            lock.unlock()
+            io_do_work(req)
+            rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
 
 ### Starts the I/O threads at process startup (rf_runtime_init, on the main thread), so a later coroutine call is
 ### only a submit and a park. A second call does nothing.

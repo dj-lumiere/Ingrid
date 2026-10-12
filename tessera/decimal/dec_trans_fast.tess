@@ -254,202 +254,219 @@ routine fast32(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
     local e: B64 = xa.err
     local u: B64 = FAST_U64
 
-    when fn
-        0 => jump done(sx.exp(), fast_through(kappa: ax, arg_err: e, unit: u))
-        1 => jump done(sx.exp_m1(), fast_through(kappa: ax + 1.0, arg_err: e, unit: u))
-        2 => jump done(sx.exp2(), fast_through(kappa: ax * 0.6932, arg_err: e, unit: u))
-        3 => jump done(sx.exp10(), fast_through(kappa: ax * 2.3026, arg_err: e, unit: u))
-        4 => jump logarithm(1.0)
-        5 => jump log1p()
-        6 => jump logarithm(FAST_INV_LN2_64)
-        7 => jump logarithm(FAST_INV_LN10_64)
-        8 => jump asin()
-        9 => jump acos()
-        10 => jump done(sx.atan(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-        11 => jump done(sx.sinh(), fast_through(kappa: ax + 1.0, arg_err: e, unit: u))
-        12 => jump done(sx.cosh(), fast_through(kappa: ax, arg_err: e, unit: u))
-        13 => jump done(sx.tanh(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-        14 => jump done(sx.asinh(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-        15 => jump acosh()
-        16 => jump atanh()
-        17 => jump done(sx.erf(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-        18 => jump done(sx.erfc(), fast_through(kappa: ax * ax * 2.0 + 2.0, arg_err: e, unit: u))
-        19 => jump gamma()
-        20 => jump lgamma()
-        21 => jump sine(sx.sin())
-        22 => jump sine(sx.cos())
-        23 => jump tangent(sx.tan())
-        24 => jump done(sx.cbrt(), fast_through(kappa: 0.34, arg_err: e, unit: u))
-        25 => jump pow()
-        else => jump atan2()
-
-    block done(v: B64, err: B64)
-        return fast_round64(v, err, f)
+    scale: B64 = when fn
+        0 =>
+            v: B64 = sx.exp()
+            err: B64 = fast_through(kappa: ax, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        1 =>
+            v: B64 = sx.exp_m1()
+            err: B64 = fast_through(kappa: ax + 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        2 =>
+            v: B64 = sx.exp2()
+            err: B64 = fast_through(kappa: ax * 0.6932, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        3 =>
+            v: B64 = sx.exp10()
+            err: B64 = fast_through(kappa: ax * 2.3026, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        4 => 1.0
+        5 =>
+            # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa 1 / |ln w| <= 1.5), else ln_1p (kappa <= 1.5)
+            if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
+                w: Fa64 = fast_dec64(dec_plus_int(x, k: 1))
+                v: B64 = w.v.ln()
+                err: B64 = fast_through(kappa: 1.5, arg_err: w.err, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.ln_1p()
+                err: B64 = fast_through(kappa: 1.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        6 => FAST_INV_LN2_64
+        7 => FAST_INV_LN10_64
+        8 =>
+            # kappa = |x| / (sqrt(1 - x^2) asin |x|), infinite at |x| = 1 (where only an exact argument passes)
+            v: B64 = sx.asin()
+            gap: B64 = U64.to[B64](1) - ax
+            root: B64 = (gap * (ax + 1.0)).sqrt()
+            kappa: B64 = ax / (root * v.abs())
+            err: B64 = fast_through(kappa, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        9 =>
+            # acos x = 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from |x| = 1/2 up (sqrt kappa 1/2, asin of at
+            # most 1/2 kappa 1.1), and pi minus that below -1/2, acos x itself in between (kappa at most 0.55)
+            if dec_compare_abs(x, c: 5, q: -1) >= 0
+                w: Fa64 = fast_dec64(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                r: B64 = (w.v * 0.5).sqrt()
+                er: B64 = fast_through(kappa: 0.5, arg_err: w.err, unit: u)
+                t: B64 = r.asin() * 2.0
+                et: B64 = fast_through(kappa: 1.1, arg_err: er, unit: u)
+                if x.neg
+                    v: B64 = FAST_PI64.sub(t)
+                    abs: B64 = FAST_PI64.mul(u) + t * et
+                    return fast_round64(v, err: (abs / v + u) * FAST_UP, f)
+                else
+                    return fast_round64(v: t, err: et, f)
+            else
+                v: B64 = sx.acos()
+                gap: B64 = U64.to[B64](1) - ax
+                root: B64 = (gap * (ax + 1.0)).sqrt()
+                kappa: B64 = ax / (root * v)
+                err: B64 = fast_through(kappa, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        10 =>
+            v: B64 = sx.atan()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        11 =>
+            v: B64 = sx.sinh()
+            err: B64 = fast_through(kappa: ax + 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        12 =>
+            v: B64 = sx.cosh()
+            err: B64 = fast_through(kappa: ax, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        13 =>
+            v: B64 = sx.tanh()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        14 =>
+            v: B64 = sx.asinh()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        15 =>
+            # acosh x: below 2 as ln_1p(t + sqrt(t (t + 2))) with t = x - 1 exact in decimal (sums of positive terms,
+            # ln_1p of a positive kappa <= 1), from 2 up acosh itself (kappa <= 0.88)
+            if dec_compare_abs(x, c: 2, q: 0) < 0
+                t: Fa64 = fast_dec64(dec_plus_int(x, k: -1))
+                s: B64 = t.v + 2.0
+                pr: B64 = t.v * s
+                ep: B64 = (t.err * 2.0 + u * 2.0) * FAST_UP
+                r: B64 = pr.sqrt()
+                er: B64 = fast_through(kappa: 0.5, arg_err: ep, unit: u)
+                a: B64 = t.v + r
+                ea: B64 = (er.max(t.err) + u) * FAST_UP
+                v: B64 = a.ln_1p()
+                err: B64 = fast_through(kappa: 1.0, arg_err: ea, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.acosh()
+                err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        16 =>
+            # atanh x: from |x| = 1/2 up as ln_1p(2|x| / w) / 2 with w = 1 - |x| exact in decimal (ln_1p of a positive
+            # kappa <= 1), below it atanh itself (kappa <= 1.25)
+            if dec_compare_abs(x, c: 5, q: -1) >= 0
+                w: Fa64 = fast_dec64(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                q: B64 = ax * 2.0 / w.v
+                eq: B64 = (e + w.err + u) * FAST_UP
+                l: B64 = q.ln_1p() * 0.5
+                v: B64 = fast_signed64(x, a: l)
+                err: B64 = fast_through(kappa: 1.0, arg_err: eq, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.atanh()
+                err: B64 = fast_through(kappa: 1.25, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        17 =>
+            v: B64 = sx.erf()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        18 =>
+            v: B64 = sx.erfc()
+            err: B64 = fast_through(kappa: ax * ax * 2.0 + 2.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        19 =>
+            # kappa of Γ is |x psi(x)|: for x > 0 at most x |ln x| + 1 (ln x - 1/x < psi(x) < ln x - 1/(2x)), for x < 0,
+            # by psi(x) = psi(1 - x) - pi cot(pi x), at most |x| (ln(1 + |x|) + 1 + 1/r) with r the distance from x to the
+            # nearest integer (pi |cot(pi r)| <= 1/r), r halved for the error of x~ (which must stay below half of it)
+            # (an underflow to zero goes to the Ziv loop, which signs the zero as sin(pi x) does)
+            v: B64 = sx.gamma()
+            if not v.abs().is_normal()
+                return fast_fail()
+            else
+                err: B64 = fast_through(kappa: fast_psi_bound(x: sx, e), arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        20 =>
+            # kappa of ln|Γ| is |x psi(x)| / |ln|Γ(x)||
+            v: B64 = sx.ln_gamma()
+            err: B64 = fast_through(kappa: fast_psi_bound(x: sx, e) / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        21 =>
+            # sin and cos: kappa |x cot x| or |x tan x|, both at most |x| / |f(x)|
+            v: B64 = sx.sin()
+            err: B64 = fast_through(kappa: ax / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        22 =>
+            v: B64 = sx.cos()
+            err: B64 = fast_through(kappa: ax / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        23 =>
+            # tan: kappa |2x / sin 2x| = |x| (|tan x| + 1 / |tan x|)
+            v: B64 = sx.tan()
+            a: B64 = v.abs()
+            err: B64 = fast_through(kappa: ax * (a + U64.to[B64](1) / a), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        24 =>
+            v: B64 = sx.cbrt()
+            err: B64 = fast_through(kappa: 0.34, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        25 =>
+            # |x|^y = e^t with t = y ln|x|: ln|x~| is off by e absolutely and by |ln| u, the product by its rounding and
+            # y's error, so t is off by |y| e + |t| (2u + e_y), and e^t then by that plus its rounding
+            ya: Fa64 = fast_dec64(y)
+            sy: B64 = fast_signed64(x: y, a: ya.v)
+            l: B64 = ax.ln()
+            t: B64 = sy * l
+            dt: B64 = (ya.v * e + t.abs() * (u * 2.0 + ya.err)) * FAST_UP
+            big: Bool = dt > FAST_LIMIT
+            neg: Bool = x.neg & dec_is_odd_integer(y)
+            if big
+                return fast_fail()
+            else
+                v: B64 = t.exp()
+                err: B64 = (dt * FAST_UP + u) * FAST_UP
+                if neg
+                    return fast_round64(v: -v, err, f)
+                else
+                    return fast_round64(v, err, f)
+        else =>
+            # the angle of (y, x) with x the ordinate here: kappa at most 1 in either argument
+            ya: Fa64 = fast_dec64(y)
+            sy: B64 = fast_signed64(x: y, a: ya.v)
+            v: B64 = sx.atan2(sy)
+            err: B64 = fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u)
+            return fast_round64(v, err, f)
 
     # ln x (scaled by 1, 1 / ln 2, or 1 / ln 10): within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal
-    # (kappa of ln(1 + t) is at most 1.5 for t >= -1/2), elsewhere ln x (kappa 1 / |ln x| <= 2.5); the scale adds
+    # (kappa of ln(1 + t) is at most 1.5 for t >= -1/2), elsewhere ln x (kappa 1 / |ln x| <= 2.5), the scale adds
     # its own rounding and the product's
-    block logarithm(scale: B64)
-        if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
-            jump log_near(scale)
-        else
-            jump log_far(scale)
-
-    block log_near(scale: B64)
+    if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
         t: Dec = dec_plus_int(x, k: -1)
         ta: Fa64 = fast_dec64(t)
-        jump scaled(fast_signed64(x: t, a: ta.v).ln_1p(), fast_through(kappa: 1.5, arg_err: ta.err, unit: u), scale)
-
-    block log_far(scale: B64)
-        when
-            scale == 1.0 => jump done(sx.ln(), fast_through(kappa: 2.5, arg_err: e, unit: u))
-            scale == FAST_INV_LN2_64 => jump done(sx.log2(), fast_through(kappa: 2.5, arg_err: e, unit: u))
-            else => jump done(sx.log10(), fast_through(kappa: 2.5, arg_err: e, unit: u))
-
-    block scaled(l: B64, err: B64, scale: B64)
+        l: B64 = fast_signed64(x: t, a: ta.v).ln_1p()
+        err: B64 = fast_through(kappa: 1.5, arg_err: ta.err, unit: u)
         exact: Bool = scale == 1.0
         more: B64 = (err + u * 2.0) * FAST_UP
         if exact
-            jump done(l, err)
+            return fast_round64(v: l, err, f)
         else
-            jump done(l * scale, more)
-
-    # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa 1 / |ln w| <= 1.5), else ln_1p (kappa <= 1.5)
-    block log1p()
-        if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
-            jump log1p_low()
-        else
-            jump done(sx.ln_1p(), fast_through(kappa: 1.5, arg_err: e, unit: u))
-
-    block log1p_low()
-        w: Fa64 = fast_dec64(dec_plus_int(x, k: 1))
-        jump done(w.v.ln(), fast_through(kappa: 1.5, arg_err: w.err, unit: u))
-
-    # kappa = |x| / (sqrt(1 - x^2) asin |x|), infinite at |x| = 1 (where only an exact argument passes)
-    block asin()
-        v: B64 = sx.asin()
-        gap: B64 = U64.to[B64](1) - ax
-        root: B64 = (gap * (ax + 1.0)).sqrt()
-        kappa: B64 = ax / (root * v.abs())
-        jump done(v, fast_through(kappa, arg_err: e, unit: u))
-
-    # acos x = 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from |x| = 1/2 up (sqrt kappa 1/2, asin of at
-    # most 1/2 kappa 1.1), and pi minus that below -1/2; acos x itself in between (kappa at most 0.55)
-    block acos()
-        if dec_compare_abs(x, c: 5, q: -1) >= 0
-            jump acos_high()
-        else
-            jump acos_mid()
-
-    block acos_mid()
-        v: B64 = sx.acos()
-        gap: B64 = U64.to[B64](1) - ax
-        root: B64 = (gap * (ax + 1.0)).sqrt()
-        kappa: B64 = ax / (root * v)
-        jump done(v, fast_through(kappa, arg_err: e, unit: u))
-
-    block acos_high()
-        w: Fa64 = fast_dec64(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
-        r: B64 = (w.v * 0.5).sqrt()
-        er: B64 = fast_through(kappa: 0.5, arg_err: w.err, unit: u)
-        t: B64 = r.asin() * 2.0
-        et: B64 = fast_through(kappa: 1.1, arg_err: er, unit: u)
-        if x.neg
-            jump acos_turned(t, et)
-        else
-            jump done(t, et)
-
-    block acos_turned(t: B64, et: B64)
-        v: B64 = FAST_PI64.sub(t)
-        abs: B64 = FAST_PI64.mul(u) + t * et
-        jump done(v, (abs / v + u) * FAST_UP)
-
-    # acosh x: below 2 as ln_1p(t + sqrt(t (t + 2))) with t = x - 1 exact in decimal (sums of positive terms,
-    # ln_1p of a positive kappa <= 1), from 2 up acosh itself (kappa <= 0.88)
-    block acosh()
-        if dec_compare_abs(x, c: 2, q: 0) < 0
-            jump acosh_near()
-        else
-            jump done(sx.acosh(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-
-    block acosh_near()
-        t: Fa64 = fast_dec64(dec_plus_int(x, k: -1))
-        s: B64 = t.v + 2.0
-        pr: B64 = t.v * s
-        ep: B64 = (t.err * 2.0 + u * 2.0) * FAST_UP
-        r: B64 = pr.sqrt()
-        er: B64 = fast_through(kappa: 0.5, arg_err: ep, unit: u)
-        a: B64 = t.v + r
-        ea: B64 = (er.max(t.err) + u) * FAST_UP
-        jump done(a.ln_1p(), fast_through(kappa: 1.0, arg_err: ea, unit: u))
-
-    # atanh x: from |x| = 1/2 up as ln_1p(2|x| / w) / 2 with w = 1 - |x| exact in decimal (ln_1p of a positive
-    # kappa <= 1), below it atanh itself (kappa <= 1.25)
-    block atanh()
-        if dec_compare_abs(x, c: 5, q: -1) >= 0
-            jump atanh_high()
-        else
-            jump done(sx.atanh(), fast_through(kappa: 1.25, arg_err: e, unit: u))
-
-    block atanh_high()
-        w: Fa64 = fast_dec64(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
-        q: B64 = ax * 2.0 / w.v
-        eq: B64 = (e + w.err + u) * FAST_UP
-        l: B64 = q.ln_1p() * 0.5
-        jump done(fast_signed64(x, a: l), fast_through(kappa: 1.0, arg_err: eq, unit: u))
-
-    # kappa of Γ is |x psi(x)|: for x > 0 at most x |ln x| + 1 (ln x - 1/x < psi(x) < ln x - 1/(2x)); for x < 0,
-    # by psi(x) = psi(1 - x) - pi cot(pi x), at most |x| (ln(1 + |x|) + 1 + 1/r) with r the distance from x to the
-    # nearest integer (pi |cot(pi r)| <= 1/r), r halved for the error of x~ (which must stay below half of it)
-    # (an underflow to zero goes to the Ziv loop, which signs the zero as sin(pi x) does)
-    block gamma()
-        v: B64 = sx.gamma()
-        if not v.abs().is_normal()
-            return fast_fail()
-        else
-            jump done(v, fast_through(kappa: fast_psi_bound(x: sx, e), arg_err: e, unit: u))
-
-    # kappa of ln|Γ| is |x psi(x)| / |ln|Γ(x)||
-    block lgamma()
-        v: B64 = sx.ln_gamma()
-        jump done(v, fast_through(kappa: fast_psi_bound(x: sx, e) / v.abs(), arg_err: e, unit: u))
-
-    # sin and cos: kappa |x cot x| or |x tan x|, both at most |x| / |f(x)|
-    block sine(v: B64)
-        jump done(v, fast_through(kappa: ax / v.abs(), arg_err: e, unit: u))
-
-    # tan: kappa |2x / sin 2x| = |x| (|tan x| + 1 / |tan x|)
-    block tangent(v: B64)
-        a: B64 = v.abs()
-        jump done(v, fast_through(kappa: ax * (a + U64.to[B64](1) / a), arg_err: e, unit: u))
-
-    # |x|^y = e^t with t = y ln|x|: ln|x~| is off by e absolutely and by |ln| u, the product by its rounding and
-    # y's error, so t is off by |y| e + |t| (2u + e_y); e^t then by that plus its rounding
-    block pow()
-        ya: Fa64 = fast_dec64(y)
-        sy: B64 = fast_signed64(x: y, a: ya.v)
-        l: B64 = ax.ln()
-        t: B64 = sy * l
-        dt: B64 = (ya.v * e + t.abs() * (u * 2.0 + ya.err)) * FAST_UP
-        big: Bool = dt > FAST_LIMIT
-        neg: Bool = x.neg & dec_is_odd_integer(y)
-        if big
-            return fast_fail()
-        else
-            jump pow_done(t.exp(), dt, neg)
-
-    block pow_done(v: B64, dt: B64, neg: Bool)
-        err: B64 = (dt * FAST_UP + u) * FAST_UP
-        if neg
-            jump done(-v, err)
-        else
-            jump done(v, err)
-
-    # the angle of (y, x) with x the ordinate here: kappa at most 1 in either argument
-    block atan2()
-        ya: Fa64 = fast_dec64(y)
-        sy: B64 = fast_signed64(x: y, a: ya.v)
-        jump done(sx.atan2(sy), fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u))
+            return fast_round64(v: l * scale, err: more, f)
+    else
+        when
+            scale == 1.0 =>
+                v: B64 = sx.ln()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+            scale == FAST_INV_LN2_64 =>
+                v: B64 = sx.log2()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+            else =>
+                v: B64 = sx.log10()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
 
 ### A bound of |x psi(x)| (the condition number of Γ) at x, the argument's relative error e: see fast32's gamma.
 ### :param x: The argument.
@@ -639,7 +656,7 @@ routine fa_ln1p(a: Fa128) -> Fa128
         abs_l: B64 = rel_w * 1.001 + lf * FAST_U128
         return (v: l, err: abs_l / lf * 1.001 * FAST_UP)
 
-### fn(x, y) at D64 from B128, for the functions B128 has fast and correctly rounded (or builds from them); not ok
+### fn(x, y) at D64 from B128, for the functions B128 has fast and correctly rounded (or builds from them), not ok
 ### for erf, erfc, tgamma, and lgamma.
 ### :param fn: Which function (a DEC_ code).
 ### :param x: The operand.
@@ -655,221 +672,169 @@ routine fast64(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
     local u: B64 = FAST_U128
     local one: B128 = B64.to[B128](1.0)
 
-    when fn
-        0 => jump done(sx.exp(), fast_through(kappa: axf, arg_err: e, unit: u))
-        1 => jump done(sx.exp_m1(), fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
-        2 => jump done(sx.exp2(), fast_through(kappa: axf * 0.6932, arg_err: e, unit: u))
-        3 => jump done(sx.exp10(), fast_through(kappa: axf * 2.3026, arg_err: e, unit: u))
-        4 => jump logarithm(0)
-        5 => jump log1p()
-        6 => jump logarithm(1)
-        7 => jump logarithm(2)
-        8 => jump asin()
-        9 => jump acos()
-        10 => jump done(sx.atan(), fast_through(kappa: 1.0, arg_err: e, unit: u))
-        11 => jump sinh()
-        12 => jump cosh()
-        13 => jump tanh()
-        14 => jump asinh()
-        15 => jump acosh()
-        16 => jump atanh()
-        21 => jump sine(sx.sin())
-        22 => jump sine(sx.cos())
-        23 => jump tangent()
-        24 => jump done(sx.cbrt(), fast_through(kappa: 0.34, arg_err: e, unit: u))
-        25 => jump pow()
-        26 => jump atan2()
+    result: Fa128 = when fn
+        0 => (v: sx.exp(), err: fast_through(kappa: axf, arg_err: e, unit: u))
+        1 => (v: sx.exp_m1(), err: fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
+        2 => (v: sx.exp2(), err: fast_through(kappa: axf * 0.6932, arg_err: e, unit: u))
+        3 => (v: sx.exp10(), err: fast_through(kappa: axf * 2.3026, arg_err: e, unit: u))
+        4, 6, 7 =>
+            # ln x, then times 1 / ln 2 or 1 / ln 10 (fn 6, 7): within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in
+            # decimal, elsewhere ln x (kappa 1 / |ln x| <= 2.5)
+            above_half: Bool = dec_compare_abs(x, c: 5, q: -1) > 0
+            near: Bool = above_half and dec_compare_abs(x, c: 15, q: -1) < 0
+            l: Fa128 = when
+                near =>
+                    t: Dec = dec_plus_int(x, k: -1)
+                    ta: Fa128 = fast_dec128(t)
+                    becomes fa_ln1p((v: fast_signed128(x: t, a: ta.v), err: ta.err))
+                else => (v: sx.ln(), err: fast_through(kappa: 2.5, arg_err: e, unit: u))
+            becomes when fn
+                4 => l
+                6 => fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN2_128)))
+                else => fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN10_128)))
+        5 =>
+            # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa <= 1.5), else fa_ln1p
+            low: Bool = x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
+            becomes when
+                low =>
+                    w: Fa128 = fast_dec128(dec_plus_int(x, k: 1))
+                    becomes (v: w.v.ln(), err: fast_through(kappa: 1.5, arg_err: w.err, unit: u))
+                else => fa_ln1p((v: sx, err: e))
+        8 =>
+            # kappa = |x| / (sqrt(1 - x^2) asin |x|), 1 - |x| exact in B128 from 1/2 up
+            v: B128 = sx.asin()
+            w: B64 = (one - ax).to[B64]()
+            root: B64 = (w * (axf + 1.0)).sqrt()
+            kappa: B64 = fast_ratio(a: ax, b: v) / root * 1.001
+            becomes (v: v, err: fast_through(kappa, arg_err: e, unit: u))
+        9 =>
+            # as D32: 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from 1/2 up, pi minus that below -1/2
+            high: Bool = dec_compare_abs(x, c: 5, q: -1) >= 0
+            becomes when
+                high =>
+                    w: Fa128 = fast_dec128(dec_plus_int(
+                        x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                    r: Fa128 = fa_sqrt((v: w.v * B64.to[B128](0.5), err: w.err))
+                    t: B128 = r.v.asin() * B64.to[B128](2.0)
+                    et: B64 = fast_through(kappa: 1.1, arg_err: r.err, unit: u)
+                    becomes when
+                        x.neg =>
+                            v: B128 = B128.from_bits(FAST_PI128) - t
+                            abs: B64 = (FAST_PI64.mul(u) + t.to[B64]() * et) * 1.001
+                            becomes (v: v, err: (abs / v.to[B64]() + u) * FAST_UP)
+                        else => (v: t, err: et)
+                else =>
+                    v: B128 = sx.acos()
+                    w: B64 = (one - ax).to[B64]()
+                    root: B64 = (w * (axf + 1.0)).sqrt()
+                    kappa: B64 = axf / (root * v.to[B64]()) * 1.001
+                    becomes (v: v, err: fast_through(kappa, arg_err: e, unit: u))
+        10 => (v: sx.atan(), err: fast_through(kappa: 1.0, arg_err: e, unit: u))
+        11 =>
+            # sinh |x| = (E + E / (E + 1)) / 2 with E = expm1|x| (kappa |x| + 1): positive terms throughout
+            if axf > 11000.0
+                return fast_fail()
+            ee: Fa128 = (v: ax.exp_m1(), err: fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
+            e1: Fa128 = fa_add_positive(a: ee, b: fa_exact(one))
+            s: Fa128 = fa_add_positive(a: ee, b: fa_div(a: ee, b: e1))
+            becomes fa_with_sign(r: (v: s.v * B64.to[B128](0.5), err: s.err), neg: x.neg)
+        12 =>
+            # cosh x = (X + 1/X) / 2 with X = e^|x| (kappa |x|), 1/X may underflow to 0, an absolute error below
+            # 2^-16000
+            if axf > 11000.0
+                return fast_fail()
+            xx: Fa128 = (v: ax.exp(), err: fast_through(kappa: axf, arg_err: e, unit: u))
+            s: Fa128 = fa_add_positive(a: xx, b: fa_div(a: fa_exact(one), b: xx))
+            becomes (v: s.v * B64.to[B128](0.5), err: s.err + u)
+        13 =>
+            # tanh |x| = E / (E + 2) with E = expm1(2|x|) (kappa 2|x| + 1)
+            two: B128 = B64.to[B128](2.0)
+            ee: Fa128 = (v: (ax * two).exp_m1(), err: fast_through(kappa: axf * 2.0 + 1.0, arg_err: e, unit: u))
+            becomes fa_with_sign(r: fa_div(a: ee, b: fa_add_positive(a: ee, b: fa_exact(two))),
+                neg: x.neg)
+        14 =>
+            # asinh |x|: from 1/2 up ln(|x| + sqrt(x^2 + 1)) (ln of at least 1.118, kappa <= 2.08), below it
+            # ln_1p(|x| + x^2 / (1 + sqrt(1 + x^2))): sums of positive terms
+            sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
+            r: Fa128 = fa_sqrt(fa_add_positive(a: sq, b: fa_exact(one)))
+            magnitude: Fa128 = when
+                axf >= 0.5 =>
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: r)
+                    becomes (v: a.v.ln(), err: fast_through(kappa: 2.08, arg_err: a.err, unit: u))
+                else =>
+                    q: Fa128 = fa_div(a: sq, b: fa_add_positive(a: r, b: fa_exact(one)))
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: q)
+                    becomes fa_ln1p(a)
+            becomes fa_with_sign(r: magnitude, neg: x.neg)
+        15 =>
+            # acosh x: from 2 up ln(x + sqrt(x^2 - 1)) (x^2 - 1 >= 3/4 x^2, so its error is at most 4/3 of x^2's plus
+            # a rounding, and ln of at least 3.73 has kappa <= 0.76), below 2 ln_1p(t + sqrt(t (t + 2))) with
+            # t = x - 1 exact
+            below_two: Bool = dec_compare_abs(x, c: 2, q: 0) < 0
+            becomes when
+                below_two =>
+                    t: Fa128 = fast_dec128(dec_plus_int(x, k: -1))
+                    t2: Fa128 = fa_add_positive(a: t, b: fa_exact(B64.to[B128](2.0)))
+                    a: Fa128 = fa_add_positive(a: t, b: fa_sqrt(fa_mul(a: t, b: t2)))
+                    becomes fa_ln1p(a)
+                else =>
+                    sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
+                    m: Fa128 = (v: sq.v - one, err: (sq.err * 1.3334 + u) * FAST_UP)
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: fa_sqrt(m))
+                    becomes (v: a.v.ln(), err: fast_through(kappa: 0.76, arg_err: a.err, unit: u))
+        16 =>
+            # atanh |x| = ln_1p(2|x| / w) / 2 with w = 1 - |x|: exact in decimal from 1/2 up, below it 1 - |x~| in
+            # B128 (the sum's relative error |x| e / w plus a rounding, at most e + 2u)
+            high: Bool = dec_compare_abs(x, c: 5, q: -1) >= 0
+            w: Fa128 = when
+                high => fast_dec128(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp),
+                    k: -1))
+                else => (v: one - ax, err: (e + u * 2.0) * FAST_UP)
+            two: Fa128 = fa_exact(B64.to[B128](2.0))
+            q: Fa128 = fa_div(a: fa_mul(a: two, b: (v: ax, err: e)), b: w)
+            l: Fa128 = fa_ln1p(q)
+            becomes fa_with_sign(r: (v: l.v * B64.to[B128](0.5), err: l.err), neg: x.neg)
+        21, 22 =>
+            # sin and cos: kappa at most |x| / |f(x)|
+            v: B128 = when fn
+                21 => sx.sin()
+                else => sx.cos()
+            becomes (v: v, err: fast_through(kappa: fast_ratio(a: ax, b: v) * 1.001, arg_err: e, unit: u))
+        23 =>
+            # tan = sin / cos, each with its own kappa
+            sc: B128SinCos = sx.sin_cos()
+            es: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.sin) * 1.001, arg_err: e, unit: u)
+            ec: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.cos) * 1.001, arg_err: e, unit: u)
+            becomes fa_div(a: (v: sc.sin, err: es), b: (v: sc.cos, err: ec))
+        24 => (v: sx.cbrt(), err: fast_through(kappa: 0.34, arg_err: e, unit: u))
+        25 =>
+            # as D32: e^t with t = y ln|x|
+            ya: Fa128 = fast_dec128(y)
+            sy: B128 = fast_signed128(x: y, a: ya.v)
+            t: B128 = sy * ax.ln()
+            tf: B64 = t.to[B64]().abs()
+            dx: B64 = ya.v.to[B64]() * e
+            dt: B64 = (dx + tf * (u * 2.0 + ya.err)) * 1.001 * FAST_UP
+            big: Bool = dt > FAST_LIMIT
+            neg: Bool = x.neg & dec_is_odd_integer(y)
+            if big
+                return fast_fail()
+            becomes fa_with_sign(r: (v: t.exp(), err: (dt * FAST_UP + u) * FAST_UP), neg)
+        26 =>
+            # the angle with x the ordinate here: kappa at most 1 in either argument
+            ya: Fa128 = fast_dec128(y)
+            sy: B128 = fast_signed128(x: y, a: ya.v)
+            becomes (v: sx.atan2(sy), err: fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u))
         else => return fast_fail()
+    return fast_round128(v: result.v, err: result.err, f)
 
-    block done(v: B128, err: B64)
-        return fast_round128(v, err, f)
-
-    block apply_sign(r: Fa128, neg: Bool)
-        if neg
-            jump done(-r.v, r.err)
-        else
-            jump done(r.v, r.err)
-
-    # ln x, then times 1 / ln 2 or 1 / ln 10 (which 1, 2): within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in
-    # decimal, elsewhere ln x (kappa 1 / |ln x| <= 2.5)
-    block logarithm(which: U32)
-        if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
-            jump log_near(which)
-        else
-            jump log_scale(which, (v: sx.ln(), err: fast_through(kappa: 2.5, arg_err: e, unit: u)))
-
-    block log_near(which: U32)
-        t: Dec = dec_plus_int(x, k: -1)
-        ta: Fa128 = fast_dec128(t)
-        jump log_scale(which, fa_ln1p((v: fast_signed128(x: t, a: ta.v), err: ta.err)))
-
-    block log_scale(which: U32, l: Fa128)
-        when which
-            0 => jump done(l.v, l.err)
-            1 => jump apply_sign(fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN2_128))), false)
-            else => jump apply_sign(fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN10_128))), false)
-
-    # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa <= 1.5), else fa_ln1p
-    block log1p()
-        if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
-            jump log1p_low()
-        else
-            jump apply_sign(fa_ln1p((v: sx, err: e)), false)
-
-    block log1p_low()
-        w: Fa128 = fast_dec128(dec_plus_int(x, k: 1))
-        jump done(w.v.ln(), fast_through(kappa: 1.5, arg_err: w.err, unit: u))
-
-    # kappa = |x| / (sqrt(1 - x^2) asin |x|), 1 - |x| exact in B128 from 1/2 up
-    block asin()
-        v: B128 = sx.asin()
-        w: B64 = (one - ax).to[B64]()
-        root: B64 = (w * (axf + 1.0)).sqrt()
-        kappa: B64 = fast_ratio(a: ax, b: v) / root * 1.001
-        jump done(v, fast_through(kappa, arg_err: e, unit: u))
-
-    # as D32: 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from 1/2 up, pi minus that below -1/2
-    block acos()
-        if dec_compare_abs(x, c: 5, q: -1) >= 0
-            jump acos_high()
-        else
-            jump acos_mid()
-
-    block acos_mid()
-        v: B128 = sx.acos()
-        w: B64 = (one - ax).to[B64]()
-        root: B64 = (w * (axf + 1.0)).sqrt()
-        kappa: B64 = axf / (root * v.to[B64]()) * 1.001
-        jump done(v, fast_through(kappa, arg_err: e, unit: u))
-
-    block acos_high()
-        w: Fa128 = fast_dec128(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
-        r: Fa128 = fa_sqrt((v: w.v * B64.to[B128](0.5), err: w.err))
-        t: B128 = r.v.asin() * B64.to[B128](2.0)
-        et: B64 = fast_through(kappa: 1.1, arg_err: r.err, unit: u)
-        if x.neg
-            jump acos_turned(t, et)
-        else
-            jump done(t, et)
-
-    block acos_turned(t: B128, et: B64)
-        v: B128 = B128.from_bits(FAST_PI128) - t
-        abs: B64 = (FAST_PI64.mul(u) + t.to[B64]() * et) * 1.001
-        jump done(v, (abs / v.to[B64]() + u) * FAST_UP)
-
-    # sinh |x| = (E + E / (E + 1)) / 2 with E = expm1|x| (kappa |x| + 1): positive terms throughout
-    block sinh()
-        if axf > 11000.0
-            return fast_fail()
-        else
-            jump sinh_sum()
-
-    block sinh_sum()
-        ee: Fa128 = (v: ax.exp_m1(), err: fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
-        e1: Fa128 = fa_add_positive(a: ee, b: fa_exact(one))
-        s: Fa128 = fa_add_positive(a: ee, b: fa_div(a: ee, b: e1))
-        jump apply_sign((v: s.v * B64.to[B128](0.5), err: s.err), x.neg)
-
-    # cosh x = (X + 1/X) / 2 with X = e^|x| (kappa |x|); 1/X may underflow to 0, an absolute error below 2^-16000
-    block cosh()
-        if axf > 11000.0
-            return fast_fail()
-        else
-            jump cosh_sum()
-
-    block cosh_sum()
-        xx: Fa128 = (v: ax.exp(), err: fast_through(kappa: axf, arg_err: e, unit: u))
-        s: Fa128 = fa_add_positive(a: xx, b: fa_div(a: fa_exact(one), b: xx))
-        jump done(s.v * B64.to[B128](0.5), s.err + u)
-
-    # tanh |x| = E / (E + 2) with E = expm1(2|x|) (kappa 2|x| + 1)
-    block tanh()
-        two: B128 = B64.to[B128](2.0)
-        ee: Fa128 = (v: (ax * two).exp_m1(), err: fast_through(kappa: axf * 2.0 + 1.0, arg_err: e, unit: u))
-        jump apply_sign(fa_div(a: ee, b: fa_add_positive(a: ee, b: fa_exact(two))), x.neg)
-
-    # asinh |x|: from 1/2 up ln(|x| + sqrt(x^2 + 1)) (ln of at least 1.118, kappa <= 2.08), below it
-    # ln_1p(|x| + x^2 / (1 + sqrt(1 + x^2))): sums of positive terms
-    block asinh()
-        sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
-        r: Fa128 = fa_sqrt(fa_add_positive(a: sq, b: fa_exact(one)))
-        if axf >= 0.5
-            jump asinh_far(r)
-        else
-            jump asinh_near(sq, r)
-
-    block asinh_far(r: Fa128)
-        a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: r)
-        jump apply_sign((v: a.v.ln(), err: fast_through(kappa: 2.08, arg_err: a.err, unit: u)), x.neg)
-
-    block asinh_near(sq: Fa128, r: Fa128)
-        q: Fa128 = fa_div(a: sq, b: fa_add_positive(a: r, b: fa_exact(one)))
-        a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: q)
-        jump apply_sign(fa_ln1p(a), x.neg)
-
-    # acosh x: from 2 up ln(x + sqrt(x^2 - 1)) (x^2 - 1 >= 3/4 x^2, so its error is at most 4/3 of x^2's plus a
-    # rounding, and ln of at least 3.73 has kappa <= 0.76), below 2 ln_1p(t + sqrt(t (t + 2))) with t = x - 1 exact
-    block acosh()
-        if dec_compare_abs(x, c: 2, q: 0) < 0
-            jump acosh_near()
-        else
-            jump acosh_far()
-
-    block acosh_far()
-        sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
-        m: Fa128 = (v: sq.v - one, err: (sq.err * 1.3334 + u) * FAST_UP)
-        a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: fa_sqrt(m))
-        jump done(a.v.ln(), fast_through(kappa: 0.76, arg_err: a.err, unit: u))
-
-    block acosh_near()
-        t: Fa128 = fast_dec128(dec_plus_int(x, k: -1))
-        t2: Fa128 = fa_add_positive(a: t, b: fa_exact(B64.to[B128](2.0)))
-        a: Fa128 = fa_add_positive(a: t, b: fa_sqrt(fa_mul(a: t, b: t2)))
-        jump apply_sign(fa_ln1p(a), false)
-
-    # atanh |x| = ln_1p(2|x| / w) / 2 with w = 1 - |x|: exact in decimal from 1/2 up, below it 1 - |x~| in B128
-    # (the sum's relative error |x| e / w plus a rounding, at most e + 2u)
-    block atanh()
-        if dec_compare_abs(x, c: 5, q: -1) >= 0
-            jump atanh_with(fast_dec128(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1)))
-        else
-            jump atanh_with((v: one - ax, err: (e + u * 2.0) * FAST_UP))
-
-    block atanh_with(w: Fa128)
-        two: Fa128 = fa_exact(B64.to[B128](2.0))
-        q: Fa128 = fa_div(a: fa_mul(a: two, b: (v: ax, err: e)), b: w)
-        l: Fa128 = fa_ln1p(q)
-        jump apply_sign((v: l.v * B64.to[B128](0.5), err: l.err), x.neg)
-
-    # sin and cos: kappa at most |x| / |f(x)|
-    block sine(v: B128)
-        jump done(v, fast_through(kappa: fast_ratio(a: ax, b: v) * 1.001, arg_err: e, unit: u))
-
-    # tan = sin / cos, each with its own kappa
-    block tangent()
-        sc: B128SinCos = sx.sin_cos()
-        es: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.sin) * 1.001, arg_err: e, unit: u)
-        ec: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.cos) * 1.001, arg_err: e, unit: u)
-        r: Fa128 = fa_div(a: (v: sc.sin, err: es), b: (v: sc.cos, err: ec))
-        jump done(r.v, r.err)
-
-    # as D32: e^t with t = y ln|x|
-    block pow()
-        ya: Fa128 = fast_dec128(y)
-        sy: B128 = fast_signed128(x: y, a: ya.v)
-        t: B128 = sy * ax.ln()
-        tf: B64 = t.to[B64]().abs()
-        dx: B64 = ya.v.to[B64]() * e
-        dt: B64 = (dx + tf * (u * 2.0 + ya.err)) * 1.001 * FAST_UP
-        big: Bool = dt > FAST_LIMIT
-        neg: Bool = x.neg & dec_is_odd_integer(y)
-        if big
-            return fast_fail()
-        else
-            jump apply_sign((v: t.exp(), err: (dt * FAST_UP + u) * FAST_UP), neg)
-
-    # the angle with x the ordinate here: kappa at most 1 in either argument
-    block atan2()
-        ya: Fa128 = fast_dec128(y)
-        sy: B128 = fast_signed128(x: y, a: ya.v)
-        jump done(sx.atan2(sy), fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u))
+### r with its value negated when neg, its bound unchanged.
+### :param r: The value and its bound.
+### :param neg: Whether the value is negated.
+### :returns: The signed value and its bound.
+@inline
+private routine fa_with_sign(r: Fa128, neg: Bool) -> Fa128
+    if neg
+        return (v: -r.v, err: r.err)
+    else
+        return r

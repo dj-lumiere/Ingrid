@@ -251,36 +251,36 @@ routine open_file(fd: S32) -> @OpenFile
 @export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: Span[Byte] = path_of(path, len: path_len)
-    when mode
-        0 => jump opened(File.at(p).open_read_result(), false)
-        1 => jump opened(File.at(p).open_write_result(), true)
-        2 => jump opened(File.at(p).open_append_result(), true)
+    values: (Result[FileHandle, FsError], Bool) = when mode
+        0 => (File.at(p).open_read_result(), false)
+        1 => (File.at(p).open_write_result(), true)
+        2 => (File.at(p).open_append_result(), true)
         else => return -1
-
-    block opened(r: Result[FileHandle, FsError], writer: Bool)
-        f: FileHandle = when r
-            is FileHandle as f => f
-            is FsError => return -1
-        buffer: Addr = c_malloc(FILE_BUFFER)
-        if buffer.is_null()
-            jump full(f, buffer)
-        else
-            jump slot(f, writer, buffer.to[@Byte](), 0)
-
-    block slot(f: FileHandle, writer: Bool, buffer: @Byte, i: USize)
-        if i == MAX_OPEN_FILES
-            jump full(f, buffer)
-        place: @OpenFile = FILE_TABLE.to[@OpenFile]().stride(i)
-        if place.used.peek()
-            jump slot(f, writer, buffer, i + 1)
-        place.poke(OpenFile(file: f, used: true, writer: writer, eof: false, buffer: buffer, start: 0, end: 0))
-        return i.to[S32]()
-
-    block full(opened: FileHandle, buffer: Addr)
+    r, writer = values
+    f: FileHandle = when r
+        is FileHandle as f => f
+        is FsError => return -1
+    buffer: Addr = c_malloc(FILE_BUFFER)
+    if buffer.is_null()
         c_free(buffer)
-        local f: @FileHandle <- opened
-        f.close()
+        local f2: @FileHandle <- f
+        f2.close()
         return -1
+    else
+        buffer2: @Byte = buffer.to[@Byte]()
+
+        each i in 0 til MAX_OPEN_FILES
+            place: @OpenFile = FILE_TABLE.to[@OpenFile]().stride(i)
+            if place.used.peek()
+                continue
+            else
+                place.poke(OpenFile(file: f, used: true, writer: writer, eof: false, buffer: buffer2, start: 0, end: 0))
+                return i.to[S32]()
+        then
+            c_free(buffer2)
+            local f2: @FileHandle <- f
+            f2.close()
+            return -1
 
 ### Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
 ### :returns: True when nothing was pending or everything was written.
@@ -742,22 +742,19 @@ routine decimal(v: U64, out: @Byte) -> USize
     local rev_buffer: @Array[Byte, 24] <- .hollow()
     local rev: @Byte = rev_buffer.to[@Byte]()
 
-    jump digit(v, 0)
+    while true with remaining: U64 = v, n: USize = 0
+        digit_value2: U8 = (remaining % 10).to[U8]()
+        rev.stride(n).poke((digit_value2 + 48).bits())
+        rest2: U64 = remaining // 10
+        if rest2 == 0
+            n2: USize = n + 1
 
-    block digit(remaining: U64, n: USize)
-        digit_value: U8 = (remaining % 10).to[U8]()
-        rev.stride(n).poke((digit_value + 48).bits())
-        rest: U64 = remaining // 10
-        if rest == 0
-            jump copy(n + 1, 0)
+            each i in 0 til n2
+                out.stride(i).poke(rev.stride(n2 - 1 - i).peek())
+            then
+                return n2
         else
-            jump digit(rest, n + 1)
-
-    block copy(n: USize, i: USize)
-        if i == n
-            return n
-        out.stride(i).poke(rev.stride(n - 1 - i).peek())
-        jump copy(n, i + 1)
+            continue with remaining: rest2, n: n + 1
 
 ### One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0), with
 ### '\n' before every entry but the first.
@@ -802,39 +799,32 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
     local iter: @DirIter <- .hollow()
 
+    # Every exit closes the listing (open_result, the first step, sets the handle before anything can fail, so
+    # close() is safe on every path) and hands the text back whole or frees it.
     opened: Result[None, FsError] = iter.open_result(Directory.at(path_of(path, len)))
-    if not opened.is_success()
-        jump finish(false)
-    if out.start(256)
-        jump next()
-    else
-        jump finish(false)
+    if not opened.is_success() or not out.start(256)
+        iter.close()
+        return out.fail()
 
-    block next()
+    while true
         e: Maybe[DirEntry] = iter.emit_checked()
         d: DirEntry = when e
             is DirEntry as d => d
-            is None => jump finish(true)
-        if not typed
-            jump add(d, false, 0)
-        m: Result[Metadata, FsError] = iter.entry_metadata_result()
-        when m
-            is Metadata as info => jump add(d, info.kind == FileKind.DIRECTORY, seconds(info.modified_ns))
-            is FsError => jump add(d, d.kind == FileKind.DIRECTORY, 0)
-
-    block add(d: DirEntry, is_dir: Bool, mtime: S64)
-        if out.entry(name: d.name, typed, is_dir, mtime)
-            jump next()
-        else
-            jump finish(false)
-
-    # Every exit comes here: the listing is closed (open_result, the first step, sets the handle before anything
-    # can fail, so close() is safe on every path), and the text is handed back whole or freed.
-    block finish(complete: Bool)
-        iter.close()
-        if complete
-            return out.finish()
-        else
+            is None =>
+                iter.close()
+                return out.finish()
+        values: (Bool, S64) = when
+            not typed => (false, 0)
+            else =>
+                m: Result[Metadata, FsError] = iter.entry_metadata_result()
+                when m
+                    is Metadata as info =>
+                        becomes (info.kind == FileKind.DIRECTORY, seconds(info.modified_ns))
+                    is FsError =>
+                        becomes (d.kind == FileKind.DIRECTORY, 0)
+        is_dir, mtime = values
+        if not out.entry(name: d.name, typed, is_dir, mtime)
+            iter.close()
             return out.fail()
 
 ### The entries' names, '\n' between them ("." and ".." left out).
