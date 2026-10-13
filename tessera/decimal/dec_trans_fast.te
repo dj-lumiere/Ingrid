@@ -1,0 +1,846 @@
+# The first attempt of the decimal transcendentals of D32 and D64 (dec_trans.te): the function evaluated in a
+# binary float, B64 for D32 and B128 for D64, with a proven bound on its error. When every value within the bound
+# rounds to the same decimal, that decimal is the correctly rounded result, exactly the one the multiprecision Ziv
+# loop would give. Otherwise (a value too close to a rounding midpoint, a huge condition number, a result outside
+# the format's normal range) the attempt says so and the Ziv loop runs as before.
+#
+# The bound. Let u be 2^-52 for B64 and 2^-112 for B128: twice the relative error of one correctly rounded
+# operation (the standard library's B64 functions are all correctly rounded, and so are the B128 ones used here:
+# exp, expm1, exp2, exp10, ln, sqrt, cbrt, sin, cos, asin, acos, atan, atan2, from CORE-MATH). A value carries a
+# relative error e: the true value y and the float v satisfy |v - y| <= e |y|.
+#
+# - The argument x = c 10^q becomes the float c × 10^q (c exact, the power of ten exact up to 10^22 or 10^48) or a
+#   chain of such products or quotients, one rounding each: e <= s u for s roundings.
+# - A function f of x~ = x (1 + d) with condition number k(t) = |t f'(t) / f(t)|: |ln f(x~) - ln f(x)| <= K |ln(x~/x)|
+#   with K the largest k between x and x~. With k(x~) <= kappa computed here (an upper bound of k at x~, in B64)
+#   and kappa |d| <= 2^-24, K <= 2 kappa + 1: k is analytic, and the relative change of k over an interval of
+#   relative width |d| is at most about (1 + k) |d| (k blows up only at zeros and poles of f, where it is about
+#   1 / distance, and the distance there is at least 1 / kappa). So the error of f(x~) rounded is at most
+#   (2 kappa + 1) e + u, with every B64 product of the bound arithmetic rounded up by FAST_UP.
+# - A composite (sinh from expm1, pow from ln and exp, ...) adds the errors of its steps, as each routine says.
+# - The rounding: z = |v| 10^k (one more chain of roundings, s' u) with p digits before the point; the true z lies
+#   within B = z (e + s' u) of it. When B < 1/4 and the fraction of z is more than B from 1/2, every value in the
+#   band rounds to the same integer, and that integer (carried to 10^(p-1) at 10^p) is the result at exponent -k.
+#
+# A decimal of a transcendental function is never exactly a midpoint, so the band settles almost always: the
+# attempt fails with probability about 2 B, plus the arguments whose condition number is huge (sin next to a
+# multiple of pi, tgamma next to a pole) and the results outside the normal range of the format.
+
+### Twice the relative error of one correctly rounded B64 operation: 2^-52.
+preset FAST_U64: B64 = B64.from_bits(0x3CB0000000000000)
+### Twice the relative error of one correctly rounded B128 operation: 2^-112.
+preset FAST_U128: B64 = B64.from_bits(0x38F0000000000000)
+### The largest kappa × error accepted, and the largest result error: 2^-24.
+preset FAST_LIMIT: B64 = B64.from_bits(0x3E70000000000000)
+### Positive infinity, the error of an attempt that has failed.
+preset FAST_INF: B64 = B64.from_bits(0x7FF0000000000000)
+
+### The factor every bound is multiplied by, so the B64 roundings of the bound arithmetic only make it larger.
+preset FAST_UP: B64 = 1.0001
+
+### The B64 nearest pi.
+preset FAST_PI64: B64 = 3.141592653589793
+### The B64 nearest pi / 2.
+preset FAST_HALF_PI64: B64 = 1.5707963267948966
+### The B128 nearest pi / 2.
+preset FAST_HALF_PI128: U128 = 0x3FFF921FB54442D18469898CC51701B8
+### The B64 nearest 1 / ln 2.
+preset FAST_INV_LN2_64: B64 = 1.4426950408889634
+### The B64 nearest 1 / ln 10.
+preset FAST_INV_LN10_64: B64 = 0.4342944819032518
+### The B128 nearest pi.
+preset FAST_PI128: U128 = 0x4000921FB54442D18469898CC51701B8
+### The B128 nearest 1 / ln 2.
+preset FAST_INV_LN2_128: U128 = 0x3FFF71547652B82FE1777D0FFDA0D23A
+### The B128 nearest 1 / ln 10.
+preset FAST_INV_LN10_128: U128 = 0x3FFDBCB7B1526E50E32A6AB7555F5A68
+
+### 10^k for k = 0 .. 22, every one exact in B64.
+preset FAST_P10_64: @Array[B64, 23] <- [1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0,
+    10000000.0, 100000000.0, 1000000000.0, 10000000000.0, 100000000000.0, 1000000000000.0,
+    10000000000000.0, 100000000000000.0, 1000000000000000.0, 10000000000000000.0,
+    100000000000000000.0, 1000000000000000000.0, 10000000000000000000.0, 100000000000000000000.0,
+    1000000000000000000000.0, 10000000000000000000000.0]
+
+### 10^k for k = 0 .. 48 as B128 bits, every one exact (5^48 < 2^113).
+preset FAST_P10_128: @Array[U128, 49] <- [0x3FFF0000000000000000000000000000,
+    0x40024000000000000000000000000000, 0x40059000000000000000000000000000,
+    0x4008F400000000000000000000000000, 0x400C3880000000000000000000000000,
+    0x400F86A0000000000000000000000000, 0x4012E848000000000000000000000000,
+    0x4016312D000000000000000000000000, 0x40197D78400000000000000000000000,
+    0x401CDCD6500000000000000000000000, 0x40202A05F20000000000000000000000,
+    0x402374876E8000000000000000000000, 0x4026D1A94A2000000000000000000000,
+    0x402A2309CE5400000000000000000000, 0x402D6BCC41E900000000000000000000,
+    0x4030C6BF526340000000000000000000, 0x40341C37937E08000000000000000000,
+    0x40376345785D8A000000000000000000, 0x403ABC16D674EC800000000000000000,
+    0x403E158E460913D00000000000000000, 0x40415AF1D78B58C40000000000000000,
+    0x4044B1AE4D6E2EF50000000000000000, 0x40480F0CF064DD592000000000000000,
+    0x404B52D02C7E14AF6800000000000000, 0x404EA784379D99DB4200000000000000,
+    0x405208B2A2C280290940000000000000, 0x40554ADF4B7320334B90000000000000,
+    0x40589D971E4FE8401E74000000000000, 0x405C027E72F1F1281308800000000000,
+    0x405F431E0FAE6D7217CAA00000000000, 0x406293E5939A08CE9DBD480000000000,
+    0x4065F8DEF8808B02452C9A0000000000, 0x40693B8B5B5056E16B3BE04000000000,
+    0x406C8A6E32246C99C60AD85000000000, 0x406FED09BEAD87C0378D8E6400000000,
+    0x40733426172C74D822B878FE80000000, 0x4076812F9CF7920E2B66973E20000000,
+    0x4079E17B84357691B6403D0DA8000000, 0x407D2CED32A16A1B11E8262889000000,
+    0x408078287F49C4A1D6622FB2AB400000, 0x4083D6329F1C35CA4BFABB9F56100000,
+    0x408725DFA371A19E6F7CB54395CA0000, 0x408A6F578C4E0A060B5BE2947B3C8000,
+    0x408DCB2D6F618C878E32DB399A0BA000, 0x40911EFC659CF7D4B8DFC90400474400,
+    0x409466BB7F0435C9E717BB4500591500, 0x4097C06A5EC5433C60DDAA16406F5A40,
+    0x409B18427B3B4A05BC8A8A4DE8459868, 0x409E5E531A0A1C872BAD2CE16256FE82]
+
+### A binary float approximation of a value and a bound on its relative error.
+record Fa64
+    v: B64
+    err: B64
+
+### A binary float approximation of a value and a bound on its relative error.
+record Fa128
+    v: B128
+    err: B64
+
+### A failed attempt.
+### :returns: Not ok.
+@inline
+routine fast_fail() -> DecTry
+    return (ok: false, d: dec_nan())
+
+### fn(x, y) correctly rounded to f from a binary float evaluation, or not ok when its bound does not settle it.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand (the ordinate for atan2).
+### :param y: The second argument (pow and atan2), else ignored.
+### :param f: The format the result rounds to.
+### :returns: The result, or not ok.
+routine dec_fast(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
+    finite: Bool = x.is_finite() and y.is_finite()
+    right: Bool = x.is_inf() and fn == DEC_ATAN
+    when
+        right and f.digits <= 7 => return fast_round64(v: fast_signed64(x, a: FAST_HALF_PI64),
+            err: FAST_U64, f)
+        right and f.digits <= 16 => return fast_round128(v: fast_signed128(x, a: fast_half_pi128()),
+            err: FAST_U128, f)
+        not finite => return fast_fail()
+        f.digits <= 7 => return fast32(fn, x, y, f)
+        f.digits <= 16 => return fast64(fn, x, y, f)
+        else => return fast_fail()
+
+### The relative error of a function value rounded once, its argument off by arg_err relative and its condition
+### number at most kappa there: (2 kappa + 1) arg_err + unit, or infinity once kappa arg_err passes 2^-24 (an exact
+### argument needs no kappa).
+### :param kappa: The bound of the condition number at the argument.
+### :param arg_err: The relative error of the argument.
+### :param unit: The function's own rounding error.
+### :returns: The bound.
+routine fast_through(kappa: B64, arg_err: B64, unit: B64) -> B64
+    exact: Bool = arg_err == 0.0
+    when
+        exact => return unit * FAST_UP
+        not kappa.is_finite() or kappa * arg_err > FAST_LIMIT => return FAST_INF
+        else =>
+            k: B64 = kappa * 2.0 + 1.0
+            return (k * arg_err + unit) * FAST_UP
+
+# ── D32: B64 ──────────────────────────────────────────────────────────────────────────────────────
+
+### v × 10^k: an exact power of ten per step of up to 22 places, each step one rounding.
+### :param v: The value.
+### :param k: The power of ten.
+### :returns: The product and its relative error.
+routine fast_scale64(v: B64, k: S64) -> Fa64
+    while true with z: B64 = v, left: S64 = k, err: B64 = 0.0
+        e: B64 = err + FAST_U64
+        when
+            left == 0 => return (v: z, err: err)
+            left > 22 => continue with z: z * FAST_P10_64.getitem(22), left: left - 22, err: e
+            left > 0 => continue with z: z * FAST_P10_64.getitem(left.to[USize]()), left: 0, err: e
+            left < -22 => continue with z: z / FAST_P10_64.getitem(22), left: left + 22, err: e
+            else => continue with z: z / FAST_P10_64.getitem((-left).to[USize]()), left: 0, err: e
+
+### |x| of a finite decimal as a B64 (its coefficient below 2^53, else a failed bound).
+### :param x: The operand.
+### :returns: |x| and its relative error.
+routine fast_dec64(x: Dec) -> Fa64
+    if x.coeff >= U128.shl(1, 53)
+        return (v: 0.0, err: FAST_INF)
+    else
+        c: B64 = x.coeff.to_wrap[U64]().to[B64]()
+        return fast_scale64(v: c, k: x.exp)
+
+### x as a signed B64.
+### :param x: The operand.
+### :param a: |x| as a B64.
+### :returns: The signed value.
+@inline
+routine fast_signed64(x: Dec, a: B64) -> B64
+    if x.neg
+        return -a
+    else
+        return a
+
+### The decimal of format f within err (relative) of v, signed and rounded as dec_round_me rounds (reduced, at qmin
+### with fewer digits below the normal range, an infinity past it), when that band reaches no midpoint; else not
+### ok. A v that overflowed or underflowed its binary format gives an infinity or a zero.
+### :param v: The value (any sign).
+### :param err: Its relative error.
+### :param f: The format.
+### :returns: The result, or not ok.
+routine fast_round64(v: B64, err: B64, f: DecFormat) -> DecTry
+    local av: B64 = v.abs()
+    local p: S64 = f.digits
+    local hi: B64 = FAST_P10_64.getitem(p.to[USize]())
+    local lo: B64 = FAST_P10_64.getitem((p - 1).to[USize]())
+
+    # past the binary format's range the true value is far past the decimal format's too: an infinity, or a zero
+    # at the least exponent (dec_round_me's results there)
+    when
+        not (err < FAST_LIMIT) => return fast_fail()
+        av.is_normal() =>
+            # log10 |v| from the exponent and the fraction (log2 of 1 + t is within 0.09 of t): off by at most one, which
+            # the range check below corrects
+            bits: U64 = av.bits()
+            e2: S64 = (bits >> 52).to[S64]() - 1023
+            frac: B64 = (bits & 0xFFFFFFFFFFFFF).to[B64]() * B64.from_bits(0x3CB0000000000000)
+            lg: B64 = (e2.to[B64]() + frac) * 0.30102999566398120
+            a: S64 = lg.floor().to[S64]()
+            # at the least exponent qmin a coefficient of fewer than p digits is the result (a subnormal or zero)
+            while true with k: S64 = (p - 1 - a).min(-f.qmin), tries: S64 = 0
+                z: Fa64 = fast_scale64(v: av, k)
+                when
+                    tries >= 3 => return fast_fail()
+                    z.v >= hi => continue with k: k - 1, tries: tries + 1
+                    z.v < lo and not (-k <= f.qmin) => continue with k: k + 1, tries: tries + 1
+                    else =>
+                        # z < 2^53, so its fraction and the distance to 1/2 are exact
+                        whole: B64 = z.v.floor()
+                        diff: B64 = z.v - whole - 0.5
+                        total: B64 = (err + z.err) * FAST_UP
+                        band: B64 = z.v * total * FAST_UP
+                        clear: Bool = band < 0.25 and diff.abs() > band
+                        up: U64 = (diff > 0.0).to[U64]()
+                        if clear
+                            return fast_result(neg: v < 0.0, c: (whole.to[U64]() + up).to[U128](),
+                                q: -k, f)
+                        else
+                            return fast_fail()
+        av.is_infinite() => return (ok: true, d: dec_inf(v.is_sign_negative()))
+        av.is_nan() => return fast_fail()
+        else => return (ok: true, d: dec_num(neg: v.is_sign_negative(), coeff: 0, exp: f.qmin))
+
+### The rounded coefficient c (at most p digits, or 10^p, carried) at exponent q >= qmin as a result of format f, as
+### dec_round_me gives it: 0 at qmin, an infinity past qmax, else reduced.
+### :param neg: The sign.
+### :param c: The coefficient.
+### :param q: The exponent.
+### :param f: The format.
+### :returns: The result.
+routine fast_result(neg: Bool, c: U128, q: S64, f: DecFormat) -> DecTry
+    carry: Bool = c == dec_p10_128(f.digits)
+    cc: U128 = when
+        carry => dec_p10_128(f.digits - 1)
+        else => c
+    qq: S64 = q + carry.to[S64]()
+    when
+        cc == 0 => return (ok: true, d: dec_num(neg, coeff: 0, exp: f.qmin))
+        qq > f.qmax => return (ok: true, d: dec_inf(neg))
+        else => return (ok: true, d: dec_num(neg, coeff: cc, exp: qq).reduce(f))
+
+### fn(x, y) at D32 from B64.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2).
+### :param f: The format.
+### :returns: The result, or not ok.
+routine fast32(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
+    local xa: Fa64 = fast_dec64(x)
+    local ax: B64 = xa.v
+    local sx: B64 = fast_signed64(x, a: ax)
+    local e: B64 = xa.err
+    local u: B64 = FAST_U64
+
+    scale: B64 = when fn
+        0 =>
+            v: B64 = sx.exp()
+            err: B64 = fast_through(kappa: ax, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        1 =>
+            v: B64 = sx.exp_m1()
+            err: B64 = fast_through(kappa: ax + 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        2 =>
+            v: B64 = sx.exp2()
+            err: B64 = fast_through(kappa: ax * 0.6932, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        3 =>
+            v: B64 = sx.exp10()
+            err: B64 = fast_through(kappa: ax * 2.3026, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        4 => 1.0
+        5 =>
+            # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa 1 / |ln w| <= 1.5), else ln_1p (kappa <= 1.5)
+            if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
+                w: Fa64 = fast_dec64(dec_plus_int(x, k: 1))
+                v: B64 = w.v.ln()
+                err: B64 = fast_through(kappa: 1.5, arg_err: w.err, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.ln_1p()
+                err: B64 = fast_through(kappa: 1.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        6 => FAST_INV_LN2_64
+        7 => FAST_INV_LN10_64
+        8 =>
+            # kappa = |x| / (sqrt(1 - x^2) asin |x|), infinite at |x| = 1 (where only an exact argument passes)
+            v: B64 = sx.asin()
+            gap: B64 = U64.to[B64](1) - ax
+            root: B64 = (gap * (ax + 1.0)).sqrt()
+            kappa: B64 = ax / (root * v.abs())
+            err: B64 = fast_through(kappa, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        9 =>
+            # acos x = 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from |x| = 1/2 up (sqrt kappa 1/2, asin of at
+            # most 1/2 kappa 1.1), and pi minus that below -1/2, acos x itself in between (kappa at most 0.55)
+            if dec_compare_abs(x, c: 5, q: -1) >= 0
+                w: Fa64 = fast_dec64(dec_plus_int(
+                    x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                r: B64 = (w.v * 0.5).sqrt()
+                er: B64 = fast_through(kappa: 0.5, arg_err: w.err, unit: u)
+                t: B64 = r.asin() * 2.0
+                et: B64 = fast_through(kappa: 1.1, arg_err: er, unit: u)
+                if x.neg
+                    v: B64 = FAST_PI64.sub(t)
+                    abs: B64 = FAST_PI64.mul(u) + t * et
+                    return fast_round64(v, err: (abs / v + u) * FAST_UP, f)
+                else
+                    return fast_round64(v: t, err: et, f)
+            else
+                v: B64 = sx.acos()
+                gap: B64 = U64.to[B64](1) - ax
+                root: B64 = (gap * (ax + 1.0)).sqrt()
+                kappa: B64 = ax / (root * v)
+                err: B64 = fast_through(kappa, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        10 =>
+            v: B64 = sx.atan()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        11 =>
+            v: B64 = sx.sinh()
+            err: B64 = fast_through(kappa: ax + 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        12 =>
+            v: B64 = sx.cosh()
+            err: B64 = fast_through(kappa: ax, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        13 =>
+            v: B64 = sx.tanh()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        14 =>
+            v: B64 = sx.asinh()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        15 =>
+            # acosh x: below 2 as ln_1p(t + sqrt(t (t + 2))) with t = x - 1 exact in decimal (sums of positive terms,
+            # ln_1p of a positive kappa <= 1), from 2 up acosh itself (kappa <= 0.88)
+            if dec_compare_abs(x, c: 2, q: 0) < 0
+                t: Fa64 = fast_dec64(dec_plus_int(x, k: -1))
+                s: B64 = t.v + 2.0
+                pr: B64 = t.v * s
+                ep: B64 = (t.err * 2.0 + u * 2.0) * FAST_UP
+                r: B64 = pr.sqrt()
+                er: B64 = fast_through(kappa: 0.5, arg_err: ep, unit: u)
+                a: B64 = t.v + r
+                ea: B64 = (er.max(t.err) + u) * FAST_UP
+                v: B64 = a.ln_1p()
+                err: B64 = fast_through(kappa: 1.0, arg_err: ea, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.acosh()
+                err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        16 =>
+            # atanh x: from |x| = 1/2 up as ln_1p(2|x| / w) / 2 with w = 1 - |x| exact in decimal (ln_1p of a positive
+            # kappa <= 1), below it atanh itself (kappa <= 1.25)
+            if dec_compare_abs(x, c: 5, q: -1) >= 0
+                w: Fa64 = fast_dec64(dec_plus_int(
+                    x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                q: B64 = ax * 2.0 / w.v
+                eq: B64 = (e + w.err + u) * FAST_UP
+                l: B64 = q.ln_1p() * 0.5
+                v: B64 = fast_signed64(x, a: l)
+                err: B64 = fast_through(kappa: 1.0, arg_err: eq, unit: u)
+                return fast_round64(v, err, f)
+            else
+                v: B64 = sx.atanh()
+                err: B64 = fast_through(kappa: 1.25, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        17 =>
+            v: B64 = sx.erf()
+            err: B64 = fast_through(kappa: 1.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        18 =>
+            v: B64 = sx.erfc()
+            err: B64 = fast_through(kappa: ax * ax * 2.0 + 2.0, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        19 =>
+            # kappa of Γ is |x psi(x)|: for x > 0 at most x |ln x| + 1 (ln x - 1/x < psi(x) < ln x - 1/(2x)), for x < 0,
+            # by psi(x) = psi(1 - x) - pi cot(pi x), at most |x| (ln(1 + |x|) + 1 + 1/r) with r the distance from x to the
+            # nearest integer (pi |cot(pi r)| <= 1/r), r halved for the error of x~ (which must stay below half of it)
+            # (an underflow to zero goes to the Ziv loop, which signs the zero as sin(pi x) does)
+            v: B64 = sx.gamma()
+            if not v.abs().is_normal()
+                return fast_fail()
+            else
+                err: B64 = fast_through(kappa: fast_psi_bound(x: sx, e), arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+        20 =>
+            # kappa of ln|Γ| is |x psi(x)| / |ln|Γ(x)||
+            v: B64 = sx.ln_gamma()
+            err: B64 = fast_through(kappa: fast_psi_bound(x: sx, e) / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        21 =>
+            # sin and cos: kappa |x cot x| or |x tan x|, both at most |x| / |f(x)|
+            v: B64 = sx.sin()
+            err: B64 = fast_through(kappa: ax / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        22 =>
+            v: B64 = sx.cos()
+            err: B64 = fast_through(kappa: ax / v.abs(), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        23 =>
+            # tan: kappa |2x / sin 2x| = |x| (|tan x| + 1 / |tan x|)
+            v: B64 = sx.tan()
+            a: B64 = v.abs()
+            err: B64 = fast_through(kappa: ax * (a + U64.to[B64](1) / a), arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        24 =>
+            v: B64 = sx.cbrt()
+            err: B64 = fast_through(kappa: 0.34, arg_err: e, unit: u)
+            return fast_round64(v, err, f)
+        25 =>
+            # |x|^y = e^t with t = y ln|x|: ln|x~| is off by e absolutely and by |ln| u, the product by its rounding and
+            # y's error, so t is off by |y| e + |t| (2u + e_y), and e^t then by that plus its rounding
+            ya: Fa64 = fast_dec64(y)
+            sy: B64 = fast_signed64(x: y, a: ya.v)
+            l: B64 = ax.ln()
+            t: B64 = sy * l
+            dt: B64 = (ya.v * e + t.abs() * (u * 2.0 + ya.err)) * FAST_UP
+            big: Bool = dt > FAST_LIMIT
+            neg: Bool = x.neg & dec_is_odd_integer(y)
+            if big
+                return fast_fail()
+            else
+                v: B64 = t.exp()
+                err: B64 = (dt * FAST_UP + u) * FAST_UP
+                if neg
+                    return fast_round64(v: -v, err, f)
+                else
+                    return fast_round64(v, err, f)
+        else =>
+            # the angle of (y, x) with x the ordinate here: kappa at most 1 in either argument
+            ya: Fa64 = fast_dec64(y)
+            sy: B64 = fast_signed64(x: y, a: ya.v)
+            v: B64 = sx.atan2(sy)
+            err: B64 = fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u)
+            return fast_round64(v, err, f)
+
+    # ln x (scaled by 1, 1 / ln 2, or 1 / ln 10): within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal
+    # (kappa of ln(1 + t) is at most 1.5 for t >= -1/2), elsewhere ln x (kappa 1 / |ln x| <= 2.5), the scale adds
+    # its own rounding and the product's
+    if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
+        t: Dec = dec_plus_int(x, k: -1)
+        ta: Fa64 = fast_dec64(t)
+        l: B64 = fast_signed64(x: t, a: ta.v).ln_1p()
+        err: B64 = fast_through(kappa: 1.5, arg_err: ta.err, unit: u)
+        exact: Bool = scale == 1.0
+        more: B64 = (err + u * 2.0) * FAST_UP
+        if exact
+            return fast_round64(v: l, err, f)
+        else
+            return fast_round64(v: l * scale, err: more, f)
+    else
+        when
+            scale == 1.0 =>
+                v: B64 = sx.ln()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+            scale == FAST_INV_LN2_64 =>
+                v: B64 = sx.log2()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+            else =>
+                v: B64 = sx.log10()
+                err: B64 = fast_through(kappa: 2.5, arg_err: e, unit: u)
+                return fast_round64(v, err, f)
+
+### A bound of |x psi(x)| (the condition number of Γ) at x, the argument's relative error e: see fast32's gamma.
+### :param x: The argument.
+### :param e: Its relative error.
+### :returns: The bound, infinite when x is too close to a pole for its error.
+routine fast_psi_bound(x: B64, e: B64) -> B64
+    local ax: B64 = x.abs()
+
+    if x > 0.0
+        return (ax * ax.ln().abs() + 1.0) * FAST_UP
+    else
+        r: B64 = (x - x.round()).abs()
+        near: Bool = ax * e * 2.0 >= r
+        lg: B64 = (ax + 1.0).ln() + 1.0
+        if near
+            return FAST_INF
+        else
+            return ax * (lg + U64.to[B64](2) / r) * FAST_UP
+
+# ── D64: B128 ─────────────────────────────────────────────────────────────────────────────────────
+
+### pi / 2 as the nearest B128.
+### :returns: pi / 2.
+@inline
+routine fast_half_pi128() -> B128
+    return B128.from_bits(FAST_HALF_PI128)
+
+### |a / b| as a B64, the quotient taken in B128 so that neither side has to fit B64's range.
+### :param a: The dividend.
+### :param b: The divisor (nonzero).
+### :returns: The ratio.
+routine fast_ratio(a: B128, b: B128) -> B64
+    return (a / b).to[B64]().abs()
+
+### 10^k as a B128, k in 0 .. 48 (exact).
+### :param k: The power.
+### :returns: The power of ten.
+@inline
+routine fast_p10_128(k: S64) -> B128
+    return B128.from_bits(FAST_P10_128.getitem(k.to[USize]()))
+
+### v × 10^k: an exact power of ten per step of up to 48 places, each step one rounding.
+### :param v: The value.
+### :param k: The power of ten.
+### :returns: The product and its relative error.
+routine fast_scale128(v: B128, k: S64) -> Fa128
+    while true with z: B128 = v, left: S64 = k, err: B64 = 0.0
+        e: B64 = err + FAST_U128
+        when
+            left == 0 => return (v: z, err: err)
+            left > 48 => continue with z: z * fast_p10_128(48), left: left - 48, err: e
+            left > 0 => continue with z: z * fast_p10_128(left), left: 0, err: e
+            left < -48 => continue with z: z / fast_p10_128(48), left: left + 48, err: e
+            else => continue with z: z / fast_p10_128(-left), left: 0, err: e
+
+### |x| of a finite decimal as a B128 (a coefficient of 2^113 or more rounds once more).
+### :param x: The operand.
+### :returns: |x| and its relative error.
+routine fast_dec128(x: Dec) -> Fa128
+    wide: Bool = x.coeff >= U128.shl(1, 113)
+    c: B128 = x.coeff.to[B128]()
+    z: Fa128 = fast_scale128(v: c, k: x.exp)
+    more: B64 = wide.to[U64]().to[B64]() * FAST_U128
+    return (v: z.v, err: z.err + more)
+
+### x as a signed B128.
+### :param x: The operand.
+### :param a: |x| as a B128.
+### :returns: The signed value.
+@inline
+routine fast_signed128(x: Dec, a: B128) -> B128
+    if x.neg
+        return -a
+    else
+        return a
+
+### The decimal of format f within err (relative) of v, signed and rounded as dec_round_me rounds (reduced, at qmin
+### with fewer digits below the normal range, an infinity past it), when that band reaches no midpoint; else not
+### ok. A v that overflowed or underflowed its binary format gives an infinity or a zero.
+### :param v: The value (any sign).
+### :param err: Its relative error.
+### :param f: The format.
+### :returns: The result, or not ok.
+routine fast_round128(v: B128, err: B64, f: DecFormat) -> DecTry
+    local av: B128 = v.abs()
+    local p: S64 = f.digits
+    local hi: B128 = fast_p10_128(p)
+    local lo: B128 = fast_p10_128(p - 1)
+
+    # past the binary format's range the true value is far past the decimal format's too: an infinity, or a zero
+    # at the least exponent (dec_round_me's results there)
+    when
+        not (err < FAST_LIMIT) => return fast_fail()
+        av.is_normal() =>
+            # log10 |v| from the exponent and the top of the fraction, off by at most one
+            bits: U128 = av.bits()
+            e2: S64 = (bits >> 112).to_wrap[S64]() - 16383
+            top: U64 = (bits >> 60).to_wrap[U64]() & 0xFFFFFFFFFFFFF
+            frac: B64 = top.to[B64]() * B64.from_bits(0x3CB0000000000000)
+            lg: B64 = (e2.to[B64]() + frac) * 0.30102999566398120
+            a: S64 = lg.floor().to[S64]()
+            # at the least exponent qmin a coefficient of fewer than p digits is the result (a subnormal or zero)
+            while true with k: S64 = (p - 1 - a).min(-f.qmin), tries: S64 = 0
+                z: Fa128 = fast_scale128(v: av, k)
+                when
+                    tries >= 3 => return fast_fail()
+                    z.v >= hi => continue with k: k - 1, tries: tries + 1
+                    z.v < lo and not (-k <= f.qmin) => continue with k: k + 1, tries: tries + 1
+                    else =>
+                        # z < 2^54, so its fraction and the distance to 1/2 are exact in B128; their B64 roundings are within 2^-53
+                        whole: B128 = z.v.floor()
+                        half: B128 = B64.to[B128](0.5)
+                        diff: B64 = (z.v - whole - half).to[B64]()
+                        total: B64 = (err + z.err) * FAST_UP
+                        band: B64 = z.v.to[B64]() * total * FAST_UP
+                        clear: Bool = band < 0.25 and diff.abs() * 0.999 > band
+                        up: U64 = (diff > 0.0).to[U64]()
+                        if clear
+                            return fast_result(neg: v < B64.to[B128](0.0),
+                                c: (whole.to[U64]() + up).to[U128](), q: -k, f)
+                        else
+                            return fast_fail()
+        av.is_infinite() => return (ok: true, d: dec_inf(v.is_sign_negative()))
+        av.is_nan() => return fast_fail()
+        else => return (ok: true, d: dec_num(neg: v.is_sign_negative(), coeff: 0, exp: f.qmin))
+
+### a × b.
+### :param a: The first factor.
+### :param b: The second factor.
+### :returns: The product and its bound.
+routine fa_mul(a: Fa128, b: Fa128) -> Fa128
+    err: B64 = a.err + b.err + a.err * b.err + FAST_U128
+    return (v: a.v * b.v, err: err * FAST_UP)
+
+### a / b (b's error below 2^-24).
+### :param a: The dividend.
+### :param b: The divisor.
+### :returns: The quotient and its bound.
+routine fa_div(a: Fa128, b: Fa128) -> Fa128
+    err: B64 = a.err + b.err * 1.001 + FAST_U128
+    return (v: a.v / b.v, err: err * FAST_UP)
+
+### a + b for a, b >= 0: the larger relative error, and the rounding.
+### :param a: The first term.
+### :param b: The second term.
+### :returns: The sum and its bound.
+routine fa_add_positive(a: Fa128, b: Fa128) -> Fa128
+    err: B64 = a.err.max(b.err) + FAST_U128
+    return (v: a.v + b.v, err: err * FAST_UP)
+
+### sqrt(a) for a > 0: half the error of a, and the rounding.
+### :param a: The operand.
+### :returns: The root and its bound.
+routine fa_sqrt(a: Fa128) -> Fa128
+    err: B64 = a.err * 0.5001 + FAST_U128
+    return (v: a.v.sqrt(), err: err * FAST_UP)
+
+### An exact B128.
+### :param v: The value.
+### :returns: It with a zero bound.
+@inline
+routine fa_exact(v: B128) -> Fa128
+    return (v: v, err: 0.0)
+
+### ln(1 + a) for a > -1/2 (signed): below 2^-30 by its series a - a^2/2 + a^3/3 - a^4/4 (the rest below 2^-120
+### relative, each of the few roundings on a value near 1), else ln of 1 + a, whose absolute error is the relative
+### error of the sum (|a| e_a / (1 + a) and its rounding) plus ln's own, over |ln(1 + a)|.
+### :param a: The operand and its bound.
+### :returns: ln(1 + a) and its bound.
+routine fa_ln1p(a: Fa128) -> Fa128
+    local one: B128 = B64.to[B128](1.0)
+    local av: B64 = a.v.to[B64]().abs()
+
+    if av < B64.from_bits(0x3E10000000000000)
+        third: B128 = one / B64.to[B128](3.0)
+        quart: B128 = a.v * B64.to[B128](0.25)
+        inner: B128 = third - quart
+        mid: B128 = B64.to[B128](0.5) - a.v * inner
+        p: B128 = one - a.v * mid
+        err: B64 = a.err + FAST_U128.mul(10.0) + B64.from_bits(0x3870000000000000)
+        return (v: a.v * p, err: err * FAST_UP)
+    else
+        w: B128 = one + a.v
+        part: B64 = fast_ratio(a: a.v, b: w) * a.err
+        rel_w: B64 = (part + FAST_U128) * 1.001
+        l: B128 = w.ln()
+        lf: B64 = l.to[B64]().abs()
+        abs_l: B64 = rel_w * 1.001 + lf * FAST_U128
+        return (v: l, err: abs_l / lf * 1.001 * FAST_UP)
+
+### fn(x, y) at D64 from B128, for the functions B128 has fast and correctly rounded (or builds from them), not ok
+### for erf, erfc, tgamma, and lgamma.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2).
+### :param f: The format.
+### :returns: The result, or not ok.
+routine fast64(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
+    local xa: Fa128 = fast_dec128(x)
+    local ax: B128 = xa.v
+    local sx: B128 = fast_signed128(x, a: ax)
+    local axf: B64 = ax.to[B64]()
+    local e: B64 = xa.err
+    local u: B64 = FAST_U128
+    local one: B128 = B64.to[B128](1.0)
+
+    result: Fa128 = when fn
+        0 => (v: sx.exp(), err: fast_through(kappa: axf, arg_err: e, unit: u))
+        1 => (v: sx.exp_m1(), err: fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
+        2 => (v: sx.exp2(), err: fast_through(kappa: axf * 0.6932, arg_err: e, unit: u))
+        3 => (v: sx.exp10(), err: fast_through(kappa: axf * 2.3026, arg_err: e, unit: u))
+        4, 6, 7 =>
+            # ln x, then times 1 / ln 2 or 1 / ln 10 (fn 6, 7): within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in
+            # decimal, elsewhere ln x (kappa 1 / |ln x| <= 2.5)
+            above_half: Bool = dec_compare_abs(x, c: 5, q: -1) > 0
+            near: Bool = above_half and dec_compare_abs(x, c: 15, q: -1) < 0
+            l: Fa128 = when
+                near =>
+                    t: Dec = dec_plus_int(x, k: -1)
+                    ta: Fa128 = fast_dec128(t)
+                    becomes fa_ln1p((v: fast_signed128(x: t, a: ta.v), err: ta.err))
+                else => (v: sx.ln(), err: fast_through(kappa: 2.5, arg_err: e, unit: u))
+            becomes when fn
+                4 => l
+                6 => fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN2_128)))
+                else => fa_mul(a: l, b: fa_exact(B128.from_bits(FAST_INV_LN10_128)))
+        5 =>
+            # ln(1 + x): below -1/2 as ln of 1 + x exact in decimal (kappa <= 1.5), else fa_ln1p
+            low: Bool = x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
+            becomes when
+                low =>
+                    w: Fa128 = fast_dec128(dec_plus_int(x, k: 1))
+                    becomes (v: w.v.ln(), err: fast_through(kappa: 1.5, arg_err: w.err, unit: u))
+                else => fa_ln1p((v: sx, err: e))
+        8 =>
+            # kappa = |x| / (sqrt(1 - x^2) asin |x|), 1 - |x| exact in B128 from 1/2 up
+            v: B128 = sx.asin()
+            w: B64 = (one - ax).to[B64]()
+            root: B64 = (w * (axf + 1.0)).sqrt()
+            kappa: B64 = fast_ratio(a: ax, b: v) / root * 1.001
+            becomes (v: v, err: fast_through(kappa, arg_err: e, unit: u))
+        9 =>
+            # as D32: 2 asin(sqrt(w / 2)) with w = 1 - |x| exact in decimal from 1/2 up, pi minus that below -1/2
+            high: Bool = dec_compare_abs(x, c: 5, q: -1) >= 0
+            becomes when
+                high =>
+                    w: Fa128 = fast_dec128(dec_plus_int(
+                        x: dec_num(neg: false, coeff: x.coeff, exp: x.exp), k: -1))
+                    r: Fa128 = fa_sqrt((v: w.v * B64.to[B128](0.5), err: w.err))
+                    t: B128 = r.v.asin() * B64.to[B128](2.0)
+                    et: B64 = fast_through(kappa: 1.1, arg_err: r.err, unit: u)
+                    becomes when
+                        x.neg =>
+                            v: B128 = B128.from_bits(FAST_PI128) - t
+                            abs: B64 = (FAST_PI64.mul(u) + t.to[B64]() * et) * 1.001
+                            becomes (v: v, err: (abs / v.to[B64]() + u) * FAST_UP)
+                        else => (v: t, err: et)
+                else =>
+                    v: B128 = sx.acos()
+                    w: B64 = (one - ax).to[B64]()
+                    root: B64 = (w * (axf + 1.0)).sqrt()
+                    kappa: B64 = axf / (root * v.to[B64]()) * 1.001
+                    becomes (v: v, err: fast_through(kappa, arg_err: e, unit: u))
+        10 => (v: sx.atan(), err: fast_through(kappa: 1.0, arg_err: e, unit: u))
+        11 =>
+            # sinh |x| = (E + E / (E + 1)) / 2 with E = expm1|x| (kappa |x| + 1): positive terms throughout
+            if axf > 11000.0
+                return fast_fail()
+            ee: Fa128 = (v: ax.exp_m1(), err: fast_through(kappa: axf + 1.0, arg_err: e, unit: u))
+            e1: Fa128 = fa_add_positive(a: ee, b: fa_exact(one))
+            s: Fa128 = fa_add_positive(a: ee, b: fa_div(a: ee, b: e1))
+            becomes fa_with_sign(r: (v: s.v * B64.to[B128](0.5), err: s.err), neg: x.neg)
+        12 =>
+            # cosh x = (X + 1/X) / 2 with X = e^|x| (kappa |x|), 1/X may underflow to 0, an absolute error below
+            # 2^-16000
+            if axf > 11000.0
+                return fast_fail()
+            xx: Fa128 = (v: ax.exp(), err: fast_through(kappa: axf, arg_err: e, unit: u))
+            s: Fa128 = fa_add_positive(a: xx, b: fa_div(a: fa_exact(one), b: xx))
+            becomes (v: s.v * B64.to[B128](0.5), err: s.err + u)
+        13 =>
+            # tanh |x| = E / (E + 2) with E = expm1(2|x|) (kappa 2|x| + 1)
+            two: B128 = B64.to[B128](2.0)
+            ee: Fa128 = (v: (ax * two).exp_m1(), err: fast_through(kappa: axf * 2.0 + 1.0, arg_err: e, unit: u))
+            becomes fa_with_sign(r: fa_div(a: ee, b: fa_add_positive(a: ee, b: fa_exact(two))),
+                neg: x.neg)
+        14 =>
+            # asinh |x|: from 1/2 up ln(|x| + sqrt(x^2 + 1)) (ln of at least 1.118, kappa <= 2.08), below it
+            # ln_1p(|x| + x^2 / (1 + sqrt(1 + x^2))): sums of positive terms
+            sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
+            r: Fa128 = fa_sqrt(fa_add_positive(a: sq, b: fa_exact(one)))
+            magnitude: Fa128 = when
+                axf >= 0.5 =>
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: r)
+                    becomes (v: a.v.ln(), err: fast_through(kappa: 2.08, arg_err: a.err, unit: u))
+                else =>
+                    q: Fa128 = fa_div(a: sq, b: fa_add_positive(a: r, b: fa_exact(one)))
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: q)
+                    becomes fa_ln1p(a)
+            becomes fa_with_sign(r: magnitude, neg: x.neg)
+        15 =>
+            # acosh x: from 2 up ln(x + sqrt(x^2 - 1)) (x^2 - 1 >= 3/4 x^2, so its error is at most 4/3 of x^2's plus
+            # a rounding, and ln of at least 3.73 has kappa <= 0.76), below 2 ln_1p(t + sqrt(t (t + 2))) with
+            # t = x - 1 exact
+            below_two: Bool = dec_compare_abs(x, c: 2, q: 0) < 0
+            becomes when
+                below_two =>
+                    t: Fa128 = fast_dec128(dec_plus_int(x, k: -1))
+                    t2: Fa128 = fa_add_positive(a: t, b: fa_exact(B64.to[B128](2.0)))
+                    a: Fa128 = fa_add_positive(a: t, b: fa_sqrt(fa_mul(a: t, b: t2)))
+                    becomes fa_ln1p(a)
+                else =>
+                    sq: Fa128 = fa_mul(a: (v: ax, err: e), b: (v: ax, err: e))
+                    m: Fa128 = (v: sq.v - one, err: (sq.err * 1.3334 + u) * FAST_UP)
+                    a: Fa128 = fa_add_positive(a: (v: ax, err: e), b: fa_sqrt(m))
+                    becomes (v: a.v.ln(), err: fast_through(kappa: 0.76, arg_err: a.err, unit: u))
+        16 =>
+            # atanh |x| = ln_1p(2|x| / w) / 2 with w = 1 - |x|: exact in decimal from 1/2 up, below it 1 - |x~| in
+            # B128 (the sum's relative error |x| e / w plus a rounding, at most e + 2u)
+            high: Bool = dec_compare_abs(x, c: 5, q: -1) >= 0
+            w: Fa128 = when
+                high => fast_dec128(dec_plus_int(x: dec_num(neg: false, coeff: x.coeff, exp: x.exp),
+                    k: -1))
+                else => (v: one - ax, err: (e + u * 2.0) * FAST_UP)
+            two: Fa128 = fa_exact(B64.to[B128](2.0))
+            q: Fa128 = fa_div(a: fa_mul(a: two, b: (v: ax, err: e)), b: w)
+            l: Fa128 = fa_ln1p(q)
+            becomes fa_with_sign(r: (v: l.v * B64.to[B128](0.5), err: l.err), neg: x.neg)
+        21, 22 =>
+            # sin and cos: kappa at most |x| / |f(x)|
+            v: B128 = when fn
+                21 => sx.sin()
+                else => sx.cos()
+            becomes (v: v, err: fast_through(kappa: fast_ratio(a: ax, b: v) * 1.001, arg_err: e, unit: u))
+        23 =>
+            # tan = sin / cos, each with its own kappa
+            sc: B128SinCos = sx.sin_cos()
+            es: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.sin) * 1.001, arg_err: e, unit: u)
+            ec: B64 = fast_through(kappa: fast_ratio(a: ax, b: sc.cos) * 1.001, arg_err: e, unit: u)
+            becomes fa_div(a: (v: sc.sin, err: es), b: (v: sc.cos, err: ec))
+        24 => (v: sx.cbrt(), err: fast_through(kappa: 0.34, arg_err: e, unit: u))
+        25 =>
+            # as D32: e^t with t = y ln|x|
+            ya: Fa128 = fast_dec128(y)
+            sy: B128 = fast_signed128(x: y, a: ya.v)
+            t: B128 = sy * ax.ln()
+            tf: B64 = t.to[B64]().abs()
+            dx: B64 = ya.v.to[B64]() * e
+            dt: B64 = (dx + tf * (u * 2.0 + ya.err)) * 1.001 * FAST_UP
+            big: Bool = dt > FAST_LIMIT
+            neg: Bool = x.neg & dec_is_odd_integer(y)
+            if big
+                return fast_fail()
+            becomes fa_with_sign(r: (v: t.exp(), err: (dt * FAST_UP + u) * FAST_UP), neg)
+        26 =>
+            # the angle with x the ordinate here: kappa at most 1 in either argument
+            ya: Fa128 = fast_dec128(y)
+            sy: B128 = fast_signed128(x: y, a: ya.v)
+            becomes (v: sx.atan2(sy), err: fast_through(kappa: 1.0, arg_err: e + ya.err, unit: u))
+        else => return fast_fail()
+    return fast_round128(v: result.v, err: result.err, f)
+
+### r with its value negated when neg, its bound unchanged.
+### :param r: The value and its bound.
+### :param neg: Whether the value is negated.
+### :returns: The signed value and its bound.
+@inline
+private routine fa_with_sign(r: Fa128, neg: Bool) -> Fa128
+    if neg
+        return (v: -r.v, err: r.err)
+    else
+        return r

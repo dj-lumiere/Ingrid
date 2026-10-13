@@ -1,0 +1,333 @@
+# RazorForge's stackful coroutine: create / resume / yield / delete, the cancellation shadow stack, and
+# abandonment. The stack and the context switch are Standard/Fiber's (switch_stack, initial_stack, and the stack
+# allocator: pages reserved, committed as the stack grows, a no-access page at the bottom), the same on every
+# operating system.
+#
+# rf_coro_resume switches into a coroutine and returns when it parks (rf_coro_yield and the scheduler's park
+# primitives) or finishes, with its status. The coroutine running on a thread is a thread-local, read again after
+# every switch, since a parked coroutine may go on on another thread.
+
+module Ingrid/Runtime
+
+import Standard/Alloc
+import Standard/Fiber
+import Standard/Os
+
+### The coroutine running on this thread, or null.
+@threadlocal
+global CURRENT_CORO: @@Coro
+
+### The order in which coroutines and threaded tasks finish, shared by both so race! compares them directly.
+### Starts at 1, so 0 is never a stamp and U64.MAX always means "not yet".
+global COMPLETION_SEQ: @U64 <- 1
+
+# rf_coro_status (razorforge_runtime.h).
+preset CORO_NEW:       U32 = 0
+preset CORO_RUNNING:   U32 = 1
+preset CORO_PARKED:    U32 = 2
+preset CORO_COMPLETED: U32 = 3
+preset CORO_CANCELLED: U32 = 4
+
+### A coroutine's stack reserve when the caller gives 0: reserved, not committed, so a parked shallow coroutine
+### costs about the pages it has touched.
+preset DEFAULT_STACK: USize = 1048576
+
+### rf_cancel_frame: one live owned value of a coroutine, in a node that lives in the scope owning the value.
+record CancelFrame
+    value_ptr: Addr
+    destroy_fn: Callable[(Addr,), None]
+    prev: @CancelFrame
+
+### rf_coro.
+record Coro
+    entry: Callable[(Addr,), None]
+    userdata: Addr
+    status: U32  # a CORO_ value; read across threads
+    cf_top: @CancelFrame  # the cancellation shadow stack's top
+    sched_next: @Coro  # the injector's link
+    wake_ns: U64  # the deadline it is parked until
+    timer_idx: SSize  # its slot in the scheduler's timer heap, or -1
+    sched_state: U32  # a SCHED_ value (sched.te)
+    park_intent: U32  # a PARK_ value, recorded by a park and applied by the worker
+    counted_done: Bool  # its completion has been taken off the scheduler's live count
+    owner_released: Bool  # its Agent let go while a worker held it: the worker frees it
+    cancel_requested: U32
+    initial_spawned: Bool  # spawned once: a second spawn does nothing
+    detached: Bool  # execute(): the worker that completes it frees it
+    awaiter: @Coro  # a coroutine waiting for this one to finish
+    home: @Sched  # the scheduler it was spawned on, where its wakes go
+    completion_seq: U64  # when it finished, in completion order (race! picks the first); U64.MAX until then
+    stack: Addr  # the bottom of its stack
+    sp: Addr  # its stack pointer while it isn't running
+    resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
+
+### Makes a `CancelFrame` from its fields.
+### :param value_ptr: Its `value_ptr`.
+### :param destroy_fn: Its `destroy_fn`.
+### :param prev: Its `prev`.
+### :returns: The new value.
+routine CancelFrame.construct(value_ptr: Addr, destroy_fn: Callable[(Addr,), None], prev: @Me) -> Me
+    return Me(value_ptr, destroy_fn, prev)
+
+### Releases nothing: a `CancelFrame` holds no memory of its own.
+routine CancelFrame.destruct(me: @Me) -> None
+    return
+
+### Makes a `Coro` from its fields.
+### :param entry: Its `entry`.
+### :param userdata: Its `userdata`.
+### :param status: Its `status`.
+### :param cf_top: Its `cf_top`.
+### :param sched_next: Its `sched_next`.
+### :param wake_ns: Its `wake_ns`.
+### :param timer_idx: Its `timer_idx`.
+### :param sched_state: Its `sched_state`.
+### :param park_intent: Its `park_intent`.
+### :param counted_done: Its `counted_done`.
+### :param owner_released: Its `owner_released`.
+### :param cancel_requested: Its `cancel_requested`.
+### :param initial_spawned: Its `initial_spawned`.
+### :param detached: Its `detached`.
+### :param awaiter: Its `awaiter`.
+### :param home: Its `home`.
+### :param completion_seq: Its `completion_seq`.
+### :param stack: Its `stack`.
+### :param sp: Its `sp`.
+### :param resumer_sp: Its `resumer_sp`.
+### :returns: The new value.
+routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
+    cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: SSize, sched_state: U32,
+    park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
+    initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
+    stack: Addr, sp: Addr, resumer_sp: Addr) -> Me
+    return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
+        park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
+        awaiter, home, completion_seq, stack, sp, resumer_sp)
+
+### Releases nothing: a `Coro` holds no memory of its own.
+routine Coro.destruct(me: @Me) -> None
+    return
+
+### The coroutine running on this thread. Read again at every call: after a switch the thread may be another one.
+### :returns: The running coroutine, or null on a plain thread.
+@noinline
+routine current_coro() -> @Coro
+    c: @Coro = CURRENT_CORO.peek()
+    return c
+
+### Takes the next completion stamp, shared by coroutines and threaded tasks.
+### :returns: The stamp, starting at 1.
+routine next_completion_seq() -> U64
+    seq: U64 = COMPLETION_SEQ.atomic_fetch_add(1)
+    return seq
+
+### A new coroutine's first frame: runs its routine, marks it completed, and goes back to its resumer for the last
+### time.
+@noreturn
+routine coro_trampoline() -> None
+    this_coro: @Coro = current_coro()
+    body: Callable[(Addr,), None] = this_coro.entry.peek()
+    body.call(this_coro.userdata.peek())
+    this_coro.completion_seq.poke_atomic(next_completion_seq())
+    this_coro.status.poke_atomic(CORO_COMPLETED)
+    switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
+    unreachable
+
+### Reserves a coroutine stack from Standard/Fiber's stack allocator.
+### :param size: The stack's reserve in bytes.
+### :returns: The stack's bottom, or null when it can't be reserved.
+routine stack_alloc(size: USize) -> Addr
+    local stacks: @MemoryManager <- make_stack_memory()
+
+    stack: Addr = stacks.alloc(size, align: 16)
+    return stack
+
+### Gives a coroutine stack back to Standard/Fiber's stack allocator.
+### :param stack: The stack's bottom, from {stack_alloc}.
+routine stack_free(stack: Addr) -> None
+    local stacks: @MemoryManager <- make_stack_memory()
+
+    stacks.free(stack)
+    return
+
+### A coroutine whose body is entry(userdata), on a stack of stack_size bytes (0: DEFAULT_STACK). It starts when it
+### is first resumed. Null for a null entry.
+### :param entry: The coroutine's body.
+### :param userdata: The argument passed to `entry`.
+### :param stack_size: The stack's reserve in bytes, or 0 for `DEFAULT_STACK`.
+### :returns: The new coroutine, or null when `entry` is null.
+### :throws: Crashes with `OutOfMemoryError` when the control block or the stack can't be allocated.
+@export("rf_coro_create")
+routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_size: USize) -> @Coro
+    if entry.addr().is_null()
+        return null
+    coro: @Coro = zeroed[Coro](count: 1, what: "Failed to allocate coroutine control block")
+    coro.entry.poke(entry)
+    coro.userdata.poke(userdata)
+    coro.timer_idx.poke(-1)
+    coro.completion_seq.poke(U64.MAX)
+    reserve: USize = when
+        stack_size == 0 => DEFAULT_STACK
+        else => stack_size
+    stack: Addr = stack_alloc(reserve)
+    if stack.is_null()
+        c_free(coro)
+        rf_throw(error_type: "OutOfMemoryError",
+            message: "Failed to reserve coroutine stack (out of address space or commit limit)")
+    else
+        coro.stack.poke(stack)
+        coro.sp.poke(initial_stack(stack: stack.to[@Byte](), size: reserve,
+            entry: coro_trampoline.addr()))
+        return coro
+
+### Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
+### :param coro: The coroutine to run.
+### :returns: Its status then (`CORO_PARKED` or `CORO_COMPLETED`), `CORO_COMPLETED` for a null `coro`.
+@export("rf_coro_resume")
+routine rf_coro_resume(coro: @Coro) -> U32
+    if coro.is_null()
+        return CORO_COMPLETED
+    if coro.status.peek_atomic() == CORO_COMPLETED
+        return CORO_COMPLETED
+    prev: @Coro = current_coro()
+    CURRENT_CORO.poke(coro)
+    coro.status.poke_atomic(CORO_RUNNING)
+    switch_stack(from: coro.resumer_sp, to: coro.sp.peek())
+    CURRENT_CORO.poke(prev)
+    return coro.status.peek_atomic()
+
+### The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
+routine coro_switch_out() -> None
+    this_coro: @Coro = current_coro()
+    if this_coro.is_null()
+        return
+    this_coro.status.poke_atomic(CORO_PARKED)
+    switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
+    return
+
+### A coroutine's status, a `CORO_` value.
+### :param coro: The coroutine, or null.
+### :returns: Its status, `CORO_COMPLETED` for a null `coro`.
+@export("rf_coro_status_get")
+routine rf_coro_status_get(coro: @Coro) -> U32
+    if coro.is_null()
+        return CORO_COMPLETED
+    else
+        return coro.status.peek_atomic()
+
+### The coroutine running on this thread, or null.
+### :returns: The running coroutine, or null on a plain thread.
+@export("rf_coro_current")
+routine rf_coro_current() -> @Coro
+    return current_coro()
+
+### The current logical task, for Roamed's task-keyed lock: the coroutine (the same across worker migration) or,
+### outside one, the OS thread. Only equality matters.
+### :returns: The coroutine's address, or the OS thread's identifier outside a coroutine.
+@export("rf_current_task_id")
+routine rf_current_task_id() -> U64
+    this_coro: @Coro = current_coro()
+    if this_coro.is_null()
+        return rf_current_thread_id()
+    else
+        return ptrtoint[Addr, U64](this_coro)
+
+### Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
+### null `coro` does nothing.
+### :param coro: The coroutine.
+@export("rf_coro_request_cancel")
+routine rf_coro_request_cancel(coro: @Coro) -> None
+    if coro.is_null()
+        return
+    coro.cancel_requested.poke_atomic(1)
+    return
+
+### Whether a coroutine was asked to stop.
+### :param coro: The coroutine, or null.
+### :returns: 1 when cancellation was requested, else 0 (0 for a null `coro`).
+@export("rf_coro_is_cancel_requested")
+routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
+    if coro.is_null()
+        return 0
+    else
+        return coro.cancel_requested.peek_atomic()
+
+### Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon). A null
+### `coro` does nothing.
+### :param coro: The coroutine to free.
+@export("rf_coro_delete")
+routine rf_coro_delete(coro: @Coro) -> None
+    if coro.is_null()
+        return
+    stack: Addr = coro.stack.peek()
+    if not stack.is_null()
+        stack_free(stack)
+    c_free(coro)
+    return
+
+### execute(): the worker that completes the coroutine frees it. Set before it is spawned, so before any worker
+### can reach its completion. A null `coro` does nothing.
+### :param coro: The coroutine.
+@export("rf_coro_set_detached")
+routine rf_coro_set_detached(coro: @Coro) -> None
+    if coro.is_null()
+        return
+    coro.detached.poke(true)
+    return
+
+### An owned value was constructed: frame (a node in the owning scope) becomes the running coroutine's top. Outside a
+### coroutine nothing is tracked.
+### :param frame: The node, in the scope owning the value.
+### :param value_ptr: The value.
+### :param destroy_fn: What destroys the value if the coroutine is abandoned.
+@export("rf_coro_cf_push")
+routine rf_coro_cf_push(frame: @CancelFrame, value_ptr: Addr,
+    destroy_fn: Callable[(Addr,), None]) -> None
+    this_coro: @Coro = current_coro()
+    if frame.is_null() or this_coro.is_null()
+        return
+    frame.value_ptr.poke(value_ptr)
+    frame.destroy_fn.poke(destroy_fn)
+    frame.prev.poke(this_coro.cf_top.peek())
+    this_coro.cf_top.poke(frame)
+    return
+
+### The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
+### it is. Outside a coroutine, or for a null `frame` (which push never linked), nothing happens.
+### :param frame: The node pushed for the value.
+@export("rf_coro_cf_pop")
+routine rf_coro_cf_pop(frame: @CancelFrame) -> None
+    this_coro: @Coro = current_coro()
+    if frame.is_null() or this_coro.is_null()
+        return
+    if this_coro.cf_top.peek() !== frame
+        return
+    this_coro.cf_top.poke(frame.prev.peek())
+    return
+
+### A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
+### construction order), then the coroutine and its stack are freed. A completed one is just freed. An abandoned one
+### is marked `CORO_CANCELLED` and given a completion stamp if it had none. A null `coro` does nothing.
+### :param coro: The coroutine to abandon.
+@export("rf_coro_abandon")
+routine rf_coro_abandon(coro: @Coro) -> None
+    if coro.is_null()
+        return
+    if coro.status.peek_atomic() == CORO_COMPLETED
+        # Stamped like a completion, so a cancelled coroutine that finished first still wins a race!.
+        rf_coro_delete(coro)
+        return
+    else
+        if coro.completion_seq.peek_atomic() == U64.MAX
+            coro.completion_seq.poke_atomic(next_completion_seq())
+        coro.status.poke_atomic(CORO_CANCELLED)
+
+        until f.is_null() with f: @CancelFrame = coro.cf_top.peek()
+            prev: @CancelFrame = f.prev.peek()
+            destroy: Callable[(Addr,), None] = f.destroy_fn.peek()
+            if not destroy.addr().is_null()
+                destroy.call(f.value_ptr.peek())
+            continue with f: prev
+        coro.cf_top.poke(null)
+        rf_coro_delete(coro)
+        return

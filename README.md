@@ -24,8 +24,8 @@ Roamed entity runtime and its cycle collector, the crash handler, SipHash, the x
 splitmix64 seeding, JSON string escaping, the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
 numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
-widths), and the arbitrary-precision Integer (`tessera/generated/numerics.tess`, with the scratch arena
-the engine takes its temporaries from in `tessera/scratch.tess`). More
+widths), and the arbitrary-precision Integer (`tessera/generated/numerics.te`, with the scratch arena
+the engine takes its temporaries from in `tessera/scratch.te`). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
@@ -42,7 +42,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
 ├── decimal/      # The decimal floats D32, D64, and D128
-└── generated/    # Written by `RazorForge export-ingrid`: Integer (numerics.tess)
+└── generated/    # Written by `RazorForge export-ingrid`: Integer (numerics.te)
 tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt
@@ -77,7 +77,7 @@ D64 against rounding through D128 (why the narrow formats don't borrow D128's re
 transcendentals against mpmath, Integer through its C calls (and the scratch and result-buffer retries)
 against what RazorForge's engines computed, the word division on its edge cases, the Roamed counts and lock, the cycle
 collector, the deadlock detector, the heap calls, and the crash report, and from
-`runtime-tessera/` the SignalCaster (`monitor.tess`), the channels' last-handle drop, the per-thread file results, the
+`runtime-tessera/` the SignalCaster (`monitor.te`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
 The routines a test reaches in the RazorForge runtime library (`rf_crash_exit`, the trace, the current task, the
@@ -86,7 +86,7 @@ checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 
 ```bash
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll test tests
-dotnet ../Tessera/bin/Debug/net10.0/tessera.dll check runtime-tessera/*.tess   # also tessera/*.tess tessera/decimal/*.tess tessera/generated/*.tess, --target <triple>
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll check runtime-tessera/*.te   # also tessera/*.te tessera/decimal/*.te tessera/generated/*.te, --target <triple>
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll fmt --check runtime-tessera tessera tests
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll lint runtime-tessera tessera tests
 ```

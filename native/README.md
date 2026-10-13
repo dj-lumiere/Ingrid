@@ -25,34 +25,34 @@ native/
 ├── build.bat
 └── build.sh
 ../runtime-tessera/
-├── sync.tess  // what the rest shares: C calls, a condition variable, the clock, the crash handler
-├── trace.tess  // the crash: __rf_throw, stack traces, fault handlers, the standard streams
-├── console.tess  // show / alert / ask, crash output and exit, runtime init, C-string helpers
-├── files.tess  // the rf_* files and filesystem calls over Tessera's Standard::Os: handles, mappings, listings
-├── numeric.tess  // libm's exact float operations, a random word, the wall clock, FFI test helpers
-├── signals.tess  // when_interrupted / when_terminated
-├── builtins.tess  // what the JIT would otherwise get from compiler-rt: emulated TLS
-├── coro.tess  // a coroutine: create / resume / yield / abandon, the cancellation shadow stack
-├── sched.tess  // the scheduler: the worker pool, deques and stealing, timers, park/wake
-├── race.tess  // race!
-├── task.tess  // result tasks and threaded tasks
-├── channel.tess  // channels
-├── monitor.tess  // SignalCaster
-├── io.tess  // whole-file reads and writes and subprocesses on the I/O threads
-└── context.tess  // the older context entry points, and waitfor on a thread
+├── sync.te  // what the rest shares: C calls, a condition variable, the clock, the crash handler
+├── trace.te  // the crash: __rf_throw, stack traces, fault handlers, the standard streams
+├── console.te  // show / alert / ask, crash output and exit, runtime init, C-string helpers
+├── files.te  // the rf_* files and filesystem calls over Tessera's Standard::Os: handles, mappings, listings
+├── numeric.te  // libm's exact float operations, a random word, the wall clock, FFI test helpers
+├── signals.te  // when_interrupted / when_terminated
+├── builtins.te  // what the JIT would otherwise get from compiler-rt: emulated TLS
+├── coro.te  // a coroutine: create / resume / yield / abandon, the cancellation shadow stack
+├── sched.te  // the scheduler: the worker pool, deques and stealing, timers, park/wake
+├── race.te  // race!
+├── task.te  // result tasks and threaded tasks
+├── channel.te  // channels
+├── monitor.te  // SignalCaster
+├── io.te  // whole-file reads and writes and subprocesses on the I/O threads
+└── context.te  // the older context entry points, and waitfor on a thread
 ../tessera/
-├── memory.tess  // rf_allocate_dynamic and the rest of the heap calls, scratch regions
-├── divide.tess  // word division for the wide integers
-├── random.tess  // splitmix64
-├── hash.tess  // SipHash-2-4, behind every hash(k0, k1) in the standard libraries
-├── roam.tess  // the Roamed entity runtime: counts, promotion, the task-keyed lock
-├── cycle.tess  // the cycle collector for Roamed entities
-├── deadlock.tess  // the opt-in deadlock detector for the Roamed lock
-└── crash.tess  // the crash handler of every program
+├── memory.te  // rf_allocate_dynamic and the rest of the heap calls, scratch regions
+├── divide.te  // word division for the wide integers
+├── random.te  // splitmix64
+├── hash.te  // SipHash-2-4, behind every hash(k0, k1) in the standard libraries
+├── roam.te  // the Roamed entity runtime: counts, promotion, the task-keyed lock
+├── cycle.te  // the cycle collector for Roamed entities
+├── deadlock.te  // the opt-in deadlock detector for the Roamed lock
+└── crash.te  // the crash handler of every program
 ```
 
 Platform differences are per-routine `#target(os: ...)` declarations, not separate builds: one source set type-checks
-for every target (`tessera check --target <triple> ../runtime-tessera/*.tess`).
+for every target (`tessera check --target <triple> ../runtime-tessera/*.te`).
 
 ## What It Links
 

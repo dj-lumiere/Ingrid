@@ -1,0 +1,60 @@
+# __emutls_get_address (builtins.te), the accessor the in-process JIT calls for a thread-local, without the rest
+# of the runtime library. The thread's slot table can't grow (realloc fails), which raises
+# OutOfMemoryError instead of clearing memory at a null table.
+
+module Ingrid/Runtime
+
+import Standard/Format
+import Standard/Os
+
+### Whether the stand-in c_realloc fails.
+global REALLOC_FAILS: @Bool
+
+# -- what builtins.te calls in the rest of the runtime library ---------------------
+
+@external("c")
+@symbol("calloc")
+routine c_calloc(count: USize, size: USize) -> Addr
+
+@external("c")
+@symbol("realloc")
+routine c_realloc_real(ptr: Addr, size: USize) -> Addr
+
+@external("c")
+@symbol("memcpy")
+routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
+
+### C's realloc, or a failure (null) when REALLOC_FAILS says so. It takes its arguments in order, as the C one it
+### stands in for.
+@positional
+routine c_realloc(ptr: Addr, size: USize) -> Addr
+    if REALLOC_FAILS.peek()
+        return null
+    else
+        return c_realloc_real(ptr, size)
+
+### count zeroed Ts.
+routine zeroed[T](count: USize, what: CStr) -> @T
+needs T: typename
+    p: Addr = c_calloc(count, sizeof[T]())
+    return p.to[@T]()
+
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
+
+### Reports the error RazorForge would raise and exits with status 3.
+@noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> None
+    Out.write("{error_type.getview()}: {message.getview()}\n")
+    exit(3)
+
+routine start() -> None
+    local value: @U64 <- 42
+    local plain: @EmutlsControl <- (size: 8, align: 8, index: 0, value: value)
+
+    REALLOC_FAILS.poke(true)
+    unreached: Addr = emutls_get_address(plain)
+    Out.write("not reached {unreached}\n")
+    return

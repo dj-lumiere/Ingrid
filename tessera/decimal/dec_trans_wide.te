@@ -1,0 +1,1053 @@
+# The decimal transcendentals evaluated once at 192 bits on the W engine (dec_wide.te): dec_trans.te's
+# evaluations at three limbs, the same algorithms and the same error bounds, on values of five words instead of
+# Mp's twenty limbs. dec_ziv tries this before the multiprecision loop, which then starts above 192 bits.
+
+### Two values.
+record WePair
+    a: We
+    b: We
+
+### An argument reduced modulo pi/2: x = r + k pi/2, k taken mod 4.
+record WReduced
+    k: U64
+    r: We
+
+### A signed fixed-point number: (-1)^neg × mag.
+record XS
+    neg: Bool
+    mag: X
+
+### fn(x, y) correctly rounded to f from one evaluation at 192 bits, or not ok when the band of that evaluation
+### reaches a rounding midpoint.
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2), else ignored.
+### :param f: The format the result rounds to.
+### :returns: The result, or not ok.
+routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
+    bits: S64 = f.digits * 4 + 40
+    v: We = wide_eval(fn, x, y, bits)
+    return wide_round(y: v, f)
+
+### e^x for |x| < 2^40: x = k ln 2 + r with |r| < 1/2 (its bound from the subtraction), then r = j1/32 + j2/2048 + s
+### exactly in fixed point (|s| <= 2^-12), e^s by its Taylor series to s^13 in fixed point, and e^x = 2^k e^(j1/32)
+### e^(j2/2048) e^s with the two powers from tables.
+###
+### The bound: |r| 2^190 truncated to an integer R is off by 2^-190, r itself by r.err 2^-192 |r|, and e^r follows its
+### argument's absolute error, so those give 4 + r.err 2^e_r units. Horner's scheme on acc = 1/k! + s acc cuts each
+### product at 2^-190 and starts from coefficients cut there too, so the sum is off by at most 2 × 2^-190 ×
+### (1 + |s| + |s|^2 + ...) < 2.01 × 2^-190, and the terms left out are below |s|^14 / 14! < 2^-204: 12.1 units of a
+### sum above 0.9997. The tables add 2 units each and the two products 2 each.
+### :param x: The operand.
+### :returns: e^x.
+routine we_exp(x: We) -> We
+    local kf: B64 = x.v.to_b64() * 1.4426950408889634
+    local k: S64 = kf.round().to_clamp[S64]()
+    local ln2k: We = we_mul_u64(a: we_const(DEC_LN2), k: k.abs_diff(0)).with_sign(k < 0)
+    local r: We = we_sub(a: x, b: ln2k)
+    local neg: Bool = r.v.neg
+    local big: X = x_of_w(r: r.v, scale: 190)
+
+    if r.v.exp > -1 and not r.v.is_zero()
+        return (v: r.v, err: B64.from_bits(0x7FF0000000000000))
+    else
+        # j1 = round(|r| 32) from R's bits above 2^185 (bit 57 of its top limb), and s1 = |r| - j1/32 with its sign
+        j1: U64 = big.h + U64.shl(1, 56) >> 57
+        hj: X = (h: j1 << 57, m: 0, l: 0)
+        above: Bool = big.h >= hj.h
+        s1: X = when
+            above => x_sub(a: big, b: hj)
+            else => x_sub(a: hj, b: big)
+        # j2 = round(|s1| 2048) from the bits above 2^179 (bit 51), and s = |s1| - j2/2048
+        s1_neg: Bool = neg ^ not above
+        j2: U64 = s1.h + U64.shl(1, 50) >> 51
+        hj2: X = (h: j2 << 51, m: 0, l: 0)
+        above2: Bool = s1.h >= hj2.h
+        s: X = when
+            above2 => x_sub(a: s1, b: hj2)
+            else => x_sub(a: hj2, b: s1)
+        i1: S64 = when
+            neg => U64.to[S64](11) - j1.to[S64]()
+            else => U64.to[S64](11) + j1.to[S64]()
+        i2: S64 = when
+            s1_neg => U64.to[S64](32) - j2.to[S64]()
+            else => U64.to[S64](32) + j2.to[S64]()
+        # acc = 1/n! + s acc from n = 12 down to the constant term, s scaled by 2^202 and acc by 2^190
+        s2: X = x_shl(x: s, k: 12)
+        s_neg: Bool = s1_neg ^ ~above2
+        while true with n: S64 = 12, acc: X = x_entry(table: WIDE_INV_FACT.to[@U64](), i: 13)
+            c2: X = x_entry(table: WIDE_INV_FACT.to[@U64](), i: n.to[USize]())
+            p2: X = x_mul_shift(a: acc, b: s2, shift: 202)
+            next2: X = when
+                s_neg => x_sub(a: c2, b: p2)
+                else => x_add(a: c2, b: p2)
+            if n == 0
+                units: B64 = (r.err * b64_pow2(r.v.exp) + 16.2) * MP_UP
+                es: We = (v: w_of_x(x: next2, scale: 190, neg: false), err: units)
+                t1: We = we_entry(table: WIDE_EXP_HIGH.to[@U64](), i: i1.to[USize]())
+                t2: We = we_entry(table: WIDE_EXP_LOW.to[@U64](), i: i2.to[USize]())
+                e: We = we_mul(a: we_mul(a: t1, b: t2), b: es)
+                return e.ldexp(k)
+            else
+                continue with n: n - 1, acc: next2
+
+### e^x - 1: below 2^-24 its own series x + x^2/2 + ..., else e^x - 1 (the cancellation costs at most 24 bits).
+### :param x: The operand.
+### :returns: e^x - 1.
+routine we_expm1(x: We) -> We
+    if x.v.exp <= -24
+        while true with term: We = x, sum: We = x, i: U64 = 2
+            next2: We = we_div_u64(a: we_mul(a: term, b: x), k: i)
+            if we_is_negligible(term: next2, sum)
+                return we_plus_abs(s: sum, e: next2.v.exp + 1)
+            else
+                continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 1
+    else
+        return we_sub(a: we_exp(x), b: we_int(1))
+
+### ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+### :param t: The argument, below 1/32 in magnitude.
+### :returns: ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
+routine we_ln1p_series(t: We) -> We
+    # power = t^(i - 1)
+    while true with power: We = t, sum: We = t, i: U64 = 2
+        next_power2: We = we_mul(a: power, b: t)
+        term2: We = we_div_u64(a: next_power2, k: i)
+        odd2: Bool = i & 1 == 1
+        signed2: We = when
+            odd2 => term2
+            else => term2.negate()
+        if we_is_negligible(term: term2, sum)
+            return we_plus_abs(s: sum, e: term2.v.exp + 1)
+        else
+            continue with power: next_power2, sum: we_add(a: sum, b: signed2), i: i + 1
+
+### ln x for x > 0: x = m 2^E with m in [0.75, 1.5), ln x = E ln 2 + ln m (we_ln_reduced).
+### :param x: The operand.
+### :returns: ln x for x > 0.
+routine we_ln(x: We) -> We
+    local top: B64 = x.v.magnitude().top_b64()
+    local low: Bool = top < 0.75
+    local e: S64 = x.v.exp - low.to[S64]()
+
+    lnm: We = we_ln_reduced(x.ldexp(-e))
+    part: We = we_mul_u64(a: we_const(DEC_LN2), k: e.abs_diff(0)).with_sign(e < 0)
+    if e == 0
+        return lnm
+    else
+        return we_add(a: part, b: lnm)
+
+### a + b for signed fixed-point numbers (no carry out of 192 bits).
+### :param a: The first term.
+### :param b: The second term.
+### :returns: The sum.
+routine xs_add(a: XS, b: XS) -> XS
+    if a.neg == b.neg
+        return (neg: a.neg, mag: x_add(a: a.mag, b: b.mag))
+    else if x_compare(a: a.mag, b: b.mag) >= 0
+        return (neg: a.neg, mag: x_sub(a: a.mag, b: b.mag))
+    else
+        return (neg: b.neg, mag: x_sub(a: b.mag, b: a.mag))
+
+### x × k for k < 2^64 as five limbs, exactly.
+### :param x: The number.
+### :param k: The multiplier.
+### :returns: The limbs.
+@inline
+routine x_mul_u64(x: X, k: U64) -> WLimbs
+    x0: U128 = x.l.mul_wide(k)
+    x1: U128 = w_fma(x: x.m, y: k, p: (x0 >> 64).to_wrap[U64](), q: 0)
+    x2: U128 = w_fma(x: x.h, y: k, p: (x1 >> 64).to_wrap[U64](), q: 0)
+    return (l4: 0, l3: (x2 >> 64).to_wrap[U64](), l2: x2.to_wrap[U64](), l1: x1.to_wrap[U64](), l0: x0.to_wrap[U64]())
+
+### The bits at .. at + 191 of five limbs as a fixed-point number.
+### :param r: The limbs.
+### :param at: The lowest bit kept.
+### :returns: The bits.
+@inline
+routine x_of_limbs(r: WLimbs, at: S64) -> X
+    return (h: r.bits(at + 128), m: r.bits(at + 64), l: r.bits(at))
+
+### ln m for m in [0.75, 1.5), in fixed point. With M = m 2^191 (its last bit cut), i = round(128 m) and r1 =
+### round(2^17 / i) / 2^10, t1 = m r1 - 1 is below 2^-7.39 and comes exactly from M r1; with j = round(2^14 t1) and r2 =
+### 1 - j 2^-14 + j^2 2^-28, t2 = (1 + t1) r2 - 1 = t1 + (r2 - 1) + t1 (r2 - 1) is below 2^-14.9 (each cut at
+### 2^-199). Then ln m = -ln r1 - ln r2 + ln(1 + t2), the logarithms of r1 and r2 from tables (2 units each) and
+### ln(1 + t2) = t2 P(t2) with P = Σ (-t2)^k / (k + 1) to k = 14 (the rest below 2^-208 relative) by Horner's scheme:
+### 8.3 units, its product 2.
+###
+### The absolute error: M's cut moves m by 2^-191 (ln m by under 2^-190.6), the cuts of t1 and t2 by 2^-197, and m's
+### own bound (relative) moves ln m by m.err 2^-192: 3 + m.err units of 2^-192, added at the end.
+### :param m: The operand, in [0.75, 1.5).
+### :returns: ln m.
+routine we_ln_reduced(m: We) -> We
+    local big: X = x_of_w(r: m.v, scale: 191)
+    local i: U64 = big.h + U64.shl(1, 55) >> 56
+    local r1: U64 = U64.add(131072, i >> 1) // i
+
+    # t1 2^201 = M r1 - 2^201, kept at 2^199
+    p: WLimbs = x_mul_u64(x: big, k: r1)
+
+    above: Bool = p.l3 >= U64.shl(1, 9)
+    two: WLimbs = (l4: 0, l3: U64.shl(1, 9), l2: 0, l1: 0, l0: 0)
+    d: WLimbs = when
+        above => w_limbs_sub(a: p, b: two)
+        else => w_limbs_sub(a: two, b: p)
+
+    # a = (r2 - 1) 2^28 = -j 2^14 + j^2, |a| < 2^21
+    t1: XS = (neg: not above, mag: x_of_limbs(r: d, at: 2))
+    jm: U64 = t1.mag.h + U64.shl(1, 56) >> 57
+    js: S64 = when
+        t1.neg => -jm.to[S64]()
+        else => jm.to[S64]()
+    a: S64 = js * js - js * 16384
+    am: U64 = a.abs_diff(0)
+    term: XS = (neg: a < 0, mag: (h: am << 43, m: 0, l: 0))
+    prod: XS = (neg: t1.neg ^ (a < 0), mag: x_of_limbs(r: x_mul_u64(x: t1.mag, k: am), at: 28))
+
+    t2: XS = xs_add(a: xs_add(a: t1, b: term), b: prod)
+    u: X = x_shl(x: t2.mag, k: 5)
+    p2: X = we_poly_signed(table: WIDE_INV_INT.to[@U64](), u, top: 14, negative: t2.neg)
+    t2w: W = w_of_x(x: t2.mag, scale: 199, neg: t2.neg)
+    lt: We = we_mul(a: we_exact(t2w), b: (v: w_of_x(x: p2, scale: 190, neg: false), err: 8.3))
+    l1: We = we_entry(table: WIDE_LN_R1.to[@U64](), i: (i - 96).to[USize]()).with_sign(r1 > 1024)
+    l2: We = we_entry(table: WIDE_LN_R2.to[@U64](), i: (js + 100).to[USize]()).with_sign(js < 0)
+
+    sum: We = we_add(a: we_add(a: l1, b: l2), b: lt)
+    delta: B64 = m.err + 3.0
+    return we_widen_abs(s: sum, delta)
+
+### a - b for five-limb numbers, a >= b.
+### :param a: The minuend.
+### :param b: The subtrahend.
+### :returns: The difference.
+routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
+    d0: U64 = a.l0 -% b.l0
+    c0: U64 = (a.l0 < b.l0).to[U64]()
+    d1: U64 = a.l1 -% b.l1 -% c0
+    c1: U64 = w_borrow(x: a.l1, y: b.l1, borrow: c0)
+    d2: U64 = a.l2 -% b.l2 -% c1
+    c2: U64 = w_borrow(x: a.l2, y: b.l2, borrow: c1)
+    d3: U64 = a.l3 -% b.l3 -% c2
+    c3: U64 = w_borrow(x: a.l3, y: b.l3, borrow: c2)
+    d4: U64 = a.l4 -% b.l4 -% c3
+    return (l4: d4, l3: d3, l2: d2, l1: d1, l0: d0)
+
+### Σ (-t)^k c_k for k = 0 .. top (or Σ |t|^k c_k when t is negative) by Horner's scheme in fixed point, u = |t|
+### scaled by 2^204, the coefficients and the sum by 2^190.
+### :param table: The coefficients c_0 .. c_top as fixed-point numbers of 2^-190.
+### :param u: |t|, scaled by 2^204.
+### :param top: The last index.
+### :param negative: Whether t is negative (all terms add).
+### :returns: The sum, scaled by 2^190.
+routine we_poly_signed(table: @U64, u: X, top: USize, negative: Bool) -> X
+    while k != 0 with k: USize = top, acc: X = x_entry(table, i: top)
+        k2: USize = k - 1
+        c: X = x_entry(table, i: k2)
+        p: X = x_mul_shift(a: acc, b: u, shift: 204)
+        if negative
+            continue with k: k2, acc: x_add(a: c, b: p)
+        else
+            continue with k: k2, acc: x_sub(a: c, b: p)
+    then
+        return acc
+
+### ln(1 + t): its series below 2^-24, else ln of the sum (the cancellation costs at most 24 bits).
+### :param t: The argument.
+### :returns: ln(1 + t).
+routine we_ln1p(t: We) -> We
+    if t.v.exp <= -24
+        return we_ln1p_series(t)
+    else
+        return we_ln(we_add(a: we_int(1), b: t))
+
+### sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below
+### the first term left out).
+### :param r: The argument.
+### :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
+routine we_sincos_series(r: We) -> WePair
+    local r2: We = we_mul(a: r, b: r)
+    local one: We = we_int(1)
+
+    # term = r^(2i - 1) / (2i - 1)!, signs alternating
+    while true with term: We = r, sum: We = r, i: U64 = 1
+        div2: U64 = i * 2 * (i * 2 + 1)
+        next2: We = we_div_u64(a: we_mul(a: term, b: r2), k: div2).negate()
+        if we_is_negligible(term: next2, sum)
+            s: We = we_plus_abs(s: sum, e: next2.v.exp)
+
+            while true with term2: We = one, sum2: We = one, i2: U64 = 1
+                div3: U64 = (i2 * 2 - 1) * (i2 * 2)
+                next3: We = we_div_u64(a: we_mul(a: term2, b: r2), k: div3).negate()
+                if we_is_negligible(term: next3, sum: sum2)
+                    return (a: s, b: we_plus_abs(s: sum2, e: next3.v.exp))
+                else
+                    continue with term2: next3, sum2: we_add(a: sum2, b: next3), i2: i2 + 1
+        else
+            continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 1
+
+### sin r and cos r for |r| <= 0.8: r = c + s with c = j/64 and |s| <= 1/128, exactly in fixed point, sin s = s P(s^2)
+### and cos s = Q(s^2) by Horner's scheme in fixed point, then sin r = sin c cos s + cos c sin s and cos r = cos c cos s
+### - sin c sin s with sin c and cos c from tables (no cancellation: c and s are within 1/128, and r <= pi/4). Past 0.8,
+### the Taylor series of r itself.
+###
+### The bound: |r| 2^190 truncated to R is off by 2^-190 and r by r.err 2^-192 |r|; sin and cos follow that absolute
+### error at most, added at the end. P and Q (to u^10, u = s^2 <= 2^-14, the rest below u^11 / 21! < 2^-218) come
+### within 2.01 × 2^-190 of their values above 0.99997: 8.1 units. The tables add 2 units, each product 2.
+### :param r: The argument.
+### :returns: sin r and cos r.
+routine we_sincos(r: We) -> WePair
+    local big: X = x_of_w(r: r.v, scale: 190)
+
+    if r.v.exp > 0
+        return we_sincos_series(r)
+    else
+        # j = round(|r| 64) from R's bits above 2^184 (bit 56 of its top limb)
+        j: U64 = big.h + U64.shl(1, 55) >> 56
+        when
+            j > 51 => return we_sincos_series(r)
+            j == 0 =>
+                # |r| < 1/128: r^2 from |r| 2^197 (below 2^190), its cut and r's own cut moving P and Q by under 2^-203; sin r
+                # carries r's bound, cos r (1 - r^2/2 ...) at most that too
+                d: X = x_of_w(r: r.v, scale: 197)
+                u: X = x_mul_shift(a: d, b: d, shift: 190)
+                p: X = we_poly(table: WIDE_INV_FACT_ODD.to[@U64](), u, top: 10)
+                q: X = we_poly(table: WIDE_INV_FACT_EVEN.to[@U64](), u, top: 10)
+                sine: We = we_mul(a: r, b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.3))
+                cosine: We = (v: w_of_x(x: q, scale: 190, neg: false), err: (r.err + 8.3) * MP_UP)
+                return (a: sine, b: cosine)
+            else =>
+                hj: X = (h: j << 56, m: 0, l: 0)
+                above: Bool = big.h >= hj.h
+                s: X = when
+                    above => x_sub(a: big, b: hj)
+                    else => x_sub(a: hj, b: big)
+                u: X = x_mul_shift(a: s, b: s, shift: 176)
+                p: X = we_poly(table: WIDE_INV_FACT_ODD.to[@U64](), u, top: 10)
+                q: X = we_poly(table: WIDE_INV_FACT_EVEN.to[@U64](), u, top: 10)
+                sw: W = w_of_x(x: s, scale: 190, neg: not above)
+                sin_s: We = we_mul(a: we_exact(sw),
+                    b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.2))
+
+                cos_s: We = (v: w_of_x(x: q, scale: 190, neg: false), err: 8.2)
+                sc: We = we_entry(table: WIDE_SIN.to[@U64](), i: j.to[USize]())
+                cc: We = we_entry(table: WIDE_COS.to[@U64](), i: j.to[USize]())
+                sine: We = we_add(a: we_mul(a: sc, b: cos_s), b: we_mul(a: cc, b: sin_s))
+                cosine: We = we_sub(a: we_mul(a: cc, b: cos_s), b: we_mul(a: sc, b: sin_s))
+                delta: B64 = r.err * b64_pow2(r.v.exp) + 4.0
+
+                sr: We = we_widen_abs(s: sine, delta)
+
+                cr: We = we_widen_abs(s: cosine, delta)
+                return (a: sr.with_sign(sr.v.neg ^ r.v.neg), b: cr)
+
+### Σ (-1)^k c_k u^k for k = 0 .. top by Horner's scheme in fixed point: acc = c_k - u acc, with u scaled by 2^204 and
+### the coefficients and the sum by 2^190 (each c_k from the table, positive, decreasing, and u below 2^-12, so acc
+### stays near c_k and above 0). Each step cuts its product at 2^-190.
+### :param table: The coefficients c_0 .. c_top as fixed-point numbers of 2^-190.
+### :param u: The variable, scaled by 2^204.
+### :param top: The last index.
+### :returns: The sum, scaled by 2^190.
+routine we_poly(table: @U64, u: X, top: USize) -> X
+    while k != 0 with k: USize = top, acc: X = x_entry(table, i: top)
+        k2: USize = k - 1
+        c: X = x_entry(table, i: k2)
+        continue with k: k2, acc: x_sub(a: c, b: x_mul_shift(a: acc, b: u, shift: 204))
+    then
+        return acc
+
+### The bound of s widened by an absolute error of delta 2^-192 (relative to |s| >= t 2^(e - 1), t its top bits).
+### :param s: The value.
+### :param delta: The absolute error in units of 2^-192.
+### :returns: s with the wider bound.
+routine we_widen_abs(s: We, delta: B64) -> We
+    t: B64 = s.v.top_b64().abs()
+    if s.v.is_zero()
+        return (v: s.v, err: B64.from_bits(0x7FF0000000000000))
+    else
+        return s.widen(delta / t * b64_pow2(-s.v.exp) * MP_UP)
+
+### atan x: past 1 in magnitude pi/2 - atan(1/|x|), else from the table: c = j/64 nearest |x|, d = (|x| - c) /
+### (1 + |x| c) with |d| <= 1/128, atan |x| = atan c + atan d, and atan d = d P(d^2) by Horner's scheme in fixed point
+### (to d^28 / 29, the rest below 2^-215 relative).
+###
+### The bound: d carries its bound from the division; d^2 cut to 2^-204 moves P by under 2^-204 and d's own cut to
+### 2^-197 by under 2^-203; P (above 0.99999) comes within 2.01 × 2^-190, so 8.3 units with those. The table adds 2.
+### :param x: The operand.
+### :returns: atan x.
+routine we_atan(x: We) -> We
+    local ax: We = x.magnitude()
+
+    when
+        x.v.is_zero() => return x
+        x.v.exp >= 1 and w_compare_magnitude(a: x.v, b: w_of_u128(v: 1, scale: 0)) > 0 =>
+            inner: We = we_atan(we_div(a: we_int(1), b: ax))
+            half_pi: We = we_const(DEC_PI).ldexp(-1)
+            r: We = we_sub(a: half_pi, b: inner)
+            return r.with_sign(x.v.neg)
+        else =>
+            # j = round(|x| 64)
+            big: X = x_of_w(r: ax.v, scale: 190)
+            j: U64 = big.h + U64.shl(1, 55) >> 56
+            d: We = when
+                j == 0 => ax
+                else =>
+                    c: We = we_exact(w_of_u128(v: j.to[U128](), scale: -6))
+                    num: We = we_sub(a: ax, b: c)
+                    den: We = we_add(a: we_int(1), b: we_mul_u64(a: ax, k: j).ldexp(-6))
+                    becomes we_div(a: num, b: den)
+            dx: X = x_of_w(r: d.v, scale: 197)
+            u: X = x_mul_shift(a: dx, b: dx, shift: 190)
+            p: X = we_poly(table: WIDE_INV_ODD.to[@U64](), u, top: 14)
+            ad: We = we_mul(a: d, b: (v: w_of_x(x: p, scale: 190, neg: false), err: 8.3))
+            t: We = we_entry(table: WIDE_ATAN.to[@U64](), i: j.to[USize]())
+            r: We = we_add(a: t, b: ad)
+            return r.with_sign(x.v.neg)
+
+### fn(x, y) at 192 bits (x, y finite, the special cases settled by the caller).
+### :param fn: Which function (a DEC_ code).
+### :param x: The operand.
+### :param y: The second argument (pow and atan2), else ignored.
+### :param bits: The precision the result needs, in bits.
+### :returns: fn(x, y) at 192 bits.
+routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
+    when fn
+        0 => return we_exp(we_of_dec(x))
+        1 => return we_expm1(we_of_dec(x))
+        2 => return we_exp(we_mul(a: we_of_dec(x), b: we_const(DEC_LN2)))
+        3 => return we_exp(we_mul(a: we_of_dec(x), b: we_const(DEC_LN10)))
+        4 => return wide_eval_ln(x)
+        5 => return wide_eval_ln1p(x)
+        6 => return we_mul(a: wide_eval_ln(x), b: we_entry(table: WIDE_CONST.to[@U64](), i: 0))
+        7 => return we_mul(a: wide_eval_ln(x), b: we_entry(table: WIDE_CONST.to[@U64](), i: 1))
+        8 => return wide_eval_asin(x)
+        9 => return wide_eval_acos(x)
+        10 => return wide_eval_atan(x)
+        11 => return wide_eval_sinh(x)
+        12 => return wide_eval_cosh(x)
+        13 => return wide_eval_tanh(x)
+        14 => return wide_eval_asinh(x)
+        15 => return wide_eval_acosh(x)
+        16 => return wide_eval_atanh(x)
+        17 => return wide_eval_erf(x, complement: false, bits)
+        18 => return wide_eval_erf(x, complement: true, bits)
+        19 => return wide_eval_gamma(x, log: false, bits)
+        20 => return wide_eval_gamma(x, log: true, bits)
+        21 => return wide_eval_trig(x, which: 0)
+        22 => return wide_eval_trig(x, which: 1)
+        23 => return wide_eval_trig(x, which: 2)
+        24 => return wide_eval_cbrt(x)
+        25 => return wide_eval_pow(x, y)
+        else => return wide_eval_atan2(y: x, x: y)
+
+### ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
+### :param x: The operand.
+### :returns: ln x of a finite x > 0.
+routine wide_eval_ln(x: Dec) -> We
+    if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
+        return we_ln1p(we_of_dec(dec_plus_int(x, k: -1)))
+    else
+        return we_ln(we_of_dec(x))
+
+### ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
+### :param x: The operand.
+### :returns: ln(1 + x) of a finite x > -1.
+routine wide_eval_ln1p(x: Dec) -> We
+    if x.neg & (dec_compare_abs(x, c: 5, q: -1) > 0)
+        return we_ln(we_of_dec(dec_plus_int(x, k: 1)))
+    else
+        return we_ln1p(we_of_dec(x))
+
+### 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at 192 bits.
+### :param x: The operand.
+### :returns: 1 - |x| for |x| <= 1.
+routine wide_one_minus_abs(x: Dec) -> We
+    local ax: Dec = dec_num(neg: false, coeff: x.coeff, exp: x.exp)
+
+    if dec_compare_abs(x, c: 5, q: -1) >= 0
+        return we_of_dec(dec_plus_int(x: ax, k: -1).negate())
+    else
+        return we_sub(a: we_int(1), b: we_of_dec(ax))
+
+### asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
+### :param x: The operand.
+### :returns: asin x for |x| <= 1.
+routine wide_eval_asin(x: Dec) -> We
+    local omx: We = wide_one_minus_abs(x)
+
+    if omx.v.is_zero()
+        return we_const(DEC_PI).ldexp(-1).with_sign(x.neg)
+    else
+        opx: We = we_sub(a: we_int(2), b: omx)
+        s: We = we_sqrt(we_mul(a: omx, b: opx))
+        a: We = we_atan(we_div(a: we_of_dec(x).magnitude(), b: s))
+        return a.with_sign(x.neg)
+
+### acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
+### :param x: The operand.
+### :returns: acos x for |x| <= 1.
+routine wide_eval_acos(x: Dec) -> We
+    local omx: We = wide_one_minus_abs(x)
+
+    if x.neg & omx.v.is_zero()
+        return we_const(DEC_PI)
+    else
+        # 1 - x and 1 + x: one of them is 1 - |x|, the other 2 - (1 - |x|)
+        other: We = we_sub(a: we_int(2), b: omx)
+        num: We = when
+            x.neg => other
+            else => omx
+        den: We = when
+            x.neg => omx
+            else => other
+        t: We = we_sqrt(we_div(a: num, b: den))
+        return we_atan(t).ldexp(1)
+
+### atan x, ±pi/2 for an infinity.
+### :param x: The operand.
+### :returns: atan x, ±pi/2 for an infinity.
+routine wide_eval_atan(x: Dec) -> We
+    if x.is_inf()
+        return we_const(DEC_PI).ldexp(-1).with_sign(x.neg)
+    else
+        return we_atan(we_of_dec(x))
+
+### sinh x: below 2^-24 its series, else (e^|x| - e^-|x|) / 2 (the cancellation costs at most 24 bits).
+### :param x: The operand.
+### :returns: sinh x.
+routine wide_eval_sinh(x: Dec) -> We
+    local xm: We = we_of_dec(x)
+    local x2: We = we_mul(a: xm, b: xm)
+
+    if xm.v.exp <= -24
+        while true with term: We = xm, sum: We = xm, i: U64 = 2
+            next2: We = we_div_u64(a: we_mul(a: term, b: x2), k: i * (i + 1))
+            if we_is_negligible(term: next2, sum)
+                return we_plus_abs(s: sum, e: next2.v.exp + 1)
+            else
+                continue with term: next2, sum: we_add(a: sum, b: next2), i: i + 2
+    else
+        e: We = we_exp(xm.magnitude())
+        d: We = we_sub(a: e, b: we_div(a: we_int(1), b: e))
+        return d.ldexp(-1).with_sign(x.neg)
+
+### cosh x = (e^|x| + e^-|x|) / 2.
+### :param x: The operand.
+### :returns: cosh x = (e^|x| + e^-|x|) / 2.
+routine wide_eval_cosh(x: Dec) -> We
+    e: We = we_exp(we_of_dec(x).magnitude())
+    s: We = we_add(a: e, b: we_div(a: we_int(1), b: e))
+    return s.ldexp(-1)
+
+### tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+### :param x: The operand.
+### :returns: tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
+routine wide_eval_tanh(x: Dec) -> We
+    u: We = we_expm1(we_of_dec(x).magnitude().ldexp(1))
+    t: We = we_div(a: u, b: we_add(a: u, b: we_int(2)))
+    return t.with_sign(x.neg)
+
+### asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+### :param x: The operand.
+### :returns: asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
+routine wide_eval_asinh(x: Dec) -> We
+    local ax: We = we_of_dec(x).magnitude()
+    local one: We = we_int(1)
+    local x2: We = we_mul(a: ax, b: ax)
+    local rt: We = we_sqrt(we_add(a: x2, b: one))
+
+    if ax.v.exp <= -1
+        t: We = we_add(a: ax, b: we_div(a: x2, b: we_add(a: one, b: rt)))
+        return we_ln1p(t).with_sign(x.neg)
+    else
+        return we_ln(we_add(a: ax, b: rt)).with_sign(x.neg)
+
+### acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+### :param x: The operand.
+### :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
+routine wide_eval_acosh(x: Dec) -> We
+    near: Bool = dec_compare_abs(x, c: 2, q: 0) < 0
+    t: We = when
+        near => we_of_dec(dec_plus_int(x, k: -1))
+        else => we_sub(a: we_of_dec(x), b: we_int(1))
+    r: We = we_sqrt(we_mul(a: t, b: we_add(a: t, b: we_int(2))))
+    return we_ln1p(we_add(a: t, b: r))
+
+### atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+### :param x: The operand.
+### :returns: atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
+routine wide_eval_atanh(x: Dec) -> We
+    ax: We = we_of_dec(x).magnitude()
+    omx: We = wide_one_minus_abs(x)
+    q: We = we_div(a: ax.ldexp(1), b: omx)
+    return we_ln1p(q).ldexp(-1).with_sign(x.neg)
+
+### cbrt x = e^(ln|x| / 3), signed.
+### :param x: The operand.
+### :returns: cbrt x = e^(ln|x| / 3), signed.
+routine wide_eval_cbrt(x: Dec) -> We
+    l: We = we_div_u64(a: wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp)), k: 3)
+    return we_exp(l).with_sign(x.neg)
+
+### erf |x| = 2/sqrt(pi) e^(-x^2) Σ x y^k / (1 3 5 ... (2k+1)) with y = 2x^2 (we_erf_series), or, where erfc x is
+### below 2^-(bits + 16) (2 x^2 log2(e) past bits + 16), 1 - erfc x from the asymptotic series.
+### :param ax: The magnitude of the argument.
+### :param bits: The precision the result needs, in bits.
+### :returns: erf |x|.
+routine we_erf_positive(ax: We, bits: S64) -> We
+    local x2: We = we_mul(a: ax, b: ax)
+    local x2f: B64 = x2.v.to_b64()
+
+    if x2f * 2.8853900817779268 > (bits + 16).to[B64]()
+        return we_sub(a: we_int(1), b: we_erfc_asymptotic(ax, bits))
+    else
+        return we_erf_series(ax, x2, y: x2.ldexp(1), bits)
+
+### The series of we_erf_positive on W values without a bound per step: term k is off by at most ax.err + k (y.err +
+### 4) units (each step one product and one division, 2 units each), and the sum of n positive terms by the largest
+### of those plus 2 units per addition: ax.err + n (y.err + 6). Once the ratio y / i is below 1/2 the rest is below
+### twice the next term.
+### :param ax: The magnitude of the argument.
+### :param x2: Its square.
+### :param y: 2 x^2.
+### :param bits: The precision the result needs, in bits.
+### :returns: erf |x|.
+routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
+    local yf: B64 = y.v.to_b64()
+
+    while true with term: W = ax.v, sum: W = ax.v, i: U64 = 3, n: U64 = 0
+        next2: W = w_div_u64(a: w_mul(a: term, b: y.v), k: i)
+        ratio2: B64 = yf / (i + 2).to[B64]()
+        if (next2.is_zero() or next2.exp < sum.exp - bits - 8) & (ratio2 < 0.5)
+            nf: B64 = n.to[B64]()
+            err: B64 = (ax.err + nf * (y.err + 6.0)) * 1.01
+            s: We = we_plus_abs(s: (v: sum, err: err), e: next2.exp + 1)
+            g: We = we_exp(x2.negate())
+            c: We = we_const(DEC_TWO_OVER_SQRT_PI)
+            return we_mul(a: we_mul(a: s, b: g), b: c)
+        else
+            continue with term: next2, sum: w_add(a: sum, b: next2), i: i + 2, n: n + 1
+
+### erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its
+### smallest term or where terms stop mattering. The rest is below the first term left out.
+### :param ax: The magnitude of the argument.
+### :param bits: The precision the result needs, in bits.
+### :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
+routine we_erfc_asymptotic(ax: We, bits: S64) -> We
+    local x2: We = we_mul(a: ax, b: ax)
+    local inv: We = we_div(a: we_int(1), b: x2.ldexp(1))
+    local one: We = we_int(1)
+
+    # term = (2k - 1)!! / (2x^2)^k, the next one term × (2k + 1) / (2x^2)
+    while true with term: We = one, sum: We = one, k: U64 = 1
+        next: We = we_mul(a: we_mul_u64(a: term, k: k * 2 - 1), b: inv)
+        growing: Bool = w_compare_magnitude(a: next.v, b: term.v) >= 0
+        small: Bool = we_is_below(term: next, sum, bits)
+        odd: Bool = k & 1 == 1
+        signed: We = when
+            odd => next.negate()
+            else => next
+        when
+            growing =>
+                sum2: We = we_plus_abs(s: sum, e: term.v.exp)
+                g: We = we_exp(x2.negate())
+                c: We = we_const(DEC_TWO_OVER_SQRT_PI).ldexp(-1)
+                d: We = we_div(a: we_mul(a: g, b: c), b: ax)
+                return we_mul(a: sum2, b: d)
+            small =>
+                sum2: We = we_plus_abs(s: sum, e: next.v.exp)
+                g: We = we_exp(x2.negate())
+                c: We = we_const(DEC_TWO_OVER_SQRT_PI).ldexp(-1)
+                d: We = we_div(a: we_mul(a: g, b: c), b: ax)
+                return we_mul(a: sum2, b: d)
+            else => continue with term: next, sum: we_add(a: sum, b: signed), k: k + 1
+
+### erf x (complement false) or erfc x: erfc of a negative x is 1 + erf|x|, below 1/2 it is 1 - erf x, above it
+### 1 - erf x at enough extra limbs for the cancellation (x^2 log2(e) bits), or the asymptotic series once that
+### series alone is accurate enough (or the extra limbs would run out).
+### :param x: The operand.
+### :param complement: Whether erfc is wanted rather than erf.
+### :param bits: The precision the result needs, in bits.
+### :returns: erf x (complement false) or erfc x.
+routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
+    local ax: We = we_of_dec(x).magnitude()
+
+    when
+        not complement => return we_erf_positive(ax, bits).with_sign(x.neg)
+        x.neg => return we_add(a: we_int(1), b: we_erf_positive(ax, bits))
+        ax.v.exp <= -1 => return we_sub(a: we_int(1), b: we_erf_positive(ax, bits: bits + 4))
+        else =>
+            # 1 - erf x loses x^2 log2(e) bits and a few: at 192 bits while the rest still holds what the format needs,
+            # the asymptotic series once that alone is accurate enough, else at more limbs
+            xf: B64 = ax.v.to_b64()
+            lost: B64 = xf * xf * 1.4426950408889634 + 4.0
+            need: B64 = bits.to[B64]()
+            limbs: U64 = (lost / 64.0).floor().to[U64]()
+            extra: USize = limbs.to[USize]() + 1
+            wide: USize = extra + 3
+            here: Bool = lost + need + 8.0 <= 192.0
+            enough: Bool = lost > need + 16.0
+            when
+                here =>
+                    lost2: S64 = lost.to[S64]()
+                    e: We = we_erf_positive(ax, bits: bits + lost2 + 8)
+                    return we_sub(a: we_int(1), b: e)
+                enough => return we_erfc_asymptotic(ax, bits)
+                wide <= MP_TOP =>
+                    axw: MpApprox = me_of_dec(x, n: wide).magnitude()
+                    e: MpApprox = me_sub(a: me_int(k: 1, n: wide),
+                        b: me_erf_positive(ax: axw, n: wide), n: wide)
+                    return we_of_me(me_narrow(x: e, from: wide, to: 3))
+                else => return we_erfc_asymptotic(ax, bits)
+
+### ln Γ(z) for z past the Stirling floor: (z - 1/2) ln z - z + ln(2 pi)/2 + (1/z) P(1/z^2), P(w) = Σ c_k w^k with
+### c_k = B_2(k+1) / ((2k + 2)(2k + 1)) (signs alternating), whose rest is below its first term left out (z real and
+### positive). How many terms (N + 1) is settled first from B64 estimates T_k = |c_k| w^k (with a margin), until one
+### falls below 2^-(bits + 8) of the sum; then Horner's scheme on W values without a bound per step. Its error is at
+### most (4N + 3) units of Σ T_k (two operations a step and the table's 3 units), w's error moves P by w.err Σ k T_k,
+### and P is at least T_0 - Σ_{k>0} T_k.
+### :param z: The argument.
+### :param bits: The precision the result needs, in bits.
+### :returns: ln Γ(z).
+routine we_lngamma_stirling(z: We, bits: S64) -> We
+    local inv: We = we_recip(z)
+    local w: We = we_mul(a: inv, b: inv)
+    local zf: B64 = z.v.to_b64()
+    local wf: B64 = w.v.to_b64() * 1.01
+
+    half: We = we_exact(w_of_u128(v: 1, scale: -1))
+    a: We = we_mul(a: we_sub(a: z, b: half), b: we_ln(z))
+    b: We = we_sub(a, b: z)
+    base: We = we_add(a: b, b: we_const(DEC_HALF_LN_2PI))
+    scale: B64 = b64_pow2(-(bits + 8)) * zf
+    limit: B64 = base.v.to_b64().abs() * scale
+    top, rest, total, weighted = we_stirling_terms(limit, wf)
+
+    # P(w) by Horner's scheme from c_top down to c_0
+    until k == 0 with k: USize = top, acc: W = wide_stirling_coefficient(top).v
+        continue with k: k - 1, acc: w_add(a: wide_stirling_coefficient(k - 1).v,
+            b: w_mul(a: w.v, b: acc))
+    then
+        c0: B64 = we_const(DEC_STIRLING).v.to_b64().abs()
+        low: B64 = c0 - (total - c0) * 1.01
+        n: B64 = top.to[B64]()
+        steps: B64 = n * 4.0 + 3.0
+        spread: B64 = steps * total + weighted * w.err
+        pe: B64 = when
+            low > 0.0 => spread / low * 1.02 + 2.0
+            else => B64.from_bits(0x7FF0000000000000)
+        s: We = we_mul(a: inv, b: (v: acc, err: pe))
+        r: We = we_add(a: base, b: s)
+        tail: B64 = rest / zf * 1.02
+        hb: U64 = tail.bits() >> 52
+        e: S64 = hb.to[S64]() - 1022
+        if tail == 0.0
+            return r
+        else
+            return we_plus_abs(s: r, e)
+
+### How many Stirling terms ln Γ sums, from B64 estimates T_k = |c_k| w^k (with a margin): the terms 0 .. k - 1
+### are in when T_k falls below the limit, or when c_k is the table's last coefficient.
+### :param limit: The bound T_k must fall below, 2^-(bits + 8) of the sum.
+### :param wf: The estimate of w = 1/z^2, with its margin.
+### :returns: The index of the last term in (N), the first term left out (T_(N+1)), Σ T_k, and Σ k T_k over the
+###     terms in.
+private routine we_stirling_terms(limit: B64, wf: B64) -> (USize, B64, B64, B64)
+    # T_k = |c_k| w^k (1.01): the terms 0 .. k - 1 are in when T_k falls below the limit
+    while true with k: USize = 1, power: B64 = wf, total: B64 = we_const(DEC_STIRLING).v.to_b64().abs(), weighted: B64 = 0.0
+        ck: B64 = we_const(DEC_STIRLING.add(k)).v.to_b64().abs()
+        tk: B64 = ck * power * 1.01
+        last: Bool = k + 1 >= DEC_STIRLING_TERMS
+        if tk < limit or last
+            return (k - 1, tk, total, weighted)
+        continue with k: k + 1, power: power * wf, total: total + tk, weighted: weighted + k.to[B64]() * tk
+
+### B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+### :param k: Which coefficient, from 0.
+### :returns: B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
+routine wide_stirling_coefficient(k: USize) -> We
+    c: We = we_const(DEC_STIRLING.add(k))
+    neg: Bool = k & 1 == 1
+    return c.with_sign(neg)
+
+### Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
+### Stirling floor, Γ(x) = Γ(x + N) / (x (x + 1) ... (x + N - 1)); for x < 0 by the reflection
+### Γ(x) = pi / (sin(pi x) Γ(1 - x)), sin(pi x) = (-1)^k sin(pi r) with r = x - k exact in decimal.
+### :param x: The operand.
+### :param log: Whether the logarithm is wanted.
+### :param bits: The precision the result needs, in bits.
+### :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
+routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
+    if x.neg
+        k: Dec = dec_round_int(x, mode: 4, f: dec_format128())
+        r: Dec = dec_add(a: x, b: k.negate(), f: dec_format128())
+        odd: Bool = dec_is_odd_integer(k)
+        pi: We = we_const(DEC_PI)
+        sinpi: We = we_sin_of_pi_times(we_of_dec(r))
+        omx: We = we_sub(a: we_int(1), b: we_of_dec(x))
+        g: We = wide_gamma_positive(z: omx, log, bits)
+        if log
+            a: We = we_sub(a: we_ln(pi), b: we_ln(sinpi.magnitude()))
+            return we_sub(a, b: g)
+        else
+            v: We = we_div(a: pi, b: we_mul(a: sinpi, b: g))
+            if odd
+                return v.negate()
+            else
+                return v
+    else
+        return wide_gamma_positive(z: we_of_dec(x), log, bits)
+
+### sin(pi r) for |r| <= 1/2: below 1/4 directly, else as cos(pi (1/2 - |r|)), signed (1/2 - |r| loses nothing:
+### both are within a factor of two).
+### :param r: The argument.
+### :returns: sin(pi r) for |r| <= 1/2.
+routine we_sin_of_pi_times(r: We) -> We
+    if r.v.exp >= -1
+        s: We = we_sub(a: we_exact(w_of_u128(v: 1, scale: -1)), b: r.magnitude())
+        c: We = we_sincos(we_mul(a: s, b: we_const(DEC_PI))).b
+        return c.with_sign(r.v.neg)
+    else
+        return we_sincos(we_mul(a: r, b: we_const(DEC_PI))).a
+
+### x reduced modulo pi/2: below pi/4 as it is; below 10^9 by k = round(|x| 2/pi) from B64 and r = |x| - k pi/2 at
+### 192 bits (the bound follows the cancellation; k from B64 may be one off, which leaves |r| a little past pi/4);
+### beyond that dec_reduce's multiprecision reduction, narrowed to 192 bits.
+### :param x: The operand.
+### :returns: x reduced modulo pi/2.
+routine wide_reduce(x: Dec) -> WReduced
+    small: Bool = dec_compare_abs(x, c: 785, q: -3) < 0
+    top: S64 = dec_digits(x.coeff) + x.exp
+    when
+        small => return (k: 0, r: we_of_dec(x))
+        top <= 9 =>
+            ax: We = we_of_dec(x).magnitude()
+            kf: B64 = ax.v.to_b64() * 0.6366197723675814
+            k: U64 = kf.round().to[U64]()
+            r: We = we_sub(a: ax, b: we_mul_u64(a: we_const(DEC_PI).ldexp(-1), k))
+            quarter: U64 = k & 3
+            turned: U64 = U64.sub(4, quarter) & 3
+            if x.neg
+                return (k: turned, r: r.negate())
+            else
+                return (k: quarter, r: r)
+        else =>
+            red: DecReduced = dec_reduce(x, n: 3)
+            return (k: red.k, r: we_of_me(red.r))
+
+### Γ(z) or ln Γ(z) for z > 0.
+### :param z: The argument.
+### :param log: Whether the logarithm is wanted.
+### :param bits: The precision the result needs, in bits.
+### :returns: Γ(z) or ln Γ(z) for z > 0.
+routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
+    local lift: B64 = (bits + 741).to[B64]()
+    local floor: B64 = (lift / 199.0).exp2()
+    local zf: B64 = z.v.to_b64()
+
+    short: Bool = zf < floor
+    count: U64 = when
+        short => dec_gamma_shift(floor, zf)
+        else => 0
+
+    # prod = z (z + 1) ... (z + i - 1) without a bound per step: each factor z + i is off by z.err + 2 units (one
+    # sum), each product adds 2
+    each i in 0 til count with prod: W = w_of_u128(v: 1, scale: 0)
+        continue with prod: w_mul(a: prod,
+            b: w_add(a: z.v, b: w_of_u128(v: i.to[U128](), scale: 0)))
+    then
+        n: B64 = count.to[B64]()
+        err: B64 = (z.err + 4.0) * n * 1.01
+
+        prod2: We = (v: prod, err: err)
+
+        shifted: We = we_add(a: z, b: we_of_u128(count.to[U128]()))
+        lg: We = we_lngamma_stirling(z: shifted, bits)
+        none: Bool = count == 0
+        when
+            log and none => return lg
+            log => return we_sub(a: lg, b: we_ln(prod2))
+            none => return we_exp(lg)
+            else => return we_div(a: we_exp(lg), b: prod2)
+
+### sin (which 0), cos (1), or tan (2) of a finite x: reduced to r and a quarter turn k, then the series.
+### :param x: The operand.
+### :param which: 0 sine, 1 cosine, 2 tangent.
+### :returns: sin (which 0), cos (1), or tan (2) of a finite x.
+routine wide_eval_trig(x: Dec, which: U64) -> We
+    red: WReduced = wide_reduce(x)
+    sc: WePair = we_sincos(red.r)
+    s: We = wide_quadrant(k: red.k, sc)
+    c: We = wide_quadrant(k: red.k + 1, sc)
+    when which
+        0 => return s
+        1 => return c
+        else => return we_div(a: s, b: c)
+
+### sin(r + k pi/2) from sin r and cos r: sin r, cos r, -sin r, -cos r.
+### :param k: The quarter turns.
+### :param sc: Sine and cosine of the reduced argument.
+### :returns: sin(r + k pi/2) from sin r and cos r.
+routine wide_quadrant(k: U64, sc: WePair) -> We
+    q: U64 = k & 3
+    when q
+        0 => return sc.a
+        1 => return sc.b
+        2 => return sc.a.negate()
+        else => return sc.b.negate()
+
+### |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not
+### past the range: dec_pow settles those).
+### :param x: The base.
+### :param y: The exponent.
+### :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
+routine wide_eval_pow(x: Dec, y: Dec) -> We
+    l: We = wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp))
+    z: We = we_mul(a: we_of_dec(y), b: l)
+    neg: Bool = x.neg & dec_is_odd_integer(y)
+    return we_exp(z).with_sign(neg)
+
+### The angle of (x, y) for finite nonzero x and y: atan(y/x), plus or minus pi for a negative x.
+### :param y: The ordinate.
+### :param x: The abscissa.
+### :returns: The angle of (x, y) for finite nonzero x and y.
+routine wide_eval_atan2(y: Dec, x: Dec) -> We
+    a: We = we_atan(we_div(a: we_of_dec(y), b: we_of_dec(x)))
+    if x.neg
+        pi: We = we_const(DEC_PI).with_sign(y.neg)
+        return we_add(a, b: pi)
+    else
+        return a
+
+### The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the
+### band reaches a midpoint: y is scaled by a power of ten so that its integer part z has p digits (fewer at the bottom
+### of the range), and the bits of z's mantissa below the binary point decide. The band is at most err units of the
+### mantissa's last bit (|z| < 2^e, so err 2^-192 |z| < err 2^(e - 192)); it is taken twice over, plus 4.
+### :param y: The value with its bound.
+### :param f: The format the result rounds to.
+### :returns: The decimal, or not ok when the band reaches a midpoint.
+routine wide_round(y: We, f: DecFormat) -> DecTry
+    local neg: Bool = y.v.neg
+    local ay: We = y.magnitude()
+    local p: S64 = f.digits
+
+    # log10 |y| within 0.03: e log10(2) + log10(t) for the top bits t in [1/2, 1), log10(t) within 0.03 of 0.6 (t - 1)
+    # (a guess one off costs one more scaling in split)
+    t: B64 = ay.v.top_b64()
+    lg: B64 = y.v.exp.to[B64]() * 0.3010299956639812 + (t - 1.0) * 0.6
+    a: S64 = lg.floor().to[S64]()
+
+    # the digits at exponent q: z = |y| 10^-q
+    while true with q: S64 = (a - p + 1).max(f.qmin), tries: S64 = 0
+        if q > f.qmax + 2
+            return (ok: true, d: dec_inf(neg))
+
+        # 10^-q up to 10^38 is an exact integer: one product
+        k: S64 = -q
+        z: We = when
+            k >= 1 and k <= 38 => we_mul(a: ay, b: we_of_u128(dec_p10_128(k)))
+            else => we_scale10(x: ay, k)
+
+        int: U128 = w_floor_u128(z.v)
+        big: Bool = int >= dec_p10_128(p)
+        tiny: Bool = int < dec_p10_128(p - 1) and q > f.qmin
+        last: Bool = tries >= 3
+        if not last and big
+            continue with q: q + 1, tries: tries + 1
+        if not last and tiny
+            continue with q: q - 1, tries: tries + 1
+
+        # `below` bits of the mantissa lie below the binary point: from 64 to 191 of them the fraction is those
+        # bits
+        below: S64 = U64.to[S64](192) - z.v.exp
+        c: U128 = when
+            below >= 64 and below <= 191 =>
+                s: U64 = below.to[U64]()
+                frac: X = w_fraction(x: z.v, s)
+                half: X = x_power(s - 1)
+                above: Bool = x_compare(a: frac, b: half) >= 0
+                dist: X = when
+                    above => x_sub(a: frac, b: half)
+                    else => x_sub(a: half, b: frac)
+                band: B64 = z.err * 2.0 + 4.0
+                if not (x_to_b64(dist) * 0.999 > band)
+                    return (ok: false, d: dec_nan())
+                becomes int + above.to[U128]()
+            else =>
+                # the fraction against 1/2 in W arithmetic, with the band |z| err 2^-192
+                frac: W = w_sub(a: z.v, b: w_of_u128(v: int, scale: 0))
+                half: W = w_of_u128(v: 1, scale: -1)
+                d: B64 = w_sub(a: frac, b: half).to_b64()
+                zf: B64 = z.v.to_b64()
+                band: B64 = zf * z.relative() * 2.0
+                if not (d.abs() > band and band < 0.25)
+                    return (ok: false, d: dec_nan())
+                becomes int + (d > 0.0).to[U128]()
+
+        carry: Bool = c == dec_p10_128(p)
+        cc: U128 = when
+            carry => dec_p10_128(p - 1)
+            else => c
+        qq: S64 = q + carry.to[S64]()
+        when
+            cc == 0 => return (ok: true, d: dec_num(neg, coeff: 0, exp: f.qmin))
+            qq > f.qmax => return (ok: true, d: dec_inf(neg))
+            else => return (ok: true, d: dec_num(neg, coeff: cc, exp: qq).reduce(f))
+
+### The low s bits of x's mantissa (64 <= s <= 191) as a fixed-point number.
+### :param x: The value.
+### :param s: How many bits.
+### :returns: The bits.
+routine w_fraction(x: W, s: U64) -> X
+    if s >= 128
+        return (h: x.h & U64.shl(1, s - 128) - 1, m: x.m, l: x.l)
+    else
+        return (h: 0, m: x.m & U64.shl(1, s - 64) - 1, l: x.l)
+
+### x as a B64 (rounded): h 2^128 + m 2^64 + l.
+### :param x: The number.
+### :returns: Its value.
+routine x_to_b64(x: X) -> B64
+    h: B64 = x.h.to[B64]() * b64_pow2(128)
+    m: B64 = x.m.to[B64]() * b64_pow2(64)
+    return h + m + x.l.to[B64]()
+
+### 2^k as a fixed-point number (k < 192).
+### :param k: The power.
+### :returns: 2^k.
+routine x_power(k: U64) -> X
+    when
+        k >= 128 => return (h: U64.shl(1, k - 128), m: 0, l: 0)
+        k >= 64 => return (h: 0, m: U64.shl(1, k - 64), l: 0)
+        else => return (h: 0, m: 0, l: U64.shl(1, k))
+
+### -1, 0, or 1 as a is below, equal to, or above b.
+### :param a: The first number.
+### :param b: The second number.
+### :returns: -1, 0, or 1.
+routine x_compare(a: X, b: X) -> S32
+    when
+        a.h != b.h => return w_order(a.h < b.h)
+        a.m != b.m => return w_order(a.m < b.m)
+        a.l != b.l => return w_order(a.l < b.l)
+        else => return 0
+
+### floor(|x|) of a W below 2^128 (mp_floor_u128 at three limbs).
+### :param x: The operand.
+### :returns: floor(|x|).
+routine w_floor_u128(x: W) -> U128
+    when
+        x.is_zero() => return 0
+        x.exp <= 0 => return 0
+        x.exp > 128 => return U128.MAX
+        else =>
+            # the integer part is the mantissa shifted right by `drop` bits
+            dropped: S64 = U64.to[S64](192) - x.exp
+            src: WLimbs = (l4: 0, l3: 0, l2: x.h, l1: x.m, l0: x.l)
+            low: U64 = src.bits(dropped)
+            high: U64 = src.bits(dropped + 64)
+            v: U128 = (high.to[U128]() << 64) | low.to[U128]()
+            keep: S64 = x.exp
+            mask: U128 = when
+                keep >= 128 => U128.MAX
+                else => U128.shl(1, keep.max(0).to[U128]()) - 1
+            return v & mask

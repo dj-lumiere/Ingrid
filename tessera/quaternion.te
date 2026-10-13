@@ -1,0 +1,1638 @@
+# RazorForge's quaternions Q128 and Q256 (over B32 and B64, Tessera's B32 and B64): the bodies of their routines,
+# moved here from RazorForge's Math3D/Q128.rf and Q256.rf. RazorForge keeps the types, their protocols, and thin
+# routines that call the ingrid_ exports below.
+#
+# The formulas are RazorForge's own, unchanged, so every result has the same bits as before, and each `+ - * /` is
+# the checked one (finite.te), which crashes where RazorForge's B32 and B64 operators do. Geometry comes in as
+# RazorForge's Vector3D and Matrix4R4C hold it, in B32: Q256 widens it exactly to B64 and narrows a vector it hands
+# back to B32, rounding to nearest, as RazorForge's conversions do.
+#
+# The exports take each component as its own float and hand a quaternion, a vector, or a tuple back in Words
+# (words.te): a B32 in a word's low half, a B64 in a whole word.
+
+### The tolerances RazorForge writes as literals: 0.000001_b32 (a rotation that is no turn, or half a turn), 0.00001_b32
+### (unit length), 0.000000000001_b64 (Q256 uses it for all three), and 0.9995 (where slerp falls back to a normalized
+### linear interpolation).
+private preset Q128_TOLERANCE:      B32 = B32.from_bits(0x358637BD)
+
+private preset Q128_UNIT_TOLERANCE: B32 = B32.from_bits(0x3727C5AC)
+private preset Q128_LINEAR:         B32 = B32.from_bits(0x3F7FDF3B)
+private preset Q256_TOLERANCE:      B64 = B64.from_bits(0x3D719799812DEA11)
+private preset Q256_LINEAR:         B64 = B64.from_bits(0x3FEFFBE76C8B4396)
+
+### Two values of one type: a direction or a point in 2D space, as RazorForge's Vector2D holds it.
+### :typeparam T: The type of the components.
+record Vector2D[T]
+needs T: typename
+    ### The x component.
+    x: T
+    ### The y component.
+    y: T
+
+### Three values of one type: a direction or a point in 3D space, as RazorForge's Vector3D holds it, or three numbers
+### that go together, such as a matrix row's elements.
+### :typeparam T: The type of the components.
+record Vector3D[T]
+needs T: typename
+    ### The x component.
+    x: T
+    ### The y component.
+    y: T
+    ### The z component.
+    z: T
+
+### Four values of one type: a vector in 4D space, as RazorForge's Vector4D holds it.
+### :typeparam T: The type of the components.
+record Vector4D[T]
+needs T: typename
+    ### The x component.
+    x: T
+    ### The y component.
+    y: T
+    ### The z component.
+    z: T
+    ### The w component.
+    w: T
+
+### The upper-left 3x3 part of a rotation matrix, row after row, m{row}{column}.
+### :typeparam T: The float of the elements, B32 or B64.
+record Matrix3[T]
+needs T: typename
+    ### Row 0, column 0.
+    m00: T
+    ### Row 0, column 1.
+    m01: T
+    ### Row 0, column 2.
+    m02: T
+    ### Row 1, column 0.
+    m10: T
+    ### Row 1, column 1.
+    m11: T
+    ### Row 1, column 2.
+    m12: T
+    ### Row 2, column 0.
+    m20: T
+    ### Row 2, column 1.
+    m21: T
+    ### Row 2, column 2.
+    m22: T
+
+### Makes a `Vector2D` from its fields.
+### :param x: Its `x`.
+### :param y: Its `y`.
+### :returns: The new value.
+routine Vector2D[T].construct(x: T, y: T) -> Me
+needs T: typename
+    return Me(x, y)
+
+### Releases nothing: a `Vector2D` holds no memory of its own.
+routine Vector2D[T].destruct(me: @Me) -> None
+needs T: typename
+    return
+
+### Makes a `Vector3D` from its fields.
+### :param x: Its `x`.
+### :param y: Its `y`.
+### :param z: Its `z`.
+### :returns: The new value.
+routine Vector3D[T].construct(x: T, y: T, z: T) -> Me
+needs T: typename
+    return Me(x, y, z)
+
+### Releases nothing: a `Vector3D` holds no memory of its own.
+routine Vector3D[T].destruct(me: @Me) -> None
+needs T: typename
+    return
+
+### Makes a `Vector4D` from its fields.
+### :param x: Its `x`.
+### :param y: Its `y`.
+### :param z: Its `z`.
+### :param w: Its `w`.
+### :returns: The new value.
+routine Vector4D[T].construct(x: T, y: T, z: T, w: T) -> Me
+needs T: typename
+    return Me(x, y, z, w)
+
+### Releases nothing: a `Vector4D` holds no memory of its own.
+routine Vector4D[T].destruct(me: @Me) -> None
+needs T: typename
+    return
+
+### Makes a `Matrix3` from its fields.
+### :param m00: Its `m00`.
+### :param m01: Its `m01`.
+### :param m02: Its `m02`.
+### :param m10: Its `m10`.
+### :param m11: Its `m11`.
+### :param m12: Its `m12`.
+### :param m20: Its `m20`.
+### :param m21: Its `m21`.
+### :param m22: Its `m22`.
+### :returns: The new value.
+routine Matrix3[T].construct(m00: T, m01: T, m02: T, m10: T, m11: T, m12: T, m20: T, m21: T,
+    m22: T) -> Me
+needs T: typename
+    return Me(m00, m01, m02, m10, m11, m12, m20, m21, m22)
+
+### Releases nothing: a `Matrix3` holds no memory of its own.
+routine Matrix3[T].destruct(me: @Me) -> None
+needs T: typename
+    return
+
+# ── Q128 ──────────────────────────────────────────────────────────────────────────
+
+### RazorForge's Q128: a quaternion w + xi + yj + zk over B32, RazorForge's B32.
+record Q128
+    w: B32
+    x: B32
+    y: B32
+    z: B32
+
+### The identity rotation 1 + 0i + 0j + 0k.
+### :returns: The identity quaternion.
+@inline
+routine Q128.identity() -> Me
+    return (w: 1.0, x: 0.0, y: 0.0, z: 0.0)
+
+### The sum, component by component.
+### :param other: The quaternion to add.
+### :returns: The sum.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q128.add(me: Me, other: Me) -> Me
+    w: B32 = me.w.add_finite(other.w)
+    x: B32 = me.x.add_finite(other.x)
+    y: B32 = me.y.add_finite(other.y)
+    z: B32 = me.z.add_finite(other.z)
+    return (w: w, x: x, y: y, z: z)
+
+### The difference, component by component.
+### :param other: The quaternion to subtract.
+### :returns: The difference.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q128.sub(me: Me, other: Me) -> Me
+    w: B32 = me.w.sub_finite(other.w)
+    x: B32 = me.x.sub_finite(other.x)
+    y: B32 = me.y.sub_finite(other.y)
+    z: B32 = me.z.sub_finite(other.z)
+    return (w: w, x: x, y: y, z: z)
+
+### Every component negated.
+### :returns: The negated quaternion.
+@inline
+routine Q128.neg(me: Me) -> Me
+    return (w: -me.w, x: -me.x, y: -me.y, z: -me.z)
+
+### The conjugate w - xi - yj - zk.
+### :returns: The conjugate.
+@inline
+routine Q128.conjugate(me: Me) -> Me
+    return (w: me.w, x: -me.x, y: -me.y, z: -me.z)
+
+### Every component times factor.
+### :param factor: The factor each component is multiplied by.
+### :returns: The scaled quaternion.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q128.scale(me: Me, factor: B32) -> Me
+    w: B32 = me.w.mul_finite(factor)
+    x: B32 = me.x.mul_finite(factor)
+    y: B32 = me.y.mul_finite(factor)
+    z: B32 = me.z.mul_finite(factor)
+    return (w: w, x: x, y: y, z: z)
+
+### The Hamilton product me · other, which turns by other and then by me (it doesn't commute).
+### :param other: The right-hand factor.
+### :returns: The product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.mul(me: Me, other: Me) -> Me
+    ww: B32 = me.w.mul_finite(other.w)
+    xx: B32 = me.x.mul_finite(other.x)
+    w1: B32 = ww.sub_finite(xx)
+    yy: B32 = me.y.mul_finite(other.y)
+    w2: B32 = w1.sub_finite(yy)
+    zz: B32 = me.z.mul_finite(other.z)
+    w: B32 = w2.sub_finite(zz)
+    wx: B32 = me.w.mul_finite(other.x)
+    xw: B32 = me.x.mul_finite(other.w)
+    x1: B32 = wx.add_finite(xw)
+    yz: B32 = me.y.mul_finite(other.z)
+    x2: B32 = x1.add_finite(yz)
+    zy: B32 = me.z.mul_finite(other.y)
+    x: B32 = x2.sub_finite(zy)
+    wy: B32 = me.w.mul_finite(other.y)
+    xz: B32 = me.x.mul_finite(other.z)
+    y1: B32 = wy.sub_finite(xz)
+    yw: B32 = me.y.mul_finite(other.w)
+    y2: B32 = y1.add_finite(yw)
+    zx: B32 = me.z.mul_finite(other.x)
+    y: B32 = y2.add_finite(zx)
+    wz: B32 = me.w.mul_finite(other.z)
+    xy: B32 = me.x.mul_finite(other.y)
+    z1: B32 = wz.add_finite(xy)
+    yx: B32 = me.y.mul_finite(other.x)
+    z2: B32 = z1.sub_finite(yx)
+    zw: B32 = me.z.mul_finite(other.w)
+    z: B32 = z2.add_finite(zw)
+    return (w: w, x: x, y: y, z: z)
+
+### The quotient me · other⁻¹.
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `other` is zero and `me` is not, `NumericDomainError` when both
+###     are zero (0 / 0, as with real division) or a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.truediv(me: Me, other: Me) -> Me
+    if other.is_zero()
+        crash_zero_divisor(me.is_zero())
+    inverse: Me = other.reciprocal()
+    return me * inverse
+
+### Whether all four components are zero (+0 or -0).
+### :returns: True for the zero quaternion.
+@inline
+routine Q128.is_zero(me: Me) -> Bool
+    wx: Bool = me.w == 0.0 and me.x == 0.0
+    yz: Bool = me.y == 0.0 and me.z == 0.0
+    return wx and yz
+
+### The dot product of the two as 4-vectors.
+### :param other: The other quaternion.
+### :returns: The dot product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.dot(me: Me, other: Me) -> B32
+    ww: B32 = me.w.mul_finite(other.w)
+    xx: B32 = me.x.mul_finite(other.x)
+    s1: B32 = ww.add_finite(xx)
+    yy: B32 = me.y.mul_finite(other.y)
+    s2: B32 = s1.add_finite(yy)
+    zz: B32 = me.z.mul_finite(other.z)
+    return s2.add_finite(zz)
+
+### The squared norm w² + x² + y² + z².
+### :returns: The squared norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.norm(me: Me) -> B32
+    return me.dot(me)
+
+### The norm, the square root of the squared norm.
+### :returns: The norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.abs(me: Me) -> B32
+    return me.norm().sqrt()
+
+### The unit quaternion in the same direction, or this one when its norm is zero.
+### :returns: The unit quaternion, or `me` when its norm is zero.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.normalize(me: Me) -> Me
+    local n: B32 = me.abs()
+
+    if n == 0.0
+        return me
+    return me.scale(B32.truediv_finite(1.0, n))
+
+### The inverse, the conjugate over the squared norm.
+### :returns: The inverse.
+### :throws: Crashes with `DivisionByZeroError` when `me` is zero, `NumericDomainError` when a step gives NaN, or
+###     `NumericOverflowError` when one is infinite.
+routine Q128.reciprocal(me: Me) -> Me
+    n: B32 = me.norm()
+    return me.conjugate().scale(B32.truediv_finite(1.0, n))
+
+### Whether the norm is 1 within the tolerance.
+### :returns: True when the squared norm is within the tolerance of 1.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.is_unit(me: Me) -> Bool
+    d: B32 = me.norm().sub_finite(1.0)
+    below: Bool = d <= Q128_UNIT_TOLERANCE
+    return below and d >= Q128_UNIT_TOLERANCE.neg()
+
+### v clamped to [-1, 1], so a unit quaternion whose w drifted just past 1 still has a real acos. NaN stays NaN.
+### :param v: The value to clamp.
+### :returns: `v` clamped to [-1, 1], or NaN when `v` is NaN.
+@inline
+routine Q128.clamp_unit(v: B32) -> B32
+    when
+        v > 1.0 => return 1.0
+        v < -1.0 => return -1.0
+        else => return v
+
+### The vector (vx, vy, vz) turned by this unit quaternion: the vector part of me · (0, v) · conj(me).
+### :param vx: The vector's x.
+### :param vy: The vector's y.
+### :param vz: The vector's z.
+### :returns: A quaternion whose x, y, and z are the turned vector.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.rotate(me: Me, vx: B32, vy: B32, vz: B32) -> Me
+    p: Me = (w: 0.0, x: vx, y: vy, z: vz)
+    sp: Me = me * p
+    return sp * me.conjugate()
+
+### The spherical interpolation from me (t = 0) to other (t = 1) along the shorter arc, both unit length. Nearly
+### parallel ends fall back to a normalized linear interpolation, which avoids dividing by sin θ near 0.
+### :param other: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The interpolated rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.slerp(me: Me, other: Me, t: B32) -> Me
+    local d: B32 = me.dot(other)
+
+    values2: (Me, B32) = when
+        d < 0.0 => (-other, -d)
+        else => (other, d)
+
+    target, cosine = values2
+    if cosine > Q128_LINEAR
+        return me.lerp(target, t)
+    theta: B32 = cosine.acos()
+    sin_theta: B32 = theta.sin()
+    rest: B32 = B32.sub_finite(1.0, t)
+    wa: B32 = rest.mul_finite(theta).sin().truediv_finite(sin_theta)
+    wb: B32 = t.mul_finite(theta).sin().truediv_finite(sin_theta)
+    a: Me = me.scale(wa)
+    b: Me = target.scale(wb)
+    return a + b
+
+### me + (target - me) t, normalized.
+### :param target: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The normalized interpolation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.lerp(me: Me, target: Me, t: B32) -> Me
+    step: Me = (target - me).scale(t)
+    return (me + step).normalize()
+
+### The normalized linear interpolation from me to other along the shorter arc.
+### :param other: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The normalized interpolation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.nlerp(me: Me, other: Me, t: B32) -> Me
+    if me.dot(other) < 0.0
+        return me.lerp(target: -other, t)
+    else
+        return me.lerp(target: other, t)
+
+### The angle this unit quaternion turns by, 2 acos w.
+### :returns: The angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.angle(me: Me) -> B32
+    half: B32 = Me.clamp_unit(me.w).acos()
+    return B32.mul_finite(2.0, half)
+
+### The unit axis (x, y, z) and the angle this unit quaternion turns by, the angle in the last place. A turn by
+### nothing has no axis: it reports the x axis.
+### :returns: The axis's x, y, and z, then the angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.to_axis_angle(me: Me) -> (B32, B32, B32, B32)
+    local w: B32 = Me.clamp_unit(me.w)
+    local angle: B32 = B32.mul_finite(2.0, w.acos())
+
+    ww: B32 = w.mul_finite(w)
+    s: B32 = B32.sub_finite(1.0, ww).sqrt()
+    if s < Q128_TOLERANCE
+        return (1.0, 0.0, 0.0, angle)
+    x: B32 = me.x.truediv_finite(s)
+    y: B32 = me.y.truediv_finite(s)
+    z: B32 = me.z.truediv_finite(s)
+    return (x, y, z, angle)
+
+### The rotation by angle about the axis (ax, ay, az), which needn't be unit length (right-hand rule). An axis of
+### length zero gives the identity.
+### :param ax: The axis's x.
+### :param ay: The axis's y.
+### :param az: The axis's z.
+### :param angle: The angle in radians.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.from_axis_angle(ax: B32, ay: B32, az: B32, angle: B32) -> Me
+    local length: B32 = Me.length(x: ax, y: ay, z: az)
+
+    if length == 0.0
+        return Me.identity()
+    half: B32 = angle.mul_finite(0.5)
+    s: B32 = half.sin().truediv_finite(length)
+    x: B32 = ax.mul_finite(s)
+    y: B32 = ay.mul_finite(s)
+    z: B32 = az.mul_finite(s)
+    return (w: half.cos(), x: x, y: y, z: z)
+
+### The length of the vector (x, y, z).
+### :param x: The vector's x.
+### :param y: The vector's y.
+### :param z: The vector's z.
+### :returns: The length.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.length(x: B32, y: B32, z: B32) -> B32
+    xx: B32 = x.mul_finite(x)
+    yy: B32 = y.mul_finite(y)
+    s: B32 = xx.add_finite(yy)
+    zz: B32 = z.mul_finite(z)
+    return s.add_finite(zz).sqrt()
+
+### The shortest rotation that turns the direction `source` onto the direction `target`, neither unit length. Opposite
+### directions turn half a turn about an axis perpendicular to the first.
+### :param source: The direction to turn from.
+### :param target: The direction to turn onto.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.from_to(source: Vector3D[B32], target: Vector3D[B32]) -> Me
+    local la: B32 = Me.length(x: source.x, y: source.y, z: source.z)
+    local lb: B32 = Me.length(x: target.x, y: target.y, z: target.z)
+
+    if la == 0.0 or lb == 0.0
+        return Me.identity()
+    au: B32 = source.x.truediv_finite(la)
+    bu: B32 = source.y.truediv_finite(la)
+    cu: B32 = source.z.truediv_finite(la)
+    av: B32 = target.x.truediv_finite(lb)
+    bv: B32 = target.y.truediv_finite(lb)
+    cv: B32 = target.z.truediv_finite(lb)
+    aa: B32 = au.mul_finite(av)
+    bb: B32 = bu.mul_finite(bv)
+    s: B32 = aa.add_finite(bb)
+    cc: B32 = cu.mul_finite(cv)
+    d: B32 = s.add_finite(cc)
+    if d >= B32.sub_finite(1.0, Q128_TOLERANCE)
+        return Me.identity()
+    if d <= B32.add_finite(-1.0, Q128_TOLERANCE)
+        return Me.half_turn(ux: au, uy: bu, uz: cu)
+    w: B32 = B32.add_finite(1.0, d)
+    b1: B32 = bu.mul_finite(cv)
+    b2: B32 = cu.mul_finite(bv)
+    x: B32 = b1.sub_finite(b2)
+    c1: B32 = cu.mul_finite(av)
+    c2: B32 = au.mul_finite(cv)
+    y: B32 = c1.sub_finite(c2)
+    a1: B32 = au.mul_finite(bv)
+    a2: B32 = bu.mul_finite(av)
+    z: B32 = a1.sub_finite(a2)
+    q: Me = (w: w, x: x, y: y, z: z)
+    return q.normalize()
+
+### Half a turn about an axis perpendicular to the unit vector (ux, uy, uz): the x axis crossed with it, or the y axis
+### crossed with it when that is too short.
+### :param ux: The unit vector's x.
+### :param uy: The unit vector's y.
+### :param uz: The unit vector's z.
+### :returns: The half-turn rotation, with w = 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.half_turn(ux: B32, uy: B32, uz: B32) -> Me
+    local py: B32 = -uz
+
+    yy: B32 = py.mul_finite(py)
+    zz: B32 = uy.mul_finite(uy)
+    short: Bool = yy.add_finite(zz) < Q128_TOLERANCE
+    values2: (B32, B32, B32) = when
+        short => (uz, 0.0, -ux)
+        else => (0.0, py, uy)
+    px, qy, pz = values2
+    l: B32 = Me.length(x: px, y: qy, z: pz)
+    x: B32 = px.truediv_finite(l)
+    y: B32 = qy.truediv_finite(l)
+    z: B32 = pz.truediv_finite(l)
+    return (w: 0.0, x: x, y: y, z: z)
+
+### The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
+### largest of 4w, 4x, 4y, and 4z to stay well conditioned.
+### :param m: The 3x3 part.
+### :returns: The rotation.
+### :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
+###     or `NumericOverflowError` when one is infinite.
+routine Q128.from_matrix(m: Matrix3[B32]) -> Me
+    local trace: B32 = m.m00.add_finite(m.m11).add_finite(m.m22)
+
+    when
+        trace > 0.0 =>
+            sw: B32 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
+            w: B32 = B32.mul_finite(0.25, sw)
+            x: B32 = m.m21.sub_finite(m.m12).truediv_finite(sw)
+            y: B32 = m.m02.sub_finite(m.m20).truediv_finite(sw)
+            z: B32 = m.m10.sub_finite(m.m01).truediv_finite(sw)
+            return (w: w, x: x, y: y, z: z)
+        m.m00 > m.m11 and m.m00 > m.m22 =>
+            sx: B32 = B32.add_finite(1.0, m.m00).sub_finite(m.m11).sub_finite(m.m22)
+            s: B32 = sx.sqrt().mul_finite(2.0)
+            w: B32 = m.m21.sub_finite(m.m12).truediv_finite(s)
+            x: B32 = B32.mul_finite(0.25, s)
+            y: B32 = m.m01.add_finite(m.m10).truediv_finite(s)
+            z: B32 = m.m02.add_finite(m.m20).truediv_finite(s)
+            return (w: w, x: x, y: y, z: z)
+        m.m11 > m.m22 =>
+            sy: B32 = B32.add_finite(1.0, m.m11).sub_finite(m.m00).sub_finite(m.m22)
+            s: B32 = sy.sqrt().mul_finite(2.0)
+            w: B32 = m.m02.sub_finite(m.m20).truediv_finite(s)
+            x: B32 = m.m01.add_finite(m.m10).truediv_finite(s)
+            y: B32 = B32.mul_finite(0.25, s)
+            z: B32 = m.m12.add_finite(m.m21).truediv_finite(s)
+            return (w: w, x: x, y: y, z: z)
+        else =>
+            sz: B32 = B32.add_finite(1.0, m.m22).sub_finite(m.m00).sub_finite(m.m11)
+            s: B32 = sz.sqrt().mul_finite(2.0)
+            w: B32 = m.m10.sub_finite(m.m01).truediv_finite(s)
+            x: B32 = m.m02.add_finite(m.m20).truediv_finite(s)
+            y: B32 = m.m12.add_finite(m.m21).truediv_finite(s)
+            z: B32 = B32.mul_finite(0.25, s)
+            return (w: w, x: x, y: y, z: z)
+
+### The rotation by Euler angles in radians: yaw about z, then pitch about y, then roll about x (the aerospace Z-Y-X
+### order, yaw · pitch · roll).
+### :param roll: The turn about x, in radians.
+### :param pitch: The turn about y, in radians.
+### :param yaw: The turn about z, in radians.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.from_euler(roll: B32, pitch: B32, yaw: B32) -> Me
+    cr: B32 = roll.mul_finite(0.5).cos()
+    sr: B32 = roll.mul_finite(0.5).sin()
+    cp: B32 = pitch.mul_finite(0.5).cos()
+    sp: B32 = pitch.mul_finite(0.5).sin()
+    cy: B32 = yaw.mul_finite(0.5).cos()
+    sy: B32 = yaw.mul_finite(0.5).sin()
+    w1: B32 = cr.mul_finite(cp).mul_finite(cy)
+    w2: B32 = sr.mul_finite(sp).mul_finite(sy)
+    w: B32 = w1.add_finite(w2)
+    x1: B32 = sr.mul_finite(cp).mul_finite(cy)
+    x2: B32 = cr.mul_finite(sp).mul_finite(sy)
+    x: B32 = x1.sub_finite(x2)
+    y1: B32 = cr.mul_finite(sp).mul_finite(cy)
+    y2: B32 = sr.mul_finite(cp).mul_finite(sy)
+    y: B32 = y1.add_finite(y2)
+    z1: B32 = cr.mul_finite(cp).mul_finite(sy)
+    z2: B32 = sr.mul_finite(sp).mul_finite(cy)
+    z: B32 = z1.sub_finite(z2)
+    return (w: w, x: x, y: y, z: z)
+
+### The Z-Y-X Euler angles (roll, pitch, yaw) of this unit quaternion, the inverse of from_euler. At pitch ±90 degrees
+### (gimbal lock) roll and yaw aren't unique, and pitch is clamped there.
+### :returns: Roll, pitch, and yaw, in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q128.to_euler(me: Me) -> (B32, B32, B32)
+    wx: B32 = me.w.mul_finite(me.x)
+    yz: B32 = me.y.mul_finite(me.z)
+    ry: B32 = B32.mul_finite(2.0, wx.add_finite(yz))
+    xx: B32 = me.x.mul_finite(me.x)
+    yy: B32 = me.y.mul_finite(me.y)
+    rx2: B32 = B32.mul_finite(2.0, xx.add_finite(yy))
+    rx: B32 = B32.sub_finite(1.0, rx2)
+    roll: B32 = ry.atan2(rx)
+    wy: B32 = me.w.mul_finite(me.y)
+    zx: B32 = me.z.mul_finite(me.x)
+    sp: B32 = B32.mul_finite(2.0, wy.sub_finite(zx))
+    pitch: B32 = Me.clamp_unit(sp).asin()
+    wz: B32 = me.w.mul_finite(me.z)
+    xy: B32 = me.x.mul_finite(me.y)
+    yy2: B32 = B32.mul_finite(2.0, wz.add_finite(xy))
+    y2: B32 = me.y.mul_finite(me.y)
+    z2: B32 = me.z.mul_finite(me.z)
+    yx2: B32 = B32.mul_finite(2.0, y2.add_finite(z2))
+    yx: B32 = B32.sub_finite(1.0, yx2)
+    yaw: B32 = yy2.atan2(yx)
+    return (roll, pitch, yaw)
+
+### The four components in Words, w first.
+### :returns: The components w, x, y, and z in Words.
+@inline
+routine Q128.words(me: Me) -> Words
+    return Words.construct(a: me.w, b: me.x, c: me.y, d: me.z)
+
+# The exports RazorForge's Q128 calls: each component of a quaternion is its own B32, and a Vector3D's or a
+# Matrix4R4C's is its own B32.
+
+### The Hamilton product, for Q128.mul.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The product's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_mul")
+@inline
+routine q128_mul(w: B32, x: B32, y: B32, z: B32, other_w: B32, other_x: B32, other_y: B32,
+    other_z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    b: Q128 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return (a * b).words()
+
+### The quotient, for Q128.truediv.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The quotient's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when the second quaternion is zero and the first is not,
+###     `NumericDomainError` when both are zero (0 / 0, as with real division) or a step gives NaN, or
+###     `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_div")
+@inline
+routine q128_div(w: B32, x: B32, y: B32, z: B32, other_w: B32, other_x: B32, other_y: B32,
+    other_z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    b: Q128 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return (a / b).words()
+
+### The dot product, for Q128.dot.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The dot product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_dot")
+@inline
+routine q128_dot(w: B32, x: B32, y: B32, z: B32, other_w: B32, other_x: B32, other_y: B32,
+    other_z: B32) -> B32
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    b: Q128 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.dot(b)
+
+### The squared norm, for Q128.norm.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The squared norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_norm")
+@inline
+routine q128_norm(w: B32, x: B32, y: B32, z: B32) -> B32
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.norm()
+
+### The norm, for Q128.abs.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_abs")
+@inline
+routine q128_abs(w: B32, x: B32, y: B32, z: B32) -> B32
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.abs()
+
+### The angle the unit quaternion turns by, for Q128.angle.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_angle")
+@inline
+routine q128_angle(w: B32, x: B32, y: B32, z: B32) -> B32
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.angle()
+
+### The unit quaternion in the same direction, for Q128.normalize.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The unit quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_normalize")
+@inline
+routine q128_normalize(w: B32, x: B32, y: B32, z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.normalize().words()
+
+### The inverse, for Q128.reciprocal.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The inverse's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when the quaternion is zero, `NumericDomainError` when a step gives
+###     NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_reciprocal")
+@inline
+routine q128_reciprocal(w: B32, x: B32, y: B32, z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.reciprocal().words()
+
+### Whether the norm is 1 within the tolerance, for Q128.is_unit.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: True when the squared norm is within the tolerance of 1.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_is_unit")
+@inline
+routine q128_is_unit(w: B32, x: B32, y: B32, z: B32) -> Bool
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    return a.is_unit()
+
+### Q128.rotate: the turned vector's x, y, and z in w0, w1, and w2, as B32s.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :param vx: The vector's x.
+### :param vy: The vector's y.
+### :param vz: The vector's z.
+### :returns: The turned vector in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_rotate")
+@inline
+routine q128_rotate(w: B32, x: B32, y: B32, z: B32, vx: B32, vy: B32, vz: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    r: Q128 = a.rotate(vx, vy, vz)
+    return Words.construct(a: r.x, b: r.y, c: r.z, d: B32.from_bits(0))
+
+### The spherical interpolation, for Q128.slerp.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :param t: How far along, 0 at the first quaternion and 1 at the second.
+### :returns: The interpolated rotation's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_slerp")
+@inline
+routine q128_slerp(w: B32, x: B32, y: B32, z: B32, other_w: B32, other_x: B32, other_y: B32,
+    other_z: B32, t: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    b: Q128 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.slerp(other: b, t).words()
+
+### The normalized linear interpolation, for Q128.nlerp.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :param t: How far along, 0 at the first quaternion and 1 at the second.
+### :returns: The interpolation's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_nlerp")
+@inline
+routine q128_nlerp(w: B32, x: B32, y: B32, z: B32, other_w: B32, other_x: B32, other_y: B32,
+    other_z: B32, t: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    b: Q128 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.nlerp(other: b, t).words()
+
+### Q128.to_axis_angle: the axis's x, y, and z as B32s in w0, w1, and w2, the angle as B32 in w3.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The axis and the angle in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_to_axis_angle")
+@inline
+routine q128_to_axis_angle(w: B32, x: B32, y: B32, z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    ax, ay, az, angle = a.to_axis_angle()
+    w0: U64 = ax.bits().to[U64]()
+    w1: U64 = ay.bits().to[U64]()
+    w2: U64 = az.bits().to[U64]()
+    w3: U64 = angle.bits().to[U64]()
+    return (w0: w0, w1: w1, w2: w2, w3: w3)
+
+### Q128.to_euler: roll, pitch, and yaw in w0, w1, and w2.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The three angles in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_to_euler")
+@inline
+routine q128_to_euler(w: B32, x: B32, y: B32, z: B32) -> Words
+    a: Q128 = (w: w, x: x, y: y, z: z)
+    roll, pitch, yaw = a.to_euler()
+    return Words.construct(a: roll, b: pitch, c: yaw, d: B32.from_bits(0))
+
+### Q128.from_axis_angle, for a B32 axis.
+### :param ax: The axis's x.
+### :param ay: The axis's y.
+### :param az: The axis's z.
+### :param angle: The angle in radians.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_from_axis_angle")
+@inline
+routine q128_from_axis_angle(ax: B32, ay: B32, az: B32, angle: B32) -> Words
+    return Q128.from_axis_angle(ax, ay, az, angle).words()
+
+### Q128.from_to, for B32 directions.
+### :param ux: The first direction's x.
+### :param uy: The first direction's y.
+### :param uz: The first direction's z.
+### :param vx: The second direction's x.
+### :param vy: The second direction's y.
+### :param vz: The second direction's z.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_from_to")
+@inline
+routine q128_from_to(ux: B32, uy: B32, uz: B32, vx: B32, vy: B32, vz: B32) -> Words
+    source: Vector3D[B32] = (x: ux, y: uy, z: uz)
+    target: Vector3D[B32] = (x: vx, y: vy, z: vz)
+    q: Q128 = Q128.from_to(source, target)
+    return q.words()
+
+### Q128.from_matrix, for the B32 elements m{row}{column} of the upper-left 3x3 part.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
+###     or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_from_matrix")
+@inline
+routine q128_from_matrix(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32,
+    m21: B32, m22: B32) -> Words
+    m: Matrix3[B32] = (m00: m00, m01: m01, m02: m02, m10: m10, m11: m11, m12: m12, m20: m20, m21: m21, m22: m22)
+    q: Q128 = Q128.from_matrix(m)
+    return q.words()
+
+### The rotation by Euler angles, for Q128.from_euler.
+### :param roll: The turn about x, in radians.
+### :param pitch: The turn about y, in radians.
+### :param yaw: The turn about z, in radians.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q128_from_euler")
+@inline
+routine q128_from_euler(roll: B32, pitch: B32, yaw: B32) -> Words
+    return Q128.from_euler(roll, pitch, yaw).words()
+
+# ── Q256 ──────────────────────────────────────────────────────────────────────────
+
+### RazorForge's Q256: a quaternion w + xi + yj + zk over B64, RazorForge's B64.
+record Q256
+    w: B64
+    x: B64
+    y: B64
+    z: B64
+
+### The identity rotation 1 + 0i + 0j + 0k.
+### :returns: The identity quaternion.
+@inline
+routine Q256.identity() -> Me
+    return (w: 1.0, x: 0.0, y: 0.0, z: 0.0)
+
+### The sum, component by component.
+### :param other: The quaternion to add.
+### :returns: The sum.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q256.add(me: Me, other: Me) -> Me
+    w: B64 = me.w.add_finite(other.w)
+    x: B64 = me.x.add_finite(other.x)
+    y: B64 = me.y.add_finite(other.y)
+    z: B64 = me.z.add_finite(other.z)
+    return (w: w, x: x, y: y, z: z)
+
+### The difference, component by component.
+### :param other: The quaternion to subtract.
+### :returns: The difference.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q256.sub(me: Me, other: Me) -> Me
+    w: B64 = me.w.sub_finite(other.w)
+    x: B64 = me.x.sub_finite(other.x)
+    y: B64 = me.y.sub_finite(other.y)
+    z: B64 = me.z.sub_finite(other.z)
+    return (w: w, x: x, y: y, z: z)
+
+### Every component negated.
+### :returns: The negated quaternion.
+@inline
+routine Q256.neg(me: Me) -> Me
+    return (w: -me.w, x: -me.x, y: -me.y, z: -me.z)
+
+### The conjugate w - xi - yj - zk.
+### :returns: The conjugate.
+@inline
+routine Q256.conjugate(me: Me) -> Me
+    return (w: me.w, x: -me.x, y: -me.y, z: -me.z)
+
+### Every component times factor.
+### :param factor: The factor each component is multiplied by.
+### :returns: The scaled quaternion.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@inline
+routine Q256.scale(me: Me, factor: B64) -> Me
+    w: B64 = me.w.mul_finite(factor)
+    x: B64 = me.x.mul_finite(factor)
+    y: B64 = me.y.mul_finite(factor)
+    z: B64 = me.z.mul_finite(factor)
+    return (w: w, x: x, y: y, z: z)
+
+### The Hamilton product me · other, which turns by other and then by me (it doesn't commute).
+### :param other: The right-hand factor.
+### :returns: The product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.mul(me: Me, other: Me) -> Me
+    ww: B64 = me.w.mul_finite(other.w)
+    xx: B64 = me.x.mul_finite(other.x)
+    w1: B64 = ww.sub_finite(xx)
+    yy: B64 = me.y.mul_finite(other.y)
+    w2: B64 = w1.sub_finite(yy)
+    zz: B64 = me.z.mul_finite(other.z)
+    w: B64 = w2.sub_finite(zz)
+    wx: B64 = me.w.mul_finite(other.x)
+    xw: B64 = me.x.mul_finite(other.w)
+    x1: B64 = wx.add_finite(xw)
+    yz: B64 = me.y.mul_finite(other.z)
+    x2: B64 = x1.add_finite(yz)
+    zy: B64 = me.z.mul_finite(other.y)
+    x: B64 = x2.sub_finite(zy)
+    wy: B64 = me.w.mul_finite(other.y)
+    xz: B64 = me.x.mul_finite(other.z)
+    y1: B64 = wy.sub_finite(xz)
+    yw: B64 = me.y.mul_finite(other.w)
+    y2: B64 = y1.add_finite(yw)
+    zx: B64 = me.z.mul_finite(other.x)
+    y: B64 = y2.add_finite(zx)
+    wz: B64 = me.w.mul_finite(other.z)
+    xy: B64 = me.x.mul_finite(other.y)
+    z1: B64 = wz.add_finite(xy)
+    yx: B64 = me.y.mul_finite(other.x)
+    z2: B64 = z1.sub_finite(yx)
+    zw: B64 = me.z.mul_finite(other.w)
+    z: B64 = z2.add_finite(zw)
+    return (w: w, x: x, y: y, z: z)
+
+### The quotient me · other⁻¹.
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `other` is zero and `me` is not, `NumericDomainError` when both
+###     are zero (0 / 0, as with real division) or a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.truediv(me: Me, other: Me) -> Me
+    if other.is_zero()
+        crash_zero_divisor(me.is_zero())
+    inverse: Me = other.reciprocal()
+    return me * inverse
+
+### Whether all four components are zero (+0 or -0).
+### :returns: True for the zero quaternion.
+@inline
+routine Q256.is_zero(me: Me) -> Bool
+    wx: Bool = me.w == 0.0 and me.x == 0.0
+    yz: Bool = me.y == 0.0 and me.z == 0.0
+    return wx and yz
+
+### The dot product of the two as 4-vectors.
+### :param other: The other quaternion.
+### :returns: The dot product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.dot(me: Me, other: Me) -> B64
+    ww: B64 = me.w.mul_finite(other.w)
+    xx: B64 = me.x.mul_finite(other.x)
+    s1: B64 = ww.add_finite(xx)
+    yy: B64 = me.y.mul_finite(other.y)
+    s2: B64 = s1.add_finite(yy)
+    zz: B64 = me.z.mul_finite(other.z)
+    return s2.add_finite(zz)
+
+### The squared norm w² + x² + y² + z².
+### :returns: The squared norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.norm(me: Me) -> B64
+    return me.dot(me)
+
+### The norm, the square root of the squared norm.
+### :returns: The norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.abs(me: Me) -> B64
+    return me.norm().sqrt()
+
+### The unit quaternion in the same direction, or this one when its norm is zero.
+### :returns: The unit quaternion, or `me` when its norm is zero.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.normalize(me: Me) -> Me
+    local n: B64 = me.abs()
+
+    if n == 0.0
+        return me
+    return me.scale(B64.truediv_finite(1.0, n))
+
+### The inverse, the conjugate over the squared norm.
+### :returns: The inverse.
+### :throws: Crashes with `DivisionByZeroError` when `me` is zero, `NumericDomainError` when a step gives NaN, or
+###     `NumericOverflowError` when one is infinite.
+routine Q256.reciprocal(me: Me) -> Me
+    n: B64 = me.norm()
+    return me.conjugate().scale(B64.truediv_finite(1.0, n))
+
+### Whether the norm is 1 within the tolerance.
+### :returns: True when the squared norm is within the tolerance of 1.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.is_unit(me: Me) -> Bool
+    d: B64 = me.norm().sub_finite(1.0)
+    below: Bool = d <= Q256_TOLERANCE
+    return below and d >= Q256_TOLERANCE.neg()
+
+### v clamped to [-1, 1], so a unit quaternion whose w drifted just past 1 still has a real acos. NaN stays NaN.
+### :param v: The value to clamp.
+### :returns: `v` clamped to [-1, 1], or NaN when `v` is NaN.
+@inline
+routine Q256.clamp_unit(v: B64) -> B64
+    when
+        v > 1.0 => return 1.0
+        v < -1.0 => return -1.0
+        else => return v
+
+### The vector (vx, vy, vz) turned by this unit quaternion: the vector part of me · (0, v) · conj(me).
+### :param vx: The vector's x.
+### :param vy: The vector's y.
+### :param vz: The vector's z.
+### :returns: A quaternion whose x, y, and z are the turned vector.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.rotate(me: Me, vx: B64, vy: B64, vz: B64) -> Me
+    p: Me = (w: 0.0, x: vx, y: vy, z: vz)
+    sp: Me = me * p
+    return sp * me.conjugate()
+
+### The spherical interpolation from me (t = 0) to other (t = 1) along the shorter arc, both unit length. Nearly
+### parallel ends fall back to a normalized linear interpolation, which avoids dividing by sin θ near 0.
+### :param other: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The interpolated rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.slerp(me: Me, other: Me, t: B64) -> Me
+    local d: B64 = me.dot(other)
+
+    values2: (Me, B64) = when
+        d < 0.0 => (-other, -d)
+        else => (other, d)
+
+    target, cosine = values2
+    if cosine > Q256_LINEAR
+        return me.lerp(target, t)
+    theta: B64 = cosine.acos()
+    sin_theta: B64 = theta.sin()
+    rest: B64 = B64.sub_finite(1.0, t)
+    wa: B64 = rest.mul_finite(theta).sin().truediv_finite(sin_theta)
+    wb: B64 = t.mul_finite(theta).sin().truediv_finite(sin_theta)
+    a: Me = me.scale(wa)
+    b: Me = target.scale(wb)
+    return a + b
+
+### me + (target - me) t, normalized.
+### :param target: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The normalized interpolation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.lerp(me: Me, target: Me, t: B64) -> Me
+    step: Me = (target - me).scale(t)
+    return (me + step).normalize()
+
+### The normalized linear interpolation from me to other along the shorter arc.
+### :param other: The end at t = 1.
+### :param t: How far along, 0 at `me` and 1 at the other end.
+### :returns: The normalized interpolation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.nlerp(me: Me, other: Me, t: B64) -> Me
+    if me.dot(other) < 0.0
+        return me.lerp(target: -other, t)
+    else
+        return me.lerp(target: other, t)
+
+### The angle this unit quaternion turns by, 2 acos w.
+### :returns: The angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.angle(me: Me) -> B64
+    half: B64 = Me.clamp_unit(me.w).acos()
+    return B64.mul_finite(2.0, half)
+
+### The unit axis (x, y, z) and the angle this unit quaternion turns by, the angle in the last place. A turn by
+### nothing has no axis: it reports the x axis.
+### :returns: The axis's x, y, and z, then the angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.to_axis_angle(me: Me) -> (B64, B64, B64, B64)
+    local w: B64 = Me.clamp_unit(me.w)
+    local angle: B64 = B64.mul_finite(2.0, w.acos())
+
+    ww: B64 = w.mul_finite(w)
+    s: B64 = B64.sub_finite(1.0, ww).sqrt()
+    if s < Q256_TOLERANCE
+        return (1.0, 0.0, 0.0, angle)
+    x: B64 = me.x.truediv_finite(s)
+    y: B64 = me.y.truediv_finite(s)
+    z: B64 = me.z.truediv_finite(s)
+    return (x, y, z, angle)
+
+### The rotation by angle about the axis (ax, ay, az), which needn't be unit length (right-hand rule). An axis of
+### length zero gives the identity.
+### :param ax: The axis's x.
+### :param ay: The axis's y.
+### :param az: The axis's z.
+### :param angle: The angle in radians.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.from_axis_angle(ax: B64, ay: B64, az: B64, angle: B64) -> Me
+    local length: B64 = Me.length(x: ax, y: ay, z: az)
+
+    if length == 0.0
+        return Me.identity()
+    half: B64 = angle.mul_finite(0.5)
+    s: B64 = half.sin().truediv_finite(length)
+    x: B64 = ax.mul_finite(s)
+    y: B64 = ay.mul_finite(s)
+    z: B64 = az.mul_finite(s)
+    return (w: half.cos(), x: x, y: y, z: z)
+
+### The length of the vector (x, y, z).
+### :param x: The vector's x.
+### :param y: The vector's y.
+### :param z: The vector's z.
+### :returns: The length.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.length(x: B64, y: B64, z: B64) -> B64
+    xx: B64 = x.mul_finite(x)
+    yy: B64 = y.mul_finite(y)
+    s: B64 = xx.add_finite(yy)
+    zz: B64 = z.mul_finite(z)
+    return s.add_finite(zz).sqrt()
+
+### The shortest rotation that turns the direction `source` onto the direction `target`, neither unit length. Opposite
+### directions turn half a turn about an axis perpendicular to the first.
+### :param source: The direction to turn from.
+### :param target: The direction to turn onto.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.from_to(source: Vector3D[B64], target: Vector3D[B64]) -> Me
+    local la: B64 = Me.length(x: source.x, y: source.y, z: source.z)
+    local lb: B64 = Me.length(x: target.x, y: target.y, z: target.z)
+
+    if la == 0.0 or lb == 0.0
+        return Me.identity()
+    au: B64 = source.x.truediv_finite(la)
+    bu: B64 = source.y.truediv_finite(la)
+    cu: B64 = source.z.truediv_finite(la)
+    av: B64 = target.x.truediv_finite(lb)
+    bv: B64 = target.y.truediv_finite(lb)
+    cv: B64 = target.z.truediv_finite(lb)
+    aa: B64 = au.mul_finite(av)
+    bb: B64 = bu.mul_finite(bv)
+    s: B64 = aa.add_finite(bb)
+    cc: B64 = cu.mul_finite(cv)
+    d: B64 = s.add_finite(cc)
+    if d >= B64.sub_finite(1.0, Q256_TOLERANCE)
+        return Me.identity()
+    if d <= B64.add_finite(-1.0, Q256_TOLERANCE)
+        return Me.half_turn(ux: au, uy: bu, uz: cu)
+    w: B64 = B64.add_finite(1.0, d)
+    b1: B64 = bu.mul_finite(cv)
+    b2: B64 = cu.mul_finite(bv)
+    x: B64 = b1.sub_finite(b2)
+    c1: B64 = cu.mul_finite(av)
+    c2: B64 = au.mul_finite(cv)
+    y: B64 = c1.sub_finite(c2)
+    a1: B64 = au.mul_finite(bv)
+    a2: B64 = bu.mul_finite(av)
+    z: B64 = a1.sub_finite(a2)
+    q: Me = (w: w, x: x, y: y, z: z)
+    return q.normalize()
+
+### Half a turn about an axis perpendicular to the unit vector (ux, uy, uz): the x axis crossed with it, or the y axis
+### crossed with it when that is too short.
+### :param ux: The unit vector's x.
+### :param uy: The unit vector's y.
+### :param uz: The unit vector's z.
+### :returns: The half-turn rotation, with w = 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.half_turn(ux: B64, uy: B64, uz: B64) -> Me
+    local py: B64 = -uz
+
+    yy: B64 = py.mul_finite(py)
+    zz: B64 = uy.mul_finite(uy)
+    short: Bool = yy.add_finite(zz) < Q256_TOLERANCE
+    values2: (B64, B64, B64) = when
+        short => (uz, 0.0, -ux)
+        else => (0.0, py, uy)
+    px, qy, pz = values2
+    l: B64 = Me.length(x: px, y: qy, z: pz)
+    x: B64 = px.truediv_finite(l)
+    y: B64 = qy.truediv_finite(l)
+    z: B64 = pz.truediv_finite(l)
+    return (w: 0.0, x: x, y: y, z: z)
+
+### The rotation of a pure rotation matrix's upper-left 3x3 part, m{row}{column}. Shepperd's method divides by the
+### largest of 4w, 4x, 4y, and 4z to stay well conditioned.
+### :param m: The 3x3 part.
+### :returns: The rotation.
+### :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
+###     or `NumericOverflowError` when one is infinite.
+routine Q256.from_matrix(m: Matrix3[B64]) -> Me
+    local trace: B64 = m.m00.add_finite(m.m11).add_finite(m.m22)
+
+    when
+        trace > 0.0 =>
+            sw: B64 = trace.add_finite(1.0).sqrt().mul_finite(2.0)
+            w: B64 = B64.mul_finite(0.25, sw)
+            x: B64 = m.m21.sub_finite(m.m12).truediv_finite(sw)
+            y: B64 = m.m02.sub_finite(m.m20).truediv_finite(sw)
+            z: B64 = m.m10.sub_finite(m.m01).truediv_finite(sw)
+            return (w: w, x: x, y: y, z: z)
+        m.m00 > m.m11 and m.m00 > m.m22 =>
+            sx: B64 = B64.add_finite(1.0, m.m00).sub_finite(m.m11).sub_finite(m.m22)
+            s: B64 = sx.sqrt().mul_finite(2.0)
+            w: B64 = m.m21.sub_finite(m.m12).truediv_finite(s)
+            x: B64 = B64.mul_finite(0.25, s)
+            y: B64 = m.m01.add_finite(m.m10).truediv_finite(s)
+            z: B64 = m.m02.add_finite(m.m20).truediv_finite(s)
+            return (w: w, x: x, y: y, z: z)
+        m.m11 > m.m22 =>
+            sy: B64 = B64.add_finite(1.0, m.m11).sub_finite(m.m00).sub_finite(m.m22)
+            s: B64 = sy.sqrt().mul_finite(2.0)
+            w: B64 = m.m02.sub_finite(m.m20).truediv_finite(s)
+            x: B64 = m.m01.add_finite(m.m10).truediv_finite(s)
+            y: B64 = B64.mul_finite(0.25, s)
+            z: B64 = m.m12.add_finite(m.m21).truediv_finite(s)
+            return (w: w, x: x, y: y, z: z)
+        else =>
+            sz: B64 = B64.add_finite(1.0, m.m22).sub_finite(m.m00).sub_finite(m.m11)
+            s: B64 = sz.sqrt().mul_finite(2.0)
+            w: B64 = m.m10.sub_finite(m.m01).truediv_finite(s)
+            x: B64 = m.m02.add_finite(m.m20).truediv_finite(s)
+            y: B64 = m.m12.add_finite(m.m21).truediv_finite(s)
+            z: B64 = B64.mul_finite(0.25, s)
+            return (w: w, x: x, y: y, z: z)
+
+### The rotation by Euler angles in radians: yaw about z, then pitch about y, then roll about x (the aerospace Z-Y-X
+### order, yaw · pitch · roll).
+### :param roll: The turn about x, in radians.
+### :param pitch: The turn about y, in radians.
+### :param yaw: The turn about z, in radians.
+### :returns: The rotation.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.from_euler(roll: B64, pitch: B64, yaw: B64) -> Me
+    cr: B64 = roll.mul_finite(0.5).cos()
+    sr: B64 = roll.mul_finite(0.5).sin()
+    cp: B64 = pitch.mul_finite(0.5).cos()
+    sp: B64 = pitch.mul_finite(0.5).sin()
+    cy: B64 = yaw.mul_finite(0.5).cos()
+    sy: B64 = yaw.mul_finite(0.5).sin()
+    w1: B64 = cr.mul_finite(cp).mul_finite(cy)
+    w2: B64 = sr.mul_finite(sp).mul_finite(sy)
+    w: B64 = w1.add_finite(w2)
+    x1: B64 = sr.mul_finite(cp).mul_finite(cy)
+    x2: B64 = cr.mul_finite(sp).mul_finite(sy)
+    x: B64 = x1.sub_finite(x2)
+    y1: B64 = cr.mul_finite(sp).mul_finite(cy)
+    y2: B64 = sr.mul_finite(cp).mul_finite(sy)
+    y: B64 = y1.add_finite(y2)
+    z1: B64 = cr.mul_finite(cp).mul_finite(sy)
+    z2: B64 = sr.mul_finite(sp).mul_finite(cy)
+    z: B64 = z1.sub_finite(z2)
+    return (w: w, x: x, y: y, z: z)
+
+### The Z-Y-X Euler angles (roll, pitch, yaw) of this unit quaternion, the inverse of from_euler. At pitch ±90 degrees
+### (gimbal lock) roll and yaw aren't unique, and pitch is clamped there.
+### :returns: Roll, pitch, and yaw, in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+routine Q256.to_euler(me: Me) -> (B64, B64, B64)
+    wx: B64 = me.w.mul_finite(me.x)
+    yz: B64 = me.y.mul_finite(me.z)
+    ry: B64 = B64.mul_finite(2.0, wx.add_finite(yz))
+    xx: B64 = me.x.mul_finite(me.x)
+    yy: B64 = me.y.mul_finite(me.y)
+    rx2: B64 = B64.mul_finite(2.0, xx.add_finite(yy))
+    rx: B64 = B64.sub_finite(1.0, rx2)
+    roll: B64 = ry.atan2(rx)
+    wy: B64 = me.w.mul_finite(me.y)
+    zx: B64 = me.z.mul_finite(me.x)
+    sp: B64 = B64.mul_finite(2.0, wy.sub_finite(zx))
+    pitch: B64 = Me.clamp_unit(sp).asin()
+    wz: B64 = me.w.mul_finite(me.z)
+    xy: B64 = me.x.mul_finite(me.y)
+    yy2: B64 = B64.mul_finite(2.0, wz.add_finite(xy))
+    y2: B64 = me.y.mul_finite(me.y)
+    z2: B64 = me.z.mul_finite(me.z)
+    yx2: B64 = B64.mul_finite(2.0, y2.add_finite(z2))
+    yx: B64 = B64.sub_finite(1.0, yx2)
+    yaw: B64 = yy2.atan2(yx)
+    return (roll, pitch, yaw)
+
+### The four components in Words, w first.
+### :returns: The components w, x, y, and z in Words.
+@inline
+routine Q256.words(me: Me) -> Words
+    return Words.construct(a: me.w, b: me.x, c: me.y, d: me.z)
+
+# The exports RazorForge's Q256 calls: each component of a quaternion is its own B64, and a Vector3D's or a
+# Matrix4R4C's is its own B32.
+
+### The Hamilton product, for Q256.mul.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The product's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_mul")
+@inline
+routine q256_mul(w: B64, x: B64, y: B64, z: B64, other_w: B64, other_x: B64, other_y: B64,
+    other_z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    b: Q256 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return (a * b).words()
+
+### The quotient, for Q256.truediv.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The quotient's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when the second quaternion is zero and the first is not,
+###     `NumericDomainError` when both are zero (0 / 0, as with real division) or a step gives NaN, or
+###     `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_div")
+@inline
+routine q256_div(w: B64, x: B64, y: B64, z: B64, other_w: B64, other_x: B64, other_y: B64,
+    other_z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    b: Q256 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return (a / b).words()
+
+### The dot product, for Q256.dot.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :returns: The dot product.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_dot")
+@inline
+routine q256_dot(w: B64, x: B64, y: B64, z: B64, other_w: B64, other_x: B64, other_y: B64,
+    other_z: B64) -> B64
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    b: Q256 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.dot(b)
+
+### The squared norm, for Q256.norm.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The squared norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_norm")
+@inline
+routine q256_norm(w: B64, x: B64, y: B64, z: B64) -> B64
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.norm()
+
+### The norm, for Q256.abs.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The norm.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_abs")
+@inline
+routine q256_abs(w: B64, x: B64, y: B64, z: B64) -> B64
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.abs()
+
+### The angle the unit quaternion turns by, for Q256.angle.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The angle in radians.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_angle")
+@inline
+routine q256_angle(w: B64, x: B64, y: B64, z: B64) -> B64
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.angle()
+
+### The unit quaternion in the same direction, for Q256.normalize.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The unit quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_normalize")
+@inline
+routine q256_normalize(w: B64, x: B64, y: B64, z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.normalize().words()
+
+### The inverse, for Q256.reciprocal.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The inverse's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when the quaternion is zero, `NumericDomainError` when a step gives
+###     NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_reciprocal")
+@inline
+routine q256_reciprocal(w: B64, x: B64, y: B64, z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.reciprocal().words()
+
+### Whether the norm is 1 within the tolerance, for Q256.is_unit.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: True when the squared norm is within the tolerance of 1.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_is_unit")
+@inline
+routine q256_is_unit(w: B64, x: B64, y: B64, z: B64) -> Bool
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    return a.is_unit()
+
+### Q256.rotate: the turned vector's x, y, and z in w0, w1, and w2, as B32s.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :param vx: The vector's x.
+### :param vy: The vector's y.
+### :param vz: The vector's z.
+### :returns: The turned vector in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_rotate")
+@inline
+routine q256_rotate(w: B64, x: B64, y: B64, z: B64, vx: B32, vy: B32, vz: B32) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    r: Q256 = a.rotate(vx: vx.to[B64](), vy: vy.to[B64](), vz: vz.to[B64]())
+    return Words.construct(a: r.x.to[B32](), b: r.y.to[B32](), c: r.z.to[B32](),
+        d: B32.from_bits(0))
+
+### The spherical interpolation, for Q256.slerp.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :param t: How far along, 0 at the first quaternion and 1 at the second.
+### :returns: The interpolated rotation's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_slerp")
+@inline
+routine q256_slerp(w: B64, x: B64, y: B64, z: B64, other_w: B64, other_x: B64, other_y: B64,
+    other_z: B64, t: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    b: Q256 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.slerp(other: b, t).words()
+
+### The normalized linear interpolation, for Q256.nlerp.
+### :param w: The first quaternion's w.
+### :param x: The first quaternion's x.
+### :param y: The first quaternion's y.
+### :param z: The first quaternion's z.
+### :param other_w: The second quaternion's w.
+### :param other_x: The second quaternion's x.
+### :param other_y: The second quaternion's y.
+### :param other_z: The second quaternion's z.
+### :param t: How far along, 0 at the first quaternion and 1 at the second.
+### :returns: The interpolation's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_nlerp")
+@inline
+routine q256_nlerp(w: B64, x: B64, y: B64, z: B64, other_w: B64, other_x: B64, other_y: B64,
+    other_z: B64, t: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    b: Q256 = (w: other_w, x: other_x, y: other_y, z: other_z)
+    return a.nlerp(other: b, t).words()
+
+### Q256.to_axis_angle: the axis's x, y, and z as B32s in w0, w1, and w2, the angle as B64 in w3.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The axis and the angle in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_to_axis_angle")
+@inline
+routine q256_to_axis_angle(w: B64, x: B64, y: B64, z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    ax, ay, az, angle = a.to_axis_angle()
+    w0: U64 = ax.to[B32]().bits().to[U64]()
+    w1: U64 = ay.to[B32]().bits().to[U64]()
+    w2: U64 = az.to[B32]().bits().to[U64]()
+    w3: U64 = angle.bits()
+    return (w0: w0, w1: w1, w2: w2, w3: w3)
+
+### Q256.to_euler: roll, pitch, and yaw in w0, w1, and w2.
+### :param w: The quaternion's w.
+### :param x: The quaternion's x.
+### :param y: The quaternion's y.
+### :param z: The quaternion's z.
+### :returns: The three angles in Words.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_to_euler")
+@inline
+routine q256_to_euler(w: B64, x: B64, y: B64, z: B64) -> Words
+    a: Q256 = (w: w, x: x, y: y, z: z)
+    roll, pitch, yaw = a.to_euler()
+    return Words.construct(a: roll, b: pitch, c: yaw, d: B64.from_bits(0))
+
+### Q256.from_axis_angle, for a B32 axis.
+### :param ax: The axis's x.
+### :param ay: The axis's y.
+### :param az: The axis's z.
+### :param angle: The angle in radians.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_from_axis_angle")
+@inline
+routine q256_from_axis_angle(ax: B32, ay: B32, az: B32, angle: B64) -> Words
+    return Q256.from_axis_angle(ax: ax.to[B64](), ay: ay.to[B64](), az: az.to[B64](), angle).words()
+
+### Q256.from_to, for B32 directions.
+### :param ux: The first direction's x.
+### :param uy: The first direction's y.
+### :param uz: The first direction's z.
+### :param vx: The second direction's x.
+### :param vy: The second direction's y.
+### :param vz: The second direction's z.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_from_to")
+@inline
+routine q256_from_to(ux: B32, uy: B32, uz: B32, vx: B32, vy: B32, vz: B32) -> Words
+    source: Vector3D[B64] = (x: ux.to[B64](), y: uy.to[B64](), z: uz.to[B64]())
+    target: Vector3D[B64] = (x: vx.to[B64](), y: vy.to[B64](), z: vz.to[B64]())
+    q: Q256 = Q256.from_to(source, target)
+    return q.words()
+
+### Q256.from_matrix, for the B32 elements m{row}{column} of the upper-left 3x3 part.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `DivisionByZeroError` when a step divides by zero, `NumericDomainError` when one gives NaN,
+###     or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_from_matrix")
+@inline
+routine q256_from_matrix(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32,
+    m21: B32, m22: B32) -> Words
+    m: Matrix3[B64] = (m00: m00.to[B64](), m01: m01.to[B64](), m02: m02.to[B64](), m10: m10.to[B64](), m11: m11.to[B64](), m12: m12.to[B64](), m20: m20.to[B64](), m21: m21.to[B64](), m22: m22.to[B64]())
+    q: Q256 = Q256.from_matrix(m)
+    return q.words()
+
+### The rotation by Euler angles, for Q256.from_euler.
+### :param roll: The turn about x, in radians.
+### :param pitch: The turn about y, in radians.
+### :param yaw: The turn about z, in radians.
+### :returns: The resulting quaternion's components in Words, w first.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is infinite.
+@export("ingrid_q256_from_euler")
+@inline
+routine q256_from_euler(roll: B64, pitch: B64, yaw: B64) -> Words
+    return Q256.from_euler(roll, pitch, yaw).words()

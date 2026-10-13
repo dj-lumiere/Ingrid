@@ -1,0 +1,155 @@
+# RazorForge's channels (channel.te) without the rest of the runtime library: the last producer handle and the
+# last consumer handle are dropped at the same moment on two threads, many times over, and the channel (its buffer
+# and itself) is freed exactly once each time. Deciding to free after giving the lock back let both threads see
+# both counts at 0 and free it twice.
+#
+# The test's c_free counts instead of freeing, so a second free shows up in the count instead of corrupting the heap.
+
+module Ingrid/Runtime
+
+import Standard/Format
+import Standard/Os
+
+### The blocks c_free was handed.
+global FREES: @U64
+
+### Rounds of the race.
+preset ROUNDS: U32 = 100000
+
+### The scheduler a coroutine runs on: not used, every wait here is on a plain thread.
+record Sched
+    id: U32
+
+### A coroutine: not used.
+record Coro
+    id: U32
+
+### What the main thread and the two droppers share: the channel of the current round, the round the droppers may
+### start, and how many drops are done.
+record Race
+    chan: @Channel
+    round: U32
+    done: U32
+
+### One dropper: its side of the channel and the race.
+record Dropper
+    race: @Race
+    producer: Bool
+
+### Makes a `Race` from its fields.
+### :param chan: Its `chan`.
+### :param round: Its `round`.
+### :param done: Its `done`.
+### :returns: The new value.
+routine Race.construct(chan: @Channel, round: U32, done: U32) -> Me
+    return Me(chan, round, done)
+
+### Releases nothing: a `Race` holds no memory of its own.
+routine Race.destruct(me: @Me) -> None
+    return
+
+### Makes a `Dropper` from its fields.
+### :param race: Its `race`.
+### :param producer: Its `producer`.
+### :returns: The new value.
+routine Dropper.construct(race: @Race, producer: Bool) -> Me
+    return Me(race, producer)
+
+### Releases nothing: a `Dropper` holds no memory of its own.
+routine Dropper.destruct(me: @Me) -> None
+    return
+
+# -- what channel.te calls in the rest of the runtime library ----------------------
+
+### The tasks still running (task.te): none, every wait here is on a plain thread.
+global LIVE_TASKS: @U64
+
+@external("c")
+@symbol("calloc")
+routine c_calloc(count: USize, size: USize) -> Addr
+
+### Counts the block instead of freeing it.
+routine c_free(ptr: Addr) -> None
+    if ptr.is_null()
+        return
+    discard_previous: U64 = FREES.atomic_fetch_add(1)
+    return
+
+### count zeroed Ts.
+routine zeroed[T](count: USize, what: CStr) -> @T
+needs T: typename
+    p: Addr = c_calloc(count, sizeof[T]())
+    return p.to[@T]()
+
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
+
+@noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> None
+    Out.write("rf_throw\n")
+    exit(1)
+
+routine rf_sched_current() -> @Sched
+    return null
+
+routine current_coro() -> @Coro
+    return null
+
+routine rf_sched_wake(s: @Sched, c: @Coro) -> None
+    return
+
+routine rf_sched_park_external() -> None
+    return
+
+routine rf_cancel_requested() -> U32
+    return 0
+
+# -- the race ------------------------------------------------------------------------
+
+### Drops one side of each round's channel as soon as the round starts.
+routine drop_each_round(dropper: @Dropper) -> None
+    local race: @Race = dropper.race.peek()
+
+    while round <= ROUNDS with round: U32 = 1
+        if not (race.round.peek_atomic() >= round)
+            continue with round: round
+        else
+            chan: @Channel = race.chan.peek_atomic()
+            if dropper.producer.peek()
+                rf_channel_drop_feeder(chan)
+            else
+                rf_channel_drop_consumer(chan)
+            discard_previous: U32 = race.done.atomic_fetch_add(1)
+            continue with round: round + 1
+    then
+        return
+
+routine start() -> None
+    local race: @Race <- Race(chan: null, round: 0, done: 0)
+    local producer: @Dropper <- Dropper(race: race, producer: true)
+    local consumer: @Dropper <- Dropper(race: race, producer: false)
+    local a: Thread[None] = get_thread[None]()
+    local b: Thread[None] = get_thread[None]()
+
+    a.put_work(entry: drop_each_round.to[Callable](), args: producer)
+    b.put_work(entry: drop_each_round.to[Callable](), args: consumer)
+
+    each n in 1 to ROUNDS
+        chan: @Channel = rf_channel_create(1)
+        race.chan.poke_atomic(chan)
+        race.round.poke_atomic(n)
+
+        while race.done.peek_atomic() != n * 2
+            pass
+        then
+            continue
+    a.wait_finished()
+    a.give_back()
+    b.wait_finished()
+    b.give_back()
+    expected: U64 = ROUNDS.to[U64]() * 2
+    frees: U64 = FREES.peek_atomic()
+    Out.write("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}\n")
+    return

@@ -27,8 +27,8 @@ if(NOT TESSERA_DLL OR NOT EXISTS "${TESSERA_DLL}")
 endif()
 message(STATUS "Tessera builder: ${TESSERA_DLL}")
 
-file(GLOB INGRID_RUNTIME_TESSERA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/*.tess")
-file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/Standard/*.tess")
+file(GLOB INGRID_RUNTIME_TESSERA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/*.te")
+file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/Standard/*.te")
 set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
 set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
 # The standard library's exports come along: the B16 and BF16 conversions LLVM calls on Windows, which the

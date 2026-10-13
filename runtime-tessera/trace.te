@@ -1,0 +1,501 @@
+# The runtime's crash: __rf_throw writes the error and a stack trace to stderr and exits with the crash status, and
+# in the modes that trace, a hardware fault (an access violation, a division by zero, an illegal instruction) prints
+# the stack before the process dies.
+#
+# Three trace modes, set at startup by __rf_set_trace_mode:
+#   0  none (release-time, release-space): no trace
+#   1  platform (release): the native stack, function names from the debug information
+#   2  shadow (debug): the RF call chain, which the builder's own trace helpers keep now, so this one stays empty
+
+module Ingrid/Runtime
+
+import Standard/Format
+import Standard/Os
+
+global TRACE_MODE: @CInt <- 1
+
+preset TRACE_NONE:     CInt = 0
+preset TRACE_PLATFORM: CInt = 1
+preset TRACE_SHADOW:   CInt = 2
+### The exit status of every runtime crash: 0x52, 'R' for Runtime error.
+preset CRASH_STATUS: CInt = 0x52
+
+### Writes `value` in hex on stderr: `digits` digits (zeros in front, higher digits dropped), uppercase or not.
+### :param value: The value to write.
+### :param digits: The number of digits, at most 16.
+### :param upper: True for `A`-`F`, false for `a`-`f`.
+routine write_hex(value: U64, digits: USize, upper: Bool) -> None
+    local text_buffer: @Array[Byte, 16] <- .hollow()
+    local text: @Byte = text_buffer.to[@Byte]()
+    local v: @U64 <- value
+
+    while left != 0 with left: USize = digits
+        d: U8 = (v.peek() & 15).to[U8]()
+        # '0' + d, or 'a' / 'A' + d - 10
+        letter: U8 = when
+            upper => 55
+            else => 87
+        c: U8 = when
+            d < 10 => d + 48
+            else => d + letter
+        text.stride(left - 1).poke(c.bits())
+        (v.peek() >> 4).poke_into(v)
+        continue with left: left - 1
+    Err.write_all_result(data: text, count: digits)
+    return
+
+# -- the crash -----------------------------------------------------------------------
+
+### Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault. On
+### Windows a stack overflow is reported as a crash in every mode.
+### :param mode: `TRACE_NONE`, `TRACE_PLATFORM`, or `TRACE_SHADOW`.
+@export("__rf_set_trace_mode")
+routine rf_set_trace_mode(mode: CInt) -> None
+    TRACE_MODE.poke(mode)
+    install_fault_handlers()
+    return
+
+### Writes the stack trace the trace mode asks for on stderr: the native stack, an empty shadow stack, or nothing.
+routine print_stack_for_mode() -> None
+    mode: CInt = TRACE_MODE.peek()
+    when
+        mode == TRACE_SHADOW =>
+            Err.write("  <stack empty>\n")
+            return
+        mode == TRACE_PLATFORM =>
+            print_platform_stack(0)
+            return
+        else => return
+
+### Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
+### "Integer overflow error" (a space before each capital after the first, which becomes lowercase). One byte at a
+### time, with nothing allocated: it runs because something crashed, possibly out of memory.
+### :param name: The crash's name.
+routine write_error_title(name: Span[Byte]) -> None
+    local one: @U8 <- 0
+
+    each i in 0 til name.count
+        c: U8 = name.byte_at(i)
+        capital: Bool = c >= 65 and c <= 90
+        new_word: Bool = capital and i > 0
+        c2: U8 = when
+            new_word =>
+                one.poke(32)
+                Err.writer().write_bytes(data: one.to[@Byte](), count: 1)
+                becomes c + 32
+            else => c
+        one.poke(c2)
+        Err.writer().write_bytes(data: one.to[@Byte](), count: 1)
+    then
+        return
+
+### A runtime error: the type and the message on stderr, the trace for the mode, and the crash status. Standard
+### output is flushed first.
+### :param error_type: The error's type name, or null for `Error`.
+### :param message: What happened, or null for none.
+@export("__rf_throw")
+@noreturn
+routine rf_throw(error_type: CStr, message: CStr) -> None
+    rf_console_flush()
+    kind: CStr = when
+        error_type.data.is_null() => "Error"
+        else => error_type
+    text: CStr = when
+        message.data.is_null() => ""
+        else => message
+    k: Span[Byte] = kind.getview()
+    m: Span[Byte] = text.getview()
+    Err.write("[91m\n")
+    write_error_title(k)
+    Err.write(": {m}\n")
+    print_stack_for_mode()
+    Err.write("[0m\n")
+    exit(CRASH_STATUS)
+
+# -- the platform stack: Windows -----------------------------------------------------
+
+### SYMBOL_INFO's size, and where its MaxNameLen and Name are.
+preset SYMBOL_INFO_SIZE:     U32   = 88
+preset SYMBOL_INFO_MAX_NAME: USize = 80
+preset SYMBOL_INFO_NAME:     USize = 84
+preset MAX_SYM_NAME:         U32   = 2000
+### IMAGEHLP_LINE64's size, and where its LineNumber and FileName are.
+preset IMAGEHLP_LINE64_SIZE: U32   = 40
+preset LINE_NUMBER:          USize = 16
+preset LINE_FILE_NAME:       USize = 24
+
+### SYMOPT_UNDNAME, SYMOPT_DEFERRED_LOADS, and SYMOPT_LOAD_LINES: plain names, symbols loaded when first asked for, and
+### the line tables loaded with them.
+preset SYM_OPTIONS: U32 = 0x16
+
+### Where SYMBOL_INFO's Address (the symbol's start) is.
+preset SYMBOL_INFO_ADDRESS: USize = 56
+### Where EXCEPTION_RECORD's ExceptionAddress is.
+preset EXCEPTION_ADDRESS: USize = 16
+
+### Win32's `RtlCaptureStackBackTrace`: the return addresses of the calling thread's frames.
+### :param skip: The frames to skip from the top.
+### :param count: The most frames to capture.
+### :param frames: Where the addresses go.
+### :param hash: Where a hash of the trace goes, or null.
+### :returns: The number of frames captured.
+@external("c")
+@symbol("RtlCaptureStackBackTrace")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_capture_stack_back_trace(skip: U32, count: U32, frames: @Addr, hash: Addr) -> U16
+
+### Win32's `GetCurrentProcess`: the pseudo-handle of the current process.
+### :returns: The handle.
+@external("c")
+@symbol("GetCurrentProcess")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_get_current_process() -> Addr
+
+### DbgHelp's `SymInitialize`: loads the symbol handler for a process.
+### :param process: The process.
+### :param search_path: The symbol search path, or null for the default.
+### :param invade: Nonzero to load the symbols of every loaded module.
+### :returns: Nonzero on success.
+@external("c")
+@symbol("SymInitialize")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_sym_initialize(process: Addr, search_path: Addr, invade: CInt) -> CInt
+
+### DbgHelp's `SymSetOptions`: what the symbol handler loads and how it shows names.
+### :param options: The SYMOPT_ flags.
+### :returns: The options now set.
+@external("c")
+@symbol("SymSetOptions")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_sym_set_options(options: U32) -> U32
+
+### DbgHelp's `SymGetLineFromAddr64`: the source file and line of an address.
+### :param process: The process.
+### :param address: The address to look up.
+### :param displacement: Where the offset into the line goes.
+### :param line: The IMAGEHLP_LINE64 the file and line are written into.
+### :returns: Nonzero when a line was found.
+@external("c")
+@symbol("SymGetLineFromAddr64")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_sym_get_line_from_addr64(process: Addr, address: U64, displacement: @U32,
+    line: @Byte) -> CInt
+
+### DbgHelp's `SymFromAddr`: the symbol at an address.
+### :param process: The process.
+### :param address: The address to look up.
+### :param displacement: Where the offset into the symbol goes, or null.
+### :param symbol: The SYMBOL_INFO the symbol is written into.
+### :returns: Nonzero when a symbol was found.
+@external("c")
+@symbol("SymFromAddr")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_sym_from_addr(process: Addr, address: U64, displacement: Addr, symbol: @Byte) -> CInt
+
+### Writes the calling thread's native stack on stderr (up to 64 frames), each frame by its symbol name, with its
+### source file and line when the program's PDB has them, or else by its address.
+### :param fault: The faulting instruction's address, or 0. A fault's trace starts at the routine that faulted, so
+###     the exception handler and the system's dispatch frames above it are left out.
+@target(os: "windows")
+routine print_platform_stack(fault: U64) -> None
+    # SYMBOL_INFO and room for its name, 8-aligned
+    local buffer: @Array[U64, 262] <- .hollow()
+    local sym: @Byte = buffer.to[@Byte]()
+    # IMAGEHLP_LINE64
+    local line_buffer: @Array[U64, 5] <- .hollow()
+    local line: @Byte = line_buffer.to[@Byte]()
+    local line_offset: @U32 <- 0
+    local stack_buffer: @Array[Addr, 64] <- .hollow()
+    # skip this helper's frame
+    local captured: U16 = c_capture_stack_back_trace(1, 64, stack_buffer.to[@Addr](), null)
+    local process: Addr = c_get_current_process()
+    local stack: @Addr = stack_buffer.to[@Addr]()
+    local frames: U32 = captured.to[U32]()
+
+    c_sym_set_options(SYM_OPTIONS)
+    c_sym_initialize(process, null, 1)
+    sym.to[@U32]().poke(SYMBOL_INFO_SIZE)
+    max_name_field: @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to[@U32]()
+    max_name_field.poke(MAX_SYM_NAME)
+    Err.write("Stack trace:\n")
+    # the first frame in the routine that faulted, or every frame when none is
+    first: U32 = when
+        fault == 0 or c_sym_from_addr(process, fault, null, sym) == 0 => 0
+        else => first_frame_in(process, stack, frames, sym)
+
+    # frame i of the capture, written as the n-th of the trace
+    while i != frames with i: U32 = first, n: U32 = 0
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
+        if c_sym_from_addr(process, address, null, sym) == 0
+            Err.write("  {n}: at 0x")
+            write_hex(value: address, digits: 16, upper: false)
+            Err.write("\n")
+            continue with i: i + 1, n: n + 1
+        symbol_name: @Byte = sym.stride(SYMBOL_INFO_NAME)
+        name: Span[Byte] = symbol_name.to[CStr]().getview()
+        line.to[@U32]().poke(IMAGEHLP_LINE64_SIZE)
+        # a return address points past its call: one byte back is the call's own line
+        if c_sym_get_line_from_addr64(process, address - 1, line_offset, line) != 0
+            file_name_text: @Byte = line.stride(LINE_FILE_NAME).to[@@Byte]().peek()
+            file_name: Span[Byte] = file_name_text.to[CStr]().getview()
+            line_number: U32 = line.stride(LINE_NUMBER).to[@U32]().peek()
+            Err.write("  {n}: at {name} ({file_name}:{line_number})\n")
+        else
+            Err.write("  {n}: at {name}\n")
+        continue with i: i + 1, n: n + 1
+    return
+
+### The capture index of the first frame in the routine that faulted, or 0 when no frame is in it. `sym` holds the
+### faulting address's symbol on entry, and each frame's lookup is written into it.
+### :param process: The process.
+### :param stack: The captured return addresses.
+### :param frames: The number of captured addresses.
+### :param sym: The SYMBOL_INFO holding the faulting routine's symbol, reused for each lookup.
+### :returns: The index of the first frame in the faulting routine, or 0.
+@target(os: "windows")
+private routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @Byte) -> U32
+    start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek()
+    while i != frames with i: U32 = 0
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
+        if c_sym_from_addr(process, address, null, sym) != 0
+            if sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek() == start
+                return i
+        continue with i: i + 1
+    then
+        return 0
+
+# -- the platform stack: POSIX -------------------------------------------------------
+
+### `backtrace`: the return addresses of the calling thread's frames.
+### :param frames: Where the addresses go.
+### :param size: The most frames to capture.
+### :returns: The number of frames captured.
+@external("c")
+@symbol("backtrace")
+@target(os: not "windows")
+routine c_backtrace(frames: @Addr, size: CInt) -> CInt
+
+### `backtrace_symbols`: a text for each address, in one malloc block the caller frees.
+### :param frames: The addresses.
+### :param size: The number of addresses.
+### :returns: The texts, or null when the allocation fails.
+@external("c")
+@symbol("backtrace_symbols")
+@target(os: not "windows")
+routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
+
+### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
+### Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
+### :param fault: Unused here: the two frames left out are already the handler's.
+@target(os: not "windows")
+routine print_platform_stack(fault: U64) -> None
+    local stack_buffer: @Array[Addr, 64] <- .hollow()
+    local frames: CInt = c_backtrace(stack_buffer.to[@Addr](), 64)
+    local symbols: @@Byte = c_backtrace_symbols(stack_buffer.to[@Addr](), frames)
+    local stack: @Addr = stack_buffer.to[@Addr]()
+
+    Err.write("Stack trace:\n")
+
+    each i in 2 til frames
+        if symbols.is_null()
+            n: CInt = i - 2
+            address: Addr = stack.stride(i.to[USize]()).peek()
+            Err.write("  {n}: {address}\n")
+        else
+            n: CInt = i - 2
+            text: @Byte = symbols.stride(i.to[USize]()).peek()
+            line: Span[Byte] = text.to[CStr]().getview()
+            Err.write("  {n}: {line}\n")
+    c_free(symbols)
+    return
+
+# -- fault handlers: Windows ---------------------------------------------------------
+
+### The program's report for a stack overflow (Ingrid/tessera/crash.te, linked into the program, where the crash
+### trace lives): set at startup through rf_set_stack_overflow_report, null until then.
+global STACK_OVERFLOW_REPORT: @Callable[(U64,), None]
+
+### Win32's `AddVectoredExceptionHandler`: registers a handler every exception passes through.
+### :param first: Nonzero to call it before the handlers already registered.
+### :param handler: The handler.
+### :returns: The handler's registration, or null on failure.
+@external("c")
+@symbol("AddVectoredExceptionHandler")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_add_vectored_exception_handler(first: U32,
+    handler: Callable[@callconv("stdcall"), (@Addr,), CInt]) -> Addr
+
+### Win32's `GetCurrentThreadStackLimits`: the bounds of the calling thread's stack.
+### :param low: Where the lowest address goes.
+### :param high: Where the highest address goes.
+@external("c")
+@symbol("GetCurrentThreadStackLimits")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_get_current_thread_stack_limits(low: @USize, high: @USize) -> None
+
+### Win32's `SetThreadStackGuarantee`: the stack kept back for the calling thread's stack-overflow handling.
+### :param size: The size in bytes to set, and where the previous size goes.
+### :returns: Nonzero on success.
+@external("c")
+@symbol("SetThreadStackGuarantee")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_set_thread_stack_guarantee(size: @U32) -> CInt
+
+### Sets the routine that reports a stack overflow (it writes the report and exits with status 82). The program's
+### entry calls this right after setting the trace mode.
+### :param report: The report, called with the thread's stack size in bytes.
+@export("rf_set_stack_overflow_report")
+routine rf_set_stack_overflow_report(report: Callable[(U64,), None]) -> None
+    STACK_OVERFLOW_REPORT.poke(report)
+    return
+
+### Keeps 64 KiB of the calling thread's stack back for its exception handler, so a stack overflow on the thread can
+### still be reported. Each thread the runtime starts calls it first.
+@export("rf_thread_stack_guarantee")
+@target(os: "windows")
+routine rf_thread_stack_guarantee() -> None
+    local size: @U32 <- 65536
+
+    c_set_thread_stack_guarantee(size)
+    return
+
+### Does nothing: only Windows keeps stack back for the exception handler.
+@export("rf_thread_stack_guarantee")
+@target(os: not "windows")
+routine rf_thread_stack_guarantee() -> None
+    return
+
+### Every exception passes through here first. A stack overflow is reported as a crash (exit status 82), with how deep
+### the calls went and the stack they used up. In a tracing mode any other fault prints the stack, then the search
+### goes on (EXCEPTION_CONTINUE_SEARCH), so the exception ends the process as it would have.
+### :param pointers: The EXCEPTION_POINTERS, whose first word is the exception record.
+### :returns: 0 (EXCEPTION_CONTINUE_SEARCH).
+@target(os: "windows")
+@callconv("stdcall")
+routine exception_handler(pointers: @Addr) -> CInt
+    exception: Addr = pointers.peek()
+    code: U32 = exception.to[@U32]().peek()
+    if code == 0xC00000FD
+        report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
+        if report.addr().is_null()
+            return 0
+        local low: @USize <- 0
+        local high: @USize <- 0
+        c_get_current_thread_stack_limits(low, high)
+        span: USize = high.peek() - low.peek()
+        size: U64 = span.to[U64]()
+        report.call(size)
+        return 0
+    else
+        if TRACE_MODE.peek() == TRACE_NONE
+            return 0
+        name: Span[Byte] = exception_name(code).getview()
+        rf_console_flush()
+        Err.write("[91m\n{name} (code 0x")
+        write_hex(value: code.to[U64](), digits: 8, upper: true)
+        Err.write(")\n[0m")
+        address_field: @Byte = exception.to[@Byte]().stride(EXCEPTION_ADDRESS)
+        fault: U64 = address_field.to[@U64]().peek()
+        print_platform_stack(fault)
+        return 0
+
+### The name of a Windows exception code.
+### :param code: The exception code.
+### :returns: The name, or `Exception` for a code not listed.
+@target(os: "windows")
+routine exception_name(code: U32) -> CStr
+    when
+        code == 0xC0000005 => return "AccessViolation"
+        code == 0xC0000094 => return "DivisionByZero"
+        code == 0xC000001D => return "IllegalInstruction"
+        code == 0xC00000FD => return "StackOverflow"
+        else => return "Exception"
+
+### Keeps stack back for the main thread's exception handler and registers {exception_handler} first in line.
+@target(os: "windows")
+routine install_fault_handlers() -> None
+    rf_thread_stack_guarantee()
+    c_add_vectored_exception_handler(1, exception_handler.to[Callable]())
+    return
+
+# -- fault handlers: POSIX -----------------------------------------------------------
+
+preset SIGILL:  CInt = 4
+preset SIGABRT: CInt = 6
+preset SIGFPE:  CInt = 8
+preset SIGSEGV: CInt = 11
+
+### C's `signal`: sets the handler of a signal.
+### :param signo: The signal.
+### :param handler: The handler, or null for the default.
+### :returns: The previous handler.
+@external("c")
+@symbol("signal")
+@target(os: not "windows")
+routine c_signal(signo: CInt, handler: Callable[(CInt,), None]) -> Addr
+
+### C's `raise`: sends a signal to the calling thread.
+### :param signo: The signal.
+### :returns: 0 on success.
+@external("c")
+@symbol("raise")
+@target(os: not "windows")
+routine c_raise(signo: CInt) -> CInt
+
+### Linux's `SIGBUS`.
+### :returns: 7.
+@target(os: "linux")
+routine sigbus() -> CInt
+    return 7
+
+### macOS's `SIGBUS`.
+### :returns: 10.
+@target(os: "macos")
+routine sigbus() -> CInt
+    return 10
+
+### Prints the fault's name and the stack, then restores the default and raises the signal again, so the process
+### ends with the status the signal gives. With tracing off, it only re-raises.
+### :param signo: The signal that came.
+@target(os: not "windows")
+routine fault_handler(signo: CInt) -> None
+    if not (TRACE_MODE.peek() == TRACE_NONE)
+        name: Span[Byte] = signal_name(signo).getview()
+        Err.write("[91m\n{name}\n[0m")
+        print_platform_stack(0)
+    c_signal(signo, null)
+    c_raise(signo)
+    return
+
+### The name of a fault signal.
+### :param signo: The signal.
+### :returns: The name, or `Signal` for a signal not listed.
+@target(os: not "windows")
+routine signal_name(signo: CInt) -> CStr
+    when
+        signo == SIGSEGV => return "SegmentationFault"
+        signo == SIGFPE => return "FloatingPointException / DivisionByZero"
+        signo == SIGILL => return "IllegalInstruction"
+        signo == sigbus() => return "BusError"
+        signo == SIGABRT => return "Abort"
+        else => return "Signal"
+
+### Sets {fault_handler} for SIGSEGV, SIGFPE, SIGILL, SIGBUS, and SIGABRT.
+@target(os: not "windows")
+routine install_fault_handlers() -> None
+    handler: Callable[(CInt,), None] = fault_handler.to[Callable]()
+    c_signal(SIGSEGV, handler)
+    c_signal(SIGFPE, handler)
+    c_signal(SIGILL, handler)
+    c_signal(sigbus(), handler)
+    c_signal(SIGABRT, handler)
+    return
