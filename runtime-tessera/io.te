@@ -358,11 +358,11 @@ global PROC_ERR_LEN: @U64
 ### A subprocess to run (a command line for the shell, or a program and its arguments), and once it ran, how.
 record ProcState
     shell: Bool  # program is a command line for the platform shell
-    program: Span[Byte]
-    args: @Span[Byte]
+    program: @[Byte]
+    args: @@[Byte]
     arg_count: U64
     arg_cap: U64
-    directory: Span[Byte]  # empty: the parent's
+    directory: @[Byte]  # empty: the parent's
     env: @EnvVar  # overrides of the parent's environment
     env_count: U64
     env_cap: U64
@@ -392,8 +392,8 @@ record ProcState
 ### :param errors: Its `errors`.
 ### :param errors_count: Its `errors_count`.
 ### :returns: The new value.
-routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte], arg_count: U64,
-    arg_cap: U64, directory: Span[Byte], env: @EnvVar, env_count: U64, env_cap: U64,
+routine ProcState.construct(shell: Bool, program: @[Byte], args: @@[Byte], arg_count: U64,
+    arg_cap: U64, directory: @[Byte], env: @EnvVar, env_count: U64, env_cap: U64,
     exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: U64,
     errors: @Byte, errors_count: U64) -> Me
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
@@ -437,17 +437,17 @@ routine rf_proc_errors_len() -> U64
 ### :param s: The string.
 ### :param n: The length, or negative for a NUL-terminated `s`.
 ### :returns: The copy, or empty when the allocation fails.
-routine owned_copy(s: @Byte, n: S32) -> Span[Byte]
+routine owned_copy(s: @Byte, n: S32) -> @[Byte]
     len: U64 = length_of(s, n)
     d: Addr = c_malloc(len.max(1).to[CSize]())
     if d.is_null()
         return .hollow()
     c_memcpy(d, s, len.to[CSize]())
-    return Span[Byte].construct(data: d.to[@Byte](), count: len)
+    return @[Byte].construct(data: d.to[@Byte](), count: len)
 
 ### Frees the malloc'd memory of `b`.
 ### :param b: The bytes to free.
-routine free_bytes(b: Span[Byte]) -> None
+routine free_bytes(b: @[Byte]) -> None
     c_free(b.data)
     return
 
@@ -456,7 +456,7 @@ routine free_bytes(b: Span[Byte]) -> None
 ### :param program: The program or command line, taken over.
 ### :returns: The new state.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-routine proc_state_new(shell: Bool, program: Span[Byte]) -> @ProcState
+routine proc_state_new(shell: Bool, program: @[Byte]) -> @ProcState
     st: @ProcState = zeroed[ProcState](count: 1, what: "Failed to allocate subprocess state")
     st.shell.poke(shell)
     st.program.poke(program)
@@ -470,7 +470,7 @@ routine proc_state_free(st: @ProcState) -> None
     free_bytes(st.directory.peek())
 
     each i in 0 til st.arg_count.peek()
-        arg_slot: @Span[Byte] = st.args.peek().stride(i)
+        arg_slot: @@[Byte] = st.args.peek().stride(i)
         free_bytes(arg_slot.peek())
 
     each i in 0 til st.env_count.peek()
@@ -507,7 +507,7 @@ routine run_state(st: @ProcState, options: ProcessOptions,
     alloc: @MemoryManager) -> Result[ProcessOutput, ProcessError]
     if st.shell.peek()
         return run_shell_result(command: st.program.peek(), options, alloc)
-    args: Span[Span[Byte]] = Span[Span[Byte]].construct(data: st.args.peek(),
+    args: @[@[Byte]] = @[@[Byte]].construct(data: st.args.peek(),
         count: st.arg_count.peek())
     return run_process_result(program: st.program.peek(), args, options, alloc)
 
@@ -517,8 +517,8 @@ routine run_state(st: @ProcState, options: ProcessOptions,
 routine proc_run_blocking(st: @ProcState) -> None
     local alloc: @MemoryManager <- make_c_heap_memory()
 
-    dir: Span[Byte] = st.directory.peek()
-    directory: Maybe[Span[Byte]] = when
+    dir: @[Byte] = st.directory.peek()
+    directory: Maybe[@[Byte]] = when
         dir.is_empty() => None()
         else => dir
     options: ProcessOptions = ProcessOptions(directory: directory, env: st.env.peek(),
@@ -599,12 +599,12 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> None
     if not (n < b.arg_cap.peek())
         doubled: U64 = b.arg_cap.peek() * 2
         cap: U64 = doubled.max(4)
-        bigger: Addr = c_realloc(b.args.peek(), (cap * sizeof[Span[Byte]]()).to[CSize]())
+        bigger: Addr = c_realloc(b.args.peek(), (cap * sizeof[@[Byte]]()).to[CSize]())
         if bigger.is_null()
             return
-        b.args.poke(bigger.to[@Span[Byte]]())
+        b.args.poke(bigger.to[@@[Byte]]())
         b.arg_cap.poke(cap)
-    slot: @Span[Byte] = b.args.peek().stride(n)
+    slot: @@[Byte] = b.args.peek().stride(n)
     slot.poke(owned_copy(s: arg, n: arg_len))
     b.arg_count.poke(n + 1)
     return
