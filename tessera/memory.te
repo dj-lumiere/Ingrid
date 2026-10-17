@@ -55,6 +55,30 @@ secret routine c_memmove(dst: Addr, src: Addr, n: CSize) -> Addr
 @symbol("memset")
 secret routine c_memset(dst: Addr, value: CInt, n: CSize) -> Addr
 
+### glibc's malloc_usable_size: how many bytes the block at `ptr` holds, at least what was asked for.
+### :param ptr: A block from the C heap.
+### :returns: Its size, in bytes.
+@external("c")
+@symbol("malloc_usable_size")
+@target(os: "linux")
+secret routine c_block_size(ptr: Addr) -> CSize
+
+### macOS's malloc_size: how many bytes the block at `ptr` holds, at least what was asked for.
+### :param ptr: A block from the C heap.
+### :returns: Its size, in bytes.
+@external("c")
+@symbol("malloc_size")
+@target(os: "macos")
+secret routine c_block_size(ptr: Addr) -> CSize
+
+### The Windows C runtime's _msize: how many bytes the block at `ptr` holds.
+### :param ptr: A block from the C heap.
+### :returns: Its size, in bytes.
+@external("c")
+@symbol("_msize")
+@target(os: "windows")
+secret routine c_block_size(ptr: Addr) -> CSize
+
 ### A runtime error with the crash report and exit status (the runtime library).
 ### :param error_type: The error's name, such as `OutOfMemoryError`.
 ### :param message: What went wrong.
@@ -78,6 +102,84 @@ secret routine out_of_memory(what: @[Byte], bytes: U64) -> None
     terminator.poke(0x00)
     rf_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStr]())
 
+# -- heap counting -------------------------------------------------------------------
+#
+# A routine test with @memory_limit runs with its heap counted: the test command sets RF_MEMORY_LIMIT, the runtime's
+# start-up turns counting on, and the exit status the program ends with reports a peak above the limit. Off, the
+# count costs one load and a branch per allocation.
+
+### Whether heap blocks are counted: 1 while a memory limit is checked, 0 otherwise.
+global HEAP_COUNTING: @U32
+
+### The bytes the counted heap holds now. A block made before counting began and freed after it makes this smaller
+### than the program's heap, never larger.
+global HEAP_IN_USE: @S64
+
+### The most HEAP_IN_USE has been since counting began.
+global HEAP_PEAK: @S64
+
+### Counts a block the heap just gave out. Null (a failed or empty allocation) counts nothing.
+### :param p: The block.
+routine count_allocated(p: Addr) -> None
+    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_null()
+        return
+    size: S64 = c_block_size(p).to[U64]().to[S64]()
+    now: S64 = HEAP_IN_USE.atomic_fetch_add_relaxed(size) + size
+    local peak: @S64 <- HEAP_PEAK.peek_atomic_relaxed()
+    while now > peak.peek()
+        when HEAP_PEAK.atomic_compare_exchange(expected: peak.peek(), new: now)
+            is None => return
+            else as seen => seen.poke_into(peak)
+    return
+
+### Counts a block about to go back to the heap. Null counts nothing.
+### :param p: The block.
+routine count_freed(p: Addr) -> None
+    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_null()
+        return
+    size: S64 = c_block_size(p).to[U64]().to[S64]()
+    HEAP_IN_USE.atomic_fetch_sub_relaxed(size)
+    return
+
+### The heap limit a routine test runs under, in bytes, or 0 when there is none.
+global HEAP_LIMIT: @U64
+
+### Reads RF_MEMORY_LIMIT (the test command sets it, in bytes, for a test with @memory_limit) and, when it holds a
+### number above 0, counts the heap from here on. The builder's `main` calls it first.
+@export("rf_heap_limit_init")
+routine rf_heap_limit_init() -> None
+    text: @Byte = c_getenv("RF_MEMORY_LIMIT")
+    if text.is_null()
+        return
+    local limit: @U64 <- 0
+    local at: @U64 <- 0
+    while text.stride(at.peek()).peek() >= b'0' and text.stride(at.peek()).peek() <= b'9'
+        digit: U64 = (text.stride(at.peek()).peek().to[U8]() - 48).to[U64]()
+        next: U64 = limit.peek() *% 10 +% digit
+        next.poke_into(limit)
+        (at.peek() + 1).poke_into(at)
+    if limit.peek() == 0
+        return
+    HEAP_LIMIT.poke(limit.peek())
+    HEAP_IN_USE.poke_atomic(0)
+    HEAP_PEAK.poke_atomic(0)
+    HEAP_COUNTING.poke_atomic(1)
+    return
+
+### The exit status the program ends with: `status`, or the crash status (82) with a report when the counted heap went
+### past its limit. The builder's `main` calls it last.
+### :param status: The status the program would end with.
+### :returns: The status to end with.
+@export("rf_heap_limit_status")
+routine rf_heap_limit_status(status: CInt) -> CInt
+    limit: U64 = HEAP_LIMIT.peek()
+    peak: S64 = HEAP_PEAK.peek_atomic()
+    if limit == 0 or peak <= 0 or peak.to[U64]() <= limit
+        return status
+    used: U64 = peak.to[U64]()
+    Err.write("Memory limit error: the program held {used} bytes, more than the limit of {limit} bytes.\n")
+    return 0x52
+
 ### Allocates `bytes` zeroed bytes from the C heap.
 ### :param bytes: How many bytes.
 ### :returns: The memory.
@@ -90,6 +192,7 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
     if p.is_null()
         out_of_memory(what: "allocate", bytes)
     else
+        count_allocated(p)
         return p
 
 ### Allocates `bytes` bytes from the C heap, not zeroed: the caller writes them before reading.
@@ -104,6 +207,7 @@ routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
     if p.is_null()
         out_of_memory(what: "allocate", bytes)
     else
+        count_allocated(p)
         return p
 
 ### Frees a block. Null is fine.
@@ -111,6 +215,7 @@ routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
 @export("rf_invalidate")
 @expensive("frees heap memory")
 routine rf_invalidate(ptr: Addr) -> None
+    count_freed(ptr)
     c_free(ptr)
     return
 
@@ -124,10 +229,12 @@ routine rf_invalidate(ptr: Addr) -> None
 @export("rf_reallocate_dynamic")
 @expensive("reallocates heap memory")
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
+    count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_null() and bytes != 0
         out_of_memory(what: "reallocate to", bytes)
     else
+        count_allocated(p)
         return p
 
 ### Copies `bytes` bytes from `src_address` to `dst_address`. The regions may overlap. A null address or no bytes
