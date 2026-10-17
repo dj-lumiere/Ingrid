@@ -79,7 +79,7 @@ routine Channel.destruct(me: @Me) -> None
 ### the lock.
 ### :param list: The first parked coroutine to wake, or null.
 routine Channel.cast_all(me: @Me, list: @ChannelWaiter) -> None
-    until w.is_null() with w: @ChannelWaiter = list
+    until w.is_hollow() with w: @ChannelWaiter = list
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         continue with w: w.next.peek()
     me.cond.cast_all()
@@ -129,7 +129,7 @@ routine Channel.free_if(me: @Me, last: Bool) -> None
 ### :param chan: The channel.
 @export("rf_channel_add_feeder")
 routine rf_channel_add_feeder(chan: @Channel) -> None
-    if chan.is_null()
+    if chan.is_hollow()
         return
     chan.lock.lock()
     next_producer_refs: U32 = chan.producer_refs.peek() + 1
@@ -141,7 +141,7 @@ routine rf_channel_add_feeder(chan: @Channel) -> None
 ### :param chan: The channel.
 @export("rf_channel_add_consumer")
 routine rf_channel_add_consumer(chan: @Channel) -> None
-    if chan.is_null()
+    if chan.is_hollow()
         return
     chan.lock.lock()
     next_consumer_refs: U32 = chan.consumer_refs.peek() + 1
@@ -154,7 +154,7 @@ routine rf_channel_add_consumer(chan: @Channel) -> None
 ### :param chan: The channel.
 @export("rf_channel_drop_feeder")
 routine rf_channel_drop_feeder(chan: @Channel) -> None
-    if chan.is_null()
+    if chan.is_hollow()
         return
     chan.lock.lock()
     refs: U32 = chan.producer_refs.peek()
@@ -173,7 +173,7 @@ routine rf_channel_drop_feeder(chan: @Channel) -> None
 ### :param chan: The channel.
 @export("rf_channel_drop_consumer")
 routine rf_channel_drop_consumer(chan: @Channel) -> None
-    if chan.is_null()
+    if chan.is_hollow()
         return
     chan.lock.lock()
     refs: U32 = chan.consumer_refs.peek()
@@ -190,7 +190,7 @@ routine rf_channel_drop_consumer(chan: @Channel) -> None
 ### :param chan: The channel.
 @export("rf_channel_close")
 routine rf_channel_close(chan: @Channel) -> None
-    if chan.is_null()
+    if chan.is_hollow()
         return
     chan.lock.lock()
     if not chan.closed.peek()
@@ -206,7 +206,7 @@ routine rf_channel_close(chan: @Channel) -> None
 routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> None
     sched: @Sched = rf_sched_current()
     coro: @Coro = current_coro()
-    if sched.is_null() or coro.is_null()
+    if sched.is_hollow() or coro.is_hollow()
         # The node outlives nothing of this routine's: it is on the heap while the list holds it, and goes after.
         # A thread waits in short slices. When a few in a row pass with no agent left that could send, receive or close,
         # nothing can ever wake it: its own scope holds what it waits on (a sender it still has, the receiver it reads),
@@ -239,13 +239,13 @@ routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> None
 routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> None
     while true with at: @@ChannelWaiter = list
         w2: @ChannelWaiter = at.peek()
-        if w2.is_null()
+        if w2.is_hollow()
             return
         if w2 !== node
             continue with at: w2.next
         else
             at.poke(node.next.peek())
-            node.next.poke(null)
+            node.next.poke(.hollow())
             return
 
 ### Sends one payload: 1, or 0 when the channel is closed or has no consumer. Waits while it is full, and for a
@@ -256,7 +256,7 @@ routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> None
 ###     for room.
 @export("rf_channel_feed")
 routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
-    if chan.is_null()
+    if chan.is_hollow()
         return 0
     return chan.feed(payload)
 
@@ -304,7 +304,7 @@ routine Channel.feed(me: @Me, payload: Addr) -> U32
 ### :returns: 1 when sent, 2 when full, 0 when `chan` is null, closed, or has no consumer.
 @export("rf_channel_offer")
 routine rf_channel_offer(chan: @Channel, payload: Addr) -> U32
-    if chan.is_null()
+    if chan.is_hollow()
         return 0
     return chan.offer(payload)
 
@@ -337,8 +337,8 @@ routine Channel.offer(me: @Me, payload: Addr) -> U32
 ### :returns: The payload, or null.
 @export("rf_channel_next")
 routine rf_channel_next(chan: @Channel) -> Addr
-    if chan.is_null()
-        return null
+    if chan.is_hollow()
+        return .hollow()
     return chan.next()
 
 ### rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
@@ -349,18 +349,18 @@ routine Channel.next(me: @Me) -> Addr
     while (me.count.peek() == 0) & ~me.closed.peek()
         if not (rf_cancel_requested() == 0)
             me.lock.unlock()
-            return null
+            return .hollow()
         else
             me.wait(me.not_empty_head)
             continue
     if me.count.peek() == 0
         me.lock.unlock()
-        return null
+        return .hollow()
     else
         head: U64 = me.head.peek()
         slot: @Addr = me.slots.peek().stride(head.to[U64]())
         payload: Addr = slot.peek()
-        slot.poke(null)
+        slot.poke(.hollow())
         me.head.poke((head + 1) % me.slot_cap.peek())
         remaining_count: U64 = me.count.peek() - 1
         remaining_count.poke_into(me.count)
@@ -373,7 +373,7 @@ routine Channel.next(me: @Me) -> Addr
 ### :returns: The buffered item count, 0 for a null `chan`.
 @export("rf_channel_count")
 routine rf_channel_count(chan: @Channel) -> U64
-    if chan.is_null()
+    if chan.is_hollow()
         return 0
     chan.lock.lock()
     n: U64 = chan.count.peek()
@@ -385,7 +385,7 @@ routine rf_channel_count(chan: @Channel) -> U64
 ### :returns: 1 when closed or null, 0 when open.
 @export("rf_channel_is_closed")
 routine rf_channel_is_closed(chan: @Channel) -> U32
-    if chan.is_null()
+    if chan.is_hollow()
         return 1
     chan.lock.lock()
     closed: Bool = chan.closed.peek()
@@ -400,7 +400,7 @@ routine rf_channel_is_closed(chan: @Channel) -> U32
 ### :returns: The items it buffers (0 for a rendezvous or a null `chan`).
 @export("rf_channel_capacity")
 routine rf_channel_capacity(chan: @Channel) -> U64
-    if chan.is_null()
+    if chan.is_hollow()
         return 0
     else
         return chan.capacity.peek()

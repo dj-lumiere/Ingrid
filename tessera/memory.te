@@ -117,11 +117,13 @@ global HEAP_IN_USE: @S64
 
 ### The most HEAP_IN_USE has been since counting began.
 global HEAP_PEAK: @S64
+### The heap limit a routine test runs under, in bytes, or 0 when there is none.
+global HEAP_LIMIT: @U64
 
 ### Counts a block the heap just gave out. Null (a failed or empty allocation) counts nothing.
 ### :param p: The block.
 routine count_allocated(p: Addr) -> None
-    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_null()
+    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_hollow()
         return
     size: S64 = c_block_size(p).to[U64]().to[S64]()
     now: S64 = HEAP_IN_USE.atomic_fetch_add_relaxed(size) + size
@@ -135,21 +137,18 @@ routine count_allocated(p: Addr) -> None
 ### Counts a block about to go back to the heap. Null counts nothing.
 ### :param p: The block.
 routine count_freed(p: Addr) -> None
-    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_null()
+    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_hollow()
         return
     size: S64 = c_block_size(p).to[U64]().to[S64]()
     HEAP_IN_USE.atomic_fetch_sub_relaxed(size)
     return
-
-### The heap limit a routine test runs under, in bytes, or 0 when there is none.
-global HEAP_LIMIT: @U64
 
 ### Reads RF_MEMORY_LIMIT (the test command sets it, in bytes, for a test with @memory_limit) and, when it holds a
 ### number above 0, counts the heap from here on. The builder's `main` calls it first.
 @export("rf_heap_limit_init")
 routine rf_heap_limit_init() -> None
     text: @Byte = c_getenv("RF_MEMORY_LIMIT")
-    if text.is_null()
+    if text.is_hollow()
         return
     local limit: @U64 <- 0
     local at: @U64 <- 0
@@ -189,7 +188,7 @@ routine rf_heap_limit_status(status: CInt) -> CInt
 @expensive("allocates heap memory")
 routine rf_allocate_dynamic(bytes: U64) -> Addr
     p: Addr = c_calloc(bytes.to[CSize](), 1)
-    if p.is_null()
+    if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
     else
         count_allocated(p)
@@ -204,7 +203,7 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
 @expensive("allocates heap memory")
 routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
     p: Addr = c_malloc(bytes.to[CSize]())
-    if p.is_null()
+    if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
     else
         count_allocated(p)
@@ -231,7 +230,7 @@ routine rf_invalidate(ptr: Addr) -> None
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
     count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
-    if p.is_null() and bytes != 0
+    if p.is_hollow() and bytes != 0
         out_of_memory(what: "reallocate to", bytes)
     else
         count_allocated(p)
@@ -298,7 +297,7 @@ routine rf_region_mark() -> U64
 @export("rf_region_alloc")
 routine rf_region_alloc(bytes: U64) -> Addr
     p: Addr = c_calloc(1, (sizeof[RegionBlock]() + bytes.to[U64]()).to[CSize]())
-    if p.is_null()
+    if p.is_hollow()
         out_of_memory(what: "allocate scratch", bytes)
     node: @RegionBlock = p.to[@RegionBlock]()
     node.prev.poke(REGION_TOP.peek())
@@ -313,7 +312,7 @@ routine rf_region_release(mark: U64) -> None
 
     while true
         top2: @RegionBlock = REGION_TOP.peek()
-        if top2.is_null() | (top2 === stop)
+        if top2.is_hollow() | (top2 === stop)
             return
         REGION_TOP.poke(top2.prev.peek())
         c_free(top2)

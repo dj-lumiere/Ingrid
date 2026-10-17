@@ -98,10 +98,10 @@ routine write_error_title(name: @[Byte]) -> None
 routine rf_throw(error_type: CStr, message: CStr) -> None
     rf_console_flush()
     kind: CStr = when
-        error_type.data.is_null() => "Error"
+        error_type.data.is_hollow() => "Error"
         else => error_type
     text: CStr = when
-        message.data.is_null() => ""
+        message.data.is_hollow() => ""
         else => message
     k: @[Byte] = kind.getview()
     m: @[Byte] = text.getview()
@@ -217,26 +217,26 @@ routine print_platform_stack(fault: U64) -> None
     local line_offset: @U32 <- 0
     local stack_buffer: @Array[Addr, 64] <- .hollow()
     # skip this helper's frame
-    local captured: U16 = c_capture_stack_back_trace(1, 64, stack_buffer.to[@Addr](), null)
+    local captured: U16 = c_capture_stack_back_trace(1, 64, stack_buffer.to[@Addr](), .hollow())
     local process: Addr = c_get_current_process()
     local stack: @Addr = stack_buffer.to[@Addr]()
     local frames: U32 = captured.to[U32]()
 
     c_sym_set_options(SYM_OPTIONS)
-    c_sym_initialize(process, null, 1)
+    c_sym_initialize(process, .hollow(), 1)
     sym.to[@U32]().poke(SYMBOL_INFO_SIZE)
     max_name_field: @U32 = sym.stride(SYMBOL_INFO_MAX_NAME).to[@U32]()
     max_name_field.poke(MAX_SYM_NAME)
     Err.write("Stack trace:\n")
     # the first frame in the routine that faulted, or every frame when none is
     first: U32 = when
-        fault == 0 or c_sym_from_addr(process, fault, null, sym) == 0 => 0
+        fault == 0 or c_sym_from_addr(process, fault, .hollow(), sym) == 0 => 0
         else => first_frame_in(process, stack, frames, sym)
 
     # frame i of the capture, written as the n-th of the trace
     while i != frames with i: U32 = first, n: U32 = 0
         address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[U64]()).peek())
-        if c_sym_from_addr(process, address, null, sym) == 0
+        if c_sym_from_addr(process, address, .hollow(), sym) == 0
             Err.write("  {n}: at 0x")
             write_hex(value: address, digits: 16, upper: false)
             Err.write("\n")
@@ -267,7 +267,7 @@ secret routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @By
     start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek()
     while i != frames with i: U32 = 0
         address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[U64]()).peek())
-        if c_sym_from_addr(process, address, null, sym) != 0
+        if c_sym_from_addr(process, address, .hollow(), sym) != 0
             if sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek() == start
                 return i
         continue with i: i + 1
@@ -307,7 +307,7 @@ routine print_platform_stack(fault: U64) -> None
     Err.write("Stack trace:\n")
 
     each i in 2 til frames
-        if symbols.is_null()
+        if symbols.is_hollow()
             n: CInt = i - 2
             address: Addr = stack.stride(i.to[U64]()).peek()
             Err.write("  {n}: {address}\n")
@@ -390,7 +390,7 @@ routine exception_handler(pointers: @Addr) -> CInt
     code: U32 = exception.to[@U32]().peek()
     if code == 0xC00000FD
         report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
-        if report.addr().is_null()
+        if report.addr().is_hollow()
             return 0
         local low: @CSize <- 0
         local high: @CSize <- 0
@@ -484,7 +484,7 @@ routine fault_handler(signo: CInt) -> None
         if Err.is_terminal()
             Err.write("[0m")
         print_platform_stack(0)
-    c_signal(signo, null)
+    c_signal(signo, .hollow())
     c_raise(signo)
     return
 

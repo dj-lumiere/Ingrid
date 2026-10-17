@@ -42,7 +42,7 @@ routine empty_map() -> @Byte
 ### :returns: Null.
 routine no_result() -> @Byte
     RESULT_LEN.poke(0)
-    return null
+    return .hollow()
 
 ### Records `len` as the result's length and hands `buf` back.
 ### :param buf: The result buffer.
@@ -58,7 +58,7 @@ routine result(buf: @Byte, len: U64) -> @Byte
 ### :returns: The buffer, or null (length 0) when the allocation fails.
 routine bytes_result(s: @Byte, len: U64) -> @Byte
     buf: Addr = c_malloc((len + 1).to[CSize]())
-    if buf.is_null()
+    if buf.is_hollow()
         return no_result()
     c_memcpy(buf, s, len.to[CSize]())
     terminator: @Byte = buf.to[@Byte]().stride(len)
@@ -144,7 +144,7 @@ routine ResultBuffer.start(me: @Me, cap: U64) -> Bool
     me.buf.poke(buf.to[@Byte]())
     me.len.poke(0)
     me.cap.poke(cap.max(16))
-    return buf.is_not_null()
+    return buf.is_not_hollow()
 
 ### Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
 ### :param n: The bytes about to be added.
@@ -156,7 +156,7 @@ routine ResultBuffer.room(me: @Me, n: U64) -> Bool
     if need > current_cap
         cap: U64 = (current_cap * 2).max(need)
         bigger: Addr = c_realloc(me.buf.peek(), cap.to[CSize]())
-        if bigger.is_null()
+        if bigger.is_hollow()
             return false
         me.buf.poke(bigger.to[@Byte]())
         me.cap.poke(cap)
@@ -236,12 +236,12 @@ routine OpenFile.destruct(me: @Me) -> None
 ### :returns: The open file, or null when `fd` is out of range or not open.
 routine open_file(fd: S32) -> @OpenFile
     if fd < 0 or fd >= 256
-        return null
+        return .hollow()
     of: @OpenFile = FILE_TABLE.to[@OpenFile]().stride(fd.to[U64]())
     if of.used.peek()
         return of
     else
-        return null
+        return .hollow()
 
 ### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or -1. No mode makes a
 ### missing file: rf_fs_make_file does.
@@ -263,7 +263,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
         is FileHandle as f => f
         is FsError => return -1
     buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
-    if buffer.is_null()
+    if buffer.is_hollow()
         c_free(buffer)
         local f2: @FileHandle <- f
         f2.close()
@@ -317,7 +317,7 @@ routine OpenFile.refill(me: @Me) -> Bool
 @export("rf_file_close")
 routine rf_file_close(fd: S32) -> None
     of: @OpenFile = open_file(fd)
-    if of.is_null()
+    if of.is_hollow()
         return
     of.drain()
     of.file.close()
@@ -331,9 +331,9 @@ routine rf_file_close(fd: S32) -> None
 @export("rf_file_read_all")
 routine rf_file_read_all(fd: S32) -> @Byte
     local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_null()
+    if of.is_hollow()
         return no_result()
     if not out.start(FILE_BUFFER)
         return out.fail()
@@ -367,9 +367,9 @@ routine rf_file_read_all(fd: S32) -> @Byte
 @export("rf_file_read_line")
 routine rf_file_read_line(fd: S32) -> @Byte
     local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_null()
+    if of.is_hollow()
         return no_result()
     if out.start(256)
         while of.start.peek() < of.end.peek() or of.refill()
@@ -397,9 +397,9 @@ routine rf_file_read_line(fd: S32) -> @Byte
 @export("rf_file_read_bytes")
 routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
     local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_null()
+    if of.is_hollow()
         return no_result()
     if out.start(count + 1)
         while true
@@ -427,7 +427,7 @@ routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
 routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
     local of: @OpenFile = open_file(fd)
 
-    if of.is_null()
+    if of.is_hollow()
         return 0
     needed: U64 = of.end.peek() + len
     if needed > FILE_BUFFER
@@ -449,7 +449,7 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
 @export("rf_file_flush")
 routine rf_file_flush(fd: S32) -> None
     of: @OpenFile = open_file(fd)
-    if of.is_null()
+    if of.is_hollow()
         return
     of.drain()
     return
@@ -460,7 +460,7 @@ routine rf_file_flush(fd: S32) -> None
 @export("rf_file_is_eof")
 routine rf_file_is_eof(fd: S32) -> Bool
     of: @OpenFile = open_file(fd)
-    if of.is_null()
+    if of.is_hollow()
         return true
     else
         return of.eof.peek() & (of.start.peek() >= of.end.peek())
@@ -478,8 +478,8 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     when FileManager.read_all_result(at: File.at(cpath.to[CStr]().getview()), alloc)
         is Memory[Byte] as text =>
             n: U64 = text.count()
-            buf: Addr = c_realloc(null, (n + 1).to[CSize]())
-            if buf.is_null()
+            buf: Addr = c_realloc(.hollow(), (n + 1).to[CSize]())
+            if buf.is_hollow()
                 drop text
                 return -1
             buf.to[@Byte]().copy(src: text.data.peek(), count: n)
@@ -516,7 +516,7 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
     local first: @[Byte] = path_of(path: a, len: a_len)
     local second: @[Byte] = path_of(path: b, len: b_len)
-    local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
     joined_count: U64 = first.count() + second.count()
     if not out.start(joined_count + 2)
@@ -845,7 +845,7 @@ routine ResultBuffer.entry(me: @Me, name: @[Byte], typed: Bool, is_dir: Bool, mt
 ### :param typed: True for `<d|f><mtime> <name>` entries, false for names only.
 ### :returns: The listing, or null (length 0) when the directory can't be opened or the buffer can't grow.
 routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
-    local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
     local iter: @DirIter <- .hollow()
 
     # Every exit closes the listing (FileManager.list_result, the first step, sets the handle before anything can
@@ -1144,7 +1144,7 @@ routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: U64, count
 ### :param len: The delta plus the length.
 @export("rf_file_unmap")
 routine rf_file_unmap(ptr: @Byte, len: U64) -> None
-    if ptr.is_null() or len == 0
+    if ptr.is_hollow() or len == 0
         return
     m: Mapping = Mapping(base: ptr, delta: 0, count: len)
     m.unmap()
@@ -1155,7 +1155,7 @@ routine rf_file_unmap(ptr: @Byte, len: U64) -> None
 ### :param len: The delta plus the length.
 @export("rf_file_map_flush")
 routine rf_file_map_flush(ptr: @Byte, len: U64) -> None
-    if ptr.is_null() or len == 0
+    if ptr.is_hollow() or len == 0
         return
     m: Mapping = Mapping(base: ptr, delta: 0, count: len)
     m.flush_result()

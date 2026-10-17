@@ -92,8 +92,7 @@ record Sched
 ### :param top: Its `top`.
 ### :param lock: Its `lock`.
 ### :returns: The new value.
-routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64,
-    lock: ExclusiveLock) -> Me
+routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64, lock: ExclusiveLock) -> Me
     return Me(buf, cap, bottom, top, lock)
 
 ### Releases nothing: a `Deque` holds no memory of its own.
@@ -198,13 +197,13 @@ routine Deque.pop_bottom(me: @Me) -> @Coro
     me.lock.lock()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro = when
-        empty => null
+        empty => .hollow()
         else =>
             b: U64 = me.bottom.peek() - 1
             me.bottom.poke(b)
             slot: @@Coro = me.slot(b)
             c: @Coro = slot.peek()
-            slot.poke(null)
+            slot.poke(.hollow())
             becomes c
     me.lock.unlock()
     return taken
@@ -215,12 +214,12 @@ routine Deque.steal_top(me: @Me) -> @Coro
     me.lock.lock()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro = when
-        empty => null
+        empty => .hollow()
         else =>
             t: U64 = me.top.peek()
             slot: @@Coro = me.slot(t)
             c: @Coro = slot.peek()
-            slot.poke(null)
+            slot.poke(.hollow())
             me.top.poke(t + 1)
             becomes c
     me.lock.unlock()
@@ -244,7 +243,7 @@ routine Deque.remove(me: @Me, c: @Coro) -> Bool
             then
                 b: U64 = me.bottom.peek() - 1
                 me.bottom.poke(b)
-                me.slot(b).poke(null)
+                me.slot(b).poke(.hollow())
                 me.lock.unlock()
                 return true
     then
@@ -256,10 +255,10 @@ routine Deque.remove(me: @Me, c: @Coro) -> Bool
 ### Appends `c`, now QUEUED, to the injector. The caller holds the scheduler lock.
 ### :param c: The coroutine.
 routine Sched.push_injector(me: @Me, c: @Coro) -> None
-    c.sched_next.poke(null)
+    c.sched_next.poke(.hollow())
     c.sched_state.poke_atomic(SCHED_QUEUED)
     tail: @Coro = me.injector_tail.peek()
-    if tail.is_null()
+    if tail.is_hollow()
         me.injector_head.poke(c)
         me.injector_tail.poke(c)
         return
@@ -273,13 +272,13 @@ routine Sched.push_injector(me: @Me, c: @Coro) -> None
 routine Sched.pop_injector(me: @Me) -> @Coro
     local c: @Coro = me.injector_head.peek()
 
-    if c.is_null()
-        return null
+    if c.is_hollow()
+        return .hollow()
     next: @Coro = c.sched_next.peek()
     me.injector_head.poke(next)
-    if next.is_null()
-        me.injector_tail.poke(null)
-    c.sched_next.poke(null)
+    if next.is_hollow()
+        me.injector_tail.poke(.hollow())
+    c.sched_next.poke(.hollow())
     c.sched_state.poke_atomic(SCHED_RUNNING)
     return c
 
@@ -290,7 +289,7 @@ routine Sched.enqueue_ready(me: @Me, c: @Coro) -> None
     local id: S64 = worker_id()
     local deques: @Deque = me.deques.peek()
 
-    if id >= 0 and deques.is_not_null()
+    if id >= 0 and deques.is_not_hollow()
         c.sched_state.poke_atomic(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return
@@ -378,7 +377,7 @@ routine Sched.insert_timer(me: @Me, c: @Coro) -> None
             cap == 0 => 16
             else => cap * 2
         heap: Addr = c_realloc(me.timer_heap.peek(), (ncap.to[U64]() * sizeof[@Coro]()).to[CSize]())
-        if heap.is_null()
+        if heap.is_hollow()
             rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow scheduler timer heap")
         me.timer_heap.poke(heap.to[@@Coro]())
         me.timer_cap.poke(ncap)
@@ -392,7 +391,7 @@ routine Sched.insert_timer(me: @Me, c: @Coro) -> None
 ### :returns: The coroutine, or null when no timer is pending.
 routine Sched.timer_pop_min(me: @Me) -> @Coro
     if me.timer_count.peek() == 0
-        return null
+        return .hollow()
     top: @Coro = me.timer_at(0)
     top.timer_idx.poke(-1)
     last: S64 = me.timer_count.peek() - 1
@@ -400,11 +399,11 @@ routine Sched.timer_pop_min(me: @Me) -> @Coro
     if last > 0
         me.timer_put(i: 0, c: me.timer_at(last))
         vacated: @@Coro = me.timer_heap.peek().stride(last)
-        vacated.poke(null)
+        vacated.poke(.hollow())
         me.timer_sift_down(0)
         return top
     else
-        me.timer_heap.peek().poke(null)
+        me.timer_heap.peek().poke(.hollow())
         return top
 
 ### Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
@@ -420,13 +419,13 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> None
     me.timer_count.poke(last)
     if i == last
         vacated: @@Coro = me.timer_heap.peek().stride(last)
-        vacated.poke(null)
+        vacated.poke(.hollow())
         return
     else
         moved: @Coro = me.timer_at(last)
         me.timer_put(i, c: moved)
         vacated: @@Coro = me.timer_heap.peek().stride(last)
-        vacated.poke(null)
+        vacated.poke(.hollow())
         me.timer_sift_up(i)
         if not (moved.timer_idx.peek() == i)
             return
@@ -440,7 +439,7 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> None
 ### :param c: The coroutine to wake.
 ### :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
 routine Sched.make_ready(me: @Me, c: @Coro) -> None
-    if me.is_null() or c.is_null()
+    if me.is_hollow() or c.is_hollow()
         return
     state: U32 = c.sched_state.peek_atomic()
     when
@@ -468,7 +467,7 @@ routine rf_sched_create() -> @Sched
 ### :param s: The scheduler.
 @export("rf_sched_destroy")
 routine rf_sched_destroy(s: @Sched) -> None
-    if s.is_null()
+    if s.is_hollow()
         return
     c_free(s.timer_heap.peek())
     c_free(s)
@@ -480,7 +479,7 @@ routine rf_sched_destroy(s: @Sched) -> None
 ### :param c: The coroutine.
 @export("rf_sched_spawn")
 routine rf_sched_spawn(s: @Sched, c: @Coro) -> None
-    if s.is_null() or c.is_null()
+    if s.is_hollow() or c.is_hollow()
         return
     s.spawn(c)
     return
@@ -505,7 +504,7 @@ routine Sched.spawn(me: @Me, c: @Coro) -> None
 @export("rf_sched_park_timer")
 routine rf_sched_park_timer(delay_ns: U64) -> None
     this_coro: @Coro = current_coro()
-    if current_sched().is_null() or this_coro.is_null()
+    if current_sched().is_hollow() or this_coro.is_hollow()
         return
     this_coro.wake_ns.poke(monotonic_ns() +^ delay_ns)
     this_coro.park_intent.poke(PARK_TIMER)
@@ -523,7 +522,7 @@ routine rf_sched_park_deadline(delay_ns: U64) -> None
 @export("rf_sched_park_external")
 routine rf_sched_park_external() -> None
     this_coro: @Coro = current_coro()
-    if current_sched().is_null() or this_coro.is_null()
+    if current_sched().is_hollow() or this_coro.is_hollow()
         return
     this_coro.park_intent.poke(PARK_EXTERNAL)
     coro_switch_out()
@@ -533,9 +532,9 @@ routine rf_sched_park_external() -> None
 @export("rf_coro_yield")
 routine rf_coro_yield() -> None
     this_coro: @Coro = current_coro()
-    if this_coro.is_null()
+    if this_coro.is_hollow()
         return
-    if not current_sched().is_null()
+    if not current_sched().is_hollow()
         this_coro.park_intent.poke(PARK_YIELD)
     coro_switch_out()
     return
@@ -546,7 +545,7 @@ routine rf_coro_yield() -> None
 ### :param c: The coroutine.
 @export("rf_sched_wake")
 routine rf_sched_wake(s: @Sched, c: @Coro) -> None
-    if s.is_null() or c.is_null()
+    if s.is_hollow() or c.is_hollow()
         return
     s.lock.lock()
     before: U32 = c.sched_state.peek_atomic()
@@ -561,7 +560,7 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> None
 ### :param s: The scheduler.
 @export("rf_sched_arm_cross_waker")
 routine rf_sched_arm_cross_waker(s: @Sched) -> None
-    if s.is_null()
+    if s.is_hollow()
         return
     s.lock.lock()
     next_cross_wakers: S64 = s.cross_wakers.peek() + 1
@@ -573,7 +572,7 @@ routine rf_sched_arm_cross_waker(s: @Sched) -> None
 ### :param s: The scheduler.
 @export("rf_sched_disarm_cross_waker")
 routine rf_sched_disarm_cross_waker(s: @Sched) -> None
-    if s.is_null()
+    if s.is_hollow()
         return
     s.lock.lock()
     n: S64 = s.cross_wakers.peek()
@@ -611,8 +610,8 @@ routine steal_rand() -> U32
 routine Sched.try_steal(me: @Me) -> @Coro
     local n: S64 = me.workers_total.peek()
 
-    if me.deques.peek().is_null() or n <= 1
-        return null
+    if me.deques.peek().is_hollow() or n <= 1
+        return .hollow()
 
     r: U32 = steal_rand()
 
@@ -624,13 +623,13 @@ routine Sched.try_steal(me: @Me) -> @Coro
         else
             victim: @Deque = me.deques.peek().stride(v)
             c: @Coro = victim.steal_top()
-            if c.is_null()
+            if c.is_hollow()
                 continue
             else
                 c.sched_state.poke_atomic(SCHED_RUNNING)
                 return c
     then
-        return null
+        return .hollow()
 
 ### Runs a coroutine this worker took (RUNNING), with no lock held, then applies how it stopped.
 ### :param c: The coroutine.
@@ -648,20 +647,20 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
         # another scheduler is woken there, after this lock is released, so it never moves to this scheduler.
         w: @Coro = c.awaiter.peek()
         away: @Coro = when
-            w.is_null() => null
+            w.is_hollow() => .hollow()
             else =>
-                c.awaiter.poke(null)
+                c.awaiter.poke(.hollow())
                 home: @Me = w.home.peek()
-                if not (home.is_null() | (home === me))
+                if not (home.is_hollow() | (home === me))
                     becomes w
                 else
                     me.make_ready(w)
-                    becomes null
+                    becomes .hollow()
         free_now: Bool = c.owner_released.peek() | c.detached.peek()
         me.cond.cast_one()
         me.block_cond.cast_all()
         me.lock.unlock()
-        if not away.is_null()
+        if not away.is_hollow()
             rf_sched_wake(s: away.home.peek(), c: away)
         if not free_now
             return
@@ -675,7 +674,7 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
         notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
         id: S64 = worker_id()
         deques: @Deque = me.deques.peek()
-        if id >= 0 and deques.is_not_null() and (notified or intent == PARK_YIELD)
+        if id >= 0 and deques.is_not_hollow() and (notified or intent == PARK_YIELD)
             c.sched_state.poke_atomic(SCHED_QUEUED)
             deques.stride(id).push_bottom(c)
             return
@@ -705,15 +704,15 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
 routine Sched.claim_work(me: @Me) -> @Coro
     id: S64 = worker_id()
     deques: @Deque = me.deques.peek()
-    if id >= 0 and deques.is_not_null()
+    if id >= 0 and deques.is_not_hollow()
         c: @Coro = deques.stride(id).pop_bottom()
-        if not c.is_null()
+        if not c.is_hollow()
             c.sched_state.poke_atomic(SCHED_RUNNING)
             return c
     me.lock.lock()
     c: @Coro = me.pop_injector()
     me.lock.unlock()
-    if c.is_null()
+    if c.is_hollow()
         return me.try_steal()
     else
         return c
@@ -726,22 +725,22 @@ routine Sched.claim_work(me: @Me) -> @Coro
 routine Sched.step(me: @Me) -> Bool
     local c: @Coro = me.claim_work()
 
-    if c.is_null()
+    if c.is_hollow()
         # Every source again under the lock: an enqueue signals the cond under the same lock, so none is lost.
         me.lock.lock()
         id: S64 = worker_id()
         deques: @Deque = me.deques.peek()
-        if id >= 0 and deques.is_not_null()
+        if id >= 0 and deques.is_not_hollow()
             mine: @Coro = deques.stride(id).pop_bottom()
-            if not mine.is_null()
+            if not mine.is_hollow()
                 mine.sched_state.poke_atomic(SCHED_RUNNING)
                 me.lock.unlock()
                 me.run_coro(mine)
                 return true
         found_coro: @Coro = me.pop_injector()
-        if found_coro.is_null()
+        if found_coro.is_hollow()
             found_coro2: @Coro = me.try_steal()
-            if found_coro2.is_null()
+            if found_coro2.is_hollow()
                 if me.timer_count.peek() > 0
                     # A timer pending is progress waiting to happen, never a deadlock: wait out the earliest one.
                     now: U64 = monotonic_ns()
@@ -814,7 +813,7 @@ routine Sched.step(me: @Me) -> Bool
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 @export("rf_sched_run")
 routine rf_sched_run(s: @Sched) -> None
-    if s.is_null()
+    if s.is_hollow()
         return
     prev: @Sched = current_sched()
     CURRENT_SCHED.poke(s)
@@ -844,7 +843,7 @@ routine is_finished(c: @Coro) -> Bool
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 @export("rf_sched_run_until")
 routine rf_sched_run_until(s: @Sched, target: @Coro) -> None
-    if s.is_null() or target.is_null()
+    if s.is_hollow() or target.is_hollow()
         return
     prev: @Sched = current_sched()
     CURRENT_SCHED.poke(s)
@@ -860,7 +859,7 @@ routine rf_sched_run_until(s: @Sched, target: @Coro) -> None
 ### :param s: The scheduler.
 @export("rf_sched_signal")
 routine rf_sched_signal(s: @Sched) -> None
-    if s.is_null()
+    if s.is_hollow()
         return
     s.lock.lock()
     s.block_cond.cast_all()
@@ -872,8 +871,8 @@ routine rf_sched_signal(s: @Sched) -> None
 ### :returns: 1 inside one, else 0.
 @export("rf_in_coroutine")
 routine rf_in_coroutine() -> U32
-    has_sched: Bool = current_sched().is_not_null()
-    if has_sched and current_coro().is_not_null()
+    has_sched: Bool = current_sched().is_not_hollow()
+    if has_sched and current_coro().is_not_hollow()
         return 1
     else
         return 0
@@ -936,8 +935,7 @@ routine pool_start() -> @Sched
     local n: S64 = pool_worker_count()
 
     s.workers_total.poke(n)
-    deques: @Deque = zeroed[Deque](count: n.to[U64](),
-        what: "Failed to allocate worker run deques")
+    deques: @Deque = zeroed[Deque](count: n.to[U64](), what: "Failed to allocate worker run deques")
     s.deques.poke(deques)
 
     each i in 0 til n
@@ -978,10 +976,10 @@ routine rf_sched_thread_default() -> @Sched
 @export("rf_sched_here")
 routine rf_sched_here() -> @Sched
     s: @Sched = HERE_SCHED.peek()
-    if not s.is_null()
+    if not s.is_hollow()
         return s
-    if not current_coro().is_null()
-        return null
+    if not current_coro().is_hollow()
+        return .hollow()
     made: @Sched = rf_sched_create()
     HERE_SCHED.poke(made)
     return made
@@ -990,7 +988,7 @@ routine rf_sched_here() -> @Sched
 ### :returns: True when some are live.
 routine here_has_live() -> Bool
     here: @Sched = HERE_SCHED.peek()
-    if here.is_null()
+    if here.is_hollow()
         return false
     here.lock.lock()
     live: Bool = here.live.peek() > 0
@@ -1004,7 +1002,7 @@ routine here_has_live() -> Bool
 routine run_here_ready() -> Bool
     local here: @Sched = HERE_SCHED.peek()
 
-    if here.is_null()
+    if here.is_hollow()
         return false
     here.lock.lock()
 
@@ -1019,7 +1017,7 @@ routine run_here_ready() -> Bool
             continue
     c: @Coro = here.pop_injector()
     here.lock.unlock()
-    if c.is_null()
+    if c.is_hollow()
         return false
     prev: @Sched = current_sched()
     CURRENT_SCHED.poke(here)
@@ -1058,22 +1056,22 @@ routine rf_sched_spawn_default(c: @Coro) -> None
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 @export("rf_sched_run_until_default")
 routine rf_sched_run_until_default(target: @Coro) -> None
-    if target.is_null()
+    if target.is_hollow()
         return
     home: @Sched = target.home.peek()
     s: @Sched = when
-        home.is_null() => rf_sched_thread_default()
+        home.is_hollow() => rf_sched_thread_default()
         else => home
     this_coro: @Coro = current_coro()
     s.lock.lock()
     next_waiters: S64 = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
-    if this_coro.is_null()
+    if this_coro.is_hollow()
         # A coroutine of another scheduler (a start_here() job) waits on the pool: the pool's completion wakes it, so
         # its own scheduler is promised a wake from another thread while it is parked.
 
         until is_finished(target)
-            if s.deques.peek().is_null()
+            if s.deques.peek().is_hollow()
                 # A directly driven scheduler has no worker of its own: the waiting thread is its worker.
                 s.lock.unlock()
                 rf_sched_run_until(s, target)
@@ -1095,7 +1093,7 @@ routine rf_sched_run_until_default(target: @Coro) -> None
             target.awaiter.poke(this_coro)
             s.lock.unlock()
             home2: @Sched = this_coro.home.peek()
-            if home2.is_not_null() & (home2 !== s)
+            if home2.is_not_hollow() & (home2 !== s)
                 rf_sched_arm_cross_waker(home2)
                 rf_sched_park_external()
                 rf_sched_disarm_cross_waker(home2)
@@ -1104,7 +1102,7 @@ routine rf_sched_run_until_default(target: @Coro) -> None
                 rf_sched_park_external()
                 s.lock.lock()
         then
-            target.awaiter.poke(null)
+            target.awaiter.poke(.hollow())
             remaining_waiters: S64 = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
             s.lock.unlock()
@@ -1126,16 +1124,16 @@ routine Sched.remove_locked(me: @Me, c: @Coro) -> Bool
 ### :param c: The coroutine.
 ### :returns: True when it was in the injector.
 secret routine Sched.unqueue_injected(me: @Me, c: @Coro) -> Bool
-    while at.is_not_null() with prev: @Coro = null, at: @Coro = me.injector_head.peek()
+    while at.is_not_hollow() with prev: @Coro = .hollow(), at: @Coro = me.injector_head.peek()
         if at === c
             next: @Coro = c.sched_next.peek()
-            if prev.is_null()
+            if prev.is_hollow()
                 me.injector_head.poke(next)
             else
                 prev.sched_next.poke(next)
             if me.injector_tail.peek() === c
                 me.injector_tail.poke(prev)
-            c.sched_next.poke(null)
+            c.sched_next.poke(.hollow())
             c.sched_state.poke_atomic(SCHED_IDLE)
             return true
         continue with prev: at, at: at.sched_next.peek()
@@ -1157,7 +1155,7 @@ secret routine Sched.unqueue_timer(me: @Me, c: @Coro) -> Bool
 ### :returns: True when a deque held it.
 secret routine Sched.unqueue_deques(me: @Me, c: @Coro) -> Bool
     d: @Deque = me.deques.peek()
-    if d.is_null()
+    if d.is_hollow()
         return false
     while i != me.workers_total.peek() with i: S64 = 0
         if d.stride(i).remove(c)
@@ -1173,10 +1171,10 @@ secret routine Sched.unqueue_deques(me: @Me, c: @Coro) -> Bool
 ### :returns: 1 when it was queued or on a timer, 0 otherwise or with no scheduler.
 @export("rf_sched_unschedule_default")
 routine rf_sched_unschedule_default(c: @Coro) -> U32
-    if c.is_null()
+    if c.is_hollow()
         return 0
     s: @Sched = home_of(c)
-    if s.is_null()
+    if s.is_hollow()
         return 0
     s.lock.lock()
     found: Bool = s.remove_locked(c)
@@ -1192,10 +1190,10 @@ routine rf_sched_unschedule_default(c: @Coro) -> U32
 ### :returns: 1 when the caller frees it (always with no pool), 0 when a worker does (or for a null `c`).
 @export("rf_sched_dispose_default")
 routine rf_sched_dispose_default(c: @Coro) -> U32
-    if c.is_null()
+    if c.is_hollow()
         return 0
     s: @Sched = home_of(c)
-    if s.is_null()
+    if s.is_hollow()
         return 1
     return s.dispose(c)
 
@@ -1204,7 +1202,7 @@ routine rf_sched_dispose_default(c: @Coro) -> U32
 ### :returns: The scheduler, or null.
 routine home_of(c: @Coro) -> @Sched
     home: @Sched = c.home.peek()
-    if home.is_null()
+    if home.is_hollow()
         return POOL.peek_atomic()
     else
         return home

@@ -40,7 +40,7 @@ routine rf_race_begin() -> @Race
 ### :param kind: 0 for a coroutine, 1 for a threaded task.
 ### :throws: Crashes with `OutOfMemoryError` when the storage can't grow.
 routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> None
-    if me.is_null()
+    if me.is_hollow()
         return
     n: S64 = me.count.peek()
     if n == me.cap.peek()
@@ -49,7 +49,7 @@ routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> None
             else => n * 2
         handles: Addr = c_realloc(me.handles.peek(), (cap.to[U64]() * sizeof[Addr]()).to[CSize]())
         kinds: Addr = c_realloc(me.kinds.peek(), cap.to[CSize]())
-        if handles.is_null() or kinds.is_null()
+        if handles.is_hollow() or kinds.is_hollow()
             rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
         me.handles.poke(handles.to[@Addr]())
         me.kinds.poke(kinds.to[@U8]())
@@ -109,7 +109,7 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> None
                 rf_sched_arm_cross_waker(s)
                 continue
             else
-                rf_task_race_register(task, s: null, coro: null)
+                rf_task_race_register(task, s: .hollow(), coro: .hollow())
                 rf_sched_disarm_cross_waker(s)
                 continue
     then
@@ -121,7 +121,7 @@ routine Race.register(me: @Me, s: @Sched, coro: @Coro, on: Bool) -> None
 ### :param set: True to set, false to clear.
 routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> None
     each i in 0 til me.count.peek()
-        if me.is_task(i) or me.handle(i).is_null()
+        if me.is_task(i) or me.handle(i).is_hollow()
             continue
         else
             c: @Coro = me.handle(i).to[@Coro]()
@@ -131,7 +131,7 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> None
             elseif c.awaiter.peek() !== awaiter
                 continue
             else
-                c.awaiter.poke(null)
+                c.awaiter.poke(.hollow())
                 continue
     then
         return
@@ -150,7 +150,7 @@ routine Race.winner(me: @Me) -> S64
                     continue with best: best, best_seq: best_seq
             else =>
                 c: @Coro = me.handle(i).to[@Coro]()
-                if c.is_null()
+                if c.is_hollow()
                     continue with best: best, best_seq: best_seq
                 elseif is_finished(c)
                     becomes c.completion_seq.peek_atomic()
@@ -168,7 +168,7 @@ routine Race.winner(me: @Me) -> S64
 ### :returns: The winner's index, or -1 when `r` is null or empty.
 @export("rf_race_wait")
 routine rf_race_wait(r: @Race) -> S64
-    if r.is_null()
+    if r.is_hollow()
         return -1
     if r.count.peek() == 0
         return -1
@@ -186,27 +186,27 @@ secret routine wait_for_winner(r: @Race) -> S64
     s.lock.lock()
     next_waiters: S64 = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
-    if not this_coro.is_null()
+    if not this_coro.is_hollow()
         r.await_coros(awaiter: this_coro, set: true)
 
     while true
         winner2: S64 = r.winner()
         if winner2 >= 0
             # A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
-            if not this_coro.is_null()
+            if not this_coro.is_hollow()
                 r.await_coros(awaiter: this_coro, set: false)
                 remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
-                r.register(s, coro: null, on: false)
+                r.register(s, coro: .hollow(), on: false)
                 return winner2
             else
                 remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
-                r.register(s, coro: null, on: false)
+                r.register(s, coro: .hollow(), on: false)
                 return winner2
-        elseif this_coro.is_null()
+        elseif this_coro.is_hollow()
             s.block_wait()
             continue
         else
@@ -219,7 +219,7 @@ secret routine wait_for_winner(r: @Race) -> S64
 ### :param r: The race to free.
 @export("rf_race_end")
 routine rf_race_end(r: @Race) -> None
-    if r.is_null()
+    if r.is_hollow()
         return
     c_free(r.handles.peek())
     c_free(r.kinds.peek())

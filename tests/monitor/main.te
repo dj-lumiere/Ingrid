@@ -25,7 +25,7 @@ global THE_CORO: @Coro <- (id: 7)
 ### Two parked coroutines on a monitor's wait list, the newer first.
 global OLDER: @Coro <- (id: 1)
 global NEWER: @Coro <- (id: 2)
-global FIRST_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: null)
+global FIRST_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: .hollow())
 global SECOND_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
 
 ### The SignalCaster a park casts on, as another agent would meanwhile, or null to let the time run out.
@@ -76,8 +76,7 @@ routine ChannelWaiter.destruct(me: @Me) -> None
 ### :param passed: Its `passed`.
 ### :param open: Its `open`.
 ### :returns: The new value.
-routine Gate.construct(sig: @Monitor, arrived: U64, tokens: U64, passed: U64,
-    open: Bool) -> Me
+routine Gate.construct(sig: @Monitor, arrived: U64, tokens: U64, passed: U64, open: Bool) -> Me
     return Me(sig, arrived, tokens, passed, open)
 
 ### Releases nothing: a `Gate` holds no memory of its own.
@@ -97,20 +96,20 @@ routine c_free(ptr: Addr) -> None
 ### count zeroed Ts.
 routine zeroed[T](count: U64, what: CStr) -> @T
 needs T: typename
-    p: Addr = c_calloc(count, sizeof[T]())
+    p: Addr = c_calloc(count.to[CSize](), sizeof[T]().to[CSize]())
     return p.to[@T]()
 
 ### Takes node off list (as in channel.te).
 routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> None
     while true with at: @@ChannelWaiter = list
         w2: @ChannelWaiter = at.peek()
-        if w2.is_null()
+        if w2.is_hollow()
             return
         if w2 !== node
             continue with at: w2.next
         else
             at.poke(node.next.peek())
-            node.next.poke(null)
+            node.next.poke(.hollow())
             return
 
 routine rf_sched_current() -> @Sched
@@ -141,7 +140,7 @@ routine rf_sched_park_external() -> None
 ### As rf_sched_park_external, until a cast or the delay has passed.
 routine rf_sched_park_deadline(delay_ns: U64) -> None
     sig: @Monitor = CAST_DURING_PARK.peek()
-    if sig.is_null()
+    if sig.is_hollow()
         Out.write("  parked with a deadline, no cast comes\n")
         sleep_until(monotonic_ns() + delay_ns)
         return
@@ -166,7 +165,7 @@ routine sleep_until(deadline: U64) -> None
 routine count_waiters(sig: @Monitor) -> U64
     local found: @U64 <- 0
 
-    until w.is_null() with w: @ChannelWaiter = sig.waiters.peek()
+    until w.is_hollow() with w: @ChannelWaiter = sig.waiters.peek()
         (found.peek() + 1).poke_into(found)
         continue with w: w.next.peek()
     then
@@ -297,7 +296,7 @@ routine coroutines(sig: @Monitor) -> None
     Out.write("a coroutine waits with a deadline:\n")
     cast: U32 = rf_signal_wait_deadline(sig, timeout_ns: 1000000000)
     Out.write("  result {cast}, {count_waiters(sig)} on the wait list\n")
-    CAST_DURING_PARK.poke(null)
+    CAST_DURING_PARK.poke(.hollow())
     late: U32 = rf_signal_wait_deadline(sig, timeout_ns: 2000000)
     Out.write("  result {late}, {count_waiters(sig)} on the wait list\n")
     rf_signal_unlock(sig)
@@ -306,9 +305,9 @@ routine coroutines(sig: @Monitor) -> None
     rf_signal_cast_one(sig)
     Out.write("cast_all:\n")
     rf_signal_cast_all(sig)
-    sig.waiters.poke(null)
-    CURRENT_SCHED.poke(null)
-    CURRENT_CORO.poke(null)
+    sig.waiters.poke(.hollow())
+    CURRENT_SCHED.poke(.hollow())
+    CURRENT_CORO.poke(.hollow())
     return
 
 routine start() -> None
