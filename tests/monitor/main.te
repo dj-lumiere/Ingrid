@@ -32,7 +32,7 @@ global SECOND_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FI
 global CAST_DURING_PARK: @@Monitor
 
 ### The threads at the gate.
-preset GATE_THREADS: USize = 3
+preset GATE_THREADS: U64 = 3
 
 ### The scheduler a coroutine runs on: the test's stand-in, a number.
 record Sched
@@ -52,9 +52,9 @@ record ChannelWaiter
 ### for them on the same SignalCaster.
 record Gate
     sig: @Monitor
-    arrived: USize
-    tokens: USize
-    passed: USize
+    arrived: U64
+    tokens: U64
+    passed: U64
     open: Bool
 
 ### Makes a `ChannelWaiter` from its fields.
@@ -76,7 +76,7 @@ routine ChannelWaiter.destruct(me: @Me) -> None
 ### :param passed: Its `passed`.
 ### :param open: Its `open`.
 ### :returns: The new value.
-routine Gate.construct(sig: @Monitor, arrived: USize, tokens: USize, passed: USize,
+routine Gate.construct(sig: @Monitor, arrived: U64, tokens: U64, passed: U64,
     open: Bool) -> Me
     return Me(sig, arrived, tokens, passed, open)
 
@@ -88,14 +88,14 @@ routine Gate.destruct(me: @Me) -> None
 
 @external("c")
 @symbol("calloc")
-routine c_calloc(count: USize, size: USize) -> Addr
+routine c_calloc(count: CSize, size: CSize) -> Addr
 
 @external("c")
 @symbol("free")
 routine c_free(ptr: Addr) -> None
 
 ### count zeroed Ts.
-routine zeroed[T](count: USize, what: CStr) -> @T
+routine zeroed[T](count: U64, what: CStr) -> @T
 needs T: typename
     p: Addr = c_calloc(count, sizeof[T]())
     return p.to[@T]()
@@ -163,8 +163,8 @@ routine sleep_until(deadline: U64) -> None
         wait_on_for(at: never, expected: 0, timeout_ns: deadline - now2)
 
 ### The coroutines on the SignalCaster's wait list.
-routine count_waiters(sig: @Monitor) -> USize
-    local found: @USize <- 0
+routine count_waiters(sig: @Monitor) -> U64
+    local found: @U64 <- 0
 
     until w.is_null() with w: @ChannelWaiter = sig.waiters.peek()
         (found.peek() + 1).poke_into(found)
@@ -191,7 +191,7 @@ routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
 ### Counts the calling thread in, holding the SignalCaster, and wakes the main thread. A cast takes the SignalCaster
 ### itself, so it comes between an unlock and a lock.
 routine arrive(gate: @Gate) -> None
-    arrived: USize = gate.arrived.peek() + 1
+    arrived: U64 = gate.arrived.peek() + 1
     arrived.poke_into(gate.arrived)
     rf_signal_unlock(gate.sig.peek())
     rf_signal_cast_all(gate.sig.peek())
@@ -200,7 +200,7 @@ routine arrive(gate: @Gate) -> None
 
 ### Counts the calling thread through, holding the SignalCaster, releases it, and wakes the main thread.
 routine let_through(gate: @Gate) -> None
-    through: USize = gate.passed.peek() + 1
+    through: U64 = gate.passed.peek() + 1
     through.poke_into(gate.passed)
     rf_signal_unlock(gate.sig.peek())
     rf_signal_cast_all(gate.sig.peek())
@@ -212,7 +212,7 @@ routine take_token(gate: @Gate) -> None
     arrive(gate)
 
     while true
-        left2: USize = gate.tokens.peek()
+        left2: U64 = gate.tokens.peek()
         if left2 > 0
             gate.tokens.poke(left2 - 1)
             let_through(gate)
@@ -233,14 +233,14 @@ routine pass_open(gate: @Gate) -> None
 
 ### Waits, holding the SignalCaster, until `count` gate threads have arrived. Each holds it from arriving until its
 ### wait releases it, so all of them wait by then.
-routine await_arrived(gate: @Gate, count: USize) -> None
+routine await_arrived(gate: @Gate, count: U64) -> None
     while gate.arrived.peek() < count
         rf_signal_wait(gate.sig.peek())
     then
         return
 
 ### Waits, holding the SignalCaster, until `count` gate threads are through.
-routine await_passed(gate: @Gate, count: USize) -> None
+routine await_passed(gate: @Gate, count: U64) -> None
     while gate.passed.peek() < count
         rf_signal_wait(gate.sig.peek())
     then
@@ -260,7 +260,7 @@ routine hand_tokens(gate: @Gate) -> Bool
         rf_signal_cast_one(gate.sig.peek())
         rf_signal_lock(gate.sig.peek())
         await_passed(gate, count: round)
-        through: USize = gate.passed.peek()
+        through: U64 = gate.passed.peek()
         one: Bool = through == round and gate.tokens.peek() == 0
         (exact.peek() & one).poke_into(exact)
     rf_signal_unlock(gate.sig.peek())

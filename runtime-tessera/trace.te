@@ -24,12 +24,12 @@ preset CRASH_STATUS: CInt = 0x52
 ### :param value: The value to write.
 ### :param digits: The number of digits, at most 16.
 ### :param upper: True for `A`-`F`, false for `a`-`f`.
-routine write_hex(value: U64, digits: USize, upper: Bool) -> None
+routine write_hex(value: U64, digits: U64, upper: Bool) -> None
     local text_buffer: @Array[Byte, 16] <- .hollow()
     local text: @Byte = text_buffer.to[@Byte]()
     local v: @U64 <- value
 
-    while left != 0 with left: USize = digits
+    while left != 0 with left: U64 = digits
         d: U8 = (v.peek() & 15).to[U8]()
         # '0' + d, or 'a' / 'A' + d - 10
         letter: U8 = when
@@ -116,22 +116,22 @@ routine rf_throw(error_type: CStr, message: CStr) -> None
 
 ### SYMBOL_INFO's size, and where its MaxNameLen and Name are.
 preset SYMBOL_INFO_SIZE:     U32   = 88
-preset SYMBOL_INFO_MAX_NAME: USize = 80
-preset SYMBOL_INFO_NAME:     USize = 84
+preset SYMBOL_INFO_MAX_NAME: U64 = 80
+preset SYMBOL_INFO_NAME:     U64 = 84
 preset MAX_SYM_NAME:         U32   = 2000
 ### IMAGEHLP_LINE64's size, and where its LineNumber and FileName are.
 preset IMAGEHLP_LINE64_SIZE: U32   = 40
-preset LINE_NUMBER:          USize = 16
-preset LINE_FILE_NAME:       USize = 24
+preset LINE_NUMBER:          U64 = 16
+preset LINE_FILE_NAME:       U64 = 24
 
 ### SYMOPT_UNDNAME, SYMOPT_DEFERRED_LOADS, and SYMOPT_LOAD_LINES: plain names, symbols loaded when first asked for, and
 ### the line tables loaded with them.
 preset SYM_OPTIONS: U32 = 0x16
 
 ### Where SYMBOL_INFO's Address (the symbol's start) is.
-preset SYMBOL_INFO_ADDRESS: USize = 56
+preset SYMBOL_INFO_ADDRESS: U64 = 56
 ### Where EXCEPTION_RECORD's ExceptionAddress is.
-preset EXCEPTION_ADDRESS: USize = 16
+preset EXCEPTION_ADDRESS: U64 = 16
 
 ### Win32's `RtlCaptureStackBackTrace`: the return addresses of the calling thread's frames.
 ### :param skip: The frames to skip from the top.
@@ -231,7 +231,7 @@ routine print_platform_stack(fault: U64) -> None
 
     # frame i of the capture, written as the n-th of the trace
     while i != frames with i: U32 = first, n: U32 = 0
-        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[U64]()).peek())
         if c_sym_from_addr(process, address, null, sym) == 0
             Err.write("  {n}: at 0x")
             write_hex(value: address, digits: 16, upper: false)
@@ -262,7 +262,7 @@ routine print_platform_stack(fault: U64) -> None
 secret routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @Byte) -> U32
     start: U64 = sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek()
     while i != frames with i: U32 = 0
-        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[USize]()).peek())
+        address: U64 = ptrtoint[Addr, U64](stack.stride(i.to[U64]()).peek())
         if c_sym_from_addr(process, address, null, sym) != 0
             if sym.stride(SYMBOL_INFO_ADDRESS).to[@U64]().peek() == start
                 return i
@@ -305,11 +305,11 @@ routine print_platform_stack(fault: U64) -> None
     each i in 2 til frames
         if symbols.is_null()
             n: CInt = i - 2
-            address: Addr = stack.stride(i.to[USize]()).peek()
+            address: Addr = stack.stride(i.to[U64]()).peek()
             Err.write("  {n}: {address}\n")
         else
             n: CInt = i - 2
-            text: @Byte = symbols.stride(i.to[USize]()).peek()
+            text: @Byte = symbols.stride(i.to[U64]()).peek()
             line: Span[Byte] = text.to[CStr]().getview()
             Err.write("  {n}: {line}\n")
     c_free(symbols)
@@ -339,7 +339,7 @@ routine c_add_vectored_exception_handler(first: U32,
 @symbol("GetCurrentThreadStackLimits")
 @callconv("stdcall")
 @target(os: "windows")
-routine c_get_current_thread_stack_limits(low: @USize, high: @USize) -> None
+routine c_get_current_thread_stack_limits(low: @CSize, high: @CSize) -> None
 
 ### Win32's `SetThreadStackGuarantee`: the stack kept back for the calling thread's stack-overflow handling.
 ### :param size: The size in bytes to set, and where the previous size goes.
@@ -388,11 +388,10 @@ routine exception_handler(pointers: @Addr) -> CInt
         report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
         if report.addr().is_null()
             return 0
-        local low: @USize <- 0
-        local high: @USize <- 0
+        local low: @CSize <- 0
+        local high: @CSize <- 0
         c_get_current_thread_stack_limits(low, high)
-        span: USize = high.peek() - low.peek()
-        size: U64 = span.to[U64]()
+        size: U64 = (high.peek() - low.peek()).to[U64]()
         report.call(size)
         return 0
     else

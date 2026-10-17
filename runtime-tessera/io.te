@@ -15,7 +15,7 @@ module Ingrid/Runtime
 import Standard/Alloc
 import Standard/Os
 
-preset IO_THREADS: USize = 4
+preset IO_THREADS: U64 = 4
 preset IO_READ_FILE:   U32 = 0
 preset IO_WRITE_FILE:  U32 = 1
 preset IO_RUN_PROCESS: U32 = 2
@@ -30,35 +30,35 @@ preset IO_CALL:        U32 = 3
 ### :returns: `dst`.
 @external("c")
 @symbol("memcpy")
-routine c_memcpy(dst: Addr, src: Addr, n: USize) -> Addr
+routine c_memcpy(dst: Addr, src: Addr, n: CSize) -> Addr
 
 ### C's `strlen`: the length of a NUL-terminated string.
 ### :param s: The string.
 ### :returns: The number of bytes before the NUL.
 @external("c")
 @symbol("strlen")
-routine c_strlen(s: @Byte) -> USize
+routine c_strlen(s: @Byte) -> CSize
 
 ### `n`, or for `n < 0` the length of `s` before its NUL.
 ### :param s: The string.
 ### :param n: The length, or negative for a NUL-terminated `s`.
 ### :returns: The length in bytes.
-routine length_of(s: @Byte, n: S32) -> USize
+routine length_of(s: @Byte, n: S32) -> U64
     if n < 0
-        return c_strlen(s)
+        return c_strlen(s).to[U64]()
     else
-        return n.to[USize]()
+        return n.to[U64]()
 
 ### A NUL-terminated malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or null.
 ### :param s: The string.
 ### :param n: The length, or negative for a NUL-terminated `s`.
 ### :returns: The copy the caller frees, or null when the allocation fails.
 routine strdupn(s: @Byte, n: S32) -> @Byte
-    len: USize = length_of(s, n)
-    d: Addr = c_malloc(len + 1)
+    len: U64 = length_of(s, n)
+    d: Addr = c_malloc((len + 1).to[CSize]())
     if d.is_null()
         return null
-    c_memcpy(d, s, len)
+    c_memcpy(d, s, len.to[CSize]())
     terminator: @Byte = d.to[@Byte]().stride(len)
     terminator.poke(0x00)
     return d.to[@Byte]()
@@ -169,7 +169,7 @@ routine rf_io_runtime_init() -> None
     if IO_OK.peek() == 1
         return
 
-    while true with i: USize = 0
+    while true with i: U64 = 0
         if not (i == IO_THREADS)
             DEFAULT_THREADS.launch_unwatched(entry: io_thread_main.to[Callable](), arg: IO_LOCK)
             continue with i: i + 1
@@ -262,11 +262,11 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
 
     req.data_len.poke(len)
     if len > 0
-        buf: Addr = c_malloc(len.to[USize]())
+        buf: Addr = c_malloc(len.to[CSize]())
         if buf.is_null()
             rf_throw(error_type: "OutOfMemoryError",
                 message: "Failed to allocate async I/O write buffer")
-        c_memcpy(buf, data, len.to[USize]())
+        c_memcpy(buf, data, len.to[CSize]())
         req.data.poke(buf.to[@Byte]())
     io_run(req)
     result: S64 = req.result.peek()
@@ -360,19 +360,19 @@ record ProcState
     shell: Bool  # program is a command line for the platform shell
     program: Span[Byte]
     args: @Span[Byte]
-    arg_count: USize
-    arg_cap: USize
+    arg_count: U64
+    arg_cap: U64
     directory: Span[Byte]  # empty: the parent's
     env: @EnvVar  # overrides of the parent's environment
-    env_count: USize
-    env_cap: USize
+    env_count: U64
+    env_cap: U64
     exit_status: S64
     term_signal: CInt  # the signal that stopped the child, or 0
     spawn_failed: Bool
     output: @Byte  # a malloc'd, NUL-terminated copy of the captured standard output, or null
-    output_count: USize
+    output_count: U64
     errors: @Byte  # a malloc'd, NUL-terminated copy of the captured standard error, or null
-    errors_count: USize
+    errors_count: U64
 
 ### Makes a `ProcState` from its fields.
 ### :param shell: Its `shell`.
@@ -392,10 +392,10 @@ record ProcState
 ### :param errors: Its `errors`.
 ### :param errors_count: Its `errors_count`.
 ### :returns: The new value.
-routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte], arg_count: USize,
-    arg_cap: USize, directory: Span[Byte], env: @EnvVar, env_count: USize, env_cap: USize,
-    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: USize,
-    errors: @Byte, errors_count: USize) -> Me
+routine ProcState.construct(shell: Bool, program: Span[Byte], args: @Span[Byte], arg_count: U64,
+    arg_cap: U64, directory: Span[Byte], env: @EnvVar, env_count: U64, env_cap: U64,
+    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: U64,
+    errors: @Byte, errors_count: U64) -> Me
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
         exit_status, term_signal, spawn_failed, output, output_count, errors, errors_count)
 
@@ -438,11 +438,11 @@ routine rf_proc_errors_len() -> U64
 ### :param n: The length, or negative for a NUL-terminated `s`.
 ### :returns: The copy, or empty when the allocation fails.
 routine owned_copy(s: @Byte, n: S32) -> Span[Byte]
-    len: USize = length_of(s, n)
-    d: Addr = c_malloc(len.max(1))
+    len: U64 = length_of(s, n)
+    d: Addr = c_malloc(len.max(1).to[CSize]())
     if d.is_null()
         return .hollow()
-    c_memcpy(d, s, len)
+    c_memcpy(d, s, len.to[CSize]())
     return Span[Byte].construct(data: d.to[@Byte](), count: len)
 
 ### Frees the malloc'd memory of `b`.
@@ -490,11 +490,11 @@ routine terminated(b: @Memory[Byte]) -> @Byte
     data: @Byte = b.data.peek()
     if data.is_null()
         return null
-    n: USize = b.count()
-    buf: Addr = c_malloc(n + 1)
+    n: U64 = b.count()
+    buf: Addr = c_malloc((n + 1).to[CSize]())
     if buf.is_null()
         return null
-    c_memcpy(buf, data, n)
+    c_memcpy(buf, data, n.to[CSize]())
     buf.to[@Byte]().stride(n).poke(0x00)
     return buf.to[@Byte]()
 
@@ -595,11 +595,11 @@ routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
 routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> None
     if b.is_null()
         return
-    n: USize = b.arg_count.peek()
+    n: U64 = b.arg_count.peek()
     if not (n < b.arg_cap.peek())
-        doubled: USize = b.arg_cap.peek() * 2
-        cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.args.peek(), cap * sizeof[Span[Byte]]())
+        doubled: U64 = b.arg_cap.peek() * 2
+        cap: U64 = doubled.max(4)
+        bigger: Addr = c_realloc(b.args.peek(), (cap * sizeof[Span[Byte]]()).to[CSize]())
         if bigger.is_null()
             return
         b.args.poke(bigger.to[@Span[Byte]]())
@@ -633,11 +633,11 @@ routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> None
 routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> None
     if b.is_null()
         return
-    n: USize = b.env_count.peek()
+    n: U64 = b.env_count.peek()
     if not (n < b.env_cap.peek())
-        doubled: USize = b.env_cap.peek() * 2
-        cap: USize = doubled.max(4)
-        bigger: Addr = c_realloc(b.env.peek(), cap * sizeof[EnvVar]())
+        doubled: U64 = b.env_cap.peek() * 2
+        cap: U64 = doubled.max(4)
+        bigger: Addr = c_realloc(b.env.peek(), (cap * sizeof[EnvVar]()).to[CSize]())
         if bigger.is_null()
             return
         b.env.poke(bigger.to[@EnvVar]())

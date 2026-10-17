@@ -14,14 +14,14 @@ import Standard/Os
 ### :returns: The memory, or null when the allocation fails.
 @external("c")
 @symbol("calloc")
-secret routine c_calloc(count: USize, size: USize) -> Addr
+secret routine c_calloc(count: CSize, size: CSize) -> Addr
 
 ### C's malloc: `size` bytes, not initialized.
 ### :param size: How many bytes.
 ### :returns: The memory, or null when the allocation fails.
 @external("c")
 @symbol("malloc")
-secret routine c_malloc(size: USize) -> Addr
+secret routine c_malloc(size: CSize) -> Addr
 
 ### C's realloc: resizes the block at `ptr` to `size` bytes, keeping its contents up to the smaller size.
 ### :param ptr: The block, or null to allocate a new one.
@@ -29,7 +29,7 @@ secret routine c_malloc(size: USize) -> Addr
 ### :returns: The block, maybe moved, or null when the allocation fails. It may be null when `size` is 0.
 @external("c")
 @symbol("realloc")
-secret routine c_realloc(ptr: Addr, size: USize) -> Addr
+secret routine c_realloc(ptr: Addr, size: CSize) -> Addr
 
 ### C's free: gives the block at `ptr` back to the heap.
 ### :param ptr: The block, or null to do nothing.
@@ -44,7 +44,7 @@ secret routine c_free(ptr: Addr) -> None
 ### :returns: `dst`.
 @external("c")
 @symbol("memmove")
-secret routine c_memmove(dst: Addr, src: Addr, n: USize) -> Addr
+secret routine c_memmove(dst: Addr, src: Addr, n: CSize) -> Addr
 
 ### C's memset: fills `n` bytes at `dst` with the low byte of `value`.
 ### :param dst: Where to fill.
@@ -53,7 +53,7 @@ secret routine c_memmove(dst: Addr, src: Addr, n: USize) -> Addr
 ### :returns: `dst`.
 @external("c")
 @symbol("memset")
-secret routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
+secret routine c_memset(dst: Addr, value: CInt, n: CSize) -> Addr
 
 ### A runtime error with the crash report and exit status (the runtime library).
 ### :param error_type: The error's name, such as `OutOfMemoryError`.
@@ -82,11 +82,11 @@ secret routine out_of_memory(what: Span[Byte], bytes: U64) -> None
 ### :param bytes: How many bytes.
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in USize (on a 32-bit target).
+###     does not fit in U64 (on a 32-bit target).
 @export("rf_allocate_dynamic")
 @expensive("allocates heap memory")
 routine rf_allocate_dynamic(bytes: U64) -> Addr
-    p: Addr = c_calloc(bytes.to[USize](), 1)
+    p: Addr = c_calloc(bytes.to[CSize](), 1)
     if p.is_null()
         out_of_memory(what: "allocate", bytes)
     else
@@ -96,11 +96,11 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
 ### :param bytes: How many bytes.
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in USize (on a 32-bit target).
+###     does not fit in U64 (on a 32-bit target).
 @export("rf_allocate_dynamic_uninit")
 @expensive("allocates heap memory")
 routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
-    p: Addr = c_malloc(bytes.to[USize]())
+    p: Addr = c_malloc(bytes.to[CSize]())
     if p.is_null()
         out_of_memory(what: "allocate", bytes)
     else
@@ -120,11 +120,11 @@ routine rf_invalidate(ptr: Addr) -> None
 ### :param bytes: The new size, in bytes.
 ### :returns: The block, maybe moved.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in USize (on a 32-bit target).
+###     does not fit in U64 (on a 32-bit target).
 @export("rf_reallocate_dynamic")
 @expensive("reallocates heap memory")
 routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
-    p: Addr = c_realloc(ptr, bytes.to[USize]())
+    p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_null() and bytes != 0
         out_of_memory(what: "reallocate to", bytes)
     else
@@ -136,22 +136,22 @@ routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
 ### :param src_address: Where the bytes come from.
 ### :param bytes: How many bytes.
 @export("rf_copy_bytes_at")
-routine rf_copy_bytes_at(dst_address: USize, src_address: USize, bytes: USize) -> None
+routine rf_copy_bytes_at(dst_address: U64, src_address: U64, bytes: U64) -> None
     if src_address == 0 or dst_address == 0 or bytes == 0
         return
-    c_memmove(inttoptr[USize, Addr](dst_address), inttoptr[USize, Addr](src_address), bytes)
+    c_memmove(inttoptr[U64, Addr](dst_address), inttoptr[U64, Addr](src_address), bytes.to[CSize]())
     return
 
 ### Fills `bytes` bytes at `dest_address` with `value`. A null address or no bytes does nothing.
 ### :param dest_address: Where to fill.
 ### :param value: The byte to fill with.
 ### :param bytes: How many bytes.
-### :throws: Crashes with `IntegerOverflowError` when `bytes` does not fit in USize (on a 32-bit target).
+### :throws: Crashes with `IntegerOverflowError` when `bytes` does not fit in U64 (on a 32-bit target).
 @export("rf_set_bytes_at")
-routine rf_set_bytes_at(dest_address: USize, value: U8, bytes: U64) -> None
+routine rf_set_bytes_at(dest_address: U64, value: U8, bytes: U64) -> None
     if dest_address == 0 or bytes == 0
         return
-    c_memset(inttoptr[USize, Addr](dest_address), value.to[CInt](), bytes.to[USize]())
+    c_memset(inttoptr[U64, Addr](dest_address), value.to[CInt](), bytes.to[CSize]())
     return
 
 # -- the scratch region --------------------------------------------------------------
@@ -187,10 +187,10 @@ routine rf_region_mark() -> U64
 ### :param bytes: How many bytes.
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     plus the block header does not fit in USize.
+###     plus the block header does not fit in U64.
 @export("rf_region_alloc")
 routine rf_region_alloc(bytes: U64) -> Addr
-    p: Addr = c_calloc(1, sizeof[RegionBlock]() + bytes.to[USize]())
+    p: Addr = c_calloc(1, (sizeof[RegionBlock]() + bytes.to[U64]()).to[CSize]())
     if p.is_null()
         out_of_memory(what: "allocate scratch", bytes)
     node: @RegionBlock = p.to[@RegionBlock]()

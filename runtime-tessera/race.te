@@ -11,8 +11,8 @@ module Ingrid/Runtime
 record Race
     handles: @Addr
     kinds: @U8
-    count: SSize
-    cap: SSize
+    count: S64
+    cap: S64
 
 ### Makes a `Race` from its fields.
 ### :param handles: Its `handles`.
@@ -20,7 +20,7 @@ record Race
 ### :param count: Its `count`.
 ### :param cap: Its `cap`.
 ### :returns: The new value.
-routine Race.construct(handles: @Addr, kinds: @U8, count: SSize, cap: SSize) -> Me
+routine Race.construct(handles: @Addr, kinds: @U8, count: S64, cap: S64) -> Me
     return Me(handles, kinds, count, cap)
 
 ### Releases nothing: a `Race` holds no memory of its own.
@@ -42,13 +42,13 @@ routine rf_race_begin() -> @Race
 routine Race.add_last(me: @Me, handle: Addr, kind: U8) -> None
     if me.is_null()
         return
-    n: SSize = me.count.peek()
+    n: S64 = me.count.peek()
     if n == me.cap.peek()
-        cap: SSize = when
+        cap: S64 = when
             n == 0 => 4
             else => n * 2
-        handles: Addr = c_realloc(me.handles.peek(), cap.to[USize]() * sizeof[Addr]())
-        kinds: Addr = c_realloc(me.kinds.peek(), cap.to[USize]())
+        handles: Addr = c_realloc(me.handles.peek(), (cap.to[U64]() * sizeof[Addr]()).to[CSize]())
+        kinds: Addr = c_realloc(me.kinds.peek(), cap.to[CSize]())
         if handles.is_null() or kinds.is_null()
             rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
         me.handles.poke(handles.to[@Addr]())
@@ -82,14 +82,14 @@ routine rf_race_add_task(r: @Race, t: @Task) -> None
 ### The handle of competitor `i`, unchecked.
 ### :param i: The competitor's index.
 ### :returns: Its coroutine or task.
-routine Race.handle(me: @Me, i: SSize) -> Addr
+routine Race.handle(me: @Me, i: S64) -> Addr
     slot: @Addr = me.handles.peek().stride(i)
     return slot.peek()
 
 ### Whether competitor `i` is a threaded task, unchecked.
 ### :param i: The competitor's index.
 ### :returns: True for a task, false for a coroutine.
-routine Race.is_task(me: @Me, i: SSize) -> Bool
+routine Race.is_task(me: @Me, i: S64) -> Bool
     slot: @U8 = me.kinds.peek().stride(i)
     return slot.peek() == 1
 
@@ -139,8 +139,8 @@ routine Race.await_coros(me: @Me, awaiter: @Coro, set: Bool) -> None
 ### The index of the first competitor to finish (the smallest completion stamp among the finished ones), or -1 while
 ### none has.
 ### :returns: The winner's index, or -1.
-routine Race.winner(me: @Me) -> SSize
-    each i in 0 til me.count.peek() with best: SSize = -1, best_seq: U64 = U64.MAX
+routine Race.winner(me: @Me) -> S64
+    each i in 0 til me.count.peek() with best: S64 = -1, best_seq: U64 = U64.MAX
         seq: U64 = when
             me.is_task(i) =>
                 t: @Task = me.handle(i).to[@Task]()
@@ -167,7 +167,7 @@ routine Race.winner(me: @Me) -> SSize
 ### :param r: The race, or null.
 ### :returns: The winner's index, or -1 when `r` is null or empty.
 @export("rf_race_wait")
-routine rf_race_wait(r: @Race) -> SSize
+routine rf_race_wait(r: @Race) -> S64
     if r.is_null()
         return -1
     if r.count.peek() == 0
@@ -178,30 +178,30 @@ routine rf_race_wait(r: @Race) -> SSize
 ### winner, and gives the lock and the registration back in finish.
 ### :param r: The race, with at least one competitor.
 ### :returns: The winner's index.
-secret routine wait_for_winner(r: @Race) -> SSize
+secret routine wait_for_winner(r: @Race) -> S64
     local s: @Sched = rf_sched_thread_default()
     local this_coro: @Coro = current_coro()
 
     r.register(s, coro: this_coro, on: true)
     s.lock.lock()
-    next_waiters: SSize = s.waiters.peek() + 1
+    next_waiters: S64 = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
     if not this_coro.is_null()
         r.await_coros(awaiter: this_coro, set: true)
 
     while true
-        winner2: SSize = r.winner()
+        winner2: S64 = r.winner()
         if winner2 >= 0
             # A completion racing this park finds the racer RUNNING and makes it NOTIFIED: no wake is lost.
             if not this_coro.is_null()
                 r.await_coros(awaiter: this_coro, set: false)
-                remaining_waiters: SSize = s.waiters.peek() - 1
+                remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
                 r.register(s, coro: null, on: false)
                 return winner2
             else
-                remaining_waiters: SSize = s.waiters.peek() - 1
+                remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
                 r.register(s, coro: null, on: false)

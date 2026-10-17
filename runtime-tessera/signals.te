@@ -30,8 +30,8 @@ record HandlerEntry
 
 record HandlerList
     items: @HandlerEntry
-    count: USize
-    cap: USize
+    count: U64
+    cap: U64
 
 ### Makes a `HandlerEntry` from its fields.
 ### :param box: Its `box`.
@@ -50,7 +50,7 @@ routine HandlerEntry.destruct(me: @Me) -> None
 ### :param count: Its `count`.
 ### :param cap: Its `cap`.
 ### :returns: The new value.
-routine HandlerList.construct(items: @HandlerEntry, count: USize, cap: USize) -> Me
+routine HandlerList.construct(items: @HandlerEntry, count: U64, cap: U64) -> Me
     return Me(items, count, cap)
 
 ### Releases nothing: a `HandlerList` holds no memory of its own.
@@ -80,12 +80,12 @@ routine invoke(e: HandlerEntry) -> None
 ### :param list: The handlers to run.
 routine dispatch(list: @HandlerList) -> None
     SIGNALS_LOCK.lock()
-    n: USize = list.count.peek()
+    n: U64 = list.count.peek()
     if not (n == 0)
-        bytes: USize = n * sizeof[HandlerEntry]()
-        snapshot: Addr = c_malloc(bytes)
+        bytes: U64 = n * sizeof[HandlerEntry]()
+        snapshot: Addr = c_malloc(bytes.to[CSize]())
         if not snapshot.is_null()
-            c_memcpy(snapshot, list.items.peek(), bytes)
+            c_memcpy(snapshot, list.items.peek(), bytes.to[CSize]())
             SIGNALS_LOCK.unlock()
 
             snapshot2: @HandlerEntry = snapshot.to[@HandlerEntry]()
@@ -111,14 +111,14 @@ routine dispatch_which(which: S32) -> None
 ### dropped.
 ### :param entry: The handler to add.
 routine HandlerList.append(me: @Me, entry: HandlerEntry) -> None
-    local n: USize = me.count.peek()
+    local n: U64 = me.count.peek()
 
     if n == me.cap.peek()
-        cap: USize = me.cap.peek()
-        ncap: USize = when
+        cap: U64 = me.cap.peek()
+        ncap: U64 = when
             cap == 0 => 4
             else => cap * 2
-        grown: Addr = c_realloc(me.items.peek(), ncap * sizeof[HandlerEntry]())
+        grown: Addr = c_realloc(me.items.peek(), (ncap * sizeof[HandlerEntry]()).to[CSize]())
         # out of memory: the registration is dropped, as registration is best-effort
         if grown.is_null()
             return
@@ -335,7 +335,7 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
     rf_thread_stack_guarantee()
 
     while true
-        rc2: SSize = c_read(pipe[0], code.to[@Byte](), 1)
+        rc2: S64 = c_read(pipe[0], code.to[@Byte](), 1).to[S64]()
         if rc2 == 1
             dispatch_which(code.peek().to[S32]())
             continue
@@ -354,7 +354,7 @@ routine install_signal_dispatch() -> None
         return
     DEFAULT_THREADS.launch_unwatched(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE)
     local sa: @SigAction <- .hollow()
-    c_memset(sa, 0, sizeof[SigAction]())
+    c_memset(sa, 0, sizeof[SigAction]().to[CSize]())
     sa.handler.poke(posix_signal_handler.to[Callable]())
     c_sigemptyset(sa.mask)
     sa.flags.poke(sa_restart())

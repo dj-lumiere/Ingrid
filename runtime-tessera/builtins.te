@@ -17,19 +17,19 @@ import Standard/Os
 @threadlocal
 global EMUTLS: @@EmutlsArray
 global EMUTLS_LOCK: @ExclusiveLock
-global EMUTLS_NEXT: @USize
+global EMUTLS_NEXT: @U64
 
 ### compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
 ### initial value or null for zeros.
 record EmutlsControl
-    size: USize
-    align: USize
-    index: USize
+    size: U64
+    align: U64
+    index: U64
     value: Addr
 
 ### One thread's objects, by slot.
 record EmutlsArray
-    size: USize
+    size: U64
     data: @Addr
 
 ### Makes a `EmutlsControl` from its fields.
@@ -38,7 +38,7 @@ record EmutlsArray
 ### :param index: Its `index`.
 ### :param value: Its `value`.
 ### :returns: The new value.
-routine EmutlsControl.construct(size: USize, align: USize, index: USize, value: Addr) -> Me
+routine EmutlsControl.construct(size: U64, align: U64, index: U64, value: Addr) -> Me
     return Me(size, align, index, value)
 
 ### Releases nothing: a `EmutlsControl` holds no memory of its own.
@@ -49,7 +49,7 @@ routine EmutlsControl.destruct(me: @Me) -> None
 ### :param size: Its `size`.
 ### :param data: Its `data`.
 ### :returns: The new value.
-routine EmutlsArray.construct(size: USize, data: @Addr) -> Me
+routine EmutlsArray.construct(size: U64, data: @Addr) -> Me
     return Me(size, data)
 
 ### Releases nothing: a `EmutlsArray` holds no memory of its own.
@@ -63,7 +63,7 @@ routine EmutlsArray.destruct(me: @Me) -> None
 @external("c")
 @symbol("_aligned_malloc")
 @target(os: "windows")
-routine c_aligned_malloc(size: USize, align: USize) -> Addr
+routine c_aligned_malloc(size: CSize, align: CSize) -> Addr
 
 ### POSIX `posix_memalign`: allocates `size` bytes aligned to `align` and stores the block in `out`.
 ### :param out: Where the block's address goes.
@@ -73,7 +73,7 @@ routine c_aligned_malloc(size: USize, align: USize) -> Addr
 @external("c")
 @symbol("posix_memalign")
 @target(os: not "windows")
-routine c_posix_memalign(out: @Addr, align: USize, size: USize) -> CInt
+routine c_posix_memalign(out: @Addr, align: CSize, size: CSize) -> CInt
 
 ### C's `memset`: fills `n` bytes at `dst` with the low byte of `value`.
 ### :param dst: The memory to fill.
@@ -82,25 +82,25 @@ routine c_posix_memalign(out: @Addr, align: USize, size: USize) -> CInt
 ### :returns: `dst`.
 @external("c")
 @symbol("memset")
-routine c_memset(dst: Addr, value: CInt, n: USize) -> Addr
+routine c_memset(dst: Addr, value: CInt, n: CSize) -> Addr
 
 ### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `_aligned_malloc`.
 ### :param size: The size in bytes.
 ### :param align: The wanted alignment.
 ### :returns: The block, or null when the allocation fails.
 @target(os: "windows")
-routine aligned_alloc(size: USize, align: USize) -> Addr
-    return c_aligned_malloc(size, align.max(sizeof[Addr]()))
+routine aligned_alloc(size: U64, align: U64) -> Addr
+    return c_aligned_malloc(size.to[CSize](), align.max(sizeof[Addr]()).to[CSize]())
 
 ### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `posix_memalign`.
 ### :param size: The size in bytes.
 ### :param align: The wanted alignment.
 ### :returns: The block, or null when the allocation fails.
 @target(os: not "windows")
-routine aligned_alloc(size: USize, align: USize) -> Addr
+routine aligned_alloc(size: U64, align: U64) -> Addr
     local p: @Addr <- null
 
-    if c_posix_memalign(p, align.max(sizeof[Addr]()), size) == 0
+    if c_posix_memalign(p, align.max(sizeof[Addr]()).to[CSize](), size.to[CSize]()) == 0
         return p.peek()
     else
         return null
@@ -113,15 +113,15 @@ routine aligned_alloc(size: USize, align: USize) -> Addr
 ###     allocated.
 @export("__emutls_get_address")
 routine emutls_get_address(control: @EmutlsControl) -> Addr
-    seen: USize = control.index.peek_atomic()
-    index: USize = when
+    seen: U64 = control.index.peek_atomic()
+    index: U64 = when
         seen == 0 =>
             EMUTLS_LOCK.lock()
-            current: USize = control.index.peek()
-            assigned: USize = when
+            current: U64 = control.index.peek()
+            assigned: U64 = when
                 current != 0 => current
                 else =>
-                    next: USize = EMUTLS_NEXT.peek() + 1
+                    next: U64 = EMUTLS_NEXT.peek() + 1
                     EMUTLS_NEXT.poke(next)
                     control.index.poke_atomic(next)
                     becomes next
@@ -136,28 +136,28 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
             EMUTLS.poke(fresh)
             becomes fresh
         else => known
-    have: USize = arr.size.peek()
+    have: U64 = arr.size.peek()
     if have < index
-        grown: Addr = c_realloc(arr.data.peek(), index * sizeof[Addr]())
+        grown: Addr = c_realloc(arr.data.peek(), (index * sizeof[Addr]()).to[CSize]())
         if grown.is_null()
             rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow thread-local storage")
         c_memset(grown.to[@Byte]().stride(have * sizeof[Addr]()), 0,
-            (index - have) * sizeof[Addr]())
+            ((index - have) * sizeof[Addr]()).to[CSize]())
         arr.data.poke(grown.to[@Addr]())
         arr.size.poke(index)
     slot: @Addr = arr.data.peek().stride(index - 1)
     obj: Addr = slot.peek()
     if not obj.is_null()
         return obj
-    size: USize = control.size.peek()
+    size: U64 = control.size.peek()
     made: Addr = aligned_alloc(size, align: control.align.peek())
     if made.is_null()
         rf_throw(error_type: "OutOfMemoryError",
             message: "Failed to allocate a thread-local variable")
     init: Addr = control.value.peek()
     if init.is_null()
-        c_memset(made, 0, size)
+        c_memset(made, 0, size.to[CSize]())
     else
-        c_memcpy(made, init, size)
+        c_memcpy(made, init, size.to[CSize]())
     slot.poke(made)
     return made

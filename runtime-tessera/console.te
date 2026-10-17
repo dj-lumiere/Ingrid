@@ -45,13 +45,13 @@ global STDOUT: @OutputBuffer
 ### asked.
 global STDOUT_INTERACTIVE: @CInt <- -1
 
-preset OUTPUT_BUFFER: USize = 8192
+preset OUTPUT_BUFFER: U64 = 8192
 
 ### What show has written and Out hasn't been given yet, behind a lock (shows come from every thread).
 record OutputBuffer
     lock: ExclusiveLock
     bytes: Array[Byte, OUTPUT_BUFFER]
-    count: USize
+    count: U64
 
 ### Whether standard output is flushed after every show: true when RF_FLUSH_STDOUT starts with `1` or stdout is a
 ### terminal. The answer is worked out once and cached.
@@ -79,7 +79,7 @@ routine is_stdout_interactive() -> Bool
 
 ### Gives Out what the buffer holds and empties it. The caller holds the lock.
 routine OutputBuffer.drain(me: @Me) -> None
-    n: USize = me.count.peek()
+    n: U64 = me.count.peek()
     if n == 0
         return
     Out.write_all_result(data: me.bytes.to[@Byte](), count: n)
@@ -92,11 +92,11 @@ routine OutputBuffer.drain(me: @Me) -> None
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
 @export("rf_console_show")
-routine rf_console_show(ptr: @Byte, count: USize) -> None
+routine rf_console_show(ptr: @Byte, count: U64) -> None
     local out: @OutputBuffer = STDOUT
 
     out.lock.lock()
-    needed: USize = out.count.peek() + count
+    needed: U64 = out.count.peek() + count
     goes_straight: Bool = when
         needed > OUTPUT_BUFFER =>
             out.drain()
@@ -107,7 +107,7 @@ routine rf_console_show(ptr: @Byte, count: USize) -> None
         Out.write_all_result(data: ptr, count)
     else
         out.bytes.to[@Byte]().stride(out.count.peek()).copy(src: ptr, count)
-        next_count: USize = out.count.peek() + count
+        next_count: U64 = out.count.peek() + count
         next_count.poke_into(out.count)
     if is_stdout_interactive()
         out.drain()
@@ -128,7 +128,7 @@ routine rf_console_flush() -> None
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
 @export("rf_console_alert")
-routine rf_console_alert(ptr: @Byte, count: USize) -> None
+routine rf_console_alert(ptr: @Byte, count: U64) -> None
     rf_console_flush()
     on: Span[Byte] = "[95m"
     off: Span[Byte] = "[0m"
@@ -144,8 +144,8 @@ routine rf_console_alert(ptr: @Byte, count: USize) -> None
 ### :param text: The text, allocated with C's heap. It is taken over.
 ### :returns: The NUL-terminated string, or null when the reallocation fails.
 routine terminated_text(text: Memory[Byte]) -> @Byte
-    n: USize = text.count()
-    buf: Addr = c_realloc(null, n + 1)
+    n: U64 = text.count()
+    buf: Addr = c_realloc(null, (n + 1).to[CSize]())
     if buf.is_null()
         drop text
         return null
@@ -195,7 +195,7 @@ routine rf_console_ask_word() -> @Byte
 ### :param count: The most bytes to read.
 ### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
 @export("rf_console_ask_bytes")
-routine rf_console_ask_bytes(count: USize) -> @Byte
+routine rf_console_ask_bytes(count: U64) -> @Byte
     rf_console_flush()
     local alloc: @MemoryManager <- heap()
     return terminated_text(In.read_count(count, alloc))
@@ -214,7 +214,7 @@ routine rf_console_ask_all() -> @Byte
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
 @export("rf_console_error")
-routine rf_console_error(ptr: @Byte, count: USize) -> None
+routine rf_console_error(ptr: @Byte, count: U64) -> None
     if ptr.is_null() or count == 0
         return
     Err.write_all_result(data: ptr, count)
@@ -265,8 +265,8 @@ routine rf_exit_code() -> S32
 ### :param cstr: The string.
 ### :returns: The number of bytes before the terminator.
 @export("rf_cstr_count")
-routine rf_cstr_count(cstr: @Byte) -> USize
-    return c_strlen(cstr)
+routine rf_cstr_count(cstr: @Byte) -> U64
+    return c_strlen(cstr).to[U64]()
 
 ### Copies the NUL-terminated string at `src`, terminator included, to `dest`.
 ### :param dest: Where the copy goes, large enough for it.

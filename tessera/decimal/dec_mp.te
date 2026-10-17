@@ -10,9 +10,9 @@
 # (dec_trans.te), otherwise the computation is repeated with more limbs.
 
 ### The limbs of an Mp: up to MP_TOP in use, one more for the guard limb of a sum.
-preset MP_CAP: USize = 20
+preset MP_CAP: U64 = 20
 ### The most limbs a computation uses: 1216 bits.
-preset MP_TOP: USize = 19
+preset MP_TOP: U64 = 19
 ### The exponent of zero, far below every other.
 preset MP_ZERO_EXP: S64 = -1125899906842624
 
@@ -43,7 +43,7 @@ record MpUnpacked
     ### The working buffer, least significant limb first.
     limbs: @Array[U64, 41]
     ### How many limbs of the buffer are in use.
-    len: USize
+    len: U64
     ### The power of two the limbs are scaled by.
     scale: S64
 
@@ -57,7 +57,7 @@ record MpBuf
 ### :param len: Its `len`.
 ### :param scale: Its `scale`.
 ### :returns: The new value.
-routine MpUnpacked.construct(neg: Bool, limbs: @Array[U64, 41], len: USize, scale: S64) -> Me
+routine MpUnpacked.construct(neg: Bool, limbs: @Array[U64, 41], len: U64, scale: S64) -> Me
     return Me(neg, limbs, len, scale)
 
 ### Releases nothing: a `MpUnpacked` holds no memory of its own.
@@ -76,7 +76,7 @@ routine Mp.zero() -> Me
 ### :param n: The precision in limbs.
 ### :returns: Whether the value is zero (whose exponent is MP_ZERO_EXP, never another's).
 @inline
-routine Mp.is_zero(me: Me, n: USize) -> Bool
+routine Mp.is_zero(me: Me, n: U64) -> Bool
     return me.exp == MP_ZERO_EXP
 
 ### The value with its sign flipped.
@@ -103,7 +103,7 @@ routine Mp.with_sign(me: Me, neg: Bool) -> Me
 ### :param n: The precision in limbs.
 ### :returns: me × 2^k (exact).
 @inline
-routine Mp.ldexp(me: Me, k: S64, n: USize) -> Me
+routine Mp.ldexp(me: Me, k: S64, n: U64) -> Me
     if me.is_zero(n)
         return me
     else
@@ -115,7 +115,7 @@ routine Mp.ldexp(me: Me, k: S64, n: USize) -> Me
 ### :param at: The lowest bit read.
 ### :returns: The 64 bits of the number in buf[0 .. len) starting at bit `at` (bits outside it read as 0).
 @inline
-routine mp_bits_at(buf: @Array[U64, 41], len: USize, at: S64) -> U64
+routine mp_bits_at(buf: @Array[U64, 41], len: U64, at: S64) -> U64
     return mp_bits(src: buf.to[@U64](), len, at)
 
 ### The 64 bits of the number in src[0 .. len) starting at bit `at` (bits outside it read as 0). A shift by 64 gives
@@ -125,7 +125,7 @@ routine mp_bits_at(buf: @Array[U64, 41], len: USize, at: S64) -> U64
 ### :param at: The lowest bit read.
 ### :returns: The 64 bits.
 @inline
-routine mp_bits(src: @U64, len: USize, at: S64) -> U64
+routine mp_bits(src: @U64, len: U64, at: S64) -> U64
     limb: S64 = at >> 6
     off: U64 = (at & 63).to[U64]()
     low: U64 = mp_word(src, len, i: limb)
@@ -138,9 +138,9 @@ routine mp_bits(src: @U64, len: USize, at: S64) -> U64
 ### :param i: The limb index (any).
 ### :returns: The limb or 0.
 @inline
-routine mp_word(src: @U64, len: USize, i: S64) -> U64
+routine mp_word(src: @U64, len: U64, i: S64) -> U64
     if i >= 0 and i < len.to[S64]()
-        return src.stride(i.to[USize]()).peek()
+        return src.stride(i.to[U64]()).peek()
     else
         return 0
 
@@ -148,17 +148,17 @@ routine mp_word(src: @U64, len: USize, i: S64) -> U64
 ### :param value: The number: its sign, its limbs in a working buffer, and their scale.
 ### :param n: The precision in limbs.
 ### :returns: The number as an Mp of n limbs, truncated toward zero.
-routine mp_pack(value: MpUnpacked, n: USize) -> Mp
+routine mp_pack(value: MpUnpacked, n: U64) -> Mp
     local neg: Bool = value.neg
-    local len: USize = value.len
+    local len: U64 = value.len
     local scale: S64 = value.scale
     local r: @Mp <- .hollow()
     local src: @U64 = value.limbs.to[@U64]()
     local dst: @U64 = r.m.to[@U64]()
 
     # the top nonzero limb
-    while i != 0 with i: USize = len
-        t: USize = i - 1
+    while i != 0 with i: U64 = len
+        t: U64 = i - 1
         limb: U64 = src.stride(t).peek()
         if limb == 0
             continue with i: t
@@ -182,7 +182,7 @@ routine mp_pack(value: MpUnpacked, n: USize) -> Mp
 ### :param scale: The power of two it is scaled by.
 ### :param n: The precision in limbs.
 ### :returns: v × 2^scale exactly, for n >= 2.
-routine mp_of_u128(v: U128, scale: S64, n: USize) -> Mp
+routine mp_of_u128(v: U128, scale: S64, n: U64) -> Mp
     local buf: @Array[U64, 41] <- .hollow()
 
     buf[0] = v.to_wrap[U64]()
@@ -193,7 +193,7 @@ routine mp_of_u128(v: U128, scale: S64, n: USize) -> Mp
 ### :param x: The float (finite).
 ### :param n: The precision in limbs.
 ### :returns: A B64 exactly (finite).
-routine mp_of_b64(x: B64, n: USize) -> Mp
+routine mp_of_b64(x: B64, n: U64) -> Mp
     local bits: U64 = x.bits()
     local biased: S64 = ((bits >> 52) & 0x7FF).to[S64]()
 
@@ -213,9 +213,9 @@ routine mp_of_b64(x: B64, n: USize) -> Mp
 ### :param exp: Its exponent.
 ### :param n: The precision in limbs.
 ### :returns: A constant of the tables.
-routine mp_const(table: @U64, at: USize, exp: S64, n: USize) -> Mp
+routine mp_const(table: @U64, at: U64, exp: S64, n: U64) -> Mp
     local r: @Mp <- Mp.zero()
-    local skip: USize = 20 - n
+    local skip: U64 = 20 - n
 
     each k in 0 til n
         word: U64 = table.stride(at + skip + k).peek()
@@ -236,7 +236,7 @@ routine b64_pow2(k: S64) -> B64
 ### The value as a B64 times 2^-exp, in [0.5, 1) (0 for zero): the top 53 bits.
 ### :param n: The precision in limbs.
 ### :returns: The value as a B64 times 2^-exp, in [0.5, 1) (0 for zero).
-routine Mp.top_b64(me: Me, n: USize) -> B64
+routine Mp.top_b64(me: Me, n: U64) -> B64
     local slot: @Me <- me
 
     top: U64 = slot.m[n - 1]
@@ -249,7 +249,7 @@ routine Mp.top_b64(me: Me, n: USize) -> B64
 ### The value as a B64 (0 or an infinity outside B64's range).
 ### :param n: The precision in limbs.
 ### :returns: The value as a B64 (0 or an infinity outside B64's range).
-routine Mp.to_b64(me: Me, n: USize) -> B64
+routine Mp.to_b64(me: Me, n: U64) -> B64
     when
         me.is_zero(n) => return 0.0
         me.exp > 1023 =>
@@ -267,7 +267,7 @@ routine Mp.to_b64(me: Me, n: USize) -> B64
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: -1, 0, or 1 as |a| is below, equal to, or above |b|.
-routine mp_compare_magnitude(a: Mp, b: Mp, n: USize) -> S32
+routine mp_compare_magnitude(a: Mp, b: Mp, n: U64) -> S32
     local sa: @Mp <- a
     local sb: @Mp <- b
 
@@ -278,7 +278,7 @@ routine mp_compare_magnitude(a: Mp, b: Mp, n: USize) -> S32
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: -1, 0, or 1 as |a| is below, equal to, or above |b|.
-routine mp_compare_slots(a: @Mp, b: @Mp, n: USize) -> S32
+routine mp_compare_slots(a: @Mp, b: @Mp, n: U64) -> S32
     local ea: S64 = a.exp.peek()
     local eb: S64 = b.exp.peek()
     local pa: @U64 = a.m.to[@U64]()
@@ -294,8 +294,8 @@ routine mp_compare_slots(a: @Mp, b: @Mp, n: USize) -> S32
         ea > eb => return 1
         else =>
             # top limb first
-            while left != 0 with left: USize = n
-                i: USize = left - 1
+            while left != 0 with left: U64 = n
+                i: U64 = left - 1
                 x: U64 = pa.stride(i).peek()
                 y: U64 = pb.stride(i).peek()
                 when
@@ -312,7 +312,7 @@ routine mp_compare_slots(a: @Mp, b: @Mp, n: USize) -> S32
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: a × b truncated to n limbs.
-routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
+routine mp_mul(a: Mp, b: Mp, n: U64) -> Mp
     local prod: @Array[U64, 41] <- .hollow()
     local sa: @Mp <- a
     local sb: @Mp <- b
@@ -329,7 +329,7 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
             # row i writes limb i + n itself, so only the low n limbs need zeros
             0.poke_into(pp.stride(i))
 
-        while i < n with i: USize = 0
+        while i < n with i: U64 = 0
             ai: U64 = pa.stride(i).peek()
 
             each j in 0 til n with carry: U64 = 0
@@ -344,7 +344,7 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
                 continue with i: i + 1
         # both mantissas have their top bit set, so the product's top limb has bit 63 or bit 62 set: the top n limbs
         # as they are, or shifted up one bit (what mp_pack would give, without its search)
-        size: USize = n * 2
+        size: U64 = n * 2
         top: U64 = pp.stride(size - 1).peek()
         e: S64 = a.exp + b.exp
         (a.neg ^ b.neg).poke_into(r.neg)
@@ -375,7 +375,7 @@ routine mp_mul(a: Mp, b: Mp, n: USize) -> Mp
 ### :param k: The multiplier (nonzero).
 ### :param n: The precision in limbs.
 ### :returns: a × k for a small k > 0, truncated.
-routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
+routine mp_mul_u64(a: Mp, k: U64, n: U64) -> Mp
     local buf: @Array[U64, 41] <- .hollow()
     local sa: @Mp <- a
     local pa: @U64 = sa.m.to[@U64]()
@@ -398,7 +398,7 @@ routine mp_mul_u64(a: Mp, k: U64, n: USize) -> Mp
 ### :param k: The divisor (nonzero).
 ### :param n: The precision in limbs.
 ### :returns: a / k for a small k > 0, truncated.
-routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
+routine mp_div_u64(a: Mp, k: U64, n: U64) -> Mp
     local buf: @Array[U64, 41] <- .hollow()
     local sa: @Mp <- a
     local pa: @U64 = sa.m.to[@U64]()
@@ -412,8 +412,8 @@ routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
     # remainder (below d, as it holds at most shift bits)
     top: S64 = n.to[S64]() * 64 - back
 
-    while left != 0 with left: USize = n + 1, rem: U64 = mp_bits(src: pa, len: n, at: top)
-        i: USize = left - 1
+    while left != 0 with left: U64 = n + 1, rem: U64 = mp_bits(src: pa, len: n, at: top)
+        i: U64 = left - 1
         below: S64 = i.to[S64]() - 1
         at: S64 = below * 64 - back
         q: Div2By1 = div_2by1(u1: rem, u0: mp_bits(src: pa, len: n, at), d, v)
@@ -429,7 +429,7 @@ routine mp_div_u64(a: Mp, k: U64, n: USize) -> Mp
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: a + b (signed), truncated.
-routine mp_add(a: Mp, b: Mp, n: USize) -> Mp
+routine mp_add(a: Mp, b: Mp, n: U64) -> Mp
     local buf: @Array[U64, 41] <- .hollow()
     local sa: @Mp <- a
     local sb: @Mp <- b
@@ -488,7 +488,7 @@ routine mp_add(a: Mp, b: Mp, n: USize) -> Mp
 ### :param n: The precision in limbs.
 ### :returns: The difference.
 @inline
-routine mp_sub(a: Mp, b: Mp, n: USize) -> Mp
+routine mp_sub(a: Mp, b: Mp, n: U64) -> Mp
     return mp_add(a, b: b.negate(), n)
 
 # ── values with error bounds ──────────────────────────────────────────────────────────────────────
@@ -528,7 +528,7 @@ routine MpApprox.magnitude(me: Me) -> Me
 ### :param n: The precision in limbs.
 ### :returns: The scaled value.
 @inline
-routine MpApprox.ldexp(me: Me, k: S64, n: USize) -> Me
+routine MpApprox.ldexp(me: Me, k: S64, n: U64) -> Me
     return (v: me.v.ldexp(k, n), err: me.err)
 
 ### The bound widened by more units.
@@ -542,7 +542,7 @@ routine MpApprox.widen(me: Me, more: B64) -> Me
 ### at 16 limbs it is 2^-1024, below the smallest normal B64, where b64_pow2 gives 0.
 ### :param n: The precision in limbs.
 ### :returns: The relative error as a B64 (not in units), for an n-limb value.
-routine MpApprox.relative(me: Me, n: USize) -> B64
+routine MpApprox.relative(me: Me, n: U64) -> B64
     half: S64 = n.to[S64]() * 32
     unit: B64 = b64_pow2(-half)
     return me.err * unit * unit
@@ -551,7 +551,7 @@ routine MpApprox.relative(me: Me, n: USize) -> B64
 ### :param r: The argument.
 ### :param n: The precision in limbs.
 ### :returns: A bound for a B64 relative error r, in units of 2^-64n.
-routine me_units(r: B64, n: USize) -> B64
+routine me_units(r: B64, n: U64) -> B64
     bits: S64 = n.to[S64]() * 64
     return r * b64_pow2(bits) * MP_UP
 
@@ -560,7 +560,7 @@ routine me_units(r: B64, n: USize) -> B64
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: a × b.
-routine me_mul(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
+routine me_mul(a: MpApprox, b: MpApprox, n: U64) -> MpApprox
     v: Mp = mp_mul(a: a.v, b: b.v, n)
     unit: B64 = b64_pow2(n.to[S64]() * -64)
     cross: B64 = a.err * b.err * unit
@@ -572,7 +572,7 @@ routine me_mul(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
 ### :param k: The multiplier (nonzero).
 ### :param n: The precision in limbs.
 ### :returns: a × k for a small exact k.
-routine me_mul_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
+routine me_mul_u64(a: MpApprox, k: U64, n: U64) -> MpApprox
     return (v: mp_mul_u64(a: a.v, k, n), err: (a.err + 2.0) * MP_UP)
 
 ### a / k for a small exact k.
@@ -580,7 +580,7 @@ routine me_mul_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
 ### :param k: The divisor (nonzero).
 ### :param n: The precision in limbs.
 ### :returns: a / k for a small exact k.
-routine me_div_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
+routine me_div_u64(a: MpApprox, k: U64, n: U64) -> MpApprox
     return (v: mp_div_u64(a: a.v, k, n), err: (a.err + 2.0) * MP_UP)
 
 ### a + b: each operand's absolute error over the result's magnitude (bounded from their top bits, me_ratio), what
@@ -589,7 +589,7 @@ routine me_div_u64(a: MpApprox, k: U64, n: USize) -> MpApprox
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: a + b.
-routine me_add(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
+routine me_add(a: MpApprox, b: MpApprox, n: U64) -> MpApprox
     v: Mp = mp_add(a: a.v, b: b.v, n)
     za: Bool = a.v.is_zero(n)
     zb: Bool = b.v.is_zero(n)
@@ -616,7 +616,7 @@ routine me_add(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
 ### :param er: r's exponent.
 ### :param n: The precision in limbs.
 ### :returns: The bound.
-routine me_ratio(x: Mp, rt: B64, er: S64, n: USize) -> B64
+routine me_ratio(x: Mp, rt: B64, er: S64, n: U64) -> B64
     xt: B64 = x.top_b64(n).abs() + b64_pow2(-53)
     return xt / rt * b64_pow2(x.exp - er) * MP_UP
 
@@ -626,7 +626,7 @@ routine me_ratio(x: Mp, rt: B64, er: S64, n: USize) -> B64
 ### :param n: The precision in limbs.
 ### :returns: The difference with its bound.
 @inline
-routine me_sub(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
+routine me_sub(a: MpApprox, b: MpApprox, n: U64) -> MpApprox
     return me_add(a, b: b.negate(), n)
 
 ### 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from a B64 start, at full precision: each step squares
@@ -635,7 +635,7 @@ routine me_sub(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: 1 / b for a nonzero b, by Newton steps y + y (1 - b y) from a B64 start, at full precision.
-routine me_recip(b: MpApprox, n: USize) -> MpApprox
+routine me_recip(b: MpApprox, n: U64) -> MpApprox
     local one: Mp = mp_of_u128(v: 1, scale: 0, n)
     local seed: B64 = 1.0 / b.v.top_b64(n)
     local steps: S64 = mp_newton_steps(n)
@@ -650,7 +650,7 @@ routine me_recip(b: MpApprox, n: USize) -> MpApprox
 ### The Newton steps from a 50-bit start to 64n + 8 bits, each doubling the correct bits.
 ### :param n: The precision in limbs.
 ### :returns: The Newton steps from a 50-bit start to 64n + 8 bits, each doubling the correct bits.
-routine mp_newton_steps(n: USize) -> S64
+routine mp_newton_steps(n: U64) -> S64
     local want: S64 = n.to[S64]() * 64 + 8
 
     while bits < want with bits: S64 = 50, k: S64 = 0
@@ -663,7 +663,7 @@ routine mp_newton_steps(n: USize) -> S64
 ### :param b: The second operand.
 ### :param n: The precision in limbs.
 ### :returns: a / b.
-routine me_div(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
+routine me_div(a: MpApprox, b: MpApprox, n: U64) -> MpApprox
     return me_mul(a, b: me_recip(b, n), n)
 
 ### sqrt(a) for a > 0: z = 1/sqrt(a) by Newton steps z + z (1 - a z^2) / 2 from a B64 start, then a z. a's error
@@ -671,7 +671,7 @@ routine me_div(a: MpApprox, b: MpApprox, n: USize) -> MpApprox
 ### :param a: The first operand.
 ### :param n: The precision in limbs.
 ### :returns: sqrt(a) for a > 0.
-routine me_sqrt(a: MpApprox, n: USize) -> MpApprox
+routine me_sqrt(a: MpApprox, n: U64) -> MpApprox
     local one: Mp = mp_of_u128(v: 1, scale: 0, n)
     local half: S64 = a.v.exp >> 1
     local steps: S64 = mp_newton_steps(n)
@@ -696,14 +696,14 @@ routine me_sqrt(a: MpApprox, n: USize) -> MpApprox
 ### :param v: The integer.
 ### :param n: The precision in limbs.
 ### :returns: An exact integer as an MpApprox.
-routine me_of_u128(v: U128, n: USize) -> MpApprox
+routine me_of_u128(v: U128, n: U64) -> MpApprox
     return me_exact(mp_of_u128(v, scale: 0, n))
 
 ### 10^k for k >= 0, by squaring (exact while it fits, the error bound counting each truncation).
 ### :param k: The power (at least 0).
 ### :param n: The precision in limbs.
 ### :returns: 10^k for k >= 0, by squaring (exact while it fits, the error bound counting each truncation).
-routine me_pow10(k: S64, n: USize) -> MpApprox
+routine me_pow10(k: S64, n: U64) -> MpApprox
     local ten: MpApprox = me_of_u128(v: 10, n)
 
     if k <= 38
@@ -723,7 +723,7 @@ routine me_pow10(k: S64, n: USize) -> MpApprox
 ### :param x: The operand.
 ### :param n: The precision in limbs.
 ### :returns: The decimal x = (-1)^neg c 10^q (finite) as an MpApprox.
-routine me_of_dec(x: Dec, n: USize) -> MpApprox
+routine me_of_dec(x: Dec, n: U64) -> MpApprox
     local c: MpApprox = me_of_u128(v: x.coeff, n)
 
     when
@@ -741,7 +741,7 @@ routine me_of_dec(x: Dec, n: USize) -> MpApprox
 ### :param k: The power of ten.
 ### :param n: The precision in limbs.
 ### :returns: x × 10^k.
-routine me_scale10(x: MpApprox, k: S64, n: USize) -> MpApprox
+routine me_scale10(x: MpApprox, k: S64, n: U64) -> MpApprox
     near: Bool = k.abs() <= 380
     when
         k == 0 => return x

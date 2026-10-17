@@ -13,13 +13,13 @@ import Standard/Os
 ### The length of the last buffer a routine here returned on this thread. Per thread: the caller reads it right after
 ### the call, with no yield in between, so another thread's call can't overwrite it.
 @threadlocal
-global RESULT_LEN: @USize
+global RESULT_LEN: @U64
 
 ### From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
 ### requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping. Per thread, like
 ### RESULT_LEN.
 @threadlocal
-global MAP_DELTA: @USize
+global MAP_DELTA: @U64
 
 ### The length of the last buffer a routine here returned.
 ### :returns: The length in bytes, 0 after a failure.
@@ -36,7 +36,7 @@ routine rf_file_map_delta() -> U64
 ### A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
 ### :returns: The address 1.
 routine empty_map() -> @Byte
-    return inttoptr[USize, @Byte](1)
+    return inttoptr[U64, @Byte](1)
 
 ### A failure: no buffer, length 0.
 ### :returns: Null.
@@ -48,7 +48,7 @@ routine no_result() -> @Byte
 ### :param buf: The result buffer.
 ### :param len: Its length.
 ### :returns: `buf`.
-routine result(buf: @Byte, len: USize) -> @Byte
+routine result(buf: @Byte, len: U64) -> @Byte
     RESULT_LEN.poke(len)
     return buf
 
@@ -56,11 +56,11 @@ routine result(buf: @Byte, len: USize) -> @Byte
 ### :param s: The bytes.
 ### :param len: The number of bytes.
 ### :returns: The buffer, or null (length 0) when the allocation fails.
-routine bytes_result(s: @Byte, len: USize) -> @Byte
-    buf: Addr = c_malloc(len + 1)
+routine bytes_result(s: @Byte, len: U64) -> @Byte
+    buf: Addr = c_malloc((len + 1).to[CSize]())
     if buf.is_null()
         return no_result()
-    c_memcpy(buf, s, len)
+    c_memcpy(buf, s, len.to[CSize]())
     terminator: @Byte = buf.to[@Byte]().stride(len)
     terminator.poke(0x00)
     return result(buf: buf.to[@Byte](), len)
@@ -100,7 +100,7 @@ routine heap() -> MemoryManager
 ### :param len: The path's length.
 ### :returns: The path.
 routine path_of(path: @Byte, len: S32) -> Span[Byte]
-    return Span[Byte].construct(data: path, count: len.max(0).to[USize]())
+    return Span[Byte].construct(data: path, count: len.max(0).to[U64]())
 
 ### 0 for a success, -1 for a failure.
 ### :param r: The outcome.
@@ -121,15 +121,15 @@ routine seconds(ns: S64) -> S64
 
 record ResultBuffer
     buf: @Byte
-    len: USize
-    cap: USize
+    len: U64
+    cap: U64
 
 ### Makes a `ResultBuffer` from its fields.
 ### :param buf: Its `buf`.
 ### :param len: Its `len`.
 ### :param cap: Its `cap`.
 ### :returns: The new value.
-routine ResultBuffer.construct(buf: @Byte, len: USize, cap: USize) -> Me
+routine ResultBuffer.construct(buf: @Byte, len: U64, cap: U64) -> Me
     return Me(buf, len, cap)
 
 ### Releases nothing: a `ResultBuffer` holds no memory of its own.
@@ -139,8 +139,8 @@ routine ResultBuffer.destruct(me: @Me) -> None
 ### Starts an empty buffer with room for `cap` bytes (at least 16).
 ### :param cap: The starting capacity.
 ### :returns: False when the allocation fails.
-routine ResultBuffer.start(me: @Me, cap: USize) -> Bool
-    buf: Addr = c_malloc(cap.max(16))
+routine ResultBuffer.start(me: @Me, cap: U64) -> Bool
+    buf: Addr = c_malloc(cap.max(16).to[CSize]())
     me.buf.poke(buf.to[@Byte]())
     me.len.poke(0)
     me.cap.poke(cap.max(16))
@@ -149,13 +149,13 @@ routine ResultBuffer.start(me: @Me, cap: USize) -> Bool
 ### Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
 ### :param n: The bytes about to be added.
 ### :returns: True when there is room.
-routine ResultBuffer.room(me: @Me, n: USize) -> Bool
-    filled: USize = me.len.peek() + n
-    need: USize = filled + 1
-    current_cap: USize = me.cap.peek()
+routine ResultBuffer.room(me: @Me, n: U64) -> Bool
+    filled: U64 = me.len.peek() + n
+    need: U64 = filled + 1
+    current_cap: U64 = me.cap.peek()
     if need > current_cap
-        cap: USize = (current_cap * 2).max(need)
-        bigger: Addr = c_realloc(me.buf.peek(), cap)
+        cap: U64 = (current_cap * 2).max(need)
+        bigger: Addr = c_realloc(me.buf.peek(), cap.to[CSize]())
         if bigger.is_null()
             return false
         me.buf.poke(bigger.to[@Byte]())
@@ -167,9 +167,9 @@ routine ResultBuffer.room(me: @Me, n: USize) -> Bool
 ### Appends `n` bytes, for which {ResultBuffer.room} made room.
 ### :param data: The bytes.
 ### :param n: The number of bytes.
-routine ResultBuffer.setitem(me: @Me, data: @Byte, n: USize) -> None
-    c_memcpy(me.buf.peek().stride(me.len.peek()), data, n)
-    next_len: USize = me.len.peek() + n
+routine ResultBuffer.setitem(me: @Me, data: @Byte, n: U64) -> None
+    c_memcpy(me.buf.peek().stride(me.len.peek()), data, n.to[CSize]())
+    next_len: U64 = me.len.peek() + n
     next_len.poke_into(me.len)
     return
 
@@ -178,14 +178,14 @@ routine ResultBuffer.setitem(me: @Me, data: @Byte, n: USize) -> None
 routine ResultBuffer.byte(me: @Me, b: Byte) -> None
     slot: @Byte = me.buf.peek().stride(me.len.peek())
     slot.poke(b)
-    next_len: USize = me.len.peek() + 1
+    next_len: U64 = me.len.peek() + 1
     next_len.poke_into(me.len)
     return
 
 ### NUL-terminates the buffer and hands it over as the result.
 ### :returns: The buffer, its length recorded as the result's.
 routine ResultBuffer.finish(me: @Me) -> @Byte
-    n: USize = me.len.peek()
+    n: U64 = me.len.peek()
     terminator: @Byte = me.buf.peek().stride(n)
     terminator.poke(0x00)
     return result(buf: me.buf.peek(), len: n)
@@ -201,8 +201,8 @@ routine ResultBuffer.fail(me: @Me) -> @Byte
 ### The open files by handle.
 global FILE_TABLE: @Array[OpenFile, 256]
 
-preset MAX_OPEN_FILES: USize = 256
-preset FILE_BUFFER:    USize = 8192
+preset MAX_OPEN_FILES: U64 = 256
+preset FILE_BUFFER:    U64 = 8192
 
 ### An open file: a reader's read-ahead, or a writer's bytes not written yet, in buffer[start, end).
 record OpenFile
@@ -211,8 +211,8 @@ record OpenFile
     writer: Bool
     eof: Bool
     buffer: @Byte
-    start: USize
-    end: USize
+    start: U64
+    end: U64
 
 ### Makes a `OpenFile` from its fields.
 ### :param file: Its `file`.
@@ -224,7 +224,7 @@ record OpenFile
 ### :param end: Its `end`.
 ### :returns: The new value.
 routine OpenFile.construct(file: FileHandle, used: Bool, writer: Bool, eof: Bool, buffer: @Byte,
-    start: USize, end: USize) -> Me
+    start: U64, end: U64) -> Me
     return Me(file, used, writer, eof, buffer, start, end)
 
 ### Releases nothing: a `OpenFile` holds no memory of its own.
@@ -237,7 +237,7 @@ routine OpenFile.destruct(me: @Me) -> None
 routine open_file(fd: S32) -> @OpenFile
     if fd < 0 or fd >= 256
         return null
-    of: @OpenFile = FILE_TABLE.to[@OpenFile]().stride(fd.to[USize]())
+    of: @OpenFile = FILE_TABLE.to[@OpenFile]().stride(fd.to[U64]())
     if of.used.peek()
         return of
     else
@@ -260,7 +260,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     f: FileHandle = when r
         is FileHandle as f => f
         is FsError => return -1
-    buffer: Addr = c_malloc(FILE_BUFFER)
+    buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
     if buffer.is_null()
         c_free(buffer)
         local f2: @FileHandle <- f
@@ -286,7 +286,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
 ### Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
 ### :returns: True when nothing was pending or everything was written.
 routine OpenFile.drain(me: @Me) -> Bool
-    n: USize = me.end.peek()
+    n: U64 = me.end.peek()
     if not (me.writer.peek() & (n > 0))
         return true
     me.end.poke(0)
@@ -297,10 +297,10 @@ routine OpenFile.drain(me: @Me) -> Bool
 ### end).
 ### :returns: True when bytes were read.
 routine OpenFile.refill(me: @Me) -> Bool
-    got: Result[USize, FsError] = me.file.read_bytes_result(buffer: me.buffer.peek(),
+    got: Result[U64, FsError] = me.file.read_bytes_result(buffer: me.buffer.peek(),
         count: FILE_BUFFER)
-    n: USize = when got
-        is USize as n => n
+    n: U64 = when got
+        is U64 as n => n
         is FsError => 0
     me.start.poke(0)
     me.end.poke(n)
@@ -337,7 +337,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
         return out.fail()
 
     # What the reader holds, then the rest straight into the result.
-    held: USize = of.end.peek() - of.start.peek()
+    held: U64 = of.end.peek() - of.start.peek()
     if not out.room(held)
         return out.fail()
     out[of.buffer.peek().stride(of.start.peek())] = held
@@ -345,15 +345,15 @@ routine rf_file_read_all(fd: S32) -> @Byte
 
     while out.room(FILE_BUFFER)
         at: @Byte = out.buf.peek().stride(out.len.peek())
-        got: Result[USize, FsError] = of.file.read_bytes_result(buffer: at, count: FILE_BUFFER)
-        n: USize = when got
-            is USize as n => n
+        got: Result[U64, FsError] = of.file.read_bytes_result(buffer: at, count: FILE_BUFFER)
+        n: U64 = when got
+            is U64 as n => n
             is FsError => 0
         if n == 0
             of.eof.poke(true)
             return out.finish()
         else
-            next_len: USize = out.len.peek() + n
+            next_len: U64 = out.len.peek() + n
             next_len.poke_into(out.len)
             continue
     then
@@ -371,7 +371,7 @@ routine rf_file_read_line(fd: S32) -> @Byte
         return no_result()
     if out.start(256)
         while of.start.peek() < of.end.peek() or of.refill()
-            at: USize = of.start.peek()
+            at: U64 = of.start.peek()
             cursor: @Byte = of.buffer.peek().stride(at)
             c: Byte = cursor.peek()
             of.start.poke(at + 1)
@@ -393,7 +393,7 @@ routine rf_file_read_line(fd: S32) -> @Byte
 ### :param count: The most bytes to read.
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
 @export("rf_file_read_bytes")
-routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
+routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
     local of: @OpenFile = open_file(fd)
     local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
 
@@ -401,14 +401,14 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
         return no_result()
     if out.start(count + 1)
         while true
-            wanted2: USize = count - out.len.peek()
+            wanted2: U64 = count - out.len.peek()
             if wanted2 == 0
                 return out.finish()
             if of.start.peek() < of.end.peek() or of.refill()
-                buffered: USize = of.end.peek() - of.start.peek()
-                n: USize = buffered.min(wanted2)
+                buffered: U64 = of.end.peek() - of.start.peek()
+                n: U64 = buffered.min(wanted2)
                 out[of.buffer.peek().stride(of.start.peek())] = n
-                next_start: USize = of.start.peek() + n
+                next_start: U64 = of.start.peek() + n
                 next_start.poke_into(of.start)
                 continue
             else
@@ -422,12 +422,12 @@ routine rf_file_read_bytes(fd: S32, count: USize) -> @Byte
 ### :param len: The number of bytes.
 ### :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
 @export("rf_file_write")
-routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
+routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
     local of: @OpenFile = open_file(fd)
 
     if of.is_null()
         return 0
-    needed: USize = of.end.peek() + len
+    needed: U64 = of.end.peek() + len
     if needed > FILE_BUFFER
         if not of.drain()
             return 0
@@ -437,8 +437,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: USize) -> USize
                 return len
             else
                 return 0
-    c_memcpy(of.buffer.peek().stride(of.end.peek()), ptr, len)
-    next_end: USize = of.end.peek() + len
+    c_memcpy(of.buffer.peek().stride(of.end.peek()), ptr, len.to[CSize]())
+    next_end: U64 = of.end.peek() + len
     next_end.poke_into(of.end)
     return len
 
@@ -475,8 +475,8 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 
     when File.at(cpath.to[CStr]().getview()).read_all_result(alloc)
         is Memory[Byte] as text =>
-            n: USize = text.count()
-            buf: Addr = c_realloc(null, n + 1)
+            n: U64 = text.count()
+            buf: Addr = c_realloc(null, (n + 1).to[CSize]())
             if buf.is_null()
                 drop text
                 return -1
@@ -494,7 +494,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 ### :returns: The bytes written, or -1 on a failure.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
     r: Result[None, FsError] = File.at(cpath.to[CStr]().getview()).write_all_result(Span[Byte].construct(
-        data, count: len.max(0).to[USize]()))
+        data, count: len.max(0).to[U64]()))
     if r.is_success()
         return len.max(0)
     else
@@ -515,7 +515,7 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
     local second: Span[Byte] = path_of(path: b, len: b_len)
     local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
 
-    joined_count: USize = first.count() + second.count()
+    joined_count: U64 = first.count() + second.count()
     if not out.start(joined_count + 2)
         return out.fail()
     out[first.data] = first.count()
@@ -740,16 +740,16 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 ### :param v: The value.
 ### :param out: Where the digits go, room for 20.
 ### :returns: The digit count.
-routine decimal(v: U64, out: @Byte) -> USize
+routine decimal(v: U64, out: @Byte) -> U64
     local rev_buffer: @Array[Byte, 24] <- .hollow()
     local rev: @Byte = rev_buffer.to[@Byte]()
 
-    while true with remaining: U64 = v, n: USize = 0
+    while true with remaining: U64 = v, n: U64 = 0
         digit_value2: U8 = (remaining % 10).to[U8]()
         rev.stride(n).poke((digit_value2 + 48).bits())
         rest2: U64 = remaining // 10
         if rest2 == 0
-            n2: USize = n + 1
+            n2: U64 = n + 1
 
             each i in 0 til n2
                 out.stride(i).poke(rev.stride(n2 - 1 - i).peek())
@@ -769,13 +769,13 @@ routine ResultBuffer.entry(me: @Me, name: Span[Byte], typed: Bool, is_dir: Bool,
     local digit_buffer: @Array[Byte, 24] <- .hollow()
     local digits: @Byte = digit_buffer.to[@Byte]()
 
-    dl: USize = when
+    dl: U64 = when
         typed => decimal(v: mtime.max(0).to[U64](), out: digits)
         else => 0
-    sep: USize = when
+    sep: U64 = when
         me.len.peek() > 0 => 1
         else => 0
-    kind: USize = when
+    kind: U64 = when
         typed => dl + 2
         else => 0
     if not me.room(sep + kind + name.count())
@@ -980,7 +980,7 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
 ### :param size: The new size in bytes.
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_size")
-routine rf_fs_set_size(path: @Byte, path_len: S32, size: USize) -> S32
+routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
     local p: Span[Byte] = path_of(path, len: path_len)
 
     r: Result[FileHandle, FsError] = File.at(p).open_read_write_result()
@@ -1020,7 +1020,7 @@ routine advise(m: Mapping) -> None
 routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
     r: Result[Mapping, FsError] = File.at(path_of(path,
-        len)).map_result(write, offset: 0, count: USize.MAX)
+        len)).map_result(write, offset: 0, count: U64.MAX)
     m: Mapping = when r
         is Mapping as m => m
         is FsError => return no_result()
@@ -1041,7 +1041,7 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 ### :param count: The window's length.
 ### :param write: True for a writable view, false for a read-only one.
 ### :returns: The base, the empty-map marker, or null on a failure.
-routine map_window(path: Span[Byte], offset: USize, count: USize, write: Bool) -> @Byte
+routine map_window(path: Span[Byte], offset: U64, count: U64, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
     r: Result[Mapping, FsError] = File.at(path).map_result(write, offset: offset.to[U64](), count)
     m: Mapping = when r
@@ -1081,7 +1081,7 @@ routine rf_file_map_path_rw(path: @Byte, path_len: S32) -> @Byte
 ### :param count: The window's length.
 ### :returns: The base, the empty-map marker for an empty window, or null on a failure.
 @export("rf_file_map_path_range")
-routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
+routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: U64, count: U64) -> @Byte
     return map_window(path: path_of(path, len: path_len), offset, count, write: false)
 
 ### Maps a window of a file for reading and writing, its offset from the base in {rf_file_map_delta}.
@@ -1091,7 +1091,7 @@ routine rf_file_map_path_range(path: @Byte, path_len: S32, offset: USize, count:
 ### :param count: The window's length.
 ### :returns: The base, the empty-map marker for an empty window, or null on a failure.
 @export("rf_file_map_path_range_rw")
-routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, count: USize) -> @Byte
+routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: U64, count: U64) -> @Byte
     return map_window(path: path_of(path, len: path_len), offset, count, write: true)
 
 ### Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
@@ -1099,7 +1099,7 @@ routine rf_file_map_path_range_rw(path: @Byte, path_len: S32, offset: USize, cou
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
 @export("rf_file_unmap")
-routine rf_file_unmap(ptr: @Byte, len: USize) -> None
+routine rf_file_unmap(ptr: @Byte, len: U64) -> None
     if ptr.is_null() or len == 0
         return
     m: Mapping = Mapping(base: ptr, delta: 0, count: len)
@@ -1110,7 +1110,7 @@ routine rf_file_unmap(ptr: @Byte, len: USize) -> None
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
 @export("rf_file_map_flush")
-routine rf_file_map_flush(ptr: @Byte, len: USize) -> None
+routine rf_file_map_flush(ptr: @Byte, len: U64) -> None
     if ptr.is_null() or len == 0
         return
     m: Mapping = Mapping(base: ptr, delta: 0, count: len)

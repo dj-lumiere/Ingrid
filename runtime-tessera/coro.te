@@ -30,7 +30,7 @@ preset CORO_CANCELLED: U32 = 4
 
 ### A coroutine's stack reserve when the caller gives 0: reserved, not committed, so a parked shallow coroutine
 ### costs about the pages it has touched.
-preset DEFAULT_STACK: USize = 1048576
+preset DEFAULT_STACK: U64 = 1048576
 
 ### rf_cancel_frame: one live owned value of a coroutine, in a node that lives in the scope owning the value.
 record CancelFrame
@@ -46,7 +46,7 @@ record Coro
     cf_top: @CancelFrame  # the cancellation shadow stack's top
     sched_next: @Coro  # the injector's link
     wake_ns: U64  # the deadline it is parked until
-    timer_idx: SSize  # its slot in the scheduler's timer heap, or -1
+    timer_idx: S64  # its slot in the scheduler's timer heap, or -1
     sched_state: U32  # a SCHED_ value (sched.te)
     park_intent: U32  # a PARK_ value, recorded by a park and applied by the worker
     counted_done: Bool  # its completion has been taken off the scheduler's live count
@@ -96,7 +96,7 @@ routine CancelFrame.destruct(me: @Me) -> None
 ### :param resumer_sp: Its `resumer_sp`.
 ### :returns: The new value.
 routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
-    cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: SSize, sched_state: U32,
+    cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
     stack: Addr, sp: Addr, resumer_sp: Addr) -> Me
@@ -136,7 +136,7 @@ routine coro_trampoline() -> None
 ### Reserves a coroutine stack from Standard/Fiber's stack allocator.
 ### :param size: The stack's reserve in bytes.
 ### :returns: The stack's bottom, or null when it can't be reserved.
-routine stack_alloc(size: USize) -> Addr
+routine stack_alloc(size: U64) -> Addr
     local stacks: @MemoryManager <- make_stack_memory()
 
     stack: Addr = stacks.alloc(size, align: 16)
@@ -158,7 +158,7 @@ routine stack_free(stack: Addr) -> None
 ### :returns: The new coroutine, or null when `entry` is null.
 ### :throws: Crashes with `OutOfMemoryError` when the control block or the stack can't be allocated.
 @export("rf_coro_create")
-routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_size: USize) -> @Coro
+routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_size: U64) -> @Coro
     if entry.addr().is_null()
         return null
     coro: @Coro = zeroed[Coro](count: 1, what: "Failed to allocate coroutine control block")
@@ -166,7 +166,7 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
     coro.userdata.poke(userdata)
     coro.timer_idx.poke(-1)
     coro.completion_seq.poke(U64.MAX)
-    reserve: USize = when
+    reserve: U64 = when
         stack_size == 0 => DEFAULT_STACK
         else => stack_size
     stack: Addr = stack_alloc(reserve)
