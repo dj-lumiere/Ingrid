@@ -142,7 +142,7 @@ routine rf_sched_park_deadline(delay_ns: U64) -> None
     sig: @Monitor = CAST_DURING_PARK.peek()
     if sig.is_hollow()
         Out.write("  parked with a deadline, no cast comes\n")
-        sleep_until(monotonic_ns() + delay_ns)
+        sleep_until(monotonic_now() + Duration.from_nanoseconds(delay_ns))
         return
     else
         Out.write("  parked with a deadline, a cast comes\n")
@@ -151,15 +151,15 @@ routine rf_sched_park_deadline(delay_ns: U64) -> None
 
 # -- helpers -------------------------------------------------------------------------
 
-### Sleeps the thread until `deadline`, in monotonic_ns.
-routine sleep_until(deadline: U64) -> None
+### Sleeps the thread until `deadline`, in monotonic_now time.
+routine sleep_until(deadline: Duration) -> None
     local never: @U32 <- 0
 
     while true
-        now2: U64 = monotonic_ns()
+        now2: Duration = monotonic_now()
         if now2 >= deadline
             return
-        wait_on_for(at: never, expected: 0, timeout_ns: deadline - now2)
+        wait_on_for(at: never, expected: 0, timeout: deadline - now2)
 
 ### The coroutines on the SignalCaster's wait list.
 routine count_waiters(sig: @Monitor) -> U64
@@ -175,11 +175,11 @@ routine count_waiters(sig: @Monitor) -> U64
 ### may return without a cast).
 ### :returns: The last wait's result, 0 once the time is up.
 routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
-    local deadline: U64 = monotonic_ns() + timeout_ns
+    local deadline: Duration = monotonic_now() + Duration.from_nanoseconds(timeout_ns)
 
     while true
-        left2: U64 = deadline -^ monotonic_ns()
-        result2: U32 = rf_signal_wait_deadline(sig, timeout_ns: left2)
+        left2: Duration = deadline -^ monotonic_now()
+        result2: U32 = rf_signal_wait_deadline(sig, timeout_ns: left2.nanoseconds())
         if result2 == 1
             continue
         else
@@ -314,11 +314,11 @@ routine start() -> None
     sig: @Monitor = rf_signal_create()
     coroutines(sig)
     rf_signal_lock(sig)
-    start: U64 = monotonic_ns()
+    start: Duration = monotonic_now()
     result: U32 = wait_out(sig, timeout_ns: 2000000)
-    waited: U64 = monotonic_ns() - start
+    waited: Duration = monotonic_now() - start
     rf_signal_unlock(sig)
-    Out.write("a thread waits with a deadline: result {result}, waited it out {waited.ge(2000000)}\n")
+    Out.write("a thread waits with a deadline: result {result}, waited it out {waited.ge(2ms)}\n")
     local tokens: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     t1: Thread[None] = get_thread[None]()
     t1.put_work(entry: take_token.to[Callable](), args: tokens)

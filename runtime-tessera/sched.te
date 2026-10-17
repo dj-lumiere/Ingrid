@@ -56,7 +56,7 @@ preset PARK_YIELD:    U32 = 3  # queued again at once, behind the others
 ### The all-idle condition must hold this many times in a row, each after a grace wait, before it is a deadlock.
 preset DEADLOCK_CONFIRMS: U64 = 3
 
-preset DEADLOCK_GRACE_NS: U64 = 2000000
+preset DEADLOCK_GRACE: Duration = 2ms
 preset WORKERS_MAX: U64 = 4096
 
 ### A worker's run deque: a ring of coroutines, its capacity a power of two.
@@ -506,7 +506,7 @@ routine rf_sched_park_timer(delay_ns: U64) -> None
     this_coro: @Coro = current_coro()
     if current_sched().is_hollow() or this_coro.is_hollow()
         return
-    this_coro.wake_ns.poke(monotonic_ns() +^ delay_ns)
+    this_coro.wake_ns.poke((monotonic_now() +^ Duration.from_nanoseconds(delay_ns)).nanoseconds())
     this_coro.park_intent.poke(PARK_TIMER)
     coro_switch_out()
     return
@@ -743,16 +743,17 @@ routine Sched.step(me: @Me) -> Bool
             if found_coro2.is_hollow()
                 if me.timer_count.peek() > 0
                     # A timer pending is progress waiting to happen, never a deadlock: wait out the earliest one.
-                    now: U64 = monotonic_ns()
+                    now: U64 = monotonic_now().nanoseconds()
                     deadline: U64 = me.timer_at(0).wake_ns.peek()
                     if deadline > now
                         more_idle: S64 = me.workers_idle.peek() + 1
                         more_idle.poke_into(me.workers_idle)
-                        me.cond.wait_until(mutex: me.lock, deadline_ns: deadline)
+                        me.cond.wait_until(mutex: me.lock,
+                            deadline: Duration.from_nanoseconds(deadline))
                         fewer_idle: S64 = me.workers_idle.peek() - 1
                         fewer_idle.poke_into(me.workers_idle)
 
-                    now2: U64 = monotonic_ns()
+                    now2: U64 = monotonic_now().nanoseconds()
 
                     while me.timer_count.peek() > 0
                         earliest_wake: U64 = me.timer_at(0).wake_ns.peek()
@@ -783,7 +784,7 @@ routine Sched.step(me: @Me) -> Bool
                         else
                             more_idle: S64 = me.workers_idle.peek() + 1
                             more_idle.poke_into(me.workers_idle)
-                            me.cond.wait_for(mutex: me.lock, timeout_ns: DEADLOCK_GRACE_NS)
+                            me.cond.wait_for(mutex: me.lock, timeout: DEADLOCK_GRACE)
                             fewer_idle: S64 = me.workers_idle.peek() - 1
                             fewer_idle.poke_into(me.workers_idle)
                             me.lock.unlock()
@@ -886,7 +887,7 @@ routine rf_sched_current() -> @Sched
 # -- the process pool ----------------------------------------------------------------
 
 ### How long a plain thread that waits on something else sleeps between turns of its start_here() jobs.
-preset HERE_POLL_NS: U64 = 1000000
+preset HERE_POLL: Duration = 1ms
 
 ### A worker's start: its scheduler and index, freed by the worker.
 record WorkerStart
@@ -1006,7 +1007,7 @@ routine run_here_ready() -> Bool
         return false
     here.lock.lock()
 
-    now: U64 = monotonic_ns()
+    now: U64 = monotonic_now().nanoseconds()
 
     while here.timer_count.peek() > 0
         earliest_wake: U64 = here.timer_at(0).wake_ns.peek()
@@ -1026,7 +1027,7 @@ routine run_here_ready() -> Bool
     return true
 
 ### Waits on a pool's block_cond with its lock held. With start_here() jobs live on this thread, it runs one that is
-### ready, or sleeps at most HERE_POLL_NS, so those jobs go on while this thread waits on something else.
+### ready, or sleeps at most HERE_POLL, so those jobs go on while this thread waits on something else.
 routine Sched.block_wait(me: @Me) -> None
     if not here_has_live()
         me.block_cond.wait(me.lock)
@@ -1037,7 +1038,7 @@ routine Sched.block_wait(me: @Me) -> None
         me.lock.lock()
         if ran
             return
-        me.block_cond.wait_for(mutex: me.lock, timeout_ns: HERE_POLL_NS)
+        me.block_cond.wait_for(mutex: me.lock, timeout: HERE_POLL)
         return
 
 ### Spawns a new coroutine onto the process pool (start_now()).
