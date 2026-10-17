@@ -48,8 +48,18 @@ routine rf_context_runtime_spawn(runtime: @ContextRuntime, entry: Callable[(Addr
     entry.call(userdata)
     return 1
 
+### The word a thread's `waitfor` waits on: the cancel flag of the threaded task it runs, or `otherwise` on a plain
+### thread.
+### :param otherwise: The word for a plain thread.
+### :returns: The word.
+routine cancel_word(otherwise: @U32) -> @U32
+    task: @Task = current_task()
+    if task.is_hollow()
+        return otherwise
+    return task.cancel_requested
+
 ### Blocks the calling thread for `duration_seconds` plus `duration_nanoseconds`, on the monotonic clock. A negative
-### `duration_seconds` returns at once.
+### `duration_seconds` returns at once, and so does a threaded task that is asked to stop while it waits.
 ### :param duration_seconds: The whole seconds to wait.
 ### :param duration_nanoseconds: The extra nanoseconds to wait.
 @export("rf_waitfor_duration")
@@ -63,8 +73,11 @@ routine rf_waitfor_duration(duration_seconds: S64, duration_nanoseconds: U32) ->
 
     deadline: Duration = monotonic_now() +^ Duration.from_nanoseconds(span)
 
+    # A threaded task waits on its own cancel flag, so a cancel ends the wait early. A plain thread waits on a word
+    # nothing changes.
+    word: @U32 = cancel_word(otherwise: never)
     while true
         now2: Duration = monotonic_now()
-        if now2 >= deadline
+        if now2 >= deadline or word.peek_atomic() != 0
             return
-        wait_on_for(at: never, expected: 0, timeout: deadline - now2)
+        wait_on_for(at: word, expected: 0, timeout: deadline - now2)

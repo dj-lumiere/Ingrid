@@ -539,6 +539,26 @@ routine rf_coro_yield() -> None
     coro_switch_out()
     return
 
+### Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
+### coroutine parked on a timer (`waitfor`) is woken now, so its wait ends early. A null `coro` does nothing.
+### :param coro: The coroutine.
+@export("rf_coro_request_cancel")
+routine rf_coro_request_cancel(coro: @Coro) -> None
+    if coro.is_hollow()
+        return
+    coro.cancel_requested.poke_atomic(1)
+    s: @Sched = coro.home.peek()
+    if s.is_hollow()
+        return
+    # Under the scheduler lock: either the worker parking it has not taken the lock yet and sees the flag, or the
+    # coroutine is on the timer heap already and is taken off it here.
+    s.lock.lock()
+    if coro.timer_idx.peek() >= 0 and coro.sched_state.peek_atomic() == SCHED_IDLE
+        s.make_ready(coro)
+        s.cond.cast_one()
+    s.lock.unlock()
+    return
+
 ### Makes a parked coroutine runnable, from any thread, and wakes an idle worker when it was parked. A null `s` or `c`
 ### does nothing.
 ### :param s: The coroutine's scheduler.
@@ -682,6 +702,11 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
             me.lock.lock()
             when
                 c.sched_state.peek_atomic() == SCHED_NOTIFIED =>
+                    me.enqueue_ready(c)
+                    me.lock.unlock()
+                    return
+                intent == PARK_TIMER and c.cancel_requested.peek_atomic() != 0 =>
+                    # Asked to stop while it was parking: its wait ends now.
                     me.enqueue_ready(c)
                     me.lock.unlock()
                     return
