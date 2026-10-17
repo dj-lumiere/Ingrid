@@ -74,6 +74,9 @@ global IO_OK: @U32
 ### The length of the last read, set just before rf_io_read_file_all returns and read right after.
 @threadlocal
 global IO_LAST_LEN: @U64
+### Whether this thread's last rf_io_read_file_all or rf_io_write_file_all failed, set just before it returns.
+@threadlocal
+global IO_LAST_FAILED: @Bool
 
 record IoReq
     kind: U32
@@ -115,6 +118,13 @@ routine IoReq.destruct(me: @Me) -> None
 @export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
     return IO_LAST_LEN.peek()
+
+### Whether this thread's last {rf_io_read_file_all} or {rf_io_write_file_all} failed. It tells an empty file
+### from a failed read, since both give null with length 0.
+### :returns: True when that call failed.
+@export("rf_io_last_failed")
+routine rf_io_last_failed() -> Bool
+    return IO_LAST_FAILED.peek()
 
 ### Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
 ### and stores the results in `req`.
@@ -227,7 +237,7 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     return req
 
 ### Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
-### rf_io_get_result_len, or null (length 0) on an error.
+### rf_io_get_result_len, or null (length 0) on an error. {rf_io_last_failed} tells an error from an empty file.
 ### :param path: The file's path.
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
 ### :returns: The contents, or null.
@@ -240,6 +250,7 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     result: S64 = req.result.peek()
     c_free(req.path.peek())
     c_free(req)
+    IO_LAST_FAILED.poke(result < 0)
     if result < 0
         IO_LAST_LEN.poke(0)
         return null
@@ -247,8 +258,9 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
         IO_LAST_LEN.poke(result.to[U64]())
         return data
 
-### Writes data_len bytes of data to the file (truncating it): the bytes written, or -1. The payload is copied, so
-### the caller's buffer needn't outlive the call. A negative `data_len` writes nothing.
+### Writes data_len bytes of data as the whole content of the existing file (emptied first): the bytes written, or
+### -1, a missing file included (nothing is made). The payload is copied, so the caller's buffer needn't outlive the
+### call. A negative `data_len` writes nothing. {rf_io_last_failed} tells whether it failed.
 ### :param path: The file's path.
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
 ### :param data: The bytes to write.
@@ -270,6 +282,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
         req.data.poke(buf.to[@Byte]())
     io_run(req)
     result: S64 = req.result.peek()
+    IO_LAST_FAILED.poke(result < 0)
     c_free(req.data.peek())
     c_free(req.path.peek())
     c_free(req)
@@ -393,9 +406,9 @@ record ProcState
 ### :param errors_count: Its `errors_count`.
 ### :returns: The new value.
 routine ProcState.construct(shell: Bool, program: @[Byte], args: @@[Byte], arg_count: U64,
-    arg_cap: U64, directory: @[Byte], env: @EnvVar, env_count: U64, env_cap: U64,
-    exit_status: S64, term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: U64,
-    errors: @Byte, errors_count: U64) -> Me
+    arg_cap: U64, directory: @[Byte], env: @EnvVar, env_count: U64, env_cap: U64, exit_status: S64,
+    term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: U64, errors: @Byte,
+    errors_count: U64) -> Me
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
         exit_status, term_signal, spawn_failed, output, output_count, errors, errors_count)
 
@@ -507,8 +520,7 @@ routine run_state(st: @ProcState, options: ProcessOptions,
     alloc: @MemoryManager) -> Result[ProcessOutput, ProcessError]
     if st.shell.peek()
         return run_shell_result(command: st.program.peek(), options, alloc)
-    args: @[@[Byte]] = @[@[Byte]].construct(data: st.args.peek(),
-        count: st.arg_count.peek())
+    args: @[@[Byte]] = @[@[Byte]].construct(data: st.args.peek(), count: st.arg_count.peek())
     return run_process_result(program: st.program.peek(), args, options, alloc)
 
 ### Runs the prepared subprocess, on whatever thread calls it, filling in how it went: the captured streams and the

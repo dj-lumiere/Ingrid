@@ -243,18 +243,20 @@ routine open_file(fd: S32) -> @OpenFile
     else
         return null
 
-### Opens a file. mode: 0 read, 1 write, 2 append. A handle, or -1.
+### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or -1. No mode makes a
+### missing file: rf_fs_make_file does.
 ### :param path: The file's path.
 ### :param path_len: The path's length.
 ### :param mode: 0 read, 1 write, 2 append.
-### :returns: The handle, or -1 for a bad mode, a failure to open, no buffer, or no free slot (256 at once).
+### :returns: The handle, or -1 for a bad mode, a missing file or another failure to open, no buffer, or no free
+###     slot (256 at once).
 @export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     values: (Result[FileHandle, FsError], Bool) = when mode
-        0 => (File.at(p).open_read_result(), false)
-        1 => (File.at(p).open_write_result(), true)
-        2 => (File.at(p).open_append_result(), true)
+        0 => (FileManager.open_read_result(at: File.at(p)), false)
+        1 => (FileManager.open_write_result(at: File.at(p)), true)
+        2 => (FileManager.open_append_result(at: File.at(p)), true)
         else => return -1
     r, writer = values
     f: FileHandle = when r
@@ -473,7 +475,7 @@ routine rf_file_is_eof(fd: S32) -> Bool
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     local alloc: @MemoryManager <- heap()
 
-    when File.at(cpath.to[CStr]().getview()).read_all_result(alloc)
+    when FileManager.read_all_result(at: File.at(cpath.to[CStr]().getview()), alloc)
         is Memory[Byte] as text =>
             n: U64 = text.count()
             buf: Addr = c_realloc(null, (n + 1).to[CSize]())
@@ -487,14 +489,15 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
             return n.to[S64]()
         is FsError => return -1
 
-### `len` bytes of `data` as the NUL-terminated path's whole file: `len`, or -1.
+### `len` bytes of `data` as the whole content of the existing file at the NUL-terminated path: `len`, or -1 (a
+### missing file included: nothing is made).
 ### :param cpath: The NUL-terminated path.
 ### :param data: The bytes.
 ### :param len: The number of bytes, negative for none.
 ### :returns: The bytes written, or -1 on a failure.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
-    r: Result[None, FsError] = File.at(cpath.to[CStr]().getview()).write_all_result(@[Byte].construct(
-        data, count: len.max(0).to[U64]()))
+    r: Result[None, FsError] = FileManager.write_all_result(at: File.at(cpath.to[CStr]().getview()),
+        data: @[Byte].construct(data, count: len.max(0).to[U64]()))
     if r.is_success()
         return len.max(0)
     else
@@ -530,8 +533,14 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
 ### :returns: The parent, or null (length 0) when the allocation fails.
 @export("rf_fs_parent_path")
 routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
-    p: @[Byte] = parent_path(path_of(path, len))
-    return bytes_result(s: p.data, len: p.count())
+    local file: @File <- File.at(path_of(path, len))
+    local parent: @Directory <- file.parent()
+
+    p: @[Byte] = parent.path.peek()
+    copied: @Byte = bytes_result(s: p.data, len: p.count())
+    drop parent
+    drop file
+    return copied
 
 ### The last component: "/a/b/file.txt" gives "file.txt".
 ### :param path: The path.
@@ -539,8 +548,12 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
 ### :returns: The name, or null (length 0) when the allocation fails.
 @export("rf_fs_file_name")
 routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
-    n: @[Byte] = file_name(path_of(path, len))
-    return bytes_result(s: n.data, len: n.count())
+    local file: @File <- File.at(path_of(path, len))
+
+    n: @[Byte] = file.name()
+    copied: @Byte = bytes_result(s: n.data, len: n.count())
+    drop file
+    return copied
 
 ### The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
 ### :param path: The path.
@@ -548,8 +561,12 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
 ### :returns: The stem, or null (length 0) when the allocation fails.
 @export("rf_fs_file_stem")
 routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
-    s: @[Byte] = file_stem(path_of(path, len))
-    return bytes_result(s: s.data, len: s.count())
+    local file: @File <- File.at(path_of(path, len))
+
+    s: @[Byte] = file.stem()
+    copied: @Byte = bytes_result(s: s.data, len: s.count())
+    drop file
+    return copied
 
 ### The extension without its dot: "file.txt" gives "txt", "file" gives "".
 ### :param path: The path.
@@ -557,8 +574,12 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
 ### :returns: The extension, or null (length 0) when the allocation fails.
 @export("rf_fs_extension")
 routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
-    e: @[Byte] = file_extension(path_of(path, len))
-    return bytes_result(s: e.data, len: e.count())
+    local file: @File <- File.at(path_of(path, len))
+
+    e: @[Byte] = file.extension()
+    copied: @Byte = bytes_result(s: e.data, len: e.count())
+    drop file
+    return copied
 
 # -- existence, kind, permissions ------------------------------------------------------
 
@@ -568,7 +589,7 @@ routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
 ### :returns: True when it exists.
 @export("rf_fs_exists")
 routine rf_fs_exists(path: @Byte, len: S32) -> Bool
-    return File.at(path_of(path, len)).is_present()
+    return FileManager.is_present(at: File.at(path_of(path, len)))
 
 ### Whether the path is a file.
 ### :param path: The path.
@@ -576,7 +597,7 @@ routine rf_fs_exists(path: @Byte, len: S32) -> Bool
 ### :returns: True for a file.
 @export("rf_fs_is_file")
 routine rf_fs_is_file(path: @Byte, len: S32) -> Bool
-    return File.at(path_of(path, len)).is_file()
+    return FileManager.is_file(at: File.at(path_of(path, len)))
 
 ### Whether the path is a directory.
 ### :param path: The path.
@@ -584,7 +605,7 @@ routine rf_fs_is_file(path: @Byte, len: S32) -> Bool
 ### :returns: True for a directory.
 @export("rf_fs_is_directory")
 routine rf_fs_is_directory(path: @Byte, len: S32) -> Bool
-    return Directory.at(path_of(path, len)).is_present()
+    return FileManager.is_directory(at: Directory.at(path_of(path, len)))
 
 ### Whether the path can be read.
 ### :param path: The path.
@@ -592,7 +613,7 @@ routine rf_fs_is_directory(path: @Byte, len: S32) -> Bool
 ### :returns: True when it is readable.
 @export("rf_fs_can_read")
 routine rf_fs_can_read(path: @Byte, len: S32) -> Bool
-    return File.at(path_of(path, len)).is_accessible(Access.READ)
+    return FileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.READ)
 
 ### Whether the path can be written.
 ### :param path: The path.
@@ -600,7 +621,7 @@ routine rf_fs_can_read(path: @Byte, len: S32) -> Bool
 ### :returns: True when it is writable.
 @export("rf_fs_can_write")
 routine rf_fs_can_write(path: @Byte, len: S32) -> Bool
-    return File.at(path_of(path, len)).is_accessible(Access.WRITE)
+    return FileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.WRITE)
 
 ### Whether the path can be executed.
 ### :param path: The path.
@@ -608,7 +629,7 @@ routine rf_fs_can_write(path: @Byte, len: S32) -> Bool
 ### :returns: True when it is executable.
 @export("rf_fs_can_execute")
 routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
-    return File.at(path_of(path, len)).is_accessible(Access.EXECUTE)
+    return FileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.EXECUTE)
 
 ### Sets or clears the read-only permission of the path.
 ### :param path: The path.
@@ -617,7 +638,7 @@ routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_readonly")
 routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
-    return status(File.at(path_of(path, len)).set_readonly_result(readonly))
+    return status(FileManager.set_readonly_result(at: File.at(path_of(path, len)), readonly))
 
 # -- directories, copy, move, remove ---------------------------------------------------
 
@@ -627,7 +648,8 @@ routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_create_dir")
 routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
-    return status(Directory.at(path_of(path, len)).create_result())
+    return status(FileManager.make_directory_result(at: Directory.at(path_of(path, len)),
+        parents: false))
 
 ### Creates a directory and its missing parents, like mkdir -p: it already existing is fine.
 ### :param path: The path.
@@ -635,7 +657,8 @@ routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_create_dir_all")
 routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
-    return status(Directory.at(path_of(path, len)).create_all_result())
+    return status(FileManager.make_directory_result(at: Directory.at(path_of(path, len)),
+        parents: true))
 
 ### Removes a file, or an empty directory (a link is removed, not followed).
 ### :param path: The path.
@@ -645,13 +668,13 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
     local p: @[Byte] = path_of(path, len)
 
-    m: Result[Metadata, FsError] = File.at(p).link_metadata_result()
+    m: Result[Metadata, FsError] = FileManager.link_metadata_result(at: File.at(p))
     when m
         is Metadata as info =>
             if info.kind == FileKind.DIRECTORY
-                return status(Directory.at(p).delete_result())
+                return status(FileManager.delete_result(at: Directory.at(p)))
             else
-                return status(File.at(p).delete_result())
+                return status(FileManager.delete_result(at: File.at(p)))
         is FsError => return -1
 
 ### Removes a directory and everything in it (a link is removed, not followed), or a file.
@@ -662,9 +685,9 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
     local alloc: @MemoryManager <- heap()
 
-    return status(Directory.at(path_of(path, len)).delete_all_result(alloc))
+    return status(FileManager.delete_all_result(at: Directory.at(path_of(path, len)), alloc))
 
-### Copies a file.
+### Copies a file, replacing what is at the destination.
 ### :param src: The source path.
 ### :param src_len: Its length.
 ### :param dst: The destination path.
@@ -672,23 +695,49 @@ routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
-    copied: Result[U64, FsError] = File.at(path_of(path: src,
-        len: src_len)).copy_to_result(File.at(path_of(path: dst, len: dst_len)))
+    copied: Result[U64, FsError] = FileManager.copy_result(
+        from: File.at(path_of(path: src, len: src_len)),
+        to: File.at(path_of(path: dst, len: dst_len)), replacing: true)
     if copied.is_success()
         return 0
     else
         return -1
 
+### Copies a file unless something is at the destination.
+### :param src: The source path.
+### :param src_len: Its length.
+### :param dst: The destination path.
+### :param dst_len: Its length.
+### :returns: 0 copied, 1 the destination exists (nothing copied), -1 an error.
+@export("rf_fs_copy_no_replace")
+routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+    copied: Result[U64, FsError] = FileManager.copy_result(
+        from: File.at(path_of(path: src, len: src_len)),
+        to: File.at(path_of(path: dst, len: dst_len)), replacing: false)
+    when copied
+        is U64 => return 0
+        is FsError as error =>
+            if error == FsError.ALREADY_EXISTS
+                return 1
+            else
+                return -1
+
 ### A rename between filesystems, as a copy and a removal.
 ### :param a: The source path.
 ### :param b: The destination path.
-### :returns: 0, or -1 when the copy or the removal fails.
-routine move_across(a: @[Byte], b: @[Byte]) -> S32
-    copied: Result[U64, FsError] = File.at(a).copy_to_result(File.at(b))
-    if copied.is_success()
-        return status(File.at(a).delete_result())
-    else
-        return -1
+### :param replacing: Whether a file at `b` is replaced.
+### :returns: 0, 1 when something is at `b` and `replacing` is false (nothing moved), or -1 when the copy or the
+###     removal fails.
+routine move_across(a: @[Byte], b: @[Byte], replacing: Bool) -> S32
+    copied: Result[U64, FsError] = FileManager.copy_result(from: File.at(a), to: File.at(b),
+        replacing)
+    when copied
+        is U64 => return status(FileManager.delete_result(at: File.at(a)))
+        is FsError as error =>
+            if error == FsError.ALREADY_EXISTS and not replacing
+                return 1
+            else
+                return -1
 
 ### Renames, replacing what is there. Between filesystems it is a copy and a removal.
 ### :param src: The source path.
@@ -701,12 +750,13 @@ routine rf_fs_move(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     local a: @[Byte] = path_of(path: src, len: src_len)
     local b: @[Byte] = path_of(path: dst, len: dst_len)
 
-    r: Result[None, FsError] = File.at(a).move_to_result(File.at(b))
+    r: Result[None, FsError] = FileManager.move_result(from: File.at(a), to: File.at(b),
+        replacing: true)
     error: FsError = when r
         is None => return 0
         is FsError as error => error
     if error == FsError.CROSS_DEVICE
-        return move_across(a, b)
+        return move_across(a, b, replacing: true)
     else
         return -1
 
@@ -721,17 +771,14 @@ routine rf_fs_move_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
     local a: @[Byte] = path_of(path: src, len: src_len)
     local b: @[Byte] = path_of(path: dst, len: dst_len)
 
-    r: Result[None, FsError] = File.at(a).move_to_if_absent_result(File.at(b))
+    r: Result[None, FsError] = FileManager.move_result(from: File.at(a), to: File.at(b),
+        replacing: false)
     error: FsError = when r
         is None => return 0
         is FsError as error => error
     when
         error == FsError.ALREADY_EXISTS => return 1
-        error == FsError.CROSS_DEVICE =>
-            if File.at(b).is_present()
-                return 1
-            else
-                return move_across(a, b)
+        error == FsError.CROSS_DEVICE => return move_across(a, b, replacing: false)
         else => return -1
 
 # -- listings --------------------------------------------------------------------------
@@ -801,9 +848,10 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
     local out: @ResultBuffer <- ResultBuffer(buf: null, len: 0, cap: 0)
     local iter: @DirIter <- .hollow()
 
-    # Every exit closes the listing (open_result, the first step, sets the handle before anything can fail, so
-    # close() is safe on every path) and hands the text back whole or frees it.
-    opened: Result[None, FsError] = iter.open_result(Directory.at(path_of(path, len)))
+    # Every exit closes the listing (FileManager.list_result, the first step, sets the handle before anything can
+    # fail, so close() is safe on every path) and hands the text back whole or frees it.
+    opened: Result[None, FsError] = FileManager.list_result(at: Directory.at(path_of(path, len)),
+        iter)
     if not opened.is_success() or not out.start(256)
         iter.close()
         return out.fail()
@@ -890,7 +938,7 @@ routine rf_fs_meta_readonly() -> Bool
 ### :returns: 0, or -1 on a failure (the cached values stay as they were).
 @export("rf_fs_metadata")
 routine rf_fs_metadata(path: @Byte, len: S32) -> S32
-    m: Result[Metadata, FsError] = File.at(path_of(path, len)).metadata_result()
+    m: Result[Metadata, FsError] = FileManager.metadata_result(at: File.at(path_of(path, len)))
     info: Metadata = when m
         is Metadata as info => info
         is FsError => return -1
@@ -907,7 +955,7 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
 ### :returns: The size in bytes, or -1 on a failure.
 @export("rf_fs_file_size")
 routine rf_fs_file_size(path: @Byte, len: S32) -> S64
-    m: Result[Metadata, FsError] = File.at(path_of(path, len)).metadata_result()
+    m: Result[Metadata, FsError] = FileManager.metadata_result(at: File.at(path_of(path, len)))
     when m
         is Metadata as info => return info.size.to_wrap[S64]()
         is FsError => return -1
@@ -920,7 +968,7 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 routine rf_fs_current_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(Directory.current_result(alloc))
+    return path_result(FileManager.current_directory_result(alloc))
 
 ### Changes the working directory.
 ### :param path: The directory's path.
@@ -928,7 +976,7 @@ routine rf_fs_current_dir() -> @Byte
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_current_dir")
 routine rf_fs_set_current_dir(path: @Byte, len: S32) -> S32
-    return status(Directory.at(path_of(path, len)).set_current_result())
+    return status(FileManager.set_current_directory_result(at: Directory.at(path_of(path, len))))
 
 ### The directory for temporary files.
 ### :returns: The path, or null (length 0) on a failure.
@@ -936,7 +984,7 @@ routine rf_fs_set_current_dir(path: @Byte, len: S32) -> S32
 routine rf_fs_temp_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(Directory.temp_result(alloc))
+    return path_result(FileManager.temp_directory_result(alloc))
 
 ### The user's home directory, or null when it can't be told.
 ### :returns: The path, or null (length 0).
@@ -944,15 +992,25 @@ routine rf_fs_temp_dir() -> @Byte
 routine rf_fs_home_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(Directory.home_result(alloc))
+    return path_result(FileManager.home_directory_result(alloc))
 
-### Makes the file if it is missing, and sets its modification time to now.
+### Makes an empty file. The directory it goes in must exist.
 ### :param path: The path.
 ### :param len: Its length.
-### :returns: 0, or -1 on a failure.
-@export("rf_fs_touch")
-routine rf_fs_touch(path: @Byte, len: S32) -> S32
-    return status(File.at(path_of(path, len)).touch_result())
+### :param replacing: Whether a file already there is emptied. When false, one there is left as it is.
+### :returns: 0 made (or emptied when `replacing`), 1 something is there and `replacing` is false, -1 any other
+###     failure.
+@export("rf_fs_make_file")
+routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
+    made: Result[None, FsError] = FileManager.make_file_result(at: File.at(path_of(path, len)),
+        replacing)
+    when made
+        is None => return 0
+        is FsError as error =>
+            if error == FsError.ALREADY_EXISTS and not replacing
+                return 1
+            else
+                return -1
 
 ### The absolute path by the text alone (links kept).
 ### :param path: The path.
@@ -962,7 +1020,7 @@ routine rf_fs_touch(path: @Byte, len: S32) -> S32
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(File.at(path_of(path, len)).absolute_result(alloc))
+    return file_path_result(FileManager.absolute_result(at: File.at(path_of(path, len)), alloc))
 
 ### The path with links, ".", and ".." resolved. It must exist.
 ### :param path: The path.
@@ -972,32 +1030,17 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(File.at(path_of(path, len)).canonical_result(alloc))
+    return file_path_result(FileManager.canonical_result(at: File.at(path_of(path, len)), alloc))
 
-### Makes the file exactly size bytes, creating, extending (zeros) or truncating it: 0, or -1.
+### Makes the existing file exactly size bytes, extending it with zeros or cutting it short: 0, or -1 (a missing
+### file included: nothing is made).
 ### :param path: The path.
 ### :param path_len: Its length.
 ### :param size: The new size in bytes.
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
-    local p: @[Byte] = path_of(path, len: path_len)
-
-    r: Result[FileHandle, FsError] = File.at(p).open_read_write_result()
-    opened: FileHandle = when r
-        is FileHandle as f => f
-        is FsError as error =>
-            if not (error == FsError.NOT_FOUND)
-                return -1
-            made: Result[FileHandle, FsError] = File.at(p).create_new_result()
-            when made
-                is FileHandle as f =>
-                    becomes f
-                is FsError => return -1
-    local f: @FileHandle <- opened
-    set: Result[None, FsError] = f.set_size_result(size.to[U64]())
-    f.close()
-    return status(set)
+    return status(FileManager.set_size_result(at: File.at(path_of(path, len: path_len)), size))
 
 # -- memory-mapped files -----------------------------------------------------------------
 
@@ -1019,8 +1062,8 @@ routine advise(m: Mapping) -> None
 ### :returns: The view, the empty-map marker, or null on a failure.
 routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
-    r: Result[Mapping, FsError] = File.at(path_of(path,
-        len)).map_result(write, offset: 0, count: U64.MAX)
+    r: Result[Mapping, FsError] = FileManager.map_result(at: File.at(path_of(path, len)), write,
+        offset: 0, count: U64.MAX)
     m: Mapping = when r
         is Mapping as m => m
         is FsError => return no_result()
@@ -1043,7 +1086,8 @@ routine map_whole(path: @Byte, len: S32, write: Bool) -> @Byte
 ### :returns: The base, the empty-map marker, or null on a failure.
 routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
-    r: Result[Mapping, FsError] = File.at(path).map_result(write, offset: offset.to[U64](), count)
+    r: Result[Mapping, FsError] = FileManager.map_result(at: File.at(path), write,
+        offset: offset.to[U64](), count)
     m: Mapping = when r
         is Mapping as m => m
         is FsError => return no_result()
