@@ -92,11 +92,11 @@ record Sched
 ### :param top: Its `top`.
 ### :param lock: Its `lock`.
 ### :returns: The new value.
-routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64, lock: ExclusiveLock) -> Me
+common routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64, lock: ExclusiveLock) -> Me
     return Me(buf, cap, bottom, top, lock)
 
 ### Releases nothing: a `Deque` holds no memory of its own.
-routine Deque.destruct(me: @Me) -> None
+routine @Deque.destruct() -> None
     return
 
 ### Makes a `Sched` from its fields.
@@ -116,7 +116,7 @@ routine Deque.destruct(me: @Me) -> None
 ### :param cond: Its `cond`.
 ### :param block_cond: Its `block_cond`.
 ### :returns: The new value.
-routine Sched.construct(injector_head: @Coro, injector_tail: @Coro, timer_heap: @@Coro,
+common routine Sched.construct(injector_head: @Coro, injector_tail: @Coro, timer_heap: @@Coro,
     timer_count: S64, timer_cap: S64, live: S64, cross_wakers: S64, waiters: S64,
     workers_total: S64, workers_idle: S64, deadlock_confirm: U64, deques: @Deque,
     lock: ExclusiveLock, cond: SignalCaster, block_cond: SignalCaster) -> Me
@@ -124,7 +124,7 @@ routine Sched.construct(injector_head: @Coro, injector_tail: @Coro, timer_heap: 
         waiters, workers_total, workers_idle, deadlock_confirm, deques, lock, cond, block_cond)
 
 ### Releases nothing: a `Sched` holds no memory of its own.
-routine Sched.destruct(me: @Me) -> None
+routine @Sched.destruct() -> None
     return
 
 ### The scheduler driving this thread.
@@ -145,7 +145,7 @@ routine worker_id() -> S64
 
 ### Makes an empty deque with room for 64 coroutines.
 ### :throws: Crashes with `OutOfMemoryError` when the ring can't be allocated.
-routine Deque.init(me: @Me) -> None
+routine @Deque.init() -> None
     me.cap.poke(64)
     me.buf.poke(zeroed[@Coro](count: 64, what: "Failed to allocate worker run deque"))
     me.bottom.poke(0)
@@ -156,14 +156,14 @@ routine Deque.init(me: @Me) -> None
 ### The ring slot for position `i`, wrapped by the capacity.
 ### :param i: The position.
 ### :returns: The slot.
-routine Deque.slot(me: @Me, i: U64) -> @@Coro
+routine @Deque.slot(i: U64) -> @@Coro
     mask: U64 = me.cap.peek() - 1
     return me.buf.peek().stride(i & mask)
 
 ### Pushes `c` at the owner's end. Grows the ring (twice the capacity) when it is full.
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when the ring can't grow.
-routine Deque.push_bottom(me: @Me, c: @Coro) -> None
+routine @Deque.push_bottom(c: @Coro) -> None
     me.lock.lock()
     used: U64 = me.bottom.peek() - me.top.peek()
     if used == me.cap.peek()
@@ -193,7 +193,7 @@ routine Deque.push_bottom(me: @Me, c: @Coro) -> None
 
 ### Pops at the owner's end: the coroutine pushed last, or null.
 ### :returns: The coroutine, or null when the deque is empty.
-routine Deque.pop_bottom(me: @Me) -> @Coro
+routine @Deque.pop_bottom() -> @Coro
     me.lock.lock()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro = when
@@ -210,7 +210,7 @@ routine Deque.pop_bottom(me: @Me) -> @Coro
 
 ### Takes from the thieves' end: the oldest coroutine, or null.
 ### :returns: The coroutine, or null when the deque is empty.
-routine Deque.steal_top(me: @Me) -> @Coro
+routine @Deque.steal_top() -> @Coro
     me.lock.lock()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro = when
@@ -228,7 +228,7 @@ routine Deque.steal_top(me: @Me) -> @Coro
 ### Takes c out if it is there, closing the gap: whether it was.
 ### :param c: The coroutine.
 ### :returns: True when it was in the deque.
-routine Deque.remove(me: @Me, c: @Coro) -> Bool
+routine @Deque.remove(c: @Coro) -> Bool
     me.lock.lock()
     n: U64 = me.bottom.peek() - me.top.peek()
     each i in 0 til n
@@ -254,7 +254,7 @@ routine Deque.remove(me: @Me, c: @Coro) -> Bool
 
 ### Appends `c`, now QUEUED, to the injector. The caller holds the scheduler lock.
 ### :param c: The coroutine.
-routine Sched.push_injector(me: @Me, c: @Coro) -> None
+routine @Sched.push_injector(c: @Coro) -> None
     c.sched_next.poke(.hollow())
     c.sched_state.poke_atomic(SCHED_QUEUED)
     tail: @Coro = me.injector_tail.peek()
@@ -268,7 +268,7 @@ routine Sched.push_injector(me: @Me, c: @Coro) -> None
 
 ### The injector's head, now RUNNING, or null. The caller holds the scheduler lock.
 ### :returns: The coroutine, or null when the injector is empty.
-routine Sched.pop_injector(me: @Me) -> @Coro
+routine @Sched.pop_injector() -> @Coro
     local c: @Coro = me.injector_head.peek()
 
     if c.is_hollow()
@@ -284,7 +284,7 @@ routine Sched.pop_injector(me: @Me) -> @Coro
 ### A runnable coroutine goes, QUEUED, to this worker's deque if a pool worker made it ready, else to the injector.
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
-routine Sched.enqueue_ready(me: @Me, c: @Coro) -> None
+routine @Sched.enqueue_ready(c: @Coro) -> None
     local id: S64 = worker_id()
     local deques: @Deque = me.deques.peek()
 
@@ -300,14 +300,14 @@ routine Sched.enqueue_ready(me: @Me, c: @Coro) -> None
 ### The coroutine at position `i` of the timer heap.
 ### :param i: The position.
 ### :returns: The coroutine.
-routine Sched.timer_at(me: @Me, i: S64) -> @Coro
+routine @Sched.timer_at(i: S64) -> @Coro
     slot: @@Coro = me.timer_heap.peek().stride(i)
     return slot.peek()
 
 ### Puts `c` at position `i` of the timer heap and records the position in it.
 ### :param i: The position.
 ### :param c: The coroutine.
-routine Sched.timer_put(me: @Me, i: S64, c: @Coro) -> None
+routine @Sched.timer_put(i: S64, c: @Coro) -> None
     slot: @@Coro = me.timer_heap.peek().stride(i)
     slot.poke(c)
     c.timer_idx.poke(i)
@@ -316,7 +316,7 @@ routine Sched.timer_put(me: @Me, i: S64, c: @Coro) -> None
 ### Swaps two positions of the timer heap.
 ### :param i: The first position.
 ### :param j: The second position.
-routine Sched.timer_swap(me: @Me, i: S64, j: S64) -> None
+routine @Sched.timer_swap(i: S64, j: S64) -> None
     a: @Coro = me.timer_at(i)
     b: @Coro = me.timer_at(j)
     me.timer_put(i, c: b)
@@ -325,7 +325,7 @@ routine Sched.timer_swap(me: @Me, i: S64, j: S64) -> None
 
 ### Moves the coroutine at `i` up the timer heap while it wakes earlier than its parent.
 ### :param i: The position.
-routine Sched.timer_sift_up(me: @Me, i: S64) -> None
+routine @Sched.timer_sift_up(i: S64) -> None
     if i <= 0
         return
     parent: S64 = (i - 1).div_trunc(2)
@@ -338,7 +338,7 @@ routine Sched.timer_sift_up(me: @Me, i: S64) -> None
 
 ### Moves the coroutine at `i` down the timer heap while a child wakes earlier.
 ### :param i: The position.
-routine Sched.timer_sift_down(me: @Me, i: S64) -> None
+routine @Sched.timer_sift_down(i: S64) -> None
     local n: S64 = me.timer_count.peek()
     local l: S64 = i * 2 + 1
     local r: S64 = l + 1
@@ -368,7 +368,7 @@ routine Sched.timer_sift_down(me: @Me, i: S64) -> None
 ### Adds `c` to the timer heap by its `wake_ns`, doubling the heap (from 16) when it is full.
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when the heap can't grow.
-routine Sched.insert_timer(me: @Me, c: @Coro) -> None
+routine @Sched.insert_timer(c: @Coro) -> None
     if me.timer_count.peek() == me.timer_cap.peek()
         cap: S64 = me.timer_cap.peek()
         ncap: S64 = when
@@ -387,7 +387,7 @@ routine Sched.insert_timer(me: @Me, c: @Coro) -> None
 
 ### The earliest coroutine, taken off the heap, or null.
 ### :returns: The coroutine, or null when no timer is pending.
-routine Sched.timer_pop_min(me: @Me) -> @Coro
+routine @Sched.timer_pop_min() -> @Coro
     if me.timer_count.peek() == 0
         return .hollow()
     top: @Coro = me.timer_at(0)
@@ -405,7 +405,7 @@ routine Sched.timer_pop_min(me: @Me) -> @Coro
 
 ### Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
 ### :param c: The coroutine.
-routine Sched.unlink_timer(me: @Me, c: @Coro) -> None
+routine @Sched.unlink_timer(c: @Coro) -> None
     i: S64 = c.timer_idx.peek()
     if i < 0 or i >= me.timer_count.peek()
         return
@@ -434,7 +434,7 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> None
 ### NOTIFIED, and QUEUED, NOTIFIED and DONE stay as they are. A null `me` or `c` does nothing.
 ### :param c: The coroutine to wake.
 ### :throws: Crashes with `OutOfMemoryError` when the worker's deque can't grow.
-routine Sched.make_ready(me: @Me, c: @Coro) -> None
+routine @Sched.make_ready(c: @Coro) -> None
     if me.is_hollow() or c.is_hollow()
         return
     state: U32 = c.sched_state.peek_atomic()
@@ -482,7 +482,7 @@ routine rf_sched_spawn(s: @Sched, c: @Coro) -> None
 
 ### rf_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
 ### :param c: The coroutine.
-routine Sched.spawn(me: @Me, c: @Coro) -> None
+routine @Sched.spawn(c: @Coro) -> None
     me.lock.lock()
     if not c.initial_spawned.peek()
         c.initial_spawned.poke(true)
@@ -623,7 +623,7 @@ routine steal_rand() -> U32
 ### A coroutine stolen from another worker's deque (now RUNNING), or null. The victims are tried in turn from a
 ### random one.
 ### :returns: The coroutine, or null when there is nothing to steal.
-routine Sched.try_steal(me: @Me) -> @Coro
+routine @Sched.try_steal() -> @Coro
     local n: S64 = me.workers_total.peek()
 
     if me.deques.peek().is_hollow() or n <= 1
@@ -648,7 +648,7 @@ routine Sched.try_steal(me: @Me) -> @Coro
 ### Runs a coroutine this worker took (RUNNING), with no lock held, then applies how it stopped.
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
-routine Sched.run_coro(me: @Me, c: @Coro) -> None
+routine @Sched.run_coro(c: @Coro) -> None
     st: U32 = rf_coro_resume(c)
     if st == CORO_COMPLETED
         me.lock.lock()
@@ -718,7 +718,7 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
 
 ### One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
 ### :returns: The coroutine, or null.
-routine Sched.claim_work(me: @Me) -> @Coro
+routine @Sched.claim_work() -> @Coro
     id: S64 = worker_id()
     deques: @Deque = me.deques.peek()
     if id >= 0 and deques.is_not_hollow()
@@ -738,7 +738,7 @@ routine Sched.claim_work(me: @Me) -> @Coro
 ### :returns: True when a coroutine ran.
 ### :throws: Crashes with `DeadlockError` when every worker is idle, coroutines are awaited, and no wake can come,
 ###     confirmed `DEADLOCK_CONFIRMS` times in a row.
-routine Sched.step(me: @Me) -> Bool
+routine @Sched.step() -> Bool
     local c: @Coro = me.claim_work()
 
     if c.is_hollow()
@@ -911,11 +911,11 @@ record WorkerStart
 ### :param sched: Its `sched`.
 ### :param index: Its `index`.
 ### :returns: The new value.
-routine WorkerStart.construct(sched: @Sched, index: S64) -> Me
+common routine WorkerStart.construct(sched: @Sched, index: S64) -> Me
     return Me(sched, index)
 
 ### Releases nothing: a `WorkerStart` holds no memory of its own.
-routine WorkerStart.destruct(me: @Me) -> None
+routine @WorkerStart.destruct() -> None
     return
 
 ### A pool worker's thread: takes its index and scheduler, frees its start, and steps the scheduler forever.
@@ -1038,7 +1038,7 @@ routine run_here_ready() -> Bool
 
 ### Waits on a pool's block_cond with its lock held. With start_here() jobs live on this thread, it runs one that is
 ### ready, or sleeps at most HERE_POLL, so those jobs go on while this thread waits on something else.
-routine Sched.block_wait(me: @Me) -> None
+routine @Sched.block_wait() -> None
     if not here_has_live()
         me.block_cond.wait(me.lock)
         return
@@ -1121,7 +1121,7 @@ routine rf_sched_run_until_default(target: @Coro) -> None
 ### holds the lock.
 ### :param c: The coroutine.
 ### :returns: True when it was queued or on a timer.
-routine Sched.remove_locked(me: @Me, c: @Coro) -> Bool
+routine @Sched.remove_locked(c: @Coro) -> Bool
     removed: Bool = me.unqueue_injected(c) or me.unqueue_timer(c) or me.unqueue_deques(c)
     if not removed
         return false
@@ -1132,7 +1132,7 @@ routine Sched.remove_locked(me: @Me, c: @Coro) -> Bool
 ### Unlinks c from the injector, now IDLE, when it is there. The caller holds the lock.
 ### :param c: The coroutine.
 ### :returns: True when it was in the injector.
-secret routine Sched.unqueue_injected(me: @Me, c: @Coro) -> Bool
+secret routine @Sched.unqueue_injected(c: @Coro) -> Bool
     while at.is_not_hollow() with prev: @Coro = .hollow(), at: @Coro = me.injector_head.peek()
         if at === c
             next: @Coro = c.sched_next.peek()
@@ -1152,7 +1152,7 @@ secret routine Sched.unqueue_injected(me: @Me, c: @Coro) -> Bool
 ### Takes c off the timers when it is on one. The caller holds the lock.
 ### :param c: The coroutine.
 ### :returns: True when a timer was taken off.
-secret routine Sched.unqueue_timer(me: @Me, c: @Coro) -> Bool
+secret routine @Sched.unqueue_timer(c: @Coro) -> Bool
     if c.timer_idx.peek() < 0
         return false
     before: S64 = me.timer_count.peek()
@@ -1162,7 +1162,7 @@ secret routine Sched.unqueue_timer(me: @Me, c: @Coro) -> Bool
 ### Takes c out of the first worker deque that holds it, now IDLE. The caller holds the lock.
 ### :param c: The coroutine.
 ### :returns: True when a deque held it.
-secret routine Sched.unqueue_deques(me: @Me, c: @Coro) -> Bool
+secret routine @Sched.unqueue_deques(c: @Coro) -> Bool
     d: @Deque = me.deques.peek()
     if d.is_hollow()
         return false
@@ -1218,7 +1218,7 @@ routine home_of(c: @Coro) -> @Sched
 ### holds it.
 ### :param c: The coroutine.
 ### :returns: 1 when the caller frees it, 0 when the worker does.
-routine Sched.dispose(me: @Me, c: @Coro) -> U32
+routine @Sched.dispose(c: @Coro) -> U32
     me.lock.lock()
     found: Bool = me.remove_locked(c)
     st: U32 = c.sched_state.peek_atomic()

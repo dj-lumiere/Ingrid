@@ -44,11 +44,11 @@ record Channel
 ### :param coro: Its `coro`.
 ### :param next: Its `next`.
 ### :returns: The new value.
-routine ChannelWaiter.construct(sched: @Sched, coro: @Coro, next: @Me) -> Me
+common routine ChannelWaiter.construct(sched: @Sched, coro: @Coro, next: @Me) -> Me
     return Me(sched, coro, next)
 
 ### Releases nothing: a `ChannelWaiter` holds no memory of its own.
-routine ChannelWaiter.destruct(me: @Me) -> None
+routine @ChannelWaiter.destruct() -> None
     return
 
 ### Makes a `Channel` from its fields.
@@ -65,20 +65,20 @@ routine ChannelWaiter.destruct(me: @Me) -> None
 ### :param not_full_head: Its `not_full_head`.
 ### :param not_empty_head: Its `not_empty_head`.
 ### :returns: The new value.
-routine Channel.construct(lock: ExclusiveLock, cond: SignalCaster, slots: @Addr, capacity: U64,
+common routine Channel.construct(lock: ExclusiveLock, cond: SignalCaster, slots: @Addr, capacity: U64,
     slot_cap: U64, head: U64, count: U64, producer_refs: U32, consumer_refs: U32, closed: Bool,
     not_full_head: @ChannelWaiter, not_empty_head: @ChannelWaiter) -> Me
     return Me(lock, cond, slots, capacity, slot_cap, head, count, producer_refs, consumer_refs,
         closed, not_full_head, not_empty_head)
 
 ### Releases nothing: a `Channel` holds no memory of its own.
-routine Channel.destruct(me: @Me) -> None
+routine @Channel.destruct() -> None
     return
 
 ### Wakes every coroutine on list and every waiting thread. Each checks again and unlinks itself. The caller holds
 ### the lock.
 ### :param list: The first parked coroutine to wake, or null.
-routine Channel.cast_all(me: @Me, list: @ChannelWaiter) -> None
+routine @Channel.cast_all(list: @ChannelWaiter) -> None
     until w.is_hollow() with w: @ChannelWaiter = list
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         continue with w: w.next.peek()
@@ -109,7 +109,7 @@ routine rf_channel_create(capacity: U64) -> @Channel
 ### under it means exactly one of two drops racing for the last handles frees the channel.
 ### :param refs: The count before this drop.
 ### :returns: Whether the channel is to be freed once the lock is given back.
-routine Channel.is_last_drop(me: @Me, refs: U32) -> Bool
+routine @Channel.is_last_drop(refs: U32) -> Bool
     dropped_last: Bool = refs == 1
     no_producers: Bool = me.producer_refs.peek() == 0
     none_left: Bool = no_producers and me.consumer_refs.peek() == 0
@@ -118,7 +118,7 @@ routine Channel.is_last_drop(me: @Me, refs: U32) -> Bool
 ### Frees the channel when the drop decided so under the lock. The caller has given the lock back, and no handle is
 ### left to reach the channel.
 ### :param last: What is_last_drop said.
-routine Channel.free_if(me: @Me, last: Bool) -> None
+routine @Channel.free_if(last: Bool) -> None
     if not last
         return
     c_free(me.slots.peek())
@@ -203,7 +203,7 @@ routine rf_channel_close(chan: @Channel) -> None
 ### Waits once: a coroutine parks with a node on list, a thread waits on the condition variable. The caller holds
 ### the lock before and after, and checks its condition again.
 ### :param list: The list of parked coroutines to join.
-routine Channel.wait(me: @Me, list: @@ChannelWaiter) -> None
+routine @Channel.wait(list: @@ChannelWaiter) -> None
     sched: @Sched = rf_sched_current()
     coro: @Coro = current_coro()
     if sched.is_hollow() or coro.is_hollow()
@@ -262,7 +262,7 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
 ### rf_channel_feed on a channel that is there: everything under the lock, which finish gives back.
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 0 when not.
-routine Channel.feed(me: @Me, payload: Addr) -> U32
+routine @Channel.feed(payload: Addr) -> U32
     me.lock.lock()
 
     while (me.count.peek() == me.slot_cap.peek()) and (not me.closed.peek() and (me.consumer_refs.peek() > 0))
@@ -308,7 +308,7 @@ routine rf_channel_offer(chan: @Channel, payload: Addr) -> U32
 ### rf_channel_offer on a channel that is there: everything under the lock, which finish gives back.
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 2 when full, 0 when closed or without a consumer.
-routine Channel.offer(me: @Me, payload: Addr) -> U32
+routine @Channel.offer(payload: Addr) -> U32
     me.lock.lock()
     result: U32 = when
         me.closed.peek() or (me.consumer_refs.peek() == 0) => 0
@@ -340,7 +340,7 @@ routine rf_channel_next(chan: @Channel) -> Addr
 
 ### rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
 ### :returns: The payload, or null when the channel is closed and drained or the agent was cancelled.
-routine Channel.next(me: @Me) -> Addr
+routine @Channel.next() -> Addr
     me.lock.lock()
 
     while (me.count.peek() == 0) and not me.closed.peek()
