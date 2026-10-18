@@ -14,7 +14,7 @@
 ### :param c: The third operand.
 ### :returns: a × b + c exactly up to a sticky digit, as (neg, coefficient, exponent, preferred exponent) for one rounding, the preferred exponent the smaller of the product's and c's.
 routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
-    local pneg: Bool = a.neg ^ b.neg
+    local pneg: Bool = a.neg != b.neg
     local pc: U256 = a.coeff.mul_wide(b.coeff)
     local pe: S64 = a.exp + b.exp
     local cc: U256 = c.coeff.to[U256]()
@@ -31,7 +31,7 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
         pc == 0 and cc == 0 =>
             # (+0) + (+0) and (-0) + (-0) keep their sign, mixed signs give +0
             e: S64 = pe.min(c.exp)
-            return (neg: pneg & c.neg, coeff: 0, exp: e, pref: e)
+            return (neg: pneg and c.neg, coeff: 0, exp: e, pref: e)
         cc == 0 => return (neg: pneg, coeff: pc, exp: pe, pref: pe)
         pc == 0 => return (neg: c.neg, coeff: cc, exp: c.exp, pref: c.exp)
         else =>
@@ -75,7 +75,7 @@ routine dec_fma_exact(a: Dec, b: Dec, c: Dec) -> DecExact
 ### :param f: The format the result rounds to.
 ### :returns: a × b + c rounded once to f.
 routine dec_fma(a: Dec, b: Dec, c: Dec, f: DecFormat) -> Dec
-    local pneg: Bool = a.neg ^ b.neg
+    local pneg: Bool = a.neg != b.neg
 
     nan: Bool = a.is_nan() or b.is_nan() or c.is_nan()
     when
@@ -131,7 +131,7 @@ routine dec_sqrt_positive(x: Dec, f: DecFormat) -> Dec
 routine dec_sqrt(x: Dec, f: DecFormat) -> Dec
     when
         x.is_nan() => return dec_nan()
-        x.neg & not x.is_zero() => return dec_nan()
+        x.neg and not x.is_zero() => return dec_nan()
         x.is_inf() => return x
         x.is_zero() => return x
         else => return dec_sqrt_positive(x, f)
@@ -162,7 +162,7 @@ routine dec_hypot_finite(x: Dec, y: Dec, z: Dec, f: DecFormat) -> Dec
     all: U256 = sx.value + sy.value + sz.value
     s: U256 = all.isqrt()
     rest: Bool = s * s != all
-    st: Bool = sx.sticky | sy.sticky | sz.sticky | rest
+    st: Bool = sx.sticky or sy.sticky or sz.sticky or rest
     coef: U256 = s * 10 + st.to[U64]().to[U256]()
     r: Dec = dec_finish(
         value: DecExact(neg: false, coeff: coef, exp: (b >> 1) - 1, pref: f.qmax), f)
@@ -258,8 +258,8 @@ routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
 ### :returns: Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
 routine dec_is_rounded_up(mode: U32, neg: Bool, cut: DecDroppedFraction) -> Bool
     when mode
-        1 => return neg & cut.rest
-        2 => return not neg & cut.rest
+        1 => return neg and cut.rest
+        2 => return not neg and cut.rest
         3 => return cut.nearest
         4 => return cut.even
         else => return false
@@ -350,7 +350,7 @@ routine dec_remainder(x: Dec, y: Dec, near: Bool) -> Dec
         else => r
     twice: U256 = rr << 1
     if twice > yy or (twice == yy and odd)
-        return dec_num(neg: ~x.neg, coeff: (yy - rr).to[U128](), exp: e)
+        return dec_num(neg: not x.neg, coeff: (yy - rr).to[U128](), exp: e)
     return dec_num(neg: x.neg, coeff: rr.to[U128](), exp: e)
 
 ### Whether fmod or the remainder of x by y is a NaN: a NaN in, an infinite x, or a zero y.
@@ -367,7 +367,7 @@ routine dec_is_mod_invalid(x: Dec, y: Dec) -> Bool
 ### :param y: The second operand.
 ### :returns: Whether fmod or the remainder returns x unchanged.
 routine dec_is_mod_identity(x: Dec, y: Dec) -> Bool
-    return ~dec_is_mod_invalid(x, y) & y.is_inf()
+    return not dec_is_mod_invalid(x, y) and y.is_inf()
 
 ### fmod (near false) or the IEEE remainder (near true) of x by y, when dec_is_mod_identity is false.
 ### :param x: The operand.
