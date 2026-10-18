@@ -7,7 +7,8 @@
 # (a write per show costs a system call and a reader's round trip per print). Buffered output still arrives: at exit
 # (registered with atexit at start-up), before every ask, on rf_console_flush, and before a crash report.
 # RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
-# a crash. alert writes to stderr in magenta. ask_line skips empty lines.
+# a crash. alert writes to stderr in magenta. ask_line gives a blank line as an empty string and null only at the end
+# of the input. Right after ask_word it skips the line end the word left behind.
 
 module Ingrid/Runtime
 
@@ -177,8 +178,11 @@ routine terminated_option(text: Maybe[Memory[Byte]]) -> @Byte
         is Memory[Byte] as t => return terminated_text(steal t)
         is None => return .hollow()
 
-### The next non-empty line from stdin, without its end, or null at the end of the input. Standard output is flushed
-### first.
+### Whether the last read from stdin was ask_word, so the line end left after the word isn't read as a blank line.
+global AFTER_WORD: @Bool
+
+### The next line from stdin, without its end, or null at the end of the input. A blank line is an empty string. Right
+### after ask_word, a line that is empty because the word ended it is skipped. Standard output is flushed first.
 ### :returns: The line as a NUL-terminated string the caller frees, or null.
 @export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte
@@ -186,13 +190,15 @@ routine rf_console_ask_line() -> @Byte
 
     rf_console_flush()
     alloc.poke(heap())
+    after_word: Bool = AFTER_WORD.peek()
+    AFTER_WORD.poke(false)
 
-    while true
+    while true with skip_blank: Bool = after_word
         when In.read_line_checked(alloc)
             is Memory[Byte] as t2 =>
-                if t2.count() == 0
+                if skip_blank and t2.count() == 0
                     drop t2
-                    continue
+                    continue with skip_blank: false
                 else
                     return terminated_text(steal t2)
             is None => return .hollow()
@@ -203,7 +209,9 @@ routine rf_console_ask_line() -> @Byte
 routine rf_console_ask_word() -> @Byte
     rf_console_flush()
     local alloc: @MemoryManager <- heap()
-    return terminated_option(In.read_word_checked(alloc))
+    word: @Byte = terminated_option(In.read_word_checked(alloc))
+    AFTER_WORD.poke(not word.is_hollow())
+    return word
 
 ### Up to `count` bytes from stdin, NUL-terminated. Standard output is flushed first.
 ### :param count: The most bytes to read.
@@ -211,6 +219,7 @@ routine rf_console_ask_word() -> @Byte
 @export("rf_console_ask_bytes")
 routine rf_console_ask_bytes(count: U64) -> @Byte
     rf_console_flush()
+    AFTER_WORD.poke(false)
     local alloc: @MemoryManager <- heap()
     return terminated_text(In.read_count(count, alloc))
 
@@ -219,6 +228,7 @@ routine rf_console_ask_bytes(count: U64) -> @Byte
 @export("rf_console_ask_all")
 routine rf_console_ask_all() -> @Byte
     rf_console_flush()
+    AFTER_WORD.poke(false)
     local alloc: @MemoryManager <- heap()
     return terminated_text(In.read_all(alloc))
 
