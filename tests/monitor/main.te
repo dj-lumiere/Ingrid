@@ -94,7 +94,7 @@ routine c_calloc(count: CSize, size: CSize) -> Addr
 routine c_free(ptr: Addr) -> None
 
 ### count zeroed Ts.
-routine zeroed[T](count: U64, what: CStr) -> @T
+routine zeroed[T](count: U64, what: CStrView) -> @T
 needs T: typename
     p: Addr = c_calloc(count.to[CSize](), sizeof[T]().to[CSize]())
     return p.to[@T]()
@@ -119,21 +119,21 @@ routine current_coro() -> @Coro
     return CURRENT_CORO.peek()
 
 routine rf_sched_arm_cross_waker(s: @Sched) -> None
-    Out.write("  cross-thread waker armed on scheduler {s.id.peek()}\n")
+    Console.show("  cross-thread waker armed on scheduler {s.id.peek()}")
     return
 
 routine rf_sched_disarm_cross_waker(s: @Sched) -> None
-    Out.write("  cross-thread waker disarmed on scheduler {s.id.peek()}\n")
+    Console.show("  cross-thread waker disarmed on scheduler {s.id.peek()}")
     return
 
 routine rf_sched_wake(s: @Sched, c: @Coro) -> None
-    Out.write("  wake coroutine {c.id.peek()} on scheduler {s.id.peek()}\n")
+    Console.show("  wake coroutine {c.id.peek()} on scheduler {s.id.peek()}")
     return
 
 ### The coroutine is off its thread: another agent casts meanwhile, if CAST_DURING_PARK says so.
 routine rf_sched_park_external() -> None
     sig: @Monitor = CAST_DURING_PARK.peek()
-    Out.write("  parked, {count_waiters(sig)} on the wait list\n")
+    Console.show("  parked, {count_waiters(sig)} on the wait list")
     rf_signal_cast_one(sig)
     return
 
@@ -141,11 +141,11 @@ routine rf_sched_park_external() -> None
 routine rf_sched_park_deadline(delay_ns: U64) -> None
     sig: @Monitor = CAST_DURING_PARK.peek()
     if sig.is_hollow()
-        Out.write("  parked with a deadline, no cast comes\n")
+        Console.show("  parked with a deadline, no cast comes")
         sleep_until(monotonic_now() + Duration.from_nanoseconds(delay_ns))
         return
     else
-        Out.write("  parked with a deadline, a cast comes\n")
+        Console.show("  parked with a deadline, a cast comes")
         rf_signal_cast_one(sig)
         return
 
@@ -281,29 +281,29 @@ routine open_gate(gate: @Gate) -> None
 
 ### The handle count, and a coroutine parked by each kind of wait.
 routine coroutines(sig: @Monitor) -> None
-    Out.write("handles: {sig.refcount.peek()}\n")
+    Console.show("handles: {sig.refcount.peek()}")
     rf_signal_add_ref(sig)
-    Out.write("after add_ref: {sig.refcount.peek()}\n")
+    Console.show("after add_ref: {sig.refcount.peek()}")
     rf_signal_drop(sig)
-    Out.write("after drop: {sig.refcount.peek()}\n")
+    Console.show("after drop: {sig.refcount.peek()}")
     CURRENT_SCHED.poke(THE_SCHED)
     CURRENT_CORO.poke(THE_CORO)
     CAST_DURING_PARK.poke(sig)
-    Out.write("a coroutine waits:\n")
+    Console.show("a coroutine waits:")
     rf_signal_lock(sig)
     rf_signal_wait(sig)
-    Out.write("  back, {count_waiters(sig)} on the wait list\n")
-    Out.write("a coroutine waits with a deadline:\n")
+    Console.show("  back, {count_waiters(sig)} on the wait list")
+    Console.show("a coroutine waits with a deadline:")
     cast: U32 = rf_signal_wait_deadline(sig, timeout_ns: 1000000000)
-    Out.write("  result {cast}, {count_waiters(sig)} on the wait list\n")
+    Console.show("  result {cast}, {count_waiters(sig)} on the wait list")
     CAST_DURING_PARK.poke(.hollow())
     late: U32 = rf_signal_wait_deadline(sig, timeout_ns: 2000000)
-    Out.write("  result {late}, {count_waiters(sig)} on the wait list\n")
+    Console.show("  result {late}, {count_waiters(sig)} on the wait list")
     rf_signal_unlock(sig)
     sig.waiters.poke(SECOND_WAITER)
-    Out.write("two coroutines parked, cast_one:\n")
+    Console.show("two coroutines parked, cast_one:")
     rf_signal_cast_one(sig)
-    Out.write("cast_all:\n")
+    Console.show("cast_all:")
     rf_signal_cast_all(sig)
     sig.waiters.poke(.hollow())
     CURRENT_SCHED.poke(.hollow())
@@ -318,7 +318,7 @@ routine start() -> None
     result: U32 = wait_out(sig, timeout_ns: 2000000)
     waited: Duration = monotonic_now() - start
     rf_signal_unlock(sig)
-    Out.write("a thread waits with a deadline: result {result}, waited it out {waited.ge(2ms)}\n")
+    Console.show("a thread waits with a deadline: result {result}, waited it out {waited.ge(2ms)}")
     local tokens: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     t1: Thread[None] = get_thread[None]()
     t1.put_work(entry: take_token.to[Callable](), args: tokens)
@@ -333,7 +333,7 @@ routine start() -> None
     t2.give_back()
     t3.wait_finished()
     t3.give_back()
-    Out.write("cast_one: {GATE_THREADS} tokens, one thread through for each: {exact}\n")
+    Console.show("cast_one: {GATE_THREADS} tokens, one thread through for each: {exact}")
     local gate: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     u1: Thread[None] = get_thread[None]()
     u1.put_work(entry: pass_open.to[Callable](), args: gate)
@@ -348,6 +348,6 @@ routine start() -> None
     u2.give_back()
     u3.wait_finished()
     u3.give_back()
-    Out.write("cast_all: {gate.passed.peek()} of {GATE_THREADS} through\n")
+    Console.show("cast_all: {gate.passed.peek()} of {GATE_THREADS} through")
     rf_signal_drop(sig)
     return

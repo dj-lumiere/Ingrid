@@ -29,6 +29,13 @@ record DeadlockWait
 @symbol("getenv")
 routine c_getenv(name: CStrView) -> @Byte
 
+### Ends the program with the crash status: the runtime's rf_crash_exit, declared here as well so the detector builds
+### without the crash handler.
+@external("c")
+@symbol("rf_crash_exit")
+@noreturn
+secret routine deadlock_exit() -> None
+
 ### Whether RF_DEADLOCK_DETECT asks for the detector: set, not empty, and not "0". Read once. Two threads reading it
 ### at once both find the same answer.
 ### :returns: True when the detector is on.
@@ -47,8 +54,7 @@ routine is_detector_on() -> Bool
             else => 1
         DETECTOR.poke_atomic(state2)
         return on
-    else
-        return state == 2
+    return state == 2
 
 ### The slot where `task` waits, or WAIT_SLOTS when it waits nowhere.
 ### :param task: The waiting task's id.
@@ -58,8 +64,7 @@ routine slot_of(task: U64) -> U64
         slot: @DeadlockWait = WAITS.getslot(i)
         if slot.used.peek() & (slot.task.peek() == task)
             return i
-        else
-            continue
+        continue
     then
         return WAIT_SLOTS
 
@@ -69,8 +74,7 @@ routine free_slot() -> U64
     each i in 0 til WAIT_SLOTS
         if WAITS.getslot(i).used.peek()
             continue
-        else
-            return i
+        return i
     then
         return WAIT_SLOTS
 
@@ -93,28 +97,26 @@ routine deadlock_wait_begin(waiter: U64, holder: U64) -> None
     if slot >= WAIT_SLOTS
         WAITS_LOCK.unlock()
         return
-    else
-        entry: @DeadlockWait = WAITS.getslot(slot)
-        waiter.poke_into(entry.task)
-        holder.poke_into(entry.holder)
-        true.poke_into(entry.used)
+    entry: @DeadlockWait = WAITS.getslot(slot)
+    waiter.poke_into(entry.task)
+    holder.poke_into(entry.holder)
+    true.poke_into(entry.used)
 
-        each steps in 0 til WAIT_SLOTS with current: U64 = holder
-            at: U64 = slot_of(current)
-            if at >= WAIT_SLOTS
-                WAITS_LOCK.unlock()
-                return
-            else
-                next: U64 = WAITS.getslot(at).holder.peek()
-                if next == waiter
-                    WAITS_LOCK.unlock()
-                    Console.alert("runtime error: Roamed lock deadlock: task {waiter} and task {current} took the same escaped entities in opposite order. Take shared entities in one consistent order.")
-                    rf_crash_exit()
-                else
-                    continue with current: next
-        then
+    each steps in 0 til WAIT_SLOTS with current: U64 = holder
+        at: U64 = slot_of(current)
+        if at >= WAIT_SLOTS
             WAITS_LOCK.unlock()
             return
+        next: U64 = WAITS.getslot(at).holder.peek()
+        if next == waiter
+            WAITS_LOCK.unlock()
+            Console.alert("runtime error: Roamed lock deadlock: task {waiter} and task {current} took the same escaped entities in opposite order. Take shared entities in one consistent order.")
+            deadlock_exit()
+        else
+            continue with current: next
+    then
+        WAITS_LOCK.unlock()
+        return
 
 ### Clears `waiter`'s wait once it holds the lock. Does nothing when the detector is off.
 ### :param waiter: The id of the task that now holds the lock.

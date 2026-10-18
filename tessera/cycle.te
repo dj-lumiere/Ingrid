@@ -118,11 +118,10 @@ routine world_enter() -> None
         state: U32 = WORLD.peek_atomic()
         if state & WRITER == 0
             return
-        else
-            # A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
-            step_out(slot)
-            wait_on(at: WORLD, expected: state)
-            continue
+        # A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
+        step_out(slot)
+        wait_on(at: WORLD, expected: state)
+        continue
     then
         return
 
@@ -142,8 +141,7 @@ routine step_out(slot: @WorldSlot) -> None
         before: U32 = slot.inside.atomic_fetch_and(WAITING.bitnot())
         wake_all(slot.inside)
         return
-    else
-        return
+    return
 
 ### Stops the world for a pass: takes WRITER (waiting for another pass to finish first), then waits until every
 ### thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
@@ -168,15 +166,14 @@ routine world_stop() -> None
             inside2: U32 = slot.inside.peek_atomic()
             if inside2 & WAITING.bitnot() == 0
                 break
-            else
-                waiting: U32 = inside2 | WAITING
-                set: Result[None, U32] = slot.inside.atomic_compare_exchange(expected: inside2,
-                    new: waiting)
-                when set
-                    is None =>
-                        wait_on(at: slot.inside, expected: waiting)
-                        continue
-                    is U32 => continue
+            waiting: U32 = inside2 | WAITING
+            set: Result[None, U32] = slot.inside.atomic_compare_exchange(expected: inside2,
+                new: waiting)
+            when set
+                is None =>
+                    wait_on(at: slot.inside, expected: waiting)
+                    continue
+                is U32 => continue
 
         continue with at: slot.next.peek()
     then
@@ -238,11 +235,10 @@ routine add_candidate(header: @RoamHeader) -> None
     if IN_COLLECTOR.peek()
         buffer_push(buffer: ROOTS, item: header)
         return
-    else
-        ROOTS_LOCK.lock()
-        buffer_push(buffer: ROOTS, item: header)
-        ROOTS_LOCK.unlock()
-        return
+    ROOTS_LOCK.lock()
+    buffer_push(buffer: ROOTS, item: header)
+    ROOTS_LOCK.unlock()
+    return
 
 ### Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
 ### the last root into its place (the order of roots doesn't matter).
@@ -257,8 +253,7 @@ routine remove_candidate(header: @RoamHeader) -> None
     if unlock
         ROOTS_LOCK.unlock()
         return
-    else
-        return
+    return
 
 ### Removes `header` from `buffer` if it is there, moving the last item into its place.
 ### :param buffer: The buffer to remove from.
@@ -275,8 +270,7 @@ routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> None
             hole.poke(moved)
             last.poke_into(buffer.count)
             return
-        else
-            continue
+        continue
     then
         return
 
@@ -324,30 +318,29 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
         drop work
         drop kids
         return
-    else
-        SCANNING.poke_into(root.state)
-        work.add_last(root)
+    SCANNING.poke_into(root.state)
+    work.add_last(root)
 
-        until work.is_empty()
-            node: @RoamHeader = work.remove_last().to[@RoamHeader]()
-            children(node, kids)
+    until work.is_empty()
+        node: @RoamHeader = work.remove_last().to[@RoamHeader]()
+        children(node, kids)
 
-            n: U64 = kids.count()
+        n: U64 = kids.count()
 
-            each i in 0 til n
-                kid_address: Addr = kids[i]
-                kid: @RoamHeader = kid_address.to[@RoamHeader]()
-                kid_count: U64 = kid.count.peek() - 1
-                kid_count.poke_into(kid.count)
-                if not (kid.state.peek() == SCANNING)
-                    SCANNING.poke_into(kid.state)
-                    work.add_last(kid)
-            then
-                continue
+        each i in 0 til n
+            kid_address: Addr = kids[i]
+            kid: @RoamHeader = kid_address.to[@RoamHeader]()
+            kid_count: U64 = kid.count.peek() - 1
+            kid_count.poke_into(kid.count)
+            if not (kid.state.peek() == SCANNING)
+                SCANNING.poke_into(kid.state)
+                work.add_last(kid)
         then
-            drop work
-            drop kids
-            return
+            continue
+    then
+        drop work
+        drop kids
+        return
 
 ### Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
 ### is garbage for now, and its children are decided the same way.
@@ -364,19 +357,18 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
         node: @RoamHeader = work.remove_last().to[@RoamHeader]()
         if not (node.state.peek() == SCANNING)
             continue
-        elseif node.count.peek() > 0
+        if node.count.peek() > 0
             scan_live(root: node, alloc)
             continue
-        else
-            GARBAGE.poke_into(node.state)
-            children(node, kids)
+        GARBAGE.poke_into(node.state)
+        children(node, kids)
 
-            n: U64 = kids.count()
+        n: U64 = kids.count()
 
-            each i in 0 til n
-                work.add_last(kids[i])
-            then
-                continue
+        each i in 0 til n
+            work.add_last(kids[i])
+        then
+            continue
     drop work
     drop kids
     return
@@ -428,17 +420,16 @@ routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
         garbage: Bool = node.state.peek() == GARBAGE
         if not (garbage and not node.buffered.peek())
             continue
-        else
-            LIVE.poke_into(node.state)
-            buffer_push(buffer: REAP, item: node)
-            children(node, kids)
+        LIVE.poke_into(node.state)
+        buffer_push(buffer: REAP, item: node)
+        children(node, kids)
 
-            n: U64 = kids.count()
+        n: U64 = kids.count()
 
-            each i in 0 til n
-                work.add_last(kids[i])
-            then
-                continue
+        each i in 0 til n
+            work.add_last(kids[i])
+        then
+            continue
     drop work
     drop kids
     return
@@ -502,14 +493,13 @@ routine remove_front(buffer: @HeaderBuffer, n: U64) -> None
     if n >= count
         buffer_clear(buffer)
         return
-    else
-        remaining: U64 = count - n
+    remaining: U64 = count - n
 
-        each k in 0 til remaining
-            from_slot: @Addr = buffer.items.peek().stride((n + k).to[U64]())
-            moved: Addr = from_slot.peek()
-            to_slot: @Addr = buffer.items.peek().stride(k.to[U64]())
-            to_slot.poke(moved)
-        then
-            remaining.poke_into(buffer.count)
-            return
+    each k in 0 til remaining
+        from_slot: @Addr = buffer.items.peek().stride((n + k).to[U64]())
+        moved: Addr = from_slot.peek()
+        to_slot: @Addr = buffer.items.peek().stride(k.to[U64]())
+        to_slot.poke(moved)
+    then
+        remaining.poke_into(buffer.count)
+        return

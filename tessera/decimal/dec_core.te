@@ -173,18 +173,16 @@ routine dec_p10_64(k: S64) -> U64
 routine dec_digits(c: U128) -> S64
     if c == 0
         return 1
-    else
-        bits: S64 = 128 - c.leading_zeros().to[S64]()
-        guess: S64 = (bits * 1233 >> 12) + 1
-        below: Bool = c < dec_p10_128(guess - 1)
-        when
-            below => return guess - 1
-            guess >= 39 => return guess
-            else =>
-                if c >= dec_p10_128(guess)
-                    return guess + 1
-                else
-                    return guess
+    bits: S64 = 128 - c.leading_zeros().to[S64]()
+    guess: S64 = (bits * 1233 >> 12) + 1
+    below: Bool = c < dec_p10_128(guess - 1)
+    when
+        below => return guess - 1
+        guess >= 39 => return guess
+        else =>
+            if c >= dec_p10_128(guess)
+                return guess + 1
+            return guess
 
 ### The number of decimal digits of c (1 for 0), for c below 10^77.
 ### :param c: The number.
@@ -192,18 +190,16 @@ routine dec_digits(c: U128) -> S64
 routine dec_digits256(c: U256) -> S64
     if c >> 128 == 0
         return dec_digits(c.to_wrap[U128]())
-    else
-        bits: S64 = 256 - c.leading_zeros().to[S64]()
-        guess: S64 = (bits * 1233 >> 12) + 1
-        below: Bool = c < dec_p10(guess - 1)
-        when
-            below => return guess - 1
-            guess >= 77 => return guess
-            else =>
-                if c >= dec_p10(guess)
-                    return guess + 1
-                else
-                    return guess
+    bits: S64 = 256 - c.leading_zeros().to[S64]()
+    guess: S64 = (bits * 1233 >> 12) + 1
+    below: Bool = c < dec_p10(guess - 1)
+    when
+        below => return guess - 1
+        guess >= 77 => return guess
+        else =>
+            if c >= dec_p10(guess)
+                return guess + 1
+            return guess
 
 ### floor(x / 10^k) for k >= 0 (k = 0 gives x), by the reciprocal in dec_tables.te.
 ### :param x: The operand.
@@ -224,8 +220,7 @@ routine dec_div_p10(x: U128, k: S64) -> U128
                 # the magic number has one bit too many: (x - t) / 2 + t, shifted one place less
                 half: U128 = x - t >> 1
                 return half + t >> shift - 1
-            else
-                return t >> shift
+            return t >> shift
 
 ### floor(x / 10^k) for k >= 0 of a U64.
 ### :param x: The operand.
@@ -244,8 +239,7 @@ routine dec_div_p10_64(x: U64, k: S64) -> U64
                 # the magic number has one bit too many: (x - t) / 2 + t, shifted one place less
                 half: U64 = x - t >> 1
                 return half + t >> shift - 1
-            else
-                return t >> shift
+            return t >> shift
 
 ### The high 256 bits of the 512-bit product a × b.
 ### :param a: The first operand.
@@ -288,8 +282,7 @@ routine dec_div_p10_256(x: U256, k: S64) -> U256
                 # the magic number has one bit too many: (x - t) / 2 + t, shifted one place less
                 half: U256 = x - t >> 1
                 return half + t >> shift - 1
-            else
-                return t >> shift
+            return t >> shift
 
 ### How many times 10 divides c (c > 0), at most cap: the decimal trailing zeros never outnumber the binary ones, so
 ### most coefficients settle without a division.
@@ -302,26 +295,23 @@ routine dec_trailing_zeros(c: U128, cap: S64) -> S64
 
     if limit <= 0
         return 0
-    else
-        # the common exact case: every allowed zero is there
-        top: U128 = dec_div_p10(x: c, k: limit)
-        if top *% dec_p10_128(limit) == c
-            return limit
-        else
-            # the largest count below limit that divides c, by halving steps
-            while step != 0 with found: S64 = 0, step: S64 = 32
-                candidate: S64 = found + step
-                if candidate < limit
-                    top2: U128 = dec_div_p10(x: c, k: candidate)
-                    divides: Bool = top2 *% dec_p10_128(candidate) == c
-                    next: S64 = when
-                        divides => candidate
-                        else => found
-                    continue with found: next, step: step >> 1
-                else
-                    continue with found: found, step: step >> 1
-            then
-                return found
+    # the common exact case: every allowed zero is there
+    top: U128 = dec_div_p10(x: c, k: limit)
+    if top *% dec_p10_128(limit) == c
+        return limit
+    # the largest count below limit that divides c, by halving steps
+    while step != 0 with found: S64 = 0, step: S64 = 32
+        candidate: S64 = found + step
+        if candidate < limit
+            top2: U128 = dec_div_p10(x: c, k: candidate)
+            divides: Bool = top2 *% dec_p10_128(candidate) == c
+            next: S64 = when
+                divides => candidate
+                else => found
+            continue with found: next, step: step >> 1
+        continue with found: found, step: step >> 1
+    then
+        return found
 
 # ── rounding to a format ──────────────────────────────────────────────────────────────────────────
 
@@ -344,58 +334,55 @@ routine dec_finish(value: DecExact, f: DecFormat) -> Dec
 
     if coeff == 0
         return dec_num(neg, coeff: 0, exp: pref.max(qmin).min(qmax))
-    else
-        nd: S64 = dec_digits256(coeff)
-        excess: S64 = nd - p
-        dropped: S64 = excess.max(qmin - exp)
-        values: (U128, S64, Bool) = when
-            dropped >= nd =>
-                # every digit goes: 1 only above half of 10^drop (exactly half ties to the even 0)
-                half: U256 = dec_p10(nd - 1) * 5
-                above: Bool = dropped == nd and coeff > half
-                becomes (above.to[U128](), exp + dropped, true)
-            dropped > 0 =>
-                unit: U256 = dec_p10(dropped)
-                q: U256 = dec_div_p10_256(x: coeff, k: dropped)
-                r: U256 = coeff - q *% unit
-                twice: U256 = r << 1
-                odd: Bool = q & 1 == 1
-                up: Bool = twice > unit or (twice == unit and odd)
-                q2: U128 = q.to[U128]() + up.to[U128]()
-                carry: Bool = q2 == dec_p10_128(p)
-                # rounding up 99...9 gives 10^p: one digit too many, all zeros
-                q3: U128 = when
-                    carry => dec_p10_128(p - 1)
-                    else => q2
-                becomes (q3, exp + dropped + carry.to[S64](), r != 0)
-            else => (coeff.to[U128](), exp, false)
-        c, e, inexact = values
-        # c has at most p digits
-        zero: Bool = c == 0
-        target: S64 = pref.min(qmax)
-        values2: (U128, S64) = when
-            zero => return dec_num(neg, coeff: 0, exp: e)
-            not inexact and e < target =>
-                tz: S64 = dec_trailing_zeros(c, cap: target - e)
-                becomes (dec_div_p10(x: c, k: tz), e + tz)
-            else => (c, e)
-        c2, e2 = values2
-        # toward pref while the coefficient has room, never below qmin
-        room: S64 = p - dec_digits(c2)
-        k: S64 = (e2 - pref).min(room).min(e2 - qmin)
-        values3: (U128, S64) = when
-            k > 0 => (c2 * dec_p10_128(k), e2 - k)
-            else => (c2, e2)
-        c3, e3 = values3
-        # above qmax: zeros appended down to qmax, if the coefficient has room for them
-        if e3 > qmax
-            spread: S64 = e3 - qmax
-            if dec_digits(c3) + spread <= p
-                return dec_num(neg, coeff: c3 * dec_p10_128(spread), exp: qmax)
-            else
-                return dec_inf(neg)
-        else
-            return dec_num(neg, coeff: c3, exp: e3)
+    nd: S64 = dec_digits256(coeff)
+    excess: S64 = nd - p
+    dropped: S64 = excess.max(qmin - exp)
+    values: (U128, S64, Bool) = when
+        dropped >= nd =>
+            # every digit goes: 1 only above half of 10^drop (exactly half ties to the even 0)
+            half: U256 = dec_p10(nd - 1) * 5
+            above: Bool = dropped == nd and coeff > half
+            becomes (above.to[U128](), exp + dropped, true)
+        dropped > 0 =>
+            unit: U256 = dec_p10(dropped)
+            q: U256 = dec_div_p10_256(x: coeff, k: dropped)
+            r: U256 = coeff - q *% unit
+            twice: U256 = r << 1
+            odd: Bool = q & 1 == 1
+            up: Bool = twice > unit or (twice == unit and odd)
+            q2: U128 = q.to[U128]() + up.to[U128]()
+            carry: Bool = q2 == dec_p10_128(p)
+            # rounding up 99...9 gives 10^p: one digit too many, all zeros
+            q3: U128 = when
+                carry => dec_p10_128(p - 1)
+                else => q2
+            becomes (q3, exp + dropped + carry.to[S64](), r != 0)
+        else => (coeff.to[U128](), exp, false)
+    c, e, inexact = values
+    # c has at most p digits
+    zero: Bool = c == 0
+    target: S64 = pref.min(qmax)
+    values2: (U128, S64) = when
+        zero => return dec_num(neg, coeff: 0, exp: e)
+        not inexact and e < target =>
+            tz: S64 = dec_trailing_zeros(c, cap: target - e)
+            becomes (dec_div_p10(x: c, k: tz), e + tz)
+        else => (c, e)
+    c2, e2 = values2
+    # toward pref while the coefficient has room, never below qmin
+    room: S64 = p - dec_digits(c2)
+    k: S64 = (e2 - pref).min(room).min(e2 - qmin)
+    values3: (U128, S64) = when
+        k > 0 => (c2 * dec_p10_128(k), e2 - k)
+        else => (c2, e2)
+    c3, e3 = values3
+    # above qmax: zeros appended down to qmax, if the coefficient has room for them
+    if e3 > qmax
+        spread: S64 = e3 - qmax
+        if dec_digits(c3) + spread <= p
+            return dec_num(neg, coeff: c3 * dec_p10_128(spread), exp: qmax)
+        return dec_inf(neg)
+    return dec_num(neg, coeff: c3, exp: e3)
 
 ### A value of another width rounded to f, its exponent kept when the digits allow (the narrowing of an arithmetic
 ### result, which keeps the exponent the wider operation chose). Specials pass through.
@@ -405,8 +392,7 @@ routine Dec.narrow(me: Me, f: DecFormat) -> Me
     if me.is_finite()
         return dec_finish(
             value: DecExact(neg: me.neg, coeff: me.coeff.to[U256](), exp: me.exp, pref: me.exp), f)
-    else
-        return me
+    return me
 
 ### A value rounded to f and reduced: trailing zeros stripped as far as the exponent range allows (the form every
 ### function result takes). Specials and zeros pass through.
@@ -415,9 +401,8 @@ routine Dec.narrow(me: Me, f: DecFormat) -> Me
 routine Dec.reduce(me: Me, f: DecFormat) -> Me
     if not me.is_finite() or me.coeff == 0
         return me
-    else
-        return dec_finish(
-            value: DecExact(neg: me.neg, coeff: me.coeff.to[U256](), exp: me.exp, pref: f.qmax), f)
+    return dec_finish(
+        value: DecExact(neg: me.neg, coeff: me.coeff.to[U256](), exp: me.exp, pref: f.qmax), f)
 
 # ── the encodings ─────────────────────────────────────────────────────────────────────────────────
 
@@ -493,9 +478,8 @@ routine Dec.to64(me: Me) -> U64
             coeff: U64 = me.coeff.to_wrap[U64]()
             if coeff < 0x20000000000000
                 return sign | (biased << 53) | coeff
-            else
-                prefix: U64 = U64.shl(3, 61)
-                return sign | prefix | (biased << 51) | (coeff & 0x7FFFFFFFFFFFF)
+            prefix: U64 = U64.shl(3, 61)
+            return sign | prefix | (biased << 51) | (coeff & 0x7FFFFFFFFFFFF)
         1 => return sign | U64.shl(0x1E, 58)
         2 => return sign | U64.shl(0x1F, 58)
         else => return sign | U64.shl(0x3F, 57)
@@ -537,9 +521,8 @@ routine Dec.to32(me: Me) -> U32
             coeff: U32 = me.coeff.to_wrap[U32]()
             if coeff < 0x800000
                 return sign | (biased << 23) | coeff
-            else
-                prefix: U32 = U32.shl(3, 29)
-                return sign | prefix | (biased << 21) | (coeff & 0x1FFFFF)
+            prefix: U32 = U32.shl(3, 29)
+            return sign | prefix | (biased << 21) | (coeff & 0x1FFFFF)
         1 => return sign | U32.shl(0x1E, 26)
         2 => return sign | U32.shl(0x1F, 26)
         else => return sign | U32.shl(0x3F, 25)
@@ -581,39 +564,38 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
         return dec_add_special(a, b)
 
     # h: the operand with the larger exponent, l: the other
-    elseif h.coeff == 0 and l.coeff != 0
+    if h.coeff == 0 and l.coeff != 0
         return dec_finish(
             value: DecExact(neg: l.neg, coeff: l.coeff.to[U256](), exp: l.exp, pref: l.exp), f)
-    else
-        shift: S64 = h.exp - l.exp
-        near: Bool = shift <= 40
-        values2: (U256, U256, S64) = when
-            near => (h.coeff.to[U256]() * dec_p10(shift), l.coeff.to[U256](), l.exp)
-            else =>
-                dropped: S64 = shift - 40
-                high: U256 = h.coeff.to[U256]() * dec_p10(40)
-                q: U128 = dec_div_p10(x: l.coeff, k: dropped)
-                whole: Bool = q *% dec_p10_128(dropped.min(38)) == l.coeff and dropped <= 38
-                exact: Bool = whole or l.coeff == 0
-                sticky: U128 = when
-                    exact => q
-                    else => q | 1
-                becomes (high, sticky.to[U256](), h.exp - 40)
-        hc, lc, e = values2
-        same: Bool = h.neg == l.neg
-        down: Bool = hc >= lc
-        values3: (U256, Bool) = when
-            same => (hc + lc, h.neg)
-            down => (hc - lc, h.neg)
-            else => (lc - hc, l.neg)
-        c, neg = values3
-        # an exact zero sum is +0, or -0 when both operands are negative
-        zero: Bool = c == 0
-        both: Bool = a.neg & b.neg
-        sign: Bool = when
-            zero => both
-            else => neg
-        return dec_finish(value: DecExact(neg: sign, coeff: c, exp: e, pref: l.exp), f)
+    shift: S64 = h.exp - l.exp
+    near: Bool = shift <= 40
+    values2: (U256, U256, S64) = when
+        near => (h.coeff.to[U256]() * dec_p10(shift), l.coeff.to[U256](), l.exp)
+        else =>
+            dropped: S64 = shift - 40
+            high: U256 = h.coeff.to[U256]() * dec_p10(40)
+            q: U128 = dec_div_p10(x: l.coeff, k: dropped)
+            whole: Bool = q *% dec_p10_128(dropped.min(38)) == l.coeff and dropped <= 38
+            exact: Bool = whole or l.coeff == 0
+            sticky: U128 = when
+                exact => q
+                else => q | 1
+            becomes (high, sticky.to[U256](), h.exp - 40)
+    hc, lc, e = values2
+    same: Bool = h.neg == l.neg
+    down: Bool = hc >= lc
+    values3: (U256, Bool) = when
+        same => (hc + lc, h.neg)
+        down => (hc - lc, h.neg)
+        else => (lc - hc, l.neg)
+    c, neg = values3
+    # an exact zero sum is +0, or -0 when both operands are negative
+    zero: Bool = c == 0
+    both: Bool = a.neg & b.neg
+    sign: Bool = when
+        zero => both
+        else => neg
+    return dec_finish(value: DecExact(neg: sign, coeff: c, exp: e, pref: l.exp), f)
 
 ### a × b for an infinity or a NaN among them: a NaN, or an infinity times zero, gives a NaN.
 ### :param a: The first operand.
@@ -634,11 +616,10 @@ routine dec_mul_special(a: Dec, b: Dec) -> Dec
 routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
     if not (a.is_finite() and b.is_finite())
         return dec_mul_special(a, b)
-    else
-        neg: Bool = a.neg ^ b.neg
-        e: S64 = a.exp + b.exp
-        return dec_finish(
-            value: DecExact(neg: neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e), f)
+    neg: Bool = a.neg ^ b.neg
+    e: S64 = a.exp + b.exp
+    return dec_finish(
+        value: DecExact(neg: neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e), f)
 
 ### a / b for an infinity or a NaN among them: a NaN or infinity over infinity gives a NaN, an infinity over a
 ### number an infinity, a number over an infinity a zero at the smallest exponent.
@@ -671,8 +652,7 @@ routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
         b.coeff == 0 =>
             if a.coeff == 0
                 return dec_nan()
-            else
-                return dec_inf(neg)
+            return dec_inf(neg)
         a.coeff == 0 => return dec_finish(
             value: DecExact(neg: neg, coeff: 0, exp: pref, pref: pref), f)
         else =>

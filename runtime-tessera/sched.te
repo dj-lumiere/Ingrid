@@ -262,10 +262,9 @@ routine Sched.push_injector(me: @Me, c: @Coro) -> None
         me.injector_head.poke(c)
         me.injector_tail.poke(c)
         return
-    else
-        tail.sched_next.poke(c)
-        me.injector_tail.poke(c)
-        return
+    tail.sched_next.poke(c)
+    me.injector_tail.poke(c)
+    return
 
 ### The injector's head, now RUNNING, or null. The caller holds the scheduler lock.
 ### :returns: The coroutine, or null when the injector is empty.
@@ -293,9 +292,8 @@ routine Sched.enqueue_ready(me: @Me, c: @Coro) -> None
         c.sched_state.poke_atomic(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return
-    else
-        me.push_injector(c)
-        return
+    me.push_injector(c)
+    return
 
 # -- the timer heap (callers hold the scheduler lock) --------------------------------
 
@@ -402,9 +400,8 @@ routine Sched.timer_pop_min(me: @Me) -> @Coro
         vacated.poke(.hollow())
         me.timer_sift_down(0)
         return top
-    else
-        me.timer_heap.peek().poke(.hollow())
-        return top
+    me.timer_heap.peek().poke(.hollow())
+    return top
 
 ### Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
 ### :param c: The coroutine.
@@ -421,16 +418,15 @@ routine Sched.unlink_timer(me: @Me, c: @Coro) -> None
         vacated: @@Coro = me.timer_heap.peek().stride(last)
         vacated.poke(.hollow())
         return
-    else
-        moved: @Coro = me.timer_at(last)
-        me.timer_put(i, c: moved)
-        vacated: @@Coro = me.timer_heap.peek().stride(last)
-        vacated.poke(.hollow())
-        me.timer_sift_up(i)
-        if not (moved.timer_idx.peek() == i)
-            return
-        me.timer_sift_down(i)
+    moved: @Coro = me.timer_at(last)
+    me.timer_put(i, c: moved)
+    vacated: @@Coro = me.timer_heap.peek().stride(last)
+    vacated.poke(.hollow())
+    me.timer_sift_up(i)
+    if not (moved.timer_idx.peek() == i)
         return
+    me.timer_sift_down(i)
+    return
 
 # -- making a coroutine ready ---------------------------------------------------------
 
@@ -640,14 +636,12 @@ routine Sched.try_steal(me: @Me) -> @Coro
         v: S64 = (offset % n.to[U64]()).to[S64]()
         if v == worker_id()
             continue
-        else
-            victim: @Deque = me.deques.peek().stride(v)
-            c: @Coro = victim.steal_top()
-            if c.is_hollow()
-                continue
-            else
-                c.sched_state.poke_atomic(SCHED_RUNNING)
-                return c
+        victim: @Deque = me.deques.peek().stride(v)
+        c: @Coro = victim.steal_top()
+        if c.is_hollow()
+            continue
+        c.sched_state.poke_atomic(SCHED_RUNNING)
+        return c
     then
         return .hollow()
 
@@ -686,43 +680,41 @@ routine Sched.run_coro(me: @Me, c: @Coro) -> None
             return
         rf_coro_delete(c)
         return
-    else
-        # A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
-        # leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
-        intent: U32 = c.park_intent.peek()
-        c.park_intent.poke(PARK_NONE)
-        notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
-        id: S64 = worker_id()
-        deques: @Deque = me.deques.peek()
-        if id >= 0 and deques.is_not_hollow() and (notified or intent == PARK_YIELD)
-            c.sched_state.poke_atomic(SCHED_QUEUED)
-            deques.stride(id).push_bottom(c)
+    # A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
+    # leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
+    intent: U32 = c.park_intent.peek()
+    c.park_intent.poke(PARK_NONE)
+    notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
+    id: S64 = worker_id()
+    deques: @Deque = me.deques.peek()
+    if id >= 0 and deques.is_not_hollow() and (notified or intent == PARK_YIELD)
+        c.sched_state.poke_atomic(SCHED_QUEUED)
+        deques.stride(id).push_bottom(c)
+        return
+    me.lock.lock()
+    when
+        c.sched_state.peek_atomic() == SCHED_NOTIFIED =>
+            me.enqueue_ready(c)
+            me.lock.unlock()
             return
-        else
-            me.lock.lock()
-            when
-                c.sched_state.peek_atomic() == SCHED_NOTIFIED =>
-                    me.enqueue_ready(c)
-                    me.lock.unlock()
-                    return
-                intent == PARK_TIMER and c.cancel_requested.peek_atomic() != 0 =>
-                    # Asked to stop while it was parking: its wait ends now.
-                    me.enqueue_ready(c)
-                    me.lock.unlock()
-                    return
-                intent == PARK_TIMER =>
-                    me.insert_timer(c)
-                    c.sched_state.poke_atomic(SCHED_IDLE)
-                    me.lock.unlock()
-                    return
-                intent == PARK_YIELD =>
-                    me.enqueue_ready(c)
-                    me.lock.unlock()
-                    return
-                else =>
-                    c.sched_state.poke_atomic(SCHED_IDLE)
-                    me.lock.unlock()
-                    return
+        intent == PARK_TIMER and c.cancel_requested.peek_atomic() != 0 =>
+            # Asked to stop while it was parking: its wait ends now.
+            me.enqueue_ready(c)
+            me.lock.unlock()
+            return
+        intent == PARK_TIMER =>
+            me.insert_timer(c)
+            c.sched_state.poke_atomic(SCHED_IDLE)
+            me.lock.unlock()
+            return
+        intent == PARK_YIELD =>
+            me.enqueue_ready(c)
+            me.lock.unlock()
+            return
+        else =>
+            c.sched_state.poke_atomic(SCHED_IDLE)
+            me.lock.unlock()
+            return
 
 ### One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
 ### :returns: The coroutine, or null.
@@ -739,8 +731,7 @@ routine Sched.claim_work(me: @Me) -> @Coro
     me.lock.unlock()
     if c.is_hollow()
         return me.try_steal()
-    else
-        return c
+    return c
 
 ### Runs one ready coroutine (true), or waits until something may be ready (false). Called with no lock held. Due
 ### timers are moved to the injector while waiting.
@@ -787,9 +778,8 @@ routine Sched.step(me: @Me) -> Bool
                             # waiting for a coroutine and every other worker idle, it is a deadlock once it persists.
                             me.lock.unlock()
                             return false
-                        else
-                            me.push_injector(me.timer_pop_min())
-                            continue
+                        me.push_injector(me.timer_pop_min())
+                        continue
                     then
                         me.lock.unlock()
                         return false
@@ -851,9 +841,8 @@ routine rf_sched_run(s: @Sched) -> None
         if done2
             CURRENT_SCHED.poke(prev)
             return
-        else
-            s.step()
-            continue
+        s.step()
+        continue
 
 ### Whether a coroutine has completed or been cancelled.
 ### :param c: The coroutine.
@@ -900,8 +889,7 @@ routine rf_in_coroutine() -> U32
     has_sched: Bool = current_sched().is_not_hollow()
     if has_sched and current_coro().is_not_hollow()
         return 1
-    else
-        return 0
+    return 0
 
 ### The scheduler driving this thread.
 ### :returns: The scheduler, or null.
@@ -949,8 +937,7 @@ routine pool_worker_count() -> S64
     env: U64 = env_positive("RF_WORKERS")
     if env == 0
         return cpu_count().to[S64]()
-    else
-        return env.min(WORKERS_MAX).to[S64]()
+    return env.min(WORKERS_MAX).to[S64]()
 
 ### Makes the process pool's scheduler with a deque per worker, and starts the workers.
 ### :returns: The pool's scheduler.
@@ -989,11 +976,10 @@ routine rf_sched_thread_default() -> @Sched
         POOL_STATE.poke_atomic(2)
         wake_all(POOL_STATE)
         return POOL.peek_atomic()
-    else
-        while POOL_STATE.peek_atomic() != 2
-            wait_on(at: POOL_STATE, expected: 1)
-        then
-            return POOL.peek_atomic()
+    while POOL_STATE.peek_atomic() != 2
+        wait_on(at: POOL_STATE, expected: 1)
+    then
+        return POOL.peek_atomic()
 
 ### The scheduler start_here() runs a job on: this thread's own, made on first use. A job started with start_now()
 ### can move between threads, so it has no thread of its own to run a job beside.
@@ -1038,9 +1024,8 @@ routine run_here_ready() -> Bool
         earliest_wake: U64 = here.timer_at(0).wake_ns.peek()
         if not (earliest_wake <= now)
             break
-        else
-            here.push_injector(here.timer_pop_min())
-            continue
+        here.push_injector(here.timer_pop_min())
+        continue
     c: @Coro = here.pop_injector()
     here.lock.unlock()
     if c.is_hollow()
@@ -1057,14 +1042,13 @@ routine Sched.block_wait(me: @Me) -> None
     if not here_has_live()
         me.block_cond.wait(me.lock)
         return
-    else
-        me.lock.unlock()
-        ran: Bool = run_here_ready()
-        me.lock.lock()
-        if ran
-            return
-        me.block_cond.wait_for(mutex: me.lock, timeout: HERE_POLL)
+    me.lock.unlock()
+    ran: Bool = run_here_ready()
+    me.lock.lock()
+    if ran
         return
+    me.block_cond.wait_for(mutex: me.lock, timeout: HERE_POLL)
+    return
 
 ### Spawns a new coroutine onto the process pool (start_now()).
 ### :param c: The coroutine.
@@ -1106,9 +1090,8 @@ routine rf_sched_run_until_default(target: @Coro) -> None
                 remaining_waiters.poke_into(s.waiters)
                 s.lock.unlock()
                 return
-            else
-                s.block_wait()
-                continue
+            s.block_wait()
+            continue
         then
             remaining_waiters: S64 = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
@@ -1207,8 +1190,7 @@ routine rf_sched_unschedule_default(c: @Coro) -> U32
     s.lock.unlock()
     if found
         return 1
-    else
-        return 0
+    return 0
 
 ### An Agent's destroy: 1 if the caller frees c now, 0 if a worker holds it (RUNNING, or QUEUED and mid-pop) and
 ### frees it itself when it completes. Decided under the lock together with the removal.
@@ -1230,8 +1212,7 @@ routine home_of(c: @Coro) -> @Sched
     home: @Sched = c.home.peek()
     if home.is_hollow()
         return POOL.peek_atomic()
-    else
-        return home
+    return home
 
 ### rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
 ### holds it.

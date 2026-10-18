@@ -69,8 +69,7 @@ routine W.with_sign(me: Me, neg: Bool) -> Me
 routine W.ldexp(me: Me, k: S64) -> Me
     if me.is_zero()
         return me
-    else
-        return (neg: me.neg, exp: me.exp + k, h: me.h, m: me.m, l: me.l)
+    return (neg: me.neg, exp: me.exp + k, h: me.h, m: me.m, l: me.l)
 
 ### v × 2^scale exactly.
 ### :param v: The integer.
@@ -79,11 +78,10 @@ routine W.ldexp(me: Me, k: S64) -> Me
 routine w_of_u128(v: U128, scale: S64) -> W
     if v == 0
         return w_zero()
-    else
-        lz: U128 = v.leading_zeros()
-        top: U128 = v << lz
-        e: S64 = scale + 128 - lz.to[S64]()
-        return (neg: false, exp: e, h: (top >> 64).to_wrap[U64](), m: top.to_wrap[U64](), l: 0)
+    lz: U128 = v.leading_zeros()
+    top: U128 = v << lz
+    e: S64 = scale + 128 - lz.to[S64]()
+    return (neg: false, exp: e, h: (top >> 64).to_wrap[U64](), m: top.to_wrap[U64](), l: 0)
 
 ### A B64 exactly (finite).
 ### :param x: The float.
@@ -121,8 +119,7 @@ routine W.top_b64(me: Me) -> B64
     frac: B64 = (me.h >> 11).to[B64]() * b64_pow2(-53)
     if me.neg
         return -frac
-    else
-        return frac
+    return frac
 
 ### The value as a B64 (0 or an infinity outside B64's range).
 ### :returns: The value as a B64.
@@ -132,8 +129,7 @@ routine W.to_b64(me: Me) -> B64
         me.exp > 1023 =>
             if me.neg
                 return B64.from_bits(0xFFF0000000000000)
-            else
-                return B64.from_bits(0x7FF0000000000000)
+            return B64.from_bits(0x7FF0000000000000)
         me.exp < -1000 => return 0.0
         else => return me.top_b64() * b64_pow2(me.exp)
 
@@ -142,13 +138,12 @@ routine W.to_b64(me: Me) -> B64
 routine W.to_b128(me: Me) -> B128
     if me.is_zero()
         return B64.to[B128](0.0)
-    else
-        # the top 113 bits: h's 64 and m's top 49
-        mant: U128 = (me.h.to[U128]() << 49) | (me.m >> 15).to[U128]()
-        frac: U128 = mant & U128.shl(1, 112) - 1
-        biased: U128 = (me.exp + 16382).to[U128]()
-        sign: U128 = me.neg.to[U128]() << 127
-        return B128.from_bits(sign | (biased << 112) | frac)
+    # the top 113 bits: h's 64 and m's top 49
+    mant: U128 = (me.h.to[U128]() << 49) | (me.m >> 15).to[U128]()
+    frac: U128 = mant & U128.shl(1, 112) - 1
+    biased: U128 = (me.exp + 16382).to[U128]()
+    sign: U128 = me.neg.to[U128]() << 127
+    return B128.from_bits(sign | (biased << 112) | frac)
 
 # ── comparing ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -177,8 +172,7 @@ routine w_compare_magnitude(a: W, b: W) -> S32
 routine w_order(less: Bool) -> S32
     if less
         return -1
-    else
-        return 1
+    return 1
 
 # ── packing ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -248,30 +242,28 @@ routine w_fma(x: U64, y: U64, p: U64, q: U64) -> U128
 routine w_mul(a: W, b: W) -> W
     if a.is_zero() or b.is_zero()
         return w_zero()
-    else
-        # row by row: r_i accumulates column i
-        x0: U128 = a.l.mul_wide(b.l)
-        x1: U128 = w_fma(x: a.l, y: b.m, p: (x0 >> 64).to_wrap[U64](), q: 0)
-        x2: U128 = w_fma(x: a.l, y: b.h, p: (x1 >> 64).to_wrap[U64](), q: 0)
-        y1: U128 = w_fma(x: a.m, y: b.l, p: x1.to_wrap[U64](), q: 0)
-        y2: U128 = w_fma(x: a.m, y: b.m, p: x2.to_wrap[U64](), q: (y1 >> 64).to_wrap[U64]())
-        y3: U128 = w_fma(x: a.m, y: b.h, p: (x2 >> 64).to_wrap[U64](), q: (y2 >> 64).to_wrap[U64]())
-        z2: U128 = w_fma(x: a.h, y: b.l, p: y2.to_wrap[U64](), q: 0)
-        z3: U128 = w_fma(x: a.h, y: b.m, p: y3.to_wrap[U64](), q: (z2 >> 64).to_wrap[U64]())
-        z4: U128 = w_fma(x: a.h, y: b.h, p: (y3 >> 64).to_wrap[U64](), q: (z3 >> 64).to_wrap[U64]())
-        r5: U64 = (z4 >> 64).to_wrap[U64]()
-        r4: U64 = z4.to_wrap[U64]()
-        r3: U64 = z3.to_wrap[U64]()
-        r2: U64 = z2.to_wrap[U64]()
-        e: S64 = a.exp + b.exp
-        neg: Bool = a.neg ^ b.neg
-        if r5 >> 63 == 1
-            return (neg: neg, exp: e, h: r5, m: r4, l: r3)
-        else
-            h: U64 = (r5 << 1) | (r4 >> 63)
-            m: U64 = (r4 << 1) | (r3 >> 63)
-            l: U64 = (r3 << 1) | (r2 >> 63)
-            return (neg: neg, exp: e - 1, h: h, m: m, l: l)
+    # row by row: r_i accumulates column i
+    x0: U128 = a.l.mul_wide(b.l)
+    x1: U128 = w_fma(x: a.l, y: b.m, p: (x0 >> 64).to_wrap[U64](), q: 0)
+    x2: U128 = w_fma(x: a.l, y: b.h, p: (x1 >> 64).to_wrap[U64](), q: 0)
+    y1: U128 = w_fma(x: a.m, y: b.l, p: x1.to_wrap[U64](), q: 0)
+    y2: U128 = w_fma(x: a.m, y: b.m, p: x2.to_wrap[U64](), q: (y1 >> 64).to_wrap[U64]())
+    y3: U128 = w_fma(x: a.m, y: b.h, p: (x2 >> 64).to_wrap[U64](), q: (y2 >> 64).to_wrap[U64]())
+    z2: U128 = w_fma(x: a.h, y: b.l, p: y2.to_wrap[U64](), q: 0)
+    z3: U128 = w_fma(x: a.h, y: b.m, p: y3.to_wrap[U64](), q: (z2 >> 64).to_wrap[U64]())
+    z4: U128 = w_fma(x: a.h, y: b.h, p: (y3 >> 64).to_wrap[U64](), q: (z3 >> 64).to_wrap[U64]())
+    r5: U64 = (z4 >> 64).to_wrap[U64]()
+    r4: U64 = z4.to_wrap[U64]()
+    r3: U64 = z3.to_wrap[U64]()
+    r2: U64 = z2.to_wrap[U64]()
+    e: S64 = a.exp + b.exp
+    neg: Bool = a.neg ^ b.neg
+    if r5 >> 63 == 1
+        return (neg: neg, exp: e, h: r5, m: r4, l: r3)
+    h: U64 = (r5 << 1) | (r4 >> 63)
+    m: U64 = (r4 << 1) | (r3 >> 63)
+    l: U64 = (r3 << 1) | (r2 >> 63)
+    return (neg: neg, exp: e - 1, h: h, m: m, l: l)
 
 ### a × k for a nonzero k: four limbs exactly, then packed.
 ### :param a: The operand.
@@ -280,12 +272,11 @@ routine w_mul(a: W, b: W) -> W
 routine w_mul_u64(a: W, k: U64) -> W
     if a.is_zero()
         return a
-    else
-        x0: U128 = a.l.mul_wide(k)
-        x1: U128 = w_fma(x: a.m, y: k, p: (x0 >> 64).to_wrap[U64](), q: 0)
-        x2: U128 = w_fma(x: a.h, y: k, p: (x1 >> 64).to_wrap[U64](), q: 0)
-        r: WLimbs = (l4: 0, l3: (x2 >> 64).to_wrap[U64](), l2: x2.to_wrap[U64](), l1: x1.to_wrap[U64](), l0: x0.to_wrap[U64]())
-        return w_pack(neg: a.neg, r, scale: a.exp - 192)
+    x0: U128 = a.l.mul_wide(k)
+    x1: U128 = w_fma(x: a.m, y: k, p: (x0 >> 64).to_wrap[U64](), q: 0)
+    x2: U128 = w_fma(x: a.h, y: k, p: (x1 >> 64).to_wrap[U64](), q: 0)
+    r: WLimbs = (l4: 0, l3: (x2 >> 64).to_wrap[U64](), l2: x2.to_wrap[U64](), l1: x1.to_wrap[U64](), l0: x0.to_wrap[U64]())
+    return w_pack(neg: a.neg, r, scale: a.exp - 192)
 
 ### a / k for a nonzero k: the quotient of a's mantissa × 2^64 by k (four limbs), packed. The dividend is shifted with
 ### the divisor until the divisor's top bit is set, so each limb is one 2-by-1 division.
@@ -300,17 +291,16 @@ routine w_div_u64(a: W, k: U64) -> W
 
     if a.is_zero()
         return a
-    else
-        # the shifted dividend's limbs, top first: h >> (64 - shift), then each limb's low part with the next one's top
-        u3: U64 = (a.h << shift) | (a.m >> back)
-        u2: U64 = (a.m << shift) | (a.l >> back)
-        u1: U64 = a.l << shift
-        q3: Div2By1 = div_2by1(u1: a.h >> back, u0: u3, d, v)
-        q2: Div2By1 = div_2by1(u1: q3.remainder, u0: u2, d, v)
-        q1: Div2By1 = div_2by1(u1: q2.remainder, u0: u1, d, v)
-        q0: Div2By1 = div_2by1(u1: q1.remainder, u0: 0, d, v)
-        r: WLimbs = (l4: 0, l3: q3.quotient, l2: q2.quotient, l1: q1.quotient, l0: q0.quotient)
-        return w_pack(neg: a.neg, r, scale: a.exp - 256)
+    # the shifted dividend's limbs, top first: h >> (64 - shift), then each limb's low part with the next one's top
+    u3: U64 = (a.h << shift) | (a.m >> back)
+    u2: U64 = (a.m << shift) | (a.l >> back)
+    u1: U64 = a.l << shift
+    q3: Div2By1 = div_2by1(u1: a.h >> back, u0: u3, d, v)
+    q2: Div2By1 = div_2by1(u1: q3.remainder, u0: u2, d, v)
+    q1: Div2By1 = div_2by1(u1: q2.remainder, u0: u1, d, v)
+    q0: Div2By1 = div_2by1(u1: q1.remainder, u0: 0, d, v)
+    r: WLimbs = (l4: 0, l3: q3.quotient, l2: q2.quotient, l1: q1.quotient, l0: q0.quotient)
+    return w_pack(neg: a.neg, r, scale: a.exp - 256)
 
 ### The magnitude of x aligned d bits below a guard limb: x's mantissa × 2^64 shifted right by d, as four limbs
 ### (bits below them dropped).
@@ -349,17 +339,16 @@ routine w_add(a: W, b: W) -> W
                 x3: U128 = w_fma(x: big.h, y: 1, p: s.l3, q: (x2 >> 64).to_wrap[U64]())
                 r: WLimbs = (l4: (x3 >> 64).to_wrap[U64](), l3: x3.to_wrap[U64](), l2: x2.to_wrap[U64](), l1: x1.to_wrap[U64](), l0: s.l0)
                 return w_pack(neg: big.neg, r, scale: big.exp - 256)
-            else
-                # big's guard limb is 0, so limb 0 of the difference is -s0 with a borrow when s0 is not 0
-                d0: U64 = U64.sub_wrap(0, s.l0)
-                b0: U64 = (s.l0 != 0).to[U64]()
-                d1: U64 = big.l -% s.l1 -% b0
-                b1: U64 = w_borrow(x: big.l, y: s.l1, borrow: b0)
-                d2: U64 = big.m -% s.l2 -% b1
-                b2: U64 = w_borrow(x: big.m, y: s.l2, borrow: b1)
-                d3: U64 = big.h -% s.l3 -% b2
-                r: WLimbs = (l4: 0, l3: d3, l2: d2, l1: d1, l0: d0)
-                return w_pack(neg: big.neg, r, scale: big.exp - 256)
+            # big's guard limb is 0, so limb 0 of the difference is -s0 with a borrow when s0 is not 0
+            d0: U64 = U64.sub_wrap(0, s.l0)
+            b0: U64 = (s.l0 != 0).to[U64]()
+            d1: U64 = big.l -% s.l1 -% b0
+            b1: U64 = w_borrow(x: big.l, y: s.l1, borrow: b0)
+            d2: U64 = big.m -% s.l2 -% b1
+            b2: U64 = w_borrow(x: big.m, y: s.l2, borrow: b1)
+            d3: U64 = big.h -% s.l3 -% b2
+            r: WLimbs = (l4: 0, l3: d3, l2: d2, l1: d1, l0: d0)
+            return w_pack(neg: big.neg, r, scale: big.exp - 256)
 
 ### Whether x - y - borrow needs a borrow from the next limb.
 ### :param x: The minuend limb.
@@ -531,16 +520,15 @@ routine we_sqrt(a: We) -> We
 
     if a.v.is_zero()
         return a
-    else
-        t: B64 = a.v.top_b64() * b64_pow2(a.v.exp - half * 2)
-        seed: B64 = 1.0 / t.sqrt()
+    t: B64 = a.v.top_b64() * b64_pow2(a.v.exp - half * 2)
+    seed: B64 = 1.0 / t.sqrt()
 
-        while k < 2 with z: W = w_of_b64(seed).ldexp(-half), k: S64 = 0
-            t2: W = w_sub(a: one, b: w_mul(a: a.v, b: w_mul(a: z, b: z)))
-            dz: W = w_mul(a: z, b: t2).ldexp(-1)
-            continue with z: w_add(a: z, b: dz), k: k + 1
-        then
-            return (v: w_mul(a: a.v, b: z), err: (a.err * 0.5001 + 24.0) * MP_UP)
+    while k < 2 with z: W = w_of_b64(seed).ldexp(-half), k: S64 = 0
+        t2: W = w_sub(a: one, b: w_mul(a: a.v, b: w_mul(a: z, b: z)))
+        dz: W = w_mul(a: z, b: t2).ldexp(-1)
+        continue with z: w_add(a: z, b: dz), k: k + 1
+    then
+        return (v: w_mul(a: a.v, b: z), err: (a.err * 0.5001 + 24.0) * MP_UP)
 
 ### An exact integer.
 ### :param v: The integer.
@@ -575,15 +563,14 @@ routine we_pow10(k: S64) -> We
 
     if k <= 38
         return we_of_u128(dec_p10_128(k))
-    else
-        while true with result: We = we_of_u128(1), base: We = ten, left: S64 = k
-            done: Bool = left == 0
-            when
-                done => return result
-                left & 1 == 1 => continue with result: we_mul(a: result,
-                    b: base), base: we_mul(a: base, b: base), left: left >> 1
-                else => continue with result: result, base: we_mul(a: base,
-                    b: base), left: left >> 1
+    while true with result: We = we_of_u128(1), base: We = ten, left: S64 = k
+        done: Bool = left == 0
+        when
+            done => return result
+            left & 1 == 1 => continue with result: we_mul(a: result,
+                b: base), base: we_mul(a: base, b: base), left: left >> 1
+            else => continue with result: result, base: we_mul(a: base,
+                b: base), left: left >> 1
 
 ### x × 10^k: within 380 places by 10^19 at a time, past that by the power of ten itself (me_scale10 at three limbs).
 ### :param x: The operand.
@@ -614,9 +601,8 @@ routine we_scale10(x: We, k: S64) -> We
 routine we_of_dec(x: Dec) -> We
     if x.coeff == 0
         return we_exact(w_zero())
-    else
-        r: We = we_scale10(x: we_of_u128(x.coeff), k: x.exp)
-        return r.with_sign(x.neg)
+    r: We = we_scale10(x: we_of_u128(x.coeff), k: x.exp)
+    return r.with_sign(x.neg)
 
 ### An MpApprox of three limbs as a We (the same value and bound).
 ### :param x: The value.
@@ -626,11 +612,10 @@ routine we_of_me(x: MpApprox) -> We
 
     if x.v.is_zero(3)
         return (v: w_zero(), err: x.err)
-    else
-        l: U64 = s.m[0]
-        m: U64 = s.m[1]
-        h: U64 = s.m[2]
-        return (v: (neg: x.v.neg, exp: x.v.exp, h: h, m: m, l: l), err: x.err)
+    l: U64 = s.m[0]
+    m: U64 = s.m[1]
+    h: U64 = s.m[2]
+    return (v: (neg: x.v.neg, exp: x.v.exp, h: h, m: m, l: l), err: x.err)
 
 ### A We as an MpApprox of three limbs (the same value and bound).
 ### :param x: The value.
@@ -640,13 +625,12 @@ routine me_of_we(x: We) -> MpApprox
 
     if x.v.is_zero()
         return (v: r.peek(), err: x.err)
-    else
-        r.m[0] = x.v.l
-        r.m[1] = x.v.m
-        r.m[2] = x.v.h
-        x.v.neg.poke_into(r.neg)
-        x.v.exp.poke_into(r.exp)
-        return (v: r.peek(), err: x.err)
+    r.m[0] = x.v.l
+    r.m[1] = x.v.m
+    r.m[2] = x.v.h
+    x.v.neg.poke_into(r.neg)
+    x.v.exp.poke_into(r.exp)
+    return (v: r.peek(), err: x.err)
 
 ### The bound of s widened by an absolute error below 2^e (me_plus_abs at three limbs).
 ### :param s: The sum.
@@ -656,8 +640,7 @@ routine we_plus_abs(s: We, e: S64) -> We
     units: B64 = b64_pow2(e - s.v.exp + 1 + 192)
     if s.v.is_zero()
         return (v: s.v, err: B64.from_bits(0x7FF0000000000000))
-    else
-        return s.widen(units)
+    return s.widen(units)
 
 ### Whether a series term no longer matters: below 2^-200 of the sum (me_is_negligible at three limbs).
 ### :param term: The term.

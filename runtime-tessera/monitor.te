@@ -98,19 +98,18 @@ routine rf_signal_wait(sig: @Monitor) -> None
         # a cast may come from another thread: not a deadlock meanwhile
         sig.cond.wait(sig.lock)
         return
-    else
-        node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
-            what: "Failed to allocate a monitor waiter")
-        node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
-        sig.waiters.poke(node)
-        sig.lock.unlock()
-        rf_sched_arm_cross_waker(sched)
-        rf_sched_park_external()
-        rf_sched_disarm_cross_waker(sched)
-        sig.lock.lock()
-        unlink(list: sig.waiters, node)
-        c_free(node)
-        return
+    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
+        what: "Failed to allocate a monitor waiter")
+    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
+    sig.waiters.poke(node)
+    sig.lock.unlock()
+    rf_sched_arm_cross_waker(sched)
+    rf_sched_park_external()
+    rf_sched_disarm_cross_waker(sched)
+    sig.lock.lock()
+    unlink(list: sig.waiters, node)
+    c_free(node)
+    return
 
 ### rf_signal_wait for at most timeout_ns: 1 if woken before the deadline (check the condition again), 0 if it
 ### passed. A null `sig` returns 0 at once.
@@ -128,20 +127,18 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
         in_time: Bool = sig.cond.wait_until(mutex: sig.lock, deadline)
         return in_time.to[U32]()
-    else
-        node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
-            what: "Failed to allocate a monitor waiter")
-        node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
-        sig.waiters.poke(node)
-        sig.lock.unlock()
-        rf_sched_park_deadline(timeout_ns)
-        sig.lock.lock()
-        unlink(list: sig.waiters, node)
-        c_free(node)
-        if monotonic_now() >= deadline
-            return 0
-        else
-            return 1
+    node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
+        what: "Failed to allocate a monitor waiter")
+    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
+    sig.waiters.poke(node)
+    sig.lock.unlock()
+    rf_sched_park_deadline(timeout_ns)
+    sig.lock.lock()
+    unlink(list: sig.waiters, node)
+    c_free(node)
+    if monotonic_now() >= deadline
+        return 0
+    return 1
 
 ### Wakes one waiter: a parked coroutine if there is one, else a thread. A null `sig` does nothing.
 ### :param sig: The monitor.
