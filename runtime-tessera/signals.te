@@ -6,9 +6,9 @@
 # self-pipe trick, async-signal-safe) and a thread of its own reads it and runs the handlers. On Windows the
 # console already calls its handler on a thread of its own.
 #
-# A handler is a RazorForge Routine value's closure box: its first word is the function, called with the box (and
-# for a context handler the context, the raw pointer of a Roamed or Guarded handle). Registration lasts the
-# process's life, so the boxes are never freed.
+# A handler is a box holding a RazorForge routine value's two words: the function and what it captured. The function
+# is called with the context first for a context handler (the raw pointer of a Roamed or Guarded handle), then the
+# captures when there are any. Registration lasts the process's life, so the boxes are never freed.
 
 module Ingrid/Runtime
 
@@ -57,23 +57,34 @@ routine HandlerList.construct(items: @HandlerEntry, count: U64, cap: U64) -> Me
 routine HandlerList.destruct(me: @Me) -> None
     return
 
-### Calls one handler: the box's first word is the function, which takes the box (and the context). A null box does
-### nothing.
+### Calls one handler. Its box holds a routine value's two words: the function, then what it captured (null for a
+### named routine). A function with captures takes them after its own arguments, so a context handler is called with
+### the context and then the captures. A null box does nothing.
 ### :param e: The handler.
 routine invoke(e: HandlerEntry) -> None
     if e.box.is_hollow()
         return
     fn: Addr = e.box.to[@Addr]().peek()
+    bound: Addr = e.box.to[@Addr]().stride(1).peek()
+    local slot: @Addr <- fn
     if e.has_ctx
-        local slot: @Addr <- fn
-        call: Callable[(Addr, Addr), None] = slot.to[@Callable[(Addr, Addr), None]]().peek()
-        call.call(e.box, e.ctx)
-        return
+        if bound.is_hollow()
+            with_ctx: Callable[(Addr,), None] = slot.to[@Callable[(Addr,), None]]().peek()
+            with_ctx.call(e.ctx)
+            return
+        else
+            with_both: Callable[(Addr, Addr), None] = slot.to[@Callable[(Addr, Addr), None]]().peek()
+            with_both.call(e.ctx, bound)
+            return
     else
-        local plain: @Addr <- fn
-        call: Callable[(Addr,), None] = plain.to[@Callable[(Addr,), None]]().peek()
-        call.call(e.box)
-        return
+        if bound.is_hollow()
+            bare: Callable[(), None] = slot.to[@Callable[(), None]]().peek()
+            bare.call()
+            return
+        else
+            captured: Callable[(Addr,), None] = slot.to[@Callable[(Addr,), None]]().peek()
+            captured.call(bound)
+            return
 
 ### Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
 ### can't be allocated, no handler runs.
