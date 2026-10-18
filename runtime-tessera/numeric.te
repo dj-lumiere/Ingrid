@@ -194,69 +194,12 @@ routine rf_random_u64() -> U64
 
 # -- the wall clock ------------------------------------------------------------------
 
-### The time between 1601-01-01 (a FILETIME's start) and the Unix epoch, in 100 ns ticks.
-preset EPOCH_TICKS: U64 = 116444736000000000
-
-### rf_Moment: seconds since the Unix epoch and the nanoseconds after them.
-record Moment
-    seconds: S64
-    nanoseconds: U32
-
-record FileTime
-    low: U32
-    high: U32
-
-### Windows' `GetSystemTimePreciseAsFileTime`: the current UTC time in 100 ns ticks since 1601-01-01.
-### :param time: Where the time goes.
-@external("c")
-@symbol("GetSystemTimePreciseAsFileTime")
-@callconv("stdcall")
-@target(os: "windows")
-routine c_get_system_time_precise_as_file_time(time: @FileTime) -> None
-
-### The Moment a FILETIME stands for. A time before 1970 has negative seconds and nanoseconds counted forward from
-### them, in [0, 10^9), as POSIX's timespec has.
-### :param file_time: 100 ns ticks since 1601-01-01 (Windows keeps them below 2^63).
-### :returns: The seconds since the Unix epoch and the nanoseconds after them.
-routine moment_from_file_time(file_time: U64) -> Moment
-    ticks: S64 = file_time.to_wrap[S64]() - EPOCH_TICKS.to[S64]()
-    seconds: S64 = ticks.div(10000000)
-    sub_second_ticks: S64 = ticks.mod(10000000)
-    return Moment(seconds: seconds, nanoseconds: (sub_second_ticks * 100).to[U32]())
-
-### The current wall-clock time, from the system's precise FILETIME.
-### :returns: The seconds since the Unix epoch and the nanoseconds after them, negative seconds before 1970.
+### The current date and time: the seconds since 1970-01-01 UTC and the nanoseconds past them, negative seconds before
+### 1970.
+### :returns: The moment.
 @export("rf_moment_now")
-@target(os: "windows")
 routine rf_moment_now() -> Moment
-    local ft: @FileTime <- FileTime(low: 0, high: 0)
-
-    c_get_system_time_precise_as_file_time(ft)
-    high_part: U64 = ft.high.peek().to[U64]()
-    file_time: U64 = (high_part << 32) | ft.low.peek().to[U64]()
-    return moment_from_file_time(file_time)
-
-### POSIX `clock_gettime`: the time of `clock`.
-### :param clock: The clock id.
-### :param out: Where the time goes.
-### :returns: 0 on success, -1 on error.
-@external("c")
-@symbol("clock_gettime")
-@target(os: not "windows")
-routine c_clock_gettime_real(clock: CInt, out: @Timespec) -> CInt
-
-### The current wall-clock time, from `CLOCK_REALTIME`.
-### :returns: The seconds since the Unix epoch and the nanoseconds after them.
-@export("rf_moment_now")
-@target(os: not "windows")
-routine rf_moment_now() -> Moment
-    local ts: @Timespec <- Timespec(sec: 0, nsec: 0)
-
-    # CLOCK_REALTIME
-    c_clock_gettime_real(0, ts)
-    now: Moment = Moment(seconds: ts.sec.peek().to[S64](),
-        nanoseconds: ts.nsec.peek().to_wrap[U32]())
-    return now
+    return Clock.now()
 
 # -- FFI test helpers ----------------------------------------------------------------
 #

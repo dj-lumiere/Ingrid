@@ -235,13 +235,13 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
     if sched.is_hollow() or this_coro.is_hollow()
         return 2
 
-    deadline: Duration = monotonic_now() +^ Duration.from_nanoseconds(timeout_ns)
+    deadline: Duration = Clock.monotonic() +^ of_ns(timeout_ns)
 
     while task.register_waiter(sched, waiter: this_coro) != 1
-        now: Duration = monotonic_now()
+        now: Duration = Clock.monotonic()
         if now >= deadline
             return task.withdraw_waiter(sched, waiter: this_coro)
-        rf_sched_park_deadline((deadline - now).nanoseconds())
+        rf_sched_park_deadline(ns_of(deadline - now))
     then
         return 1
 
@@ -500,13 +500,12 @@ routine rf_task_wait_within(task: @Task, timeout_seconds: S64, timeout_nanosecon
         return COMPLETION_ERROR
     if task.is_completed() or task.kind.peek() != TASK_THREADED
         return task.completion.peek()
-    secs: U64 = timeout_seconds.max(0).to[U64]()
-    span: U64 = secs *^ 1000000000 +^ timeout_nanoseconds.to[U64]()
-
-    deadline: Duration = monotonic_now() +^ Duration.from_nanoseconds(span)
+    timeout: Duration = Duration.from_parts(seconds: timeout_seconds,
+        nanoseconds: timeout_nanoseconds).max(0s)
+    deadline: Duration = Clock.monotonic() +^ timeout
 
     until task.is_completed()
-        now: Duration = monotonic_now()
+        now: Duration = Clock.monotonic()
         if now >= deadline
             return COMPLETION_TIMEOUT
         wait_on_for(at: task.done, expected: 0, timeout: deadline - now)
