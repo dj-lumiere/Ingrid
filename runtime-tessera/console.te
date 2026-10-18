@@ -71,7 +71,7 @@ routine is_stdout_interactive() -> Bool
             STDOUT_INTERACTIVE.poke(flag)
             return interactive
 
-    interactive: Bool = Out.is_terminal()
+    interactive: Bool = Console.output().is_terminal()
     flag: CInt = when
         interactive => 1
         else => 0
@@ -83,7 +83,7 @@ routine OutputBuffer.drain(me: @Me) -> None
     n: U64 = me.count.peek()
     if n == 0
         return
-    Out.write_all_result(data: me.bytes.to[@Byte](), count: n)
+    Console.output().write_all_result(data: me.bytes.to[@Byte](), count: n)
     me.count.poke(0)
     return
 
@@ -105,7 +105,7 @@ routine rf_console_show(ptr: @Byte, count: U64) -> None
             becomes count >= OUTPUT_BUFFER
         else => false
     if goes_straight
-        Out.write_all_result(data: ptr, count)
+        Console.output().write_all_result(data: ptr, count)
     else
         out.bytes.to[@Byte]().stride(out.count.peek()).copy(src: ptr, count)
         next_count: U64 = out.count.peek() + count
@@ -142,14 +142,14 @@ routine rf_console_flush_on_fault() -> None
 @export("rf_console_alert")
 routine rf_console_alert(ptr: @Byte, count: U64) -> None
     rf_console_flush()
-    colored: Bool = Err.is_terminal()
+    colored: Bool = Console.errors().is_terminal()
     on: @[Byte] = "[95m"
     off: @[Byte] = "[0m"
     if colored
-        Err.write_all_result(data: on.data, count: on.count())
-    Err.write_all_result(data: ptr, count)
+        Console.errors().write_all_result(data: on.data, count: on.count())
+    Console.errors().write_all_result(data: ptr, count)
     if colored
-        Err.write_all_result(data: off.data, count: off.count())
+        Console.errors().write_all_result(data: off.data, count: off.count())
     return
 
 # -- standard input ------------------------------------------------------------------
@@ -194,7 +194,7 @@ routine rf_console_ask_line() -> @Byte
     AFTER_WORD.poke(false)
 
     while true with skip_blank: Bool = after_word
-        when In.read_line_checked(alloc)
+        when Console.ask_line_checked(alloc)
             is Memory[Byte] as t2 =>
                 if skip_blank and t2.count() == 0
                     drop t2
@@ -209,7 +209,7 @@ routine rf_console_ask_line() -> @Byte
 routine rf_console_ask_word() -> @Byte
     rf_console_flush()
     local alloc: @MemoryManager <- heap()
-    word: @Byte = terminated_option(In.read_word_checked(alloc))
+    word: @Byte = terminated_option(Console.ask_word_checked(alloc))
     AFTER_WORD.poke(not word.is_hollow())
     return word
 
@@ -221,7 +221,7 @@ routine rf_console_ask_bytes(count: U64) -> @Byte
     rf_console_flush()
     AFTER_WORD.poke(false)
     local alloc: @MemoryManager <- heap()
-    return terminated_text(In.read_count(count, alloc))
+    return terminated_text(Console.ask_bytes(count, alloc))
 
 ### The rest of stdin, NUL-terminated. Standard output is flushed first.
 ### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
@@ -230,7 +230,7 @@ routine rf_console_ask_all() -> @Byte
     rf_console_flush()
     AFTER_WORD.poke(false)
     local alloc: @MemoryManager <- heap()
-    return terminated_text(In.read_all(alloc))
+    return terminated_text(Console.ask_all(alloc))
 
 # -- the crash report's OS side ------------------------------------------------------
 
@@ -241,7 +241,7 @@ routine rf_console_ask_all() -> @Byte
 routine rf_console_error(ptr: @Byte, count: U64) -> None
     if ptr.is_hollow() or count == 0
         return
-    Err.write_all_result(data: ptr, count)
+    Console.errors().write_all_result(data: ptr, count)
     return
 
 ### Flushes stdout, so a program's output appears before the crash report that follows it.
@@ -254,7 +254,7 @@ routine rf_flush_output() -> None
 ### :returns: True when standard error is a terminal.
 @export("rf_stderr_is_terminal")
 routine rf_stderr_is_terminal() -> Bool
-    return Err.is_terminal()
+    return Console.errors().is_terminal()
 
 ### Ends the program with the crash status, after the report.
 @export("rf_crash_exit")
@@ -271,7 +271,7 @@ routine rf_crash_exit() -> None
 routine rf_runtime_init() -> None
     rf_io_runtime_init()
     c_atexit(rf_console_flush.to[Callable]())
-    Err.enable_colors()
+    Console.errors().enable_colors()
     return
 
 ### Sets the exit status the program ends with when its `start` returns: RazorForge's and Suflae's `set_exit_code`.
