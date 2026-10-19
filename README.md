@@ -76,7 +76,7 @@ against RazorForge's engines and the other decimal operations against exact refe
 D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal
 transcendentals against mpmath, Integer through its C calls (and the scratch and result-buffer retries)
 against what RazorForge's engines computed, the word division on its edge cases, the Roamed counts and lock, the cycle
-collector, the deadlock detector, the heap calls, and the crash report, and from
+collector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.te`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.

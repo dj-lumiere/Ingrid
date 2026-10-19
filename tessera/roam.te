@@ -4,7 +4,8 @@
 # (RazorForge's `RoamManager[T]`) whose methods call these routines on the controller's address.
 #
 # The cycle collector itself, with its buffers and the world lock, is in cycle.te. The only native calls left are
-# the task scheduler's (the current task and yielding), which is the runtime's own.
+# the runtime's own: the agent running now and yielding (the scheduler's), and the AccessManager, which records a
+# wait for the lock and looks for agents that wait on each other.
 
 import Standard/Collections
 import Standard/Os
@@ -24,7 +25,8 @@ record RoamHeader
     data: Addr
     ### The exclusive lock (0 free, 1 held). Used only once escaped.
     locked: U8
-    ### The task holding the lock, 0 when free. Keyed to the task, not the thread, since tasks migrate.
+    ### The agent holding the lock (its AccessManager id), 0 when free. Keyed to the agent, not the thread, since
+    ### agents migrate.
     holder_task: U64
     ### How many times the holder has entered the lock.
     depth: U64
@@ -69,11 +71,25 @@ routine @RoamHeader.destruct() -> None
 
 # ── The task scheduler (native) ──────────────────────────────────────────
 
-### The id of the task running now, from the native task scheduler.
-### :returns: The current task's id.
+### The id of the agent running now, the AccessManager's (the runtime library's): what the lock keeps of its holder.
+### :returns: The current agent's id.
 @external("c")
-@symbol("rf_current_task_id")
+@symbol("rf_access_flow_id")
 secret routine current_task_id() -> U64
+
+### Records with the AccessManager that the running agent waits for the lock at `lock`, whose holder's id `holder`
+### keeps, and looks for a deadlock when the program's check is on.
+### :param lock: The entity's header.
+### :param holder: Its `holder_task`.
+### :throws: Crashes with `DeadlockError` when agents wait on each other.
+@external("c")
+@symbol("rf_access_wait_begin")
+secret routine access_wait_begin(lock: Addr, holder: @U64) -> None
+
+### Records with the AccessManager that the running agent no longer waits.
+@external("c")
+@symbol("rf_access_wait_end")
+secret routine access_wait_end() -> None
 
 ### Yields the running task to the native scheduler, so another task can run on this worker.
 @external("c")
@@ -309,11 +325,12 @@ routine roam_promote(header: @RoamHeader) -> None
         drop kids
         return
 
-# ── The task-keyed reentrant lock ──────────────────────────────────────────
+# ── The agent-keyed reentrant lock ──────────────────────────────────────────
 
-### Enters the entity's lock when it has escaped (a local entity has no contention). Re-entry by the holding task
-### only deepens the hold, so a member routine calling itself never deadlocks. A contended entry registers the wait
-### with the deadlock detector and yields to the scheduler instead of spinning, so a holder parked on this worker
+### Enters the entity's lock when it has escaped (a local entity has no contention). Re-entry by the holding agent
+### only deepens the hold: the builder brackets each statement, so a member routine called inside one enters again.
+### A contended entry records the wait with the AccessManager, which looks for agents waiting on each other when the
+### program's deadlock check is on, and yields to the scheduler instead of spinning, so a holder parked on this worker
 ### can run.
 ### :param header: The entity's header.
 @export("ingrid_roam_lock_enter")
@@ -322,22 +339,23 @@ routine roam_lock_enter(header: @RoamHeader) -> None
     if header.escaped.peek_atomic() == 1
         task: U64 = current_task_id()
 
-        until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task
+        until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task with waited: Bool = false
             taken: Result[None, U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
             when taken
                 is None =>
                     header.holder_task.poke_atomic(task)
                     1.poke_into(header.depth)
-                    deadlock_wait_end(task)
+                    if waited
+                        access_wait_end()
                     return
                 is U8 =>
-                    deadlock_wait_begin(waiter: task, holder: header.holder_task.peek_atomic())
+                    if not waited
+                        access_wait_begin(lock: header, holder: header.holder_task)
                     coro_yield()
-                    continue
+                    continue with waited: true
         then
             next_depth: U64 = header.depth.peek() + 1
             next_depth.poke_into(header.depth)
-            deadlock_wait_end(task)
             return
     else
         return

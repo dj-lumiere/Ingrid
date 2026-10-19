@@ -18,8 +18,10 @@ global SCRATCH: @HeaderBuffer
 ### The garbage a pass found, freed once the walk is over (freeing during it would leave dangling addresses).
 global REAP: @HeaderBuffer
 
-### Guards ROOTS, which two mutators holding the world lock shared can append to at once.
-global ROOTS_LOCK: @ExclusiveLock
+### Guards ROOTS, which two mutators holding the world lock shared can append to at once: 1 while one does. A plain
+### flag rather than an ExclusiveAccess: this code is linked into every program, and the AccessManager that keeps track
+### of accesses lives once, in the runtime library.
+global ROOTS_FLAG: @U32
 
 ### The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
 ### cache. Which mutators are inside is kept per thread, in SLOTS.
@@ -103,6 +105,19 @@ routine my_slot() -> @WorldSlot
                 is Addr => continue
     else
         return mine.to[@WorldSlot]()
+
+### Takes ROOTS_FLAG, sleeping while another thread holds it.
+routine lock_roots() -> None
+    while ROOTS_FLAG.atomic_swap(1) != 0
+        wait_on(at: ROOTS_FLAG, expected: 1)
+    then
+        return
+
+### Gives ROOTS_FLAG up, waking one thread that sleeps on it.
+routine unlock_roots() -> None
+    ROOTS_FLAG.poke_atomic(0)
+    wake_one(ROOTS_FLAG)
+    return
 
 ### Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
 ### its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
@@ -234,9 +249,9 @@ routine add_candidate(header: @RoamHeader) -> None
     if IN_COLLECTOR.peek()
         buffer_push(buffer: ROOTS, item: header)
         return
-    ROOTS_LOCK.lock()
+    lock_roots()
     buffer_push(buffer: ROOTS, item: header)
-    ROOTS_LOCK.unlock()
+    unlock_roots()
     return
 
 ### Drops one root that is about to be freed by its last strong release, so no pass reaches the freed header. Swaps
@@ -246,11 +261,11 @@ routine remove_candidate(header: @RoamHeader) -> None
     unlock: Bool = when
         IN_COLLECTOR.peek() => false
         else =>
-            ROOTS_LOCK.lock()
+            lock_roots()
             becomes true
     buffer_remove(buffer: ROOTS, header)
     if unlock
-        ROOTS_LOCK.unlock()
+        unlock_roots()
         return
     return
 

@@ -1,6 +1,6 @@
 # RazorForge's SignalCaster: a monitor (a lock and a wait set). A waiter takes the lock, checks its condition, and
 # waits while it doesn't hold: wait releases the lock, suspends, and takes it again when woken. The lock and the
-# waiting of plain threads are Standard/Os's ExclusiveLock and SignalCaster. What is RazorForge's own is here: the handle count
+# waiting of plain threads are Standard/Os's ExclusiveAccess and SignalCaster. What is RazorForge's own is here: the handle count
 # the agents sharing one SignalCaster hold, and the coroutines a wait parks on the RazorForge scheduler (a cast on any
 # thread wakes them, before any thread).
 
@@ -10,7 +10,7 @@ import Standard/Os
 
 ### rf_signal.
 record Monitor
-    lock: ExclusiveLock  # the monitor lock, which guards the caller's condition
+    lock: ExclusiveAccess  # the monitor lock, which guards the caller's condition
     cond: SignalCaster  # plain threads wait here
     waiters: @ChannelWaiter  # parked coroutines
     refcount: U32
@@ -21,7 +21,7 @@ record Monitor
 ### :param waiters: Its `waiters`.
 ### :param refcount: Its `refcount`.
 ### :returns: The new value.
-common routine Monitor.construct(lock: ExclusiveLock, cond: SignalCaster, waiters: @ChannelWaiter,
+common routine Monitor.construct(lock: ExclusiveAccess, cond: SignalCaster, waiters: @ChannelWaiter,
     refcount: U32) -> Me
     return Me(lock, cond, waiters, refcount)
 
@@ -125,7 +125,7 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
     coro: @Coro = current_coro()
     if sched.is_hollow() or coro.is_hollow()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
-        in_time: Bool = sig.cond.wait_until(mutex: sig.lock, deadline)
+        in_time: Bool = sig.cond.wait_until(access: sig.lock, deadline)
         return in_time.to[U32]()
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")

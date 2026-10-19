@@ -58,6 +58,7 @@ record Coro
     stack: StackManager  # its stack, on pages from PAGES
     sp: Addr  # its stack pointer while it isn't running
     resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
+    access: @AccessFlow  # what the AccessManager keeps of it, made at its first access
 
 ### Makes a `CancelFrame` from its fields.
 ### :param value_ptr: Its `value_ptr`.
@@ -92,15 +93,16 @@ routine @CancelFrame.destruct() -> None
 ### :param stack: Its `stack`.
 ### :param sp: Its `sp`.
 ### :param resumer_sp: Its `resumer_sp`.
+### :param access: Its `access`.
 ### :returns: The new value.
 common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
     cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
-    stack: StackManager, sp: Addr, resumer_sp: Addr) -> Me
+    stack: StackManager, sp: Addr, resumer_sp: Addr, access: @AccessFlow) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
-        awaiter, home, completion_seq, stack, sp, resumer_sp)
+        awaiter, home, completion_seq, stack, sp, resumer_sp, access)
 
 ### Releases nothing: a `Coro` holds no memory of its own.
 routine @Coro.destruct() -> None
@@ -176,7 +178,10 @@ routine rf_coro_resume(coro: @Coro) -> U32
     # The running flow's StackManager is the coroutine's while it runs.
     outer_stack: @StackManager = RUNNING_STACK.peek()
     RUNNING_STACK.poke(coro.stack)
+    # The AccessManager sees the coroutine as the agent running here while it runs.
+    outer_flow: @@AccessFlow = AccessManager.switch_flow(coro.access)
     switch_stack(from: coro.resumer_sp, to: coro.sp.peek())
+    AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
     return coro.status.peek_atomic()
@@ -234,6 +239,7 @@ routine rf_coro_delete(coro: @Coro) -> None
     stack: StackManager = coro.stack.peek()
     if stack.top.is_not_hollow()
         give_back_stack(stack, pages: PAGES)
+    AccessManager.end_flow(coro.access)
     c_free(coro)
     return
 

@@ -64,7 +64,7 @@ record Deque
     cap: U64
     bottom: U64  # the next free slot at the owner's end
     top: U64  # the oldest coroutine, at the thieves' end
-    lock: ExclusiveLock
+    lock: ExclusiveAccess
 
 ### rf_sched.
 record Sched
@@ -80,7 +80,7 @@ record Sched
     workers_idle: S64
     deadlock_confirm: U64
     deques: @Deque  # one per pool worker, or null for a scheduler driven directly
-    lock: ExclusiveLock
+    lock: ExclusiveAccess
     cond: SignalCaster  # idle workers wait here
     block_cond: SignalCaster  # top-level retrieve!/race! callers wait here
 
@@ -91,7 +91,7 @@ record Sched
 ### :param top: Its `top`.
 ### :param lock: Its `lock`.
 ### :returns: The new value.
-common routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64, lock: ExclusiveLock) -> Me
+common routine Deque.construct(buf: @@Coro, cap: U64, bottom: U64, top: U64, lock: ExclusiveAccess) -> Me
     return Me(buf, cap, bottom, top, lock)
 
 ### Releases nothing: a `Deque` holds no memory of its own.
@@ -118,7 +118,7 @@ routine @Deque.destruct() -> None
 common routine Sched.construct(injector_head: @Coro, injector_tail: @Coro, timer_heap: @@Coro,
     timer_count: S64, timer_cap: S64, live: S64, cross_wakers: S64, waiters: S64,
     workers_total: S64, workers_idle: S64, deadlock_confirm: U64, deques: @Deque,
-    lock: ExclusiveLock, cond: SignalCaster, block_cond: SignalCaster) -> Me
+    lock: ExclusiveAccess, cond: SignalCaster, block_cond: SignalCaster) -> Me
     return Me(injector_head, injector_tail, timer_heap, timer_count, timer_cap, live, cross_wakers,
         waiters, workers_total, workers_idle, deadlock_confirm, deques, lock, cond, block_cond)
 
@@ -149,7 +149,7 @@ routine @Deque.init() -> None
     me.buf.poke(zeroed[@Coro](count: 64, what: "Failed to allocate worker run deque"))
     me.bottom.poke(0)
     me.top.poke(0)
-    me.lock.poke(ExclusiveLock.construct())
+    me.lock.poke(ExclusiveAccess.construct())
     return
 
 ### The ring slot for position `i`, wrapped by the capacity.
@@ -763,7 +763,7 @@ routine @Sched.step() -> Bool
                     if deadline > now
                         more_idle: S64 = me.workers_idle.peek() + 1
                         more_idle.poke_into(me.workers_idle)
-                        me.cond.wait_until(mutex: me.lock,
+                        me.cond.wait_until(access: me.lock,
                             deadline: of_ns(deadline))
                         fewer_idle: S64 = me.workers_idle.peek() - 1
                         fewer_idle.poke_into(me.workers_idle)
@@ -798,7 +798,7 @@ routine @Sched.step() -> Bool
                         else
                             more_idle: S64 = me.workers_idle.peek() + 1
                             more_idle.poke_into(me.workers_idle)
-                            me.cond.wait_for(mutex: me.lock, timeout: DEADLOCK_GRACE)
+                            me.cond.wait_for(access: me.lock, timeout: DEADLOCK_GRACE)
                             fewer_idle: S64 = me.workers_idle.peek() - 1
                             fewer_idle.poke_into(me.workers_idle)
                             me.lock.unlock()
@@ -1046,7 +1046,7 @@ routine @Sched.block_wait() -> None
     me.lock.lock()
     if ran
         return
-    me.block_cond.wait_for(mutex: me.lock, timeout: HERE_POLL)
+    me.block_cond.wait_for(access: me.lock, timeout: HERE_POLL)
     return
 
 ### Spawns a new coroutine onto the process pool (start_now()).

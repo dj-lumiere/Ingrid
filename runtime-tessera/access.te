@@ -1,0 +1,151 @@
+# RazorForge's and Suflae's side of Standard/Os's AccessManager. The AccessManager lives here, in the runtime library,
+# once for the whole program: the standard libraries take and give up a Guarded's access through these routines, a
+# block that opens several at once names them and opens them together (in address order), and a Roamed entity's lock
+# reports its waits here (roam.te, linked into the program, reaches these by their C names).
+#
+# Every agent is a flow of its own: a coroutine's AccessFlow is made at its first access and given back with the
+# coroutine, and the scheduler tells the AccessManager which coroutine runs (rf_coro_resume). A coroutine that waits
+# for an access parks on a short timer, so the coroutine holding it runs on the same worker meanwhile. A plain thread
+# runs its start_here() jobs while it waits, and sleeps otherwise.
+#
+# The checks are the program's `[debug] deadlock-check` and `[debug] access-order`, which the program's `main` passes
+# to rf_access_configure before `start` runs, with the language the reports speak.
+
+module Ingrid/Runtime
+
+import Standard/Os
+
+### How long a coroutine waiting for an access parks before it looks again.
+preset ACCESS_POLL: Duration = 50us
+
+### How a waiting agent parks: a coroutine on a short timer (so the holder can run on its worker), a plain thread by
+### running one of its start_here() jobs, else by sleeping on the access's word. It may return early.
+### :param word: The word the agent waits on, hollow when there is none.
+### :param expected: The value the word holds while the wait goes on.
+### :param deadline: When to stop, in `Clock.monotonic()` time, `Duration.MAX` for none.
+routine access_park(word: @U32, expected: U32, deadline: Duration) -> None
+    local now: Duration = Clock.monotonic()
+    local this_coro: @Coro = current_coro()
+
+    if deadline != Duration.MAX and now >= deadline
+        return
+    left: Duration = when
+        deadline == Duration.MAX => ACCESS_POLL
+        else => (deadline - now).min(ACCESS_POLL)
+    if this_coro.is_not_hollow() and current_sched().is_not_hollow()
+        rf_sched_park_timer(ns_of(left))
+        return
+    if run_here_ready()
+        return
+    if word.is_hollow() or here_has_live()
+        waitfor(left)
+        return
+    if deadline == Duration.MAX
+        wait_on(at: word, expected)
+        return
+    wait_on_for(at: word, expected, timeout: deadline - now)
+    return
+
+### Sets the AccessManager up for this program: its checks, the language its reports speak (1 RazorForge, 2 Suflae),
+### and the routine that writes where the code taking an access is. The program's `main` calls it before `start`, on
+### the thread that runs `start`, which the reports then call `start()`.
+### :param deadlock_check: Nonzero to look for a deadlock before an agent waits.
+### :param access_order: Nonzero to stop on two accesses taken in opposite orders.
+### :param language: 1 for RazorForge, 2 for Suflae.
+### :param place: The code of a `Callable[(@SourceLocation,), None]` that writes the place, or null.
+@export("rf_access_configure")
+routine rf_access_configure(deadlock_check: U32, access_order: U32, language: U32, place: Addr) -> None
+    writer: Callable[(@SourceLocation,), None] = bitcast(place)
+    AccessManager.set_park(access_park.to[Callable]())
+    AccessManager.configure(deadlock_check: deadlock_check != 0, access_order: access_order != 0,
+        words: language.to_clamp[U8](), place: writer)
+    return
+
+### Takes a Guarded's access, waiting while another agent holds it.
+### :param access: The access, laid out as Standard/Os's ExclusiveAccess or MultiReadAccess.
+### :param kind: 1 for ExclusiveAccess, 2 for MultiReadAccess.
+### :param mode: 1 to read, 2 to write.
+### :throws: Crashes with `ReenterDuringAccessError` when this agent already holds it, and with `DeadlockError` (with
+### the deadlock check on) when agents wait on each other.
+@export("rf_access_lock")
+routine rf_access_lock(access: Addr, kind: U32, mode: U32) -> None
+    local place: @SourceLocation <- AccessManager.place_here()
+
+    AccessManager.take(access, kind: kind.to_clamp[U8](), mode: mode.to_clamp[U8](), place)
+    return
+
+### Takes a Guarded's access if it is free, without waiting.
+### :param access: The access.
+### :param kind: 1 for ExclusiveAccess, 2 for MultiReadAccess.
+### :param mode: 1 to read, 2 to write.
+### :returns: 1 when it took the access, else 0.
+### :throws: Crashes with `ReenterDuringAccessError` when this agent already holds it.
+@export("rf_access_try_lock")
+routine rf_access_try_lock(access: Addr, kind: U32, mode: U32) -> U8
+    local place: @SourceLocation <- AccessManager.place_here()
+
+    taken: Bool = AccessManager.try_take(access, kind: kind.to_clamp[U8](), mode: mode.to_clamp[U8](), place)
+    return taken.to[U8]()
+
+### Gives up a Guarded's access this agent holds.
+### :param access: The access.
+### :param kind: 1 for ExclusiveAccess, 2 for MultiReadAccess.
+### :param mode: 1 to read, 2 to write.
+@export("rf_access_unlock")
+routine rf_access_unlock(access: Addr, kind: U32, mode: U32) -> None
+    AccessManager.give_up(access, kind: kind.to_clamp[U8](), mode: mode.to_clamp[U8]())
+    return
+
+### Names one target of a block that opens several at once.
+### :param access: The access, or for a token the entity, only checked to differ from the others.
+### :param kind: 1 for ExclusiveAccess, 2 for MultiReadAccess, 0 for an entity only checked.
+### :param mode: 1 to read, 2 to write.
+@export("rf_access_enlist")
+routine rf_access_enlist(access: Addr, kind: U32, mode: U32) -> None
+    AccessManager.enlist(access, kind: kind.to_clamp[U8](), mode: mode.to_clamp[U8]())
+    return
+
+### Opens the targets a block named, in the order of their addresses, waiting for each.
+### :throws: Crashes with `AliasedTokensError` when two names are the same entity, with `ReenterDuringAccessError`
+### when this agent holds one already, and with `DeadlockError` (with the deadlock check on) on a cycle.
+@export("rf_access_open_enlisted")
+routine rf_access_open_enlisted() -> None
+    local place: @SourceLocation <- AccessManager.place_here()
+
+    AccessManager.open_enlisted(place)
+    return
+
+### Opens the targets a block named only if every one is free right now, without waiting.
+### :returns: 1 when it opened them all, 0 when one was taken (then none is open).
+### :throws: Crashes with `AliasedTokensError` when two names are the same entity, and with
+### `ReenterDuringAccessError` when this agent holds one already.
+@export("rf_access_try_open_enlisted")
+routine rf_access_try_open_enlisted() -> U8
+    local place: @SourceLocation <- AccessManager.place_here()
+
+    opened: Bool = AccessManager.try_open_enlisted(place)
+    return opened.to[U8]()
+
+### The id of the agent running here, which a Roamed entity's lock keeps while the agent holds it.
+### :returns: The id, never 0.
+@export("rf_access_flow_id")
+routine rf_access_flow_id() -> U64
+    return AccessManager.flow_id()
+
+### A Roamed entity's lock is taken and the agent will wait for it: records the wait, and looks for a deadlock when the
+### check is on.
+### :param lock: The lock (the entity's header).
+### :param holder: Where the lock keeps the id of the agent holding it.
+### :throws: Crashes with `DeadlockError` (with the deadlock check on) when agents wait on each other.
+@export("rf_access_wait_begin")
+routine rf_access_wait_begin(lock: Addr, holder: @U64) -> None
+    local place: @SourceLocation <- AccessManager.place_here()
+
+    AccessManager.begin_wait(access: lock, holder, place)
+    return
+
+### The agent no longer waits for a Roamed entity's lock.
+@export("rf_access_wait_end")
+routine rf_access_wait_end() -> None
+    AccessManager.end_wait()
+    return
