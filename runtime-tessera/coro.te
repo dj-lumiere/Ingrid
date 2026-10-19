@@ -1,7 +1,6 @@
 # RazorForge's stackful coroutine: create / resume / yield / delete, the cancellation shadow stack, and
-# abandonment. The stack and the context switch are Standard/Fiber's (switch_stack, initial_stack, and the stack
-# allocator: pages reserved, committed as the stack grows, a no-access page at the bottom), the same on every
-# operating system.
+# abandonment. The stack and the context switch are Standard/Fiber's (switch_stack, initial_stack, and take_stack:
+# pages from PAGES with a closed page at the bottom), the same on every operating system.
 #
 # rf_coro_resume switches into a coroutine and returns when it parks (rf_coro_yield and the scheduler's park
 # primitives) or finishes, with its status. The coroutine running on a thread is a thread-local, read again after
@@ -28,8 +27,8 @@ preset CORO_PARKED:    U32 = 2
 preset CORO_COMPLETED: U32 = 3
 preset CORO_CANCELLED: U32 = 4
 
-### A coroutine's stack reserve when the caller gives 0: reserved, not committed, so a parked shallow coroutine
-### costs about the pages it has touched.
+### A coroutine's stack size when the caller gives 0. The operating system backs only the pages a coroutine touches,
+### so a parked shallow coroutine costs about those.
 preset DEFAULT_STACK: U64 = 1048576
 
 ### rf_cancel_frame: one live owned value of a coroutine, in a node that lives in the scope owning the value.
@@ -57,7 +56,7 @@ record Coro
     awaiter: @Coro  # a coroutine waiting for this one to finish
     home: @Sched  # the scheduler it was spawned on, where its wakes go
     completion_seq: U64  # when it finished, in completion order (race! picks the first); U64.MAX until then
-    stack: Addr  # the bottom of its stack
+    stack: StackManager  # its stack, on pages from PAGES
     sp: Addr  # its stack pointer while it isn't running
     resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
 
@@ -99,7 +98,7 @@ common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, st
     cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
-    stack: Addr, sp: Addr, resumer_sp: Addr) -> Me
+    stack: StackManager, sp: Addr, resumer_sp: Addr) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
         awaiter, home, completion_seq, stack, sp, resumer_sp)
@@ -133,23 +132,6 @@ routine coro_trampoline() -> None
     switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
     unreachable
 
-### Reserves a coroutine stack from Standard/Fiber's stack allocator.
-### :param size: The stack's reserve in bytes.
-### :returns: The stack's bottom, or null when it can't be reserved.
-routine stack_alloc(size: U64) -> Addr
-    local stacks: @MemoryManager <- make_stack_memory()
-
-    stack: Addr = stacks.alloc(size, align: 16)
-    return stack
-
-### Gives a coroutine stack back to Standard/Fiber's stack allocator.
-### :param stack: The stack's bottom, from {stack_alloc}.
-routine stack_free(stack: Addr) -> None
-    local stacks: @MemoryManager <- make_stack_memory()
-
-    stacks.free(stack)
-    return
-
 ### A coroutine whose body is entry(userdata), on a stack of stack_size bytes (0: DEFAULT_STACK). It starts when it
 ### is first resumed. Null for a null entry.
 ### :param entry: The coroutine's body.
@@ -169,14 +151,14 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
     reserve: U64 = when
         stack_size == 0 => DEFAULT_STACK
         else => stack_size
-    stack: Addr = stack_alloc(reserve)
-    if stack.is_hollow()
+    stack: StackManager = take_stack(size: ByteSize.construct(bytes: reserve), pages: PAGES)
+    if stack.top.is_hollow()
         c_free(coro)
         rf_throw(error_type: "OutOfMemoryError",
             message: "Failed to reserve coroutine stack (out of address space or commit limit)")
     else
         coro.stack.poke(stack)
-        coro.sp.poke(initial_stack(stack: stack.to[@Byte](), size: reserve,
+        coro.sp.poke(initial_stack(stack: stack.bottom, size: stack.size().bytes(),
             entry: coro_trampoline.addr()))
         return coro
 
@@ -192,7 +174,11 @@ routine rf_coro_resume(coro: @Coro) -> U32
     prev: @Coro = current_coro()
     CURRENT_CORO.poke(coro)
     coro.status.poke_atomic(CORO_RUNNING)
+    # The running flow's StackManager is the coroutine's while it runs.
+    outer_stack: @StackManager = RUNNING_STACK.peek()
+    RUNNING_STACK.poke(coro.stack)
     switch_stack(from: coro.resumer_sp, to: coro.sp.peek())
+    RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
     return coro.status.peek_atomic()
 
@@ -246,9 +232,9 @@ routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
 routine rf_coro_delete(coro: @Coro) -> None
     if coro.is_hollow()
         return
-    stack: Addr = coro.stack.peek()
-    if not stack.is_hollow()
-        stack_free(stack)
+    stack: StackManager = coro.stack.peek()
+    if stack.top.is_not_hollow()
+        give_back_stack(stack, pages: PAGES)
     c_free(coro)
     return
 
