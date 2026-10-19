@@ -1,80 +1,64 @@
-# The current process's signals for the stdlib's Signals module: when_interrupted (Ctrl-C, SIGINT) and
+# The current process's events for RazorForge's and Suflae's CpuEventManager: when_interrupted (Ctrl+C, SIGINT) and
 # when_terminated (SIGTERM, the console closing). Not a child's signal (rf_proc_term_signal) and not SignalCaster.
 #
-# Registering a handler takes over the signal: the process no longer ends on it by itself, the RazorForge handlers
-# decide. They run outside signal context: on POSIX the signal handler only writes one byte to a pipe (the
-# self-pipe trick, async-signal-safe) and a thread of its own reads it and runs the handlers. On Windows the
-# console already calls its handler on a thread of its own.
+# Each kind has one handler slot. Putting a handler in a slot takes the event over from the system, and hands back the
+# handler that held it before. Putting null in it gives the event back to the system. A handler runs outside signal
+# context: on POSIX the signal handler only writes one byte to a pipe (the self-pipe trick, async-signal-safe) and a
+# thread of its own reads it and runs the handler. On Windows the console already calls its handler on a thread of its
+# own.
+#
+# When a when_terminated handler returns, the process ends with ProcessManager.exit_process and the status
+# rf_set_exit_code stored last. When a when_interrupted handler returns, the program goes on. An event of a kind whose
+# handler is still running takes the system's action: a second Ctrl+C ends a program whose handler is stuck.
 #
 # A handler is a box holding a RazorForge routine value's two words: the function and what it captured. The function
-# is called with the context first for a context handler (the raw pointer of a Roamed or Guarded handle), then the
-# captures when there are any. Registration lasts the process's life, so the boxes are never freed.
+# is called with the captures when there are any. A box that left its slot may still be running on the handler's
+# thread, so boxes are never freed.
 
 module Ingrid/Runtime
 
 import Standard/Os
 
-global INTERRUPT_HANDLERS: @HandlerList
-global TERMINATE_HANDLERS: @HandlerList
-### Guards the lists and the one-time setup.
+### The box in the interrupt slot, null for none.
+global INTERRUPT_HOLDER: @Addr
+### The box in the terminate slot, null for none.
+global TERMINATE_HOLDER: @Addr
+### 1 from when an interrupt is taken until its handler returns.
+global INTERRUPT_RUNNING: @U32
+### 1 from when a termination request is taken until the process ends.
+global TERMINATE_RUNNING: @U32
+### Guards the one-time setup.
 global SIGNALS_LOCK: @ExclusiveAccess
 global SIGNALS_INSTALLED: @Bool
 
 preset SIG_INTERRUPT: S32 = 0
 preset SIG_TERMINATE: S32 = 1
 
-record HandlerEntry
-    box: Addr
-    ctx: Addr
-    has_ctx: Bool
+### The slot of one kind.
+### :param which: `SIG_TERMINATE` for the terminate slot, anything else for the interrupt slot.
+### :returns: The slot.
+routine holder_of(which: S32) -> @Addr
+    slot: @Addr = when
+        which == SIG_TERMINATE => TERMINATE_HOLDER
+        else => INTERRUPT_HOLDER
+    return slot
 
-record HandlerList
-    items: @HandlerEntry
-    count: U64
-    cap: U64
-
-### Makes a `HandlerEntry` from its fields.
-### :param box: Its `box`.
-### :param ctx: Its `ctx`.
-### :param has_ctx: Its `has_ctx`.
-### :returns: The new value.
-common routine HandlerEntry.construct(box: Addr, ctx: Addr, has_ctx: Bool) -> Me
-    return Me(box, ctx, has_ctx)
-
-### Releases nothing: a `HandlerEntry` holds no memory of its own.
-routine @HandlerEntry.destruct() -> None
-    return
-
-### Makes a `HandlerList` from its fields.
-### :param items: Its `items`.
-### :param count: Its `count`.
-### :param cap: Its `cap`.
-### :returns: The new value.
-common routine HandlerList.construct(items: @HandlerEntry, count: U64, cap: U64) -> Me
-    return Me(items, count, cap)
-
-### Releases nothing: a `HandlerList` holds no memory of its own.
-routine @HandlerList.destruct() -> None
-    return
+### The running mark of one kind.
+### :param which: `SIG_TERMINATE` for the terminate mark, anything else for the interrupt mark.
+### :returns: The mark.
+routine running_of(which: S32) -> @U32
+    mark: @U32 = when
+        which == SIG_TERMINATE => TERMINATE_RUNNING
+        else => INTERRUPT_RUNNING
+    return mark
 
 ### Calls one handler. Its box holds a routine value's two words: the function, then what it captured (null for a
-### named routine). A function with captures takes them after its own arguments, so a context handler is called with
-### the context and then the captures. A null box does nothing.
-### :param e: The handler.
-routine invoke(e: HandlerEntry) -> None
-    if e.box.is_hollow()
-        return
-    fn: Addr = e.box.to[@Addr]().peek()
-    bound: Addr = e.box.to[@Addr]().stride(1).peek()
+### named routine). A function with captures takes them after its own arguments.
+### :param box: The handler's box.
+routine invoke(box: Addr) -> None
+    fn: Addr = box.to[@Addr]().peek()
+    bound: Addr = box.to[@Addr]().stride(1).peek()
     local slot: @Addr <- fn
-    if e.has_ctx
-        if bound.is_hollow()
-            with_ctx: Callable[(Addr,), None] = slot.to[@Callable[(Addr,), None]]().peek()
-            with_ctx.call(e.ctx)
-            return
-        with_both: Callable[(Addr, Addr), None] = slot.to[@Callable[(Addr, Addr), None]]().peek()
-        with_both.call(e.ctx, bound)
-        return
     if bound.is_hollow()
         bare: Callable[(), None] = slot.to[@Callable[(), None]]().peek()
         bare.call()
@@ -83,93 +67,36 @@ routine invoke(e: HandlerEntry) -> None
     captured.call(bound)
     return
 
-### Runs every handler of a list, from a copy taken under the lock (a handler may register more). When the copy
-### can't be allocated, no handler runs.
-### :param list: The handlers to run.
-routine dispatch(list: @HandlerList) -> None
-    SIGNALS_LOCK.lock()
-    n: U64 = list.count.peek()
-    if not (n == 0)
-        bytes: U64 = n * sizeof[HandlerEntry]()
-        snapshot: Addr = c_malloc(bytes.to[CSize]())
-        if not snapshot.is_hollow()
-            c_memcpy(snapshot, list.items.peek(), bytes.to[CSize]())
-            SIGNALS_LOCK.unlock()
+### Runs the handler of an event that was taken, outside signal context. A request to end then ends the process.
+### :param which: `SIG_TERMINATE` or `SIG_INTERRUPT`.
+### :returns: False when no handler holds the slot now, so the system's action is due.
+routine run_handler(which: S32) -> Bool
+    box: Addr = holder_of(which).peek_atomic()
+    if box.is_hollow()
+        return false
+    invoke(box)
+    if which == SIG_TERMINATE
+        ProcessManager.exit_process(exit_code())
+    running_of(which).poke_atomic(0)
+    return true
 
-            snapshot2: @HandlerEntry = snapshot.to[@HandlerEntry]()
-
-            each i in 0 til n
-                invoke(snapshot2.stride(i).peek())
-            then
-                c_free(snapshot2)
-                return
-    SIGNALS_LOCK.unlock()
-    return
-
-### Runs the handlers of one signal.
-### :param which: `SIG_TERMINATE` for the terminate handlers, anything else for the interrupt handlers.
-routine dispatch_which(which: S32) -> None
-    list: @HandlerList = when
-        which == SIG_TERMINATE => TERMINATE_HANDLERS
-        else => INTERRUPT_HANDLERS
-    dispatch(list)
-    return
-
-### Appends a handler, doubling the storage (from 4) when it is full. When the storage can't grow, the handler is
-### dropped.
-### :param entry: The handler to add.
-routine @HandlerList.append(entry: HandlerEntry) -> None
-    local n: U64 = me.count.peek()
-
-    if n == me.cap.peek()
-        cap: U64 = me.cap.peek()
-        ncap: U64 = when
-            cap == 0 => 4
-            else => cap * 2
-        grown: Addr = c_realloc(me.items.peek(), (ncap * sizeof[HandlerEntry]()).to[CSize]())
-        # out of memory: the registration is dropped, as registration is best-effort
-        if grown.is_hollow()
-            return
-        me.items.poke(grown.to[@HandlerEntry]())
-        me.cap.poke(ncap)
-    slot: @HandlerEntry = me.items.peek().stride(n)
-    slot.poke(entry)
-    me.count.poke(n + 1)
-    return
-
-### Adds a handler to one signal's list under the lock, and installs the signal dispatch on the first registration.
-### :param which: `SIG_TERMINATE` for the terminate list, anything else for the interrupt list.
-### :param entry: The handler to add.
+### Puts a handler in one kind's slot, and on the first handler installs the event dispatch.
+### :param which: The kind: 1 for terminate, anything else for interrupt.
+### :param handler_box: The routine value's box, or null to give the event back to the system.
+### :returns: The box that held the slot before, null for none.
 ### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
-routine register_entry(which: S32, entry: HandlerEntry) -> None
+@export("rf_cpu_event_replace")
+routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
+    kind: S32 = when
+        which == SIG_TERMINATE => SIG_TERMINATE
+        else => SIG_INTERRUPT
     SIGNALS_LOCK.lock()
-    list: @HandlerList = when
-        which == SIG_TERMINATE => TERMINATE_HANDLERS
-        else => INTERRUPT_HANDLERS
-    list.append(entry)
-    if not SIGNALS_INSTALLED.peek()
+    before: Addr = holder_of(kind).atomic_swap(handler_box)
+    if not handler_box.is_hollow() and not SIGNALS_INSTALLED.peek()
         install_signal_dispatch()
+    listen(kind, on: not handler_box.is_hollow())
     SIGNALS_LOCK.unlock()
-    return
-
-### A Routine[(), None] handler for which: 0 interrupt (SIGINT, Ctrl-C), 1 terminate (SIGTERM, the console closing).
-### :param which: The signal: 1 for terminate, anything else for interrupt.
-### :param handler_box: The Routine value's closure box.
-### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
-@export("rf_signal_register")
-routine rf_signal_register(which: S32, handler_box: Addr) -> None
-    register_entry(which, entry: HandlerEntry(box: handler_box, ctx: .hollow(), has_ctx: false))
-    return
-
-### A Routine[(Ctx,), None] handler, called with context each time the signal comes.
-### :param which: The signal: 1 for terminate, anything else for interrupt.
-### :param handler_box: The Routine value's closure box.
-### :param context: The raw pointer passed to the handler.
-### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
-@export("rf_signal_register_ctx")
-routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> None
-    register_entry(which, entry: HandlerEntry(box: handler_box, ctx: context, has_ctx: true))
-    return
+    return before
 
 # -- Windows: the console's control handler ------------------------------------------
 
@@ -184,28 +111,41 @@ routine rf_signal_register_ctx(which: S32, handler_box: Addr, context: Addr) -> 
 routine c_set_console_ctrl_handler(handler: Callable[@callconv("stdcall"), (U32,), CInt],
     add: CInt) -> CInt
 
-### On a thread the console starts, outside any signal context: runs the handlers, and TRUE keeps the default
-### (the end of the process) from happening.
-### :param ctrl_type: The console event: Ctrl-C and Ctrl-Break interrupt, close, logoff, and shutdown terminate.
-### :returns: 1 when handlers ran, 0 for any other event (the default applies).
+### On a thread the console starts, outside any signal context: runs the handler of the event's kind. Returning 0
+### lets the system act, which ends the process: when no handler holds the slot, or when the kind's handler is still
+### running.
+### :param ctrl_type: The console event: Ctrl+C and Ctrl+Break interrupt, close, logoff, and shutdown terminate.
+### :returns: 1 when a handler ran, 0 to let the system act.
 @target(os: "windows")
 @callconv("stdcall")
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
     # CTRL_C_EVENT 0, CTRL_BREAK_EVENT 1. CTRL_CLOSE_EVENT 2, CTRL_LOGOFF_EVENT 5, CTRL_SHUTDOWN_EVENT 6
-    when
-        ctrl_type <= 1 =>
-            dispatch_which(SIG_INTERRUPT)
-            return 1
-        ctrl_type == 2 or ctrl_type == 5 or ctrl_type == 6 =>
-            dispatch_which(SIG_TERMINATE)
-            return 1
-        else => return 0
+    if ctrl_type > 6 or ctrl_type == 3 or ctrl_type == 4
+        return 0
+    which: S32 = when
+        ctrl_type <= 1 => SIG_INTERRUPT
+        else => SIG_TERMINATE
+    if holder_of(which).peek_atomic().is_hollow()
+        return 0
+    if running_of(which).atomic_swap(1) == 1
+        return 0
+    if run_handler(which)
+        return 1
+    running_of(which).poke_atomic(0)
+    return 0
 
 ### Installs the console control handler. Called with the lock held.
 @target(os: "windows")
 routine install_signal_dispatch() -> None
     c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
     SIGNALS_INSTALLED.poke(true)
+    return
+
+### Nothing to do on Windows: the console handler stays installed and lets the system act for a slot with no handler.
+### :param which: The kind.
+### :param on: Whether a handler holds its slot.
+@target(os: "windows")
+routine listen(which: S32, on: Bool) -> None
     return
 
 # -- POSIX: the self-pipe ------------------------------------------------------------
@@ -279,6 +219,14 @@ routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
 @target(os: not "windows")
 routine c_sigemptyset(set: Addr) -> CInt
 
+### C's `raise`: sends a signal to the calling thread.
+### :param signo: The signal.
+### :returns: 0 on success.
+@external("c")
+@symbol("raise")
+@target(os: not "windows")
+secret routine c_raise_signal(signo: CInt) -> CInt
+
 ### Linux's `SA_RESTART` flag.
 ### :returns: `0x10000000`.
 @target(os: "linux")
@@ -319,7 +267,51 @@ secret routine c_errno_place() -> @CInt
 secret routine errno() -> CInt
     return c_errno_place().peek()
 
-### Async-signal-safe: writes the which-code byte to the self-pipe, retrying on EINTR, and returns.
+### The signal of a kind.
+### :param which: `SIG_TERMINATE` or `SIG_INTERRUPT`.
+### :returns: SIGTERM or SIGINT.
+@target(os: not "windows")
+routine signal_of(which: S32) -> CInt
+    signo: CInt = when
+        which == SIG_TERMINATE => SIGTERM
+        else => SIGINT
+    return signo
+
+### Points a signal at posix_signal_handler, or back at the system's action. Async-signal-safe.
+### :param signo: The signal.
+### :param on: True for posix_signal_handler, false for the system's action.
+@target(os: not "windows")
+routine set_signal_action(signo: CInt, on: Bool) -> None
+    local sa: @SigAction <- .hollow()
+    c_memset(sa, 0, sizeof[SigAction]().to[CSize]())
+    c_sigemptyset(sa.mask)
+    if on
+        sa.handler.poke(posix_signal_handler.to[Callable]())
+        sa.flags.poke(sa_restart())
+    c_sigaction(signo, sa, .hollow())
+    return
+
+### Lets the system act on a signal: puts its action back and sends the signal again, which ends the process. Inside
+### the signal's own handler the signal waits until the handler returns. Async-signal-safe.
+### :param signo: The signal.
+@target(os: not "windows")
+routine system_action(signo: CInt) -> None
+    set_signal_action(signo, on: false)
+    c_raise_signal(signo)
+    return
+
+### Points the kind's signal at posix_signal_handler while a handler holds its slot, else back at the system's action.
+### Called with the lock held.
+### :param which: The kind.
+### :param on: Whether a handler holds its slot.
+@target(os: not "windows")
+routine listen(which: S32, on: Bool) -> None
+    if SIGNALS_INSTALLED.peek()
+        set_signal_action(signal_of(which), on)
+    return
+
+### Async-signal-safe: takes the event and writes its which-code byte to the self-pipe, retrying on EINTR. An event
+### of a kind whose handler is still running takes the system's action instead.
 ### :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 @target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> None
@@ -329,12 +321,19 @@ routine posix_signal_handler(signo: CInt) -> None
         else => 0
     local byte: @U8 <- code
 
+    which: S32 = when
+        signo == SIGTERM => SIG_TERMINATE
+        else => SIG_INTERRUPT
+    if running_of(which).atomic_swap(1) == 1
+        system_action(signo)
+        return
     while c_write(SELF_PIPE.to[@CInt]().stride(1).peek(), byte.to[@Byte](), 1) < 0 and errno() == 4
         pass
     then
         return
 
-### Reads which-codes from the pipe and runs the handlers.
+### Reads which-codes from the pipe and runs each one's handler. When the slot has emptied since the event came, the
+### system acts on it.
 ### :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 @target(os: not "windows")
 routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
@@ -345,14 +344,16 @@ routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
     while true
         rc2: S64 = c_read(pipe[0], code.to[@Byte](), 1).to[S64]()
         if rc2 == 1
-            dispatch_which(code.peek().to[S32]())
+            which: S32 = code.peek().to[S32]()
+            if not run_handler(which)
+                system_action(signal_of(which))
             continue
         if rc2 < 0 and errno() == 4
             continue
         return
 
-### Makes the self-pipe, starts the dispatch thread, and sets the handler for SIGINT and SIGTERM. Called with the lock
-### held. If the pipe can't be made, nothing is installed and a later registration tries again.
+### Makes the self-pipe and starts the dispatch thread. Called with the lock held. If the pipe can't be made, nothing
+### is installed, the signals keep the system's action, and a later handler tries again.
 ### :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 @target(os: not "windows")
 routine install_signal_dispatch() -> None
@@ -360,12 +361,9 @@ routine install_signal_dispatch() -> None
     if c_pipe(fds) != 0
         return
     DEFAULT_THREADS.launch_unwatched(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE)
-    local sa: @SigAction <- .hollow()
-    c_memset(sa, 0, sizeof[SigAction]().to[CSize]())
-    sa.handler.poke(posix_signal_handler.to[Callable]())
-    c_sigemptyset(sa.mask)
-    sa.flags.poke(sa_restart())
-    c_sigaction(SIGINT, sa, .hollow())
-    c_sigaction(SIGTERM, sa, .hollow())
     SIGNALS_INSTALLED.poke(true)
+    if not INTERRUPT_HOLDER.peek_atomic().is_hollow()
+        set_signal_action(SIGINT, on: true)
+    if not TERMINATE_HOLDER.peek_atomic().is_hollow()
+        set_signal_action(SIGTERM, on: true)
     return

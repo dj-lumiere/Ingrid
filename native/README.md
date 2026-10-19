@@ -30,7 +30,7 @@ native/
 ├── console.te  // show / alert / ask, crash output and exit, runtime init, C-string helpers
 ├── files.te  // the rf_* files and filesystem calls over Tessera's Standard::Os: handles, mappings, listings
 ├── numeric.te  // libm's exact float operations, a random word, the wall clock, FFI test helpers
-├── signals.te  // when_interrupted / when_terminated
+├── signals.te  // CpuEventManager: when_interrupted / when_terminated
 ├── builtins.te  // what the JIT would otherwise get from compiler-rt: emulated TLS
 ├── coro.te  // a coroutine: create / resume / yield / abandon, the cancellation shadow stack
 ├── sched.te  // the scheduler: the worker pool, deques and stealing, timers, park/wake
