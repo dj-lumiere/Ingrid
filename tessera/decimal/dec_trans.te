@@ -104,7 +104,7 @@ routine me_narrow(x: MpApprox, from: U64, to: U64) -> MpApprox
     x.v.neg.poke_into(dst.neg)
     x.v.exp.poke_into(dst.exp)
     scale: B64 = b64_pow2(skip.to[S64]() * -64)
-    err: B64 = (x.err * scale + 2.0) * MP_UP
+    err: B64 = (x.err *! scale +! 2.0) *! MP_UP
     return (v: dst.peek(), err: err)
 
 # ── exp, ln ───────────────────────────────────────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ routine me_narrow(x: MpApprox, from: U64, to: U64) -> MpApprox
 ### :param n: The precision in limbs.
 ### :returns: e^x for |x| < 2^16.
 routine me_exp(x: MpApprox, n: U64) -> MpApprox
-    local kf: B64 = x.v.to_b64(n) * 1.4426950408889634
+    local kf: B64 = x.v.to_b64(n) *! 1.4426950408889634
     local k: S64 = kf.round().to[S64]()
     local s: S64 = n.to[S64]() * 2 + 4
     local ln2k: MpApprox = me_mul_u64(a: me_const(i: DEC_LN2, n), k: k.abs_diff(0),
@@ -174,7 +174,7 @@ routine me_ln(x: MpApprox, n: U64) -> MpApprox
     local low: Bool = top < 0.75
     local e: S64 = x.v.exp - low.to[S64]()
     local m: MpApprox = x.ldexp(k: -e, n)
-    local y0: B64 = m.v.to_b64(n).ln()
+    local y0: B64 = m.v.to_b64(n).ln_unchecked()
     local y0m: MpApprox = me_exact(mp_of_b64(x: y0, n))
     local one: MpApprox = me_int(k: 1, n)
 
@@ -349,7 +349,7 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: U64, tie_rule: U8) -> DecTry
     local p: S64 = f.digits
 
     top: B64 = ay.v.top_b64(n)
-    lg: B64 = top.log10() + y.v.exp.to[B64]() * 0.3010299956639812
+    lg: B64 = top.log10_unchecked() +! y.v.exp.to[B64]() *! 0.3010299956639812
     a: S64 = lg.floor().to[S64]()
 
     # the digits at exponent q: z = |y| 10^-q
@@ -371,7 +371,7 @@ routine dec_round_me(y: MpApprox, f: DecFormat, n: U64, tie_rule: U8) -> DecTry
         half: Mp = mp_of_u128(v: 1, scale: -1, n)
         d: B64 = mp_sub(a: frac, b: half, n).to_b64(n)
         zf: B64 = z.v.to_b64(n)
-        band: B64 = zf * z.relative(n) * 2.0
+        band: B64 = zf *! z.relative(n) *! 2.0
         clear: Bool = d.abs() > band and band < 0.25
         up: Bool = d > 0.0
         c: U128 = when
@@ -653,7 +653,7 @@ routine me_erf_positive(ax: MpApprox, n: U64) -> MpApprox
     # the next term is term × 2x^2 / i
     while true with term: MpApprox = ax, sum: MpApprox = ax, i: U64 = 3
         next2: MpApprox = me_div_u64(a: me_mul(a: term, b: two, n), k: i, n)
-        ratio2: B64 = two.v.to_b64(n) / (i + 2).to[B64]()
+        ratio2: B64 = two.v.to_b64(n) /! (i + 2).to[B64]()
         if me_is_negligible(term: next2, sum, n) and (ratio2 < 0.5)
             sum2: MpApprox = me_plus_abs(s: sum, e: next2.v.exp + 1, n)
             g: MpApprox = me_exp(x: x2.negate(), n)
@@ -711,11 +711,11 @@ routine dec_eval_erf(x: Dec, n: U64, complement: Bool) -> MpApprox
         ax.v.exp <= -1 => return me_sub(a: me_int(k: 1, n), b: me_erf_positive(ax, n), n)
         else =>
             xf: B64 = ax.v.to_b64(n)
-            lost: B64 = xf * xf * 1.4426950408889634 + 4.0
-            limbs: U64 = (lost / 64.0).floor().to[U64]()
+            lost: B64 = xf *! xf *! 1.4426950408889634 +! 4.0
+            limbs: U64 = (lost /! 64.0).floor().to[U64]()
             extra: U64 = limbs.to[U64]() + 1
             wide: U64 = n + extra
-            enough: Bool = lost > n.to[B64]() * 64.0 + 16.0
+            enough: Bool = lost > n.to[B64]() *! 64.0 +! 16.0
             when
                 enough => return me_erfc_asymptotic(ax, n)
                 wide <= MP_TOP =>
@@ -765,8 +765,8 @@ routine dec_stirling_coefficient(k: U64, n: U64) -> MpApprox
 ### :param n: The precision in limbs.
 ### :returns: Where Stirling's series with its 100 terms is accurate to 64n + 20 bits.
 routine dec_stirling_floor(n: U64) -> B64
-    bits: B64 = n.to[B64]() * 64.0 + 741.0
-    return (bits / 199.0).exp2()
+    bits: B64 = n.to[B64]() *! 64.0 +! 741.0
+    return (bits /! 199.0).exp2_unchecked()
 
 ### Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole: for x > 0 shifted up past the
 ### Stirling floor, Γ(x) = Γ(x + N) / (x (x + 1) ... (x + N - 1)); for x < 0 by the reflection
@@ -1267,19 +1267,19 @@ routine dec_pow_size(x: Dec, y: Dec) -> B64
     l: B64 = when
         near =>
             t: Dec = dec_plus_int(x: ax, k: -1)
-            tf: B64 = t.coeff.to[B64]() * t.exp.to[B64]().exp10()
+            tf: B64 = t.coeff.to[B64]() *! t.exp.to[B64]().exp10_unchecked()
             st: B64 = when
                 t.neg => -tf
                 else => tf
-            becomes st.ln_1p()
+            becomes st.ln_1p_unchecked()
         else =>
-            lc: B64 = ax.coeff.to[B64]().ln()
-            becomes lc + x.exp.to[B64]() * 2.302585092994046
-    yf: B64 = y.coeff.to[B64]() * y.exp.to[B64]().exp10()
+            lc: B64 = ax.coeff.to[B64]().ln_unchecked()
+            becomes lc +! x.exp.to[B64]() *! 2.302585092994046
+    yf: B64 = y.coeff.to[B64]() *! y.exp.to[B64]().exp10_unchecked()
     sy: B64 = when
         y.neg => -yf
         else => yf
-    return sy * l
+    return sy *! l
 
 ### atan2(y, x), the angle of (x, y) in (-pi, pi], correctly rounded to f, with C99's special cases.
 ### :param y: The ordinate.
@@ -1331,7 +1331,7 @@ routine Dec.as_result() -> Me
 ### :param zf: z as a B64.
 ### :returns: The steps.
 routine dec_gamma_shift(floor: B64, zf: B64) -> U64
-    gap: B64 = floor - zf.min(floor)
+    gap: B64 = floor -! zf.min(floor)
     return gap.floor().to[U64]() + 1
 
 ### What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).
