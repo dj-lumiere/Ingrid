@@ -36,13 +36,13 @@ global MAP_WRITABLE: @Bool
 ### :param error: The reason.
 ### :returns: The code.
 routine reason_code(error: FsError) -> S32
-    return when
-        error == FsError.NOT_FOUND => 2
-        error == FsError.PERMISSION_DENIED or error == FsError.READ_ONLY => 3
-        error == FsError.NO_SPACE => 4
-        error == FsError.STORAGE_FAULT => 5
-        error == FsError.ALREADY_EXISTS => 6
-        error == FsError.INVALID_PATH or error == FsError.NAME_TOO_LONG => 7
+    return when error
+        is NotFoundError => 2
+        is NotEnoughPermissionError, is ReadOnlyError => 3
+        is NotEnoughSpaceError => 4
+        is StorageFaultError => 5
+        is AlreadyExistsError => 6
+        is InvalidPathError, is NameTooLongError => 7
         else => 1
 
 ### Records why a call failed, for {rf_fs_last_error}.
@@ -119,7 +119,7 @@ routine bytes_result(s: @Byte, len: U64) -> @Byte
 ### dropped.
 ### :param r: The directory, or the failure.
 ### :returns: The path, or null (length 0) on a failure.
-routine path_result(r: Result[Directory, FsError]) -> @Byte
+routine path_result(r: Check[Directory]) -> @Byte
     when steal r
         is Directory as d =>
             path: @[Byte] = d.path.peek()
@@ -131,7 +131,7 @@ routine path_result(r: Result[Directory, FsError]) -> @Byte
 ### A File's path copied into a malloc'd, NUL-terminated buffer, as the result. The file's own memory is dropped.
 ### :param r: The file, or the error that stopped it.
 ### :returns: The copied path, or null on a failure.
-routine file_path_result(r: Result[File, FsError]) -> @Byte
+routine file_path_result(r: Check[File]) -> @Byte
     when steal r
         is File as f =>
             path: @[Byte] = f.path.peek()
@@ -155,7 +155,7 @@ routine path_of(path: @Byte, len: S32) -> @[Byte]
 ### 0 for a success, -1 for a failure.
 ### :param r: The outcome.
 ### :returns: 0 or -1.
-routine status(r: Result[None, FsError]) -> S32
+routine status(r: Check[None]) -> S32
     when r
         is None => return 0
         is FsError as error => return failed(error)
@@ -290,6 +290,21 @@ routine open_file(fd: S32) -> @OpenFile
         return of
     return .hollow()
 
+### Opens the file at `path` for reading (mode 0), writing, emptied first (1), or appending (2).
+### :param path: The file's path.
+### :param mode: 0, 1, or 2.
+### :returns: The open handle.
+### :throws: Throws the FsError the OS reported.
+failable routine open_in_mode(path: @[Byte], mode: S32) -> FileHandle
+    if mode == 0
+        return when check OsFileManager.open_read(at: File.at(path))
+            is FileHandle as f => f
+    if mode == 1
+        return when check OsFileManager.open_write(at: File.at(path))
+            is FileHandle as f => f
+    return when check OsFileManager.open_append(at: File.at(path))
+        is FileHandle as f => f
+
 ### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or -1. No mode makes a
 ### missing file: rf_fs_make_file does.
 ### :param path: The file's path.
@@ -300,16 +315,12 @@ routine open_file(fd: S32) -> @OpenFile
 @export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: @[Byte] = path_of(path, len: path_len)
-    values: (Result[FileHandle, FsError], Bool) = when mode
-        0 => (OsFileManager.open_read_result(at: File.at(p)), false)
-        1 => (OsFileManager.open_write_result(at: File.at(p)), true)
-        2 => (OsFileManager.open_append_result(at: File.at(p)), true)
-        else =>
-            LAST_ERROR.poke(1)
-            return -1
-    r, writer = values
-    f: FileHandle = when r
-        is FileHandle as f => f
+    if mode < 0 or mode > 2
+        LAST_ERROR.poke(1)
+        return -1
+    writer: Bool = mode != 0
+    f: FileHandle = when check open_in_mode(path: p, mode)
+        is FileHandle as opened => opened
         is FsError as error => return failed(error)
     buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
     if buffer.is_hollow()
@@ -341,15 +352,13 @@ routine @OpenFile.drain() -> Bool
     if not (me.writer.peek() and (n > 0))
         return true
     me.end.poke(0)
-    wrote: Result[None, FsError] = me.file.write_all_result(data: me.buffer.peek(), count: n)
-    return wrote.is_success()
+    return try me.file.write_all(data: me.buffer.peek(), count: n)
 
 ### Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
 ### end).
 ### :returns: True when bytes were read.
 routine @OpenFile.refill() -> Bool
-    got: Result[U64, FsError] = me.file.read_bytes_result(buffer: me.buffer.peek(),
-        count: FILE_BUFFER)
+    got: Check[U64] = check me.file.read_bytes(buffer: me.buffer.peek(), count: FILE_BUFFER)
     n: U64 = when got
         is U64 as n => n
         is FsError => 0
@@ -395,7 +404,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
 
     while out.room(FILE_BUFFER)
         at: @Byte = out.buf.peek().stride(out.len.peek())
-        got: Result[U64, FsError] = of.file.read_bytes_result(buffer: at, count: FILE_BUFFER)
+        got: Check[U64] = check of.file.read_bytes(buffer: at, count: FILE_BUFFER)
         n: U64 = when got
             is U64 as n => n
             is FsError => 0
@@ -480,8 +489,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
         if not of.drain()
             return 0
         if len >= FILE_BUFFER
-            wrote: Result[None, FsError] = of.file.write_all_result(data: ptr, count: len)
-            if wrote.is_success()
+            wrote: Bool = try of.file.write_all(data: ptr, count: len)
+            if wrote
                 return len
             return 0
     c_memcpy(of.buffer.peek().stride(of.end.peek()), ptr, len.to[CSize]())
@@ -520,7 +529,7 @@ routine rf_file_is_eof(fd: S32) -> Bool
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     local alloc: @MemoryManager <- heap()
 
-    when OsFileManager.read_all_result(at: File.at(cpath.to[CStrView]().getview()), alloc)
+    when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), alloc)
         is Memory[Byte] as text =>
             n: U64 = text.count()
             buf: Addr = c_realloc(.hollow(), (n + 1).to[CSize]())
@@ -541,8 +550,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 ### :param len: The number of bytes, negative for none.
 ### :returns: The bytes written, or a negative reason code on a failure.
 routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
-    r: Result[None, FsError] = OsFileManager.write_all_result(
-        at: File.at(cpath.to[CStrView]().getview()),
+    r: Check[None] = check OsFileManager.write_all(at: File.at(cpath.to[CStrView]().getview()),
         data: @[Byte].construct(data, count: len.max(0).to[U64]()))
     when r
         is None => return len.max(0)
@@ -683,7 +691,7 @@ routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_readonly")
 routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
-    return status(OsFileManager.set_readonly_result(at: File.at(path_of(path, len)), readonly))
+    return status(check OsFileManager.set_readonly(at: File.at(path_of(path, len)), readonly))
 
 # -- directories, copy, move, remove ---------------------------------------------------
 
@@ -693,7 +701,7 @@ routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_create_dir")
 routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
-    return status(OsFileManager.make_directory_result(at: Directory.at(path_of(path, len)),
+    return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
         parents: false))
 
 ### Creates a directory and its missing parents, like mkdir -p: it already existing is fine.
@@ -702,7 +710,7 @@ routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_create_dir_all")
 routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
-    return status(OsFileManager.make_directory_result(at: Directory.at(path_of(path, len)),
+    return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
         parents: true))
 
 ### Removes a file, or an empty directory (a link is removed, not followed).
@@ -713,12 +721,12 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
     local p: @[Byte] = path_of(path, len)
 
-    m: Result[Metadata, FsError] = OsFileManager.link_metadata_result(at: File.at(p))
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     when m
         is Metadata as info =>
             if info.kind == FileKind.DIRECTORY
-                return status(OsFileManager.delete_result(at: Directory.at(p)))
-            return status(OsFileManager.delete_result(at: File.at(p)))
+                return status(check OsFileManager.delete(at: Directory.at(p)))
+            return status(check OsFileManager.delete(at: File.at(p)))
         is FsError as error => return failed(error)
 
 ### Removes a directory and everything in it (a link is removed, not followed), or a file.
@@ -729,7 +737,7 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
     local alloc: @MemoryManager <- heap()
 
-    return status(OsFileManager.delete_all_result(at: Directory.at(path_of(path, len)), alloc))
+    return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), alloc))
 
 ### Copies a file, replacing what is at the destination.
 ### :param src: The source path.
@@ -739,8 +747,7 @@ routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_copy")
 routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
-    copied: Result[U64, FsError] = OsFileManager.copy_result(
-        from: File.at(path_of(path: src, len: src_len)),
+    copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
         to: File.at(path_of(path: dst, len: dst_len)), replacing: true)
     when copied
         is U64 => return 0
@@ -754,15 +761,12 @@ routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 ### :returns: 0 copied, 1 the destination exists (nothing copied), -1 an error.
 @export("rf_fs_copy_no_replace")
 routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
-    copied: Result[U64, FsError] = OsFileManager.copy_result(
-        from: File.at(path_of(path: src, len: src_len)),
+    copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
         to: File.at(path_of(path: dst, len: dst_len)), replacing: false)
     when copied
         is U64 => return 0
-        is FsError as error =>
-            if error == FsError.ALREADY_EXISTS
-                return 1
-            return failed(error)
+        is AlreadyExistsError => return 1
+        else as error => return failed(error)
 
 ### Gives the path the name `name`, in the directory it is in: a file, or a directory.
 ### :param path: The path.
@@ -777,20 +781,47 @@ routine rf_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, rep
     local p: @[Byte] = path_of(path, len: path_len)
     local n: @[Byte] = path_of(path: name, len: name_len)
 
-    m: Result[Metadata, FsError] = OsFileManager.link_metadata_result(at: File.at(p))
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     is_directory: Bool = when m
         is Metadata as info => info.kind == FileKind.DIRECTORY
         is FsError as error => return failed(error)
-    r: Result[None, FsError] = when
-        is_directory => OsFileManager.rename_result(at: Directory.at(p), to: n, replacing)
-        else => OsFileManager.rename_result(at: File.at(p), to: n, replacing)
-    when r
+    when check rename_either(p, n, replacing, is_directory)
         is None => return 0
-        is FsError as error =>
-            when
-                error == FsError.ALREADY_EXISTS and not replacing => return 1
-                error == FsError.INVALID_PATH => return 2
-                else => return failed(error)
+        is AlreadyExistsError as error =>
+            if not replacing
+                return 1
+            return failed(error)
+        is InvalidPathError => return 2
+        else as error => return failed(error)
+
+### Renames the file or directory at `p` to `n`.
+### :param p: The path.
+### :param n: The new name.
+### :param replacing: Whether something of that name is replaced.
+### :param is_directory: Whether `p` is a directory.
+### :throws: Throws the FsError the OS reported.
+failable routine rename_either(p: @[Byte], n: @[Byte], replacing: Bool, is_directory: Bool) -> None
+    if is_directory
+        when check OsFileManager.rename(at: Directory.at(p), to: n, replacing)
+            is None => return
+    when check OsFileManager.rename(at: File.at(p), to: n, replacing)
+        is None => return
+
+### Moves the file or directory at `p` into the directory `d`, keeping its name.
+### :param p: The path.
+### :param d: The directory.
+### :param replacing: Whether something of that name in `d` is replaced.
+### :param is_directory: Whether `p` is a directory.
+### :param alloc: The allocator for the child paths of a copied tree.
+### :throws: Throws the FsError the OS reported, or `OriginalKeptError` when the copy is whole and the original is still
+###     there.
+failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, is_directory: Bool,
+    alloc: @MemoryManager) -> None
+    if is_directory
+        when check OsFileManager.move(at: Directory.at(p), into: Directory.at(d), replacing, alloc)
+            is None => return
+    when check OsFileManager.move(at: File.at(p), into: Directory.at(d), replacing, alloc)
+        is None => return
 
 ### Puts the path into the directory `into`, keeping its name: renamed by the OS on the same partition, else copied
 ### into `into` and then deleted.
@@ -808,23 +839,20 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     local d: @[Byte] = path_of(path: into, len: into_len)
     local alloc: @MemoryManager <- heap()
 
-    m: Result[Metadata, FsError] = OsFileManager.link_metadata_result(at: File.at(p))
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     is_directory: Bool = when m
         is Metadata as info => info.kind == FileKind.DIRECTORY
         is FsError as error => return failed(error)
-    r: Result[None, MoveError] = when
-        is_directory => OsFileManager.move_result(at: Directory.at(p), into: Directory.at(d),
-            replacing, alloc)
-        else => OsFileManager.move_result(at: File.at(p), into: Directory.at(d), replacing, alloc)
-    when r
+    when check move_either(p, d, replacing, is_directory, alloc)
         is None => return 0
-        is MoveError as error =>
-            when
-                error.reason == FsError.ALREADY_EXISTS and not replacing and not error.copied => return 1
-                error.copied =>
-                    LAST_ERROR.poke(reason_code(error.reason))
-                    return -2
-                else => return failed(error.reason)
+        is AlreadyExistsError as error =>
+            if not replacing
+                return 1
+            return failed(error)
+        is OriginalKeptError =>
+            LAST_ERROR.poke(1)
+            return -2
+        else as error => return failed(error)
 
 # -- listings --------------------------------------------------------------------------
 
@@ -895,9 +923,8 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
 
     # Every exit closes the listing (OsFileManager.list_result, the first step, sets the handle before anything can
     # fail, so close() is safe on every path) and hands the text back whole or frees it.
-    opened: Result[None, FsError] = OsFileManager.list_result(at: Directory.at(path_of(path, len)),
-        iter)
-    if not opened.is_success() or not out.start(256)
+    opened: Bool = try OsFileManager.list(at: Directory.at(path_of(path, len)), iter)
+    if not opened or not out.start(256)
         iter.close()
         return out.fail()
 
@@ -911,7 +938,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
         values: (Bool, S64) = when
             not typed => (false, 0)
             else =>
-                m: Result[Metadata, FsError] = iter.entry_metadata_result()
+                m: Check[Metadata] = check iter.entry_metadata()
                 when m
                     is Metadata as info =>
                         becomes (info.kind == FileKind.DIRECTORY, seconds(info.modified_ns))
@@ -983,7 +1010,7 @@ routine rf_fs_meta_readonly() -> Bool
 ### :returns: 0, or -1 on a failure (the cached values stay as they were).
 @export("rf_fs_metadata")
 routine rf_fs_metadata(path: @Byte, len: S32) -> S32
-    m: Result[Metadata, FsError] = OsFileManager.metadata_result(at: File.at(path_of(path, len)))
+    m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
     info: Metadata = when m
         is Metadata as info => info
         is FsError as error => return failed(error)
@@ -1000,7 +1027,7 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
 ### :returns: The size in bytes, or -1 on a failure.
 @export("rf_fs_file_size")
 routine rf_fs_file_size(path: @Byte, len: S32) -> S64
-    m: Result[Metadata, FsError] = OsFileManager.metadata_result(at: File.at(path_of(path, len)))
+    m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
     when m
         is Metadata as info => return info.size.to_wrap[S64]()
         is FsError as error => return failed(error).to[S64]()
@@ -1013,7 +1040,7 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 routine rf_fs_current_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(OsEnvironment.working_directory_result(alloc))
+    return path_result(check OsEnvironment.working_directory(alloc))
 
 ### The directory for temporary files.
 ### :returns: The path, or null (length 0) on a failure.
@@ -1021,7 +1048,7 @@ routine rf_fs_current_dir() -> @Byte
 routine rf_fs_temp_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(OsEnvironment.temp_directory_result(alloc))
+    return path_result(check OsEnvironment.temp_directory(alloc))
 
 ### The user's home directory, or null when it can't be told.
 ### :returns: The path, or null (length 0).
@@ -1029,7 +1056,7 @@ routine rf_fs_temp_dir() -> @Byte
 routine rf_fs_home_dir() -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return path_result(OsEnvironment.home_directory_result(alloc))
+    return path_result(check OsEnvironment.home_directory(alloc))
 
 ### Makes an empty file. The directory it goes in must exist.
 ### :param path: The path.
@@ -1039,14 +1066,14 @@ routine rf_fs_home_dir() -> @Byte
 ###     failure.
 @export("rf_fs_make_file")
 routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
-    made: Result[None, FsError] = OsFileManager.make_file_result(at: File.at(path_of(path, len)),
-        replacing)
+    made: Check[None] = check OsFileManager.make_file(at: File.at(path_of(path, len)), replacing)
     when made
         is None => return 0
-        is FsError as error =>
-            if error == FsError.ALREADY_EXISTS and not replacing
+        is AlreadyExistsError as error =>
+            if not replacing
                 return 1
             return failed(error)
+        else as error => return failed(error)
 
 ### The absolute path by the text alone (links kept).
 ### :param path: The path.
@@ -1056,7 +1083,7 @@ routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(OsFileManager.absolute_result(at: File.at(path_of(path, len)), alloc))
+    return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), alloc))
 
 ### The path with links, ".", and ".." resolved. It must exist.
 ### :param path: The path.
@@ -1066,7 +1093,7 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
     local alloc: @MemoryManager <- heap()
 
-    return file_path_result(OsFileManager.canonical_result(at: File.at(path_of(path, len)), alloc))
+    return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), alloc))
 
 ### Makes the existing file exactly size bytes, extending it with zeros or cutting it short: 0, or -1 (a missing
 ### file included: nothing is made).
@@ -1076,7 +1103,7 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_set_size")
 routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
-    return status(OsFileManager.set_size_result(at: File.at(path_of(path, len: path_len)), size))
+    return status(check OsFileManager.set_size(at: File.at(path_of(path, len: path_len)), size))
 
 # -- files as storage, mapped ----------------------------------------------------------
 
@@ -1095,19 +1122,21 @@ routine advise(m: FileStorage[Byte]) -> None
 ### :param path: The path.
 ### :param offset: The window's first byte in the file.
 ### :param count: The window's length, U64.MAX for the rest of the file.
-### :returns: The storage, or why it couldn't be mapped.
-routine map_storage(path: @[Byte], offset: U64, count: U64) -> Result[FileStorage[Byte], FsError]
-    r: Result[FileStorage[Byte], FsError] = OsFileManager.storage_result[Byte](at: File.at(path),
+### :returns: The storage.
+### :throws: Throws the FsError of the read-only mapping when the writable one wasn't allowed, else that one's.
+failable routine map_storage(path: @[Byte], offset: U64, count: U64) -> FileStorage[Byte]
+    writable: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path),
         write: true, start: offset, count)
-    when r
-        is FileStorage[Byte] =>
+    when writable
+        is FileStorage[Byte] as m =>
             MAP_WRITABLE.poke(true)
-            return r
-        is FsError as error =>
-            if not (error == FsError.PERMISSION_DENIED or error == FsError.READ_ONLY or error == FsError.BUSY)
-                return r
+            return m
+        is NotEnoughPermissionError, is ReadOnlyError, is BusyError => pass
     MAP_WRITABLE.poke(false)
-    return OsFileManager.storage_result[Byte](at: File.at(path), write: false, start: offset, count)
+    readable: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path),
+        write: false, start: offset, count)
+    return when readable
+        is FileStorage[Byte] as m => m
 
 ### A window [offset, offset + count) of a file, clamped to its end and aligned down for the OS: the base (MAP_DELTA
 ### from it to offset, the clamped length as the result), the empty-map marker for an empty window, or null.
@@ -1117,9 +1146,8 @@ routine map_storage(path: @[Byte], offset: U64, count: U64) -> Result[FileStorag
 ### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
 routine map_window(path: @[Byte], offset: U64, count: U64) -> @Byte
     MAP_DELTA.poke(0)
-    r: Result[FileStorage[Byte], FsError] = map_storage(path, offset, count)
-    m: FileStorage[Byte] = when r
-        is FileStorage[Byte] as m => m
+    m: FileStorage[Byte] = when check map_storage(path, offset, count)
+        is FileStorage[Byte] as mapped => mapped
         is FsError as error => return failed_result(error)
     if m.count() == 0
         RESULT_LEN.poke(0)
@@ -1168,5 +1196,5 @@ routine rf_file_map_flush(ptr: @Byte, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
     m: FileStorage[Byte] = FileStorage[Byte](base: ptr, delta: 0, count: len, writable: true)
-    m.flush_result()
+    try m.flush()
     return

@@ -95,13 +95,13 @@ secret routine program_view(words: @List[U32], mode: U32) -> Maybe[Program]
 routine pattern_compile(code: @U32, code_count: U64, mode: U32, out: @U32, out_count: U64) -> S64
     local words: @List[U32] <- decode_words(chars: code, count: code_count)
 
-    when compile_pattern(code: words.getview(), mode, alloc: HEAP)
+    when check compile_pattern(code: words.getview(), mode, alloc: HEAP)
         is Memory[U32] as program =>
             written: S64 = encode_words(words: program.getview(), out, out_count)
             drop program
             drop words
             return written
-        is PatternError =>
+        is InvalidPatternError =>
             drop words
             return -1
 
@@ -118,10 +118,11 @@ routine pattern_compile_message(code: @U32, code_count: U64, mode: U32, out: @U3
     local words: @List[U32] <- decode_words(chars: code, count: code_count)
     local message: @List[Byte] <- .construct(HEAP)
 
-    when compile_pattern(code: words.getview(), mode, alloc: HEAP)
+    when check compile_pattern(code: words.getview(), mode, alloc: HEAP)
         is Memory[U32] as program =>
             drop program
-        is PatternError as error => write_pattern_error(error, code: words.getview(), out: message)
+        is InvalidPatternError as error => write_pattern_error(error, code: words.getview(),
+            out: message)
     written: U64 = write_utf32(text: message.getview(), out, out_count)
     drop message
     drop words
@@ -140,18 +141,18 @@ routine pattern_from_regex(regex: @U32, regex_count: U64, mode: U32, out: @U32,
     out_count: U64) -> S64
     input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: regex,
         count: regex_count))
-    when read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
+    when check read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
         is List[U32] as tree =>
-            when compile_pattern(code: tree.getview(), mode, alloc: HEAP)
+            when check compile_pattern(code: tree.getview(), mode, alloc: HEAP)
                 is Memory[U32] as program =>
                     written: S64 = encode_words(words: program.getview(), out, out_count)
                     drop program
                     drop tree
                     return written
-                is PatternError =>
+                is InvalidPatternError =>
                     drop tree
                     return -1
-        is RegexError => return -1
+        is PatternSyntaxError => return -1
 
 ### Why a regular expression can't be read, and where, as code points: `Backreferences aren't supported ... (at
 ### position 3).`
@@ -168,18 +169,18 @@ routine pattern_regex_message(regex: @U32, regex_count: U64, mode: U32, out: @U3
 
     input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: regex,
         count: regex_count))
-    when read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
+    when check read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
         is List[U32] as tree =>
-            when compile_pattern(code: tree.getview(), mode, alloc: HEAP)
+            when check compile_pattern(code: tree.getview(), mode, alloc: HEAP)
                 is Memory[U32] as program =>
                     drop program
-                is PatternError as error =>
+                is InvalidPatternError as error =>
                     kind: RegexErrorKind = when
                         error.kind == PatternErrorKind.DUPLICATE_NAME => RegexErrorKind.DUPLICATE_NAME
                         else => RegexErrorKind.TOO_LARGE
-                    write_regex_error(error: RegexError(kind, at: 0), out: message)
+                    write_regex_error(error: PatternSyntaxError(kind, at: 0), out: message)
             drop tree
-        is RegexError as error => write_regex_error(error, out: message)
+        is PatternSyntaxError as error => write_regex_error(error, out: message)
     written: U64 = write_utf32(text: message.getview(), out, out_count)
     drop message
     return written

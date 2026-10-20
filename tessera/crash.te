@@ -1,6 +1,6 @@
 # The crash handler for every RazorForge and Suflae program. Ingrid's Tessera code reaches it when a check fails
-# (an overflow, an index out of bounds, a failed allocation): Standard/System's crash calls tessera_crash_handler,
-# and this definition takes the place of the standard library's weak default. It reports a Tessera crash the way
+# (an overflow, an index out of bounds, a failed allocation): Standard/System's Crash service reports it with the
+# routine in its slot, and set_library_folder puts crash_handler there at startup. It reports a Tessera crash the way
 # RazorForge's crash report does (Core's crash_report): the crash's name (the RazorForge crashable it
 # matches, such as IntegerOverflowError) and its message, where it happened, the calling thread's crash trace, then
 # exit status 82, through the same runtime calls. A stack overflow is reported here too (stack_overflow_report), and so
@@ -63,11 +63,13 @@ secret routine trace_depth() -> S32
 @symbol("_rf_trace_get_frames_shared")
 secret routine trace_frames() -> @TraceFrame
 
-### Sets the standard library's folder. The program's entry calls it at startup.
+### Sets the standard library's folder and puts crash_handler in the Crash service's slot. The program's entry calls it
+### at startup.
 ### :param library: The standard library's folder, or hollow.
 @export("tessera_set_library_folder")
 routine set_library_folder(library: CStrView) -> None
     LIBRARY_FOLDER.poke(library)
+    Crash.report_with(crash_handler.to[Callable]())
     return
 
 ### A crash the runtime library raised (a deadlock, a failed allocation), reported like any crash: the crash's name and
@@ -146,19 +148,18 @@ routine in_library(file: @[Byte]) -> Bool
 
 ### Reports a crash and exits with the crash status (82): flushes standard output, then writes to standard error, in
 ### red, the crash's name and message, where it happened (the place given, or else where the program's own code was),
-### and the calling thread's crash trace. Standard/System's crash calls it in place of the standard library's weak
-### default.
+### and the calling thread's crash trace. set_library_folder puts it in the Crash service's slot.
 ### :param name: The crash's name, such as `IntegerOverflowError`.
 ### :param message: What went wrong.
 ### :param place: Where it happened, or null when that isn't known.
-@export("tessera_crash_handler")
-@noreturn
-routine crash_handler(name: @[Byte], message: @[Byte], place: @SourceLocation) -> None
+@untraced
+routine crash_handler(name: @[Byte], message: @CrashMessage, place: @SourceLocation) -> None
     rf_flush_output()
     if Console.errors().is_terminal()
         Console.alert("[91m", end: "")
     write_title(name)
-    Console.alert(": {message}", end: "")
+    text: @[Byte] = message.text()
+    Console.alert(": {text}", end: "")
     write_place(place)
     Console.alert("")
     write_trace()

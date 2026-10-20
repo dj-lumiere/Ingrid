@@ -82,7 +82,7 @@ routine @OutputBuffer.drain() -> None
     n: U64 = me.count.peek()
     if n == 0
         return
-    Console.output().write_all_result(data: me.bytes.to[@Byte](), count: n)
+    try Console.output().write_all(data: me.bytes.to[@Byte](), count: n)
     me.count.poke(0)
     return
 
@@ -104,7 +104,7 @@ routine rf_console_show(ptr: @Byte, count: U64) -> None
             becomes count >= OUTPUT_BUFFER
         else => false
     if goes_straight
-        Console.output().write_all_result(data: ptr, count)
+        try Console.output().write_all(data: ptr, count)
     else
         out.bytes.to[@Byte]().stride(out.count.peek()).copy(src: ptr, count)
         next_count: U64 = out.count.peek() + count
@@ -121,6 +121,14 @@ routine rf_console_flush() -> None
     out.lock.lock()
     out.drain()
     out.lock.unlock()
+    return
+
+### Gives standard output what is buffered when the program crashes, without taking the buffer's lock: the crashing
+### thread may hold it, taking it could take memory (a fiber's flow is made the first time it takes an access), and
+### the other threads that crash meanwhile wait for the stop, so nothing else writes.
+routine rf_console_flush_crashing() -> None
+    out: @OutputBuffer = STDOUT
+    out.drain()
     return
 
 ### Gives standard output what is buffered when the program faulted, so its output comes before the fault report.
@@ -145,10 +153,10 @@ routine rf_console_alert(ptr: @Byte, count: U64) -> None
     on: @[Byte] = "[95m"
     off: @[Byte] = "[0m"
     if colored
-        Console.errors().write_all_result(data: on.data, count: on.count())
-    Console.errors().write_all_result(data: ptr, count)
+        try Console.errors().write_all(data: on.data, count: on.count())
+    try Console.errors().write_all(data: ptr, count)
     if colored
-        Console.errors().write_all_result(data: off.data, count: off.count())
+        try Console.errors().write_all(data: off.data, count: off.count())
     return
 
 # -- standard input ------------------------------------------------------------------
@@ -238,7 +246,7 @@ routine rf_console_ask_all() -> @Byte
 routine rf_console_error(ptr: @Byte, count: U64) -> None
     if ptr.is_hollow() or count == 0
         return
-    Console.errors().write_all_result(data: ptr, count)
+    try Console.errors().write_all(data: ptr, count)
     return
 
 ### Flushes stdout, so a program's output appears before the crash report that follows it.
@@ -262,10 +270,12 @@ routine rf_crash_exit() -> None
 
 # -- start-up ------------------------------------------------------------------------
 
-### Process start-up: the I/O threads start on the main thread, standard output's buffer is flushed at exit, and
-### stderr takes ANSI colors (on Windows a console needs asking).
+### Process start-up: a crash in the library's own Tessera code is reported by runtime_crash_handler, the I/O threads
+### start on the main thread, standard output's buffer is flushed at exit, and stderr takes ANSI colors (on Windows a
+### console needs asking).
 @export("rf_runtime_init")
 routine rf_runtime_init() -> None
+    Crash.report_with(runtime_crash_handler.to[Callable]())
     rf_io_runtime_init()
     c_atexit(rf_console_flush.to[Callable]())
     Console.errors().enable_colors()
