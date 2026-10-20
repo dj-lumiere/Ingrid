@@ -24,6 +24,8 @@ jobs:
   tessera:
     name: tessera (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # A hung golden test fails the job here instead of holding the runner for GitHub's six hours.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -98,12 +100,17 @@ jobs:
         shell: pwsh
         run: Add-Content $env:GITHUB_PATH 'C:\llvm21\bin'
 
-      # Keg-only; GITHUB_PATH entries are prepended, so this shadows Apple clang.
+      # Keg-only; GITHUB_PATH entries are prepended, so this shadows Apple clang. Homebrew's clang links against the
+      # Command Line Tools' SDK, so the linker comes from the Command Line Tools too: the selected Xcode's ld can be
+      # older than that SDK and reject its libSystem.tbd ("unknown architecture").
       - name: Install LLVM 21 (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install llvm@21
           echo "$(brew --prefix llvm@21)/bin" >> "$GITHUB_PATH"
+          echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
+          DEVELOPER_DIR=/Library/Developer/CommandLineTools xcrun --find ld
+          DEVELOPER_DIR=/Library/Developer/CommandLineTools ld -v
 
       - name: Verify toolchain
         run: clang --version
@@ -135,5 +142,6 @@ jobs:
       # Runs even when a check failed, so one run shows both.
       - name: Golden tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
         working-directory: Ingrid
         run: $TESSERA test tests
