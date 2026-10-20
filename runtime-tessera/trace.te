@@ -5,7 +5,8 @@
 # Three trace modes, set at startup by __rf_set_trace_mode:
 #   0  none (release-time, release-space): no trace
 #   1  platform (release): the native stack, function names from the debug information
-#   2  shadow (debug): the RF call chain, which the builder's own trace helpers keep now, so this one stays empty
+#   2  shadow (debug and release): the RF call chain, which the program keeps (Ingrid/tessera/crash.te), so a crash
+#      raised here is reported by the program's own crash report, set at startup through rf_set_crash_report
 
 module Ingrid/Runtime
 
@@ -54,17 +55,18 @@ routine rf_set_trace_mode(mode: CInt) -> None
     install_fault_handlers()
     return
 
-### Writes the stack trace the trace mode asks for on stderr: the native stack, an empty shadow stack, or nothing.
-routine print_stack_for_mode() -> None
-    mode: CInt = TRACE_MODE.peek()
-    when
-        mode == TRACE_SHADOW =>
-            Console.alert("  <stack empty>")
-            return
-        mode == TRACE_PLATFORM =>
-            print_platform_stack(0)
-            return
-        else => return
+### The program's report of a crash raised here (Ingrid/tessera/crash.te, linked into the program with the crash
+### trace): set at startup through rf_set_crash_report, null until then.
+global CRASH_REPORT: @Callable[(CStrView, CStrView, @SourceLocation), None]
+
+### Sets the routine that reports a crash raised here in the shadow trace mode: the program's crash report, which
+### writes where the program was and its crash trace, then exits with status 82. The program's entry calls this at
+### startup.
+### :param report: The report, called with the error type's name, the message, and where it happened (or null).
+@export("rf_set_crash_report")
+routine rf_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation), None]) -> None
+    CRASH_REPORT.poke(report)
+    return
 
 ### Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
 ### "Integer overflow error" (a space before each capital after the first, which becomes lowercase). One byte at a
@@ -95,6 +97,16 @@ routine write_error_title(name: @[Byte]) -> None
 @export("__rf_throw")
 @noreturn
 routine rf_throw(error_type: CStrView, message: CStrView) -> None
+    report_crash(error_type, message, place: .hollow())
+
+### Reports a crash raised here and exits with the crash status. In the shadow trace mode the program's crash report
+### writes it (where the program was, and its crash trace). Otherwise this writes the type, the message, the place
+### when there is one, and the native stack in the platform mode. Standard output is flushed first.
+### :param error_type: The error's type name, or null for `Error`.
+### :param message: What happened, or null for none.
+### :param place: Where it happened, or null when that isn't known.
+@noreturn
+routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLocation) -> None
     rf_console_flush()
     kind: CStrView = when
         error_type.data.is_hollow() => "Error"
@@ -102,14 +114,25 @@ routine rf_throw(error_type: CStrView, message: CStrView) -> None
     text: CStrView = when
         message.data.is_hollow() => ""
         else => message
+    mode: CInt = TRACE_MODE.peek()
+    report: Callable[(CStrView, CStrView, @SourceLocation), None] = CRASH_REPORT.peek()
+    if mode == TRACE_SHADOW and not report.addr().is_hollow()
+        report.call(kind, text, place)
     k: @[Byte] = kind.getview()
     m: @[Byte] = text.getview()
     if Console.errors().is_terminal()
         Console.alert("[91m", end: "")
     Console.alert("")
     write_error_title(k)
-    Console.alert(": {m}")
-    print_stack_for_mode()
+    Console.alert(": {m}", end: "")
+    if not place.is_hollow()
+        file: @[Byte] = place.file.peek()
+        line: U32 = place.line.peek()
+        column: U32 = place.column.peek()
+        Console.alert("\nat {file}:{line}:{column}", end: "")
+    Console.alert("")
+    if mode == TRACE_PLATFORM
+        print_platform_stack(0)
     if Console.errors().is_terminal()
         Console.alert("[0m", end: "")
     Console.alert("")

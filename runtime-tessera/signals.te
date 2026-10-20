@@ -4,8 +4,8 @@
 # Each kind has one handler slot. Putting a handler in a slot takes the event over from the system, and hands back the
 # handler that held it before. Putting null in it gives the event back to the system. A handler runs outside signal
 # context: on POSIX the signal handler only writes one byte to a pipe (the self-pipe trick, async-signal-safe) and a
-# thread of its own reads it and runs the handler. On Windows the console already calls its handler on a thread of its
-# own.
+# thread of its own reads it and runs the handler. On Windows the console calls its handler on a thread it starts, one
+# event at a time, so an interrupt is handed to a thread of the runtime's own: the console's next event comes at once.
 #
 # When a when_terminated handler returns, the process ends with ProcessManager.exit_process and the status
 # rf_set_exit_code stored last. When a when_interrupted handler returns, the program goes on. An event of a kind whose
@@ -27,6 +27,8 @@ global TERMINATE_HOLDER: @Addr
 global INTERRUPT_RUNNING: @U32
 ### 1 from when a termination request is taken until the process ends.
 global TERMINATE_RUNNING: @U32
+### 1 from when the console handler hands an interrupt to the dispatch thread until the thread takes it (Windows).
+global INTERRUPT_PENDING: @U32
 ### Guards the one-time setup.
 global SIGNALS_LOCK: @ExclusiveAccess
 global SIGNALS_INSTALLED: @Bool
@@ -84,7 +86,7 @@ routine run_handler(which: S32) -> Bool
 ### :param which: The kind: 1 for terminate, anything else for interrupt.
 ### :param handler_box: The routine value's box, or null to give the event back to the system.
 ### :returns: The box that held the slot before, null for none.
-### :throws: Crashes with `TaskSpawnError` on POSIX when the dispatch thread can't be started.
+### :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 @export("rf_cpu_event_replace")
 routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
     kind: S32 = when
@@ -111,11 +113,17 @@ routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
 routine c_set_console_ctrl_handler(handler: Callable[@callconv("stdcall"), (U32,), CInt],
     add: CInt) -> CInt
 
-### On a thread the console starts, outside any signal context: runs the handler of the event's kind. Returning 0
-### lets the system act, which ends the process: when no handler holds the slot, or when the kind's handler is still
-### running.
+### Win32's STATUS_CONTROL_C_EXIT, 0xC000013A: the status a process ends with when nothing handles Ctrl+C.
+@target(os: "windows")
+preset CONTROL_C_EXIT: S32 = -1073741510
+
+### On a thread the console starts, outside any signal context: takes the event for the handler of its kind. A
+### request to end runs its handler here (the process ends after it). An interrupt goes to the dispatch thread, and
+### this returns at once: the console hands its handlers one event at a time, so an interrupt handler run here would
+### hold back the next interrupt until it returned. Returning 0 lets the system act, which ends the process: when no
+### handler holds the slot, or when the kind's handler is still running.
 ### :param ctrl_type: The console event: Ctrl+C and Ctrl+Break interrupt, close, logoff, and shutdown terminate.
-### :returns: 1 when a handler ran, 0 to let the system act.
+### :returns: 1 when a handler took the event, 0 to let the system act.
 @target(os: "windows")
 @callconv("stdcall")
 routine console_ctrl_handler(ctrl_type: U32) -> CInt
@@ -129,14 +137,35 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
         return 0
     if running_of(which).atomic_swap(1) == 1
         return 0
+    if which == SIG_INTERRUPT
+        INTERRUPT_PENDING.poke_atomic(1)
+        wake_one(INTERRUPT_PENDING)
+        return 1
     if run_handler(which)
         return 1
     running_of(which).poke_atomic(0)
     return 0
 
-### Installs the console control handler. Called with the lock held.
+### The dispatch thread: runs the interrupt handler for each interrupt the console handler hands it. When the slot has
+### emptied since the interrupt came, the process ends as the system would end it.
+### :param pending: INTERRUPT_PENDING.
+@target(os: "windows")
+routine interrupt_dispatch_main(pending: @U32) -> None
+    rf_thread_stack_guarantee()
+
+    while true
+        if pending.atomic_swap(0) == 0
+            wait_on(at: pending, expected: 0)
+            continue
+        if not run_handler(SIG_INTERRUPT)
+            ProcessManager.exit_process(CONTROL_C_EXIT)
+        continue
+
+### Starts the dispatch thread and installs the console control handler. Called with the lock held.
+### :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
 @target(os: "windows")
 routine install_signal_dispatch() -> None
+    DEFAULT_THREADS.launch_unwatched(entry: interrupt_dispatch_main.to[Callable](), arg: INTERRUPT_PENDING)
     c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
     SIGNALS_INSTALLED.poke(true)
     return

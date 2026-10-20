@@ -3,7 +3,8 @@
 # and this definition takes the place of the standard library's weak default. It reports a Tessera crash the way
 # RazorForge's crash report does (Core's crash_report): the crash's name (the RazorForge crashable it
 # matches, such as IntegerOverflowError) and its message, where it happened, the calling thread's crash trace, then
-# exit status 82, through the same runtime calls. A stack overflow is reported here too (stack_overflow_report).
+# exit status 82, through the same runtime calls. A stack overflow is reported here too (stack_overflow_report), and so
+# is a crash the runtime library raises (a deadlock, a failed allocation: runtime_crash_report).
 
 import Standard/Os
 
@@ -57,9 +58,95 @@ secret routine trace_depth() -> S32
 @symbol("_rf_trace_get_frames_shared")
 secret routine trace_frames() -> @TraceFrame
 
+### The standard library's folder, hollow when it isn't known: a frame whose file is in it is the library's own, and a
+### crash raised in the library is named by where the program called into it. Set at startup by set_library_folder.
+global LIBRARY_FOLDER: @CStrView
+
+### Sets the standard library's folder. The program's entry calls it at startup.
+### :param library: The standard library's folder, or hollow.
+@export("tessera_set_library_folder")
+routine set_library_folder(library: CStrView) -> None
+    LIBRARY_FOLDER.poke(library)
+    return
+
+### A crash the runtime library raised (a deadlock, a failed allocation), reported like any crash: the crash's name and
+### message, where the program was (the place given, or else the most recent frame of the program's own code), and
+### the calling thread's crash trace, then exit status 82. The program's entry hands it to the runtime library's
+### rf_set_crash_report at startup.
+### :param name: The crash's name, such as `DeadlockError`.
+### :param message: What went wrong.
+### :param place: Where it happened, or null when that isn't known.
+@export("tessera_runtime_crash_report")
+@noreturn
+routine runtime_crash_report(name: CStrView, message: CStrView, place: @SourceLocation) -> None
+    local text: @[Byte] = message.getview()
+
+    rf_flush_output()
+    if Console.errors().is_terminal()
+        Console.alert("[91m", end: "")
+    write_title(name.getview())
+    Console.alert(": {text}", end: "")
+    write_place(place)
+    Console.alert("")
+    write_trace()
+    if Console.errors().is_terminal()
+        Console.alert("[0m", end: "")
+    rf_crash_exit()
+
+### Writes a new line and `at`, then where a crash happened: the place given when it is in the program's own code, or
+### else the most recent frame of the program's own code (where the program called into the library).
+### :param place: Where the crash was raised, or null when that isn't known.
+routine write_place(place: @SourceLocation) -> None
+    if place.is_hollow() or place.line.peek() == 0 or in_library(file: place.file.peek())
+        write_program_position()
+        return
+    file: @[Byte] = place.file.peek()
+    line: U32 = place.line.peek()
+    column: U32 = place.column.peek()
+    Console.alert("\nat {file}:{line}:{column}", end: "")
+    return
+
+### Writes a new line and `at`, then the position of the most recent frame of the program's own code: a frame with a
+### line (a library frame named by the library has none) whose file isn't in the standard library. Writes nothing
+### when the trace has no such frame.
+routine write_program_position() -> None
+    local depth: S32 = trace_depth()
+    local shown: S32 = depth.min(32)
+
+    each k in 0 til shown
+        frame: @TraceFrame = recent_frame(depth, k)
+        line: S32 = frame.line.peek()
+        file_ptr: @CChar = frame.file.peek().to[@CChar]()
+        file: @[Byte] = file_ptr.to[CStrView]().getview()
+        if line == 0 or in_library(file)
+            continue
+        column: S32 = frame.column.peek()
+        Console.alert("\nat {file}:{line}:{column}", end: "")
+        return
+    then
+        return
+
+### Whether a source file is in the standard library's folder.
+### :param file: The file's path.
+### :returns: True when it starts with LIBRARY_FOLDER, false when it doesn't or the folder isn't known.
+routine in_library(file: @[Byte]) -> Bool
+    folder_text: CStrView = LIBRARY_FOLDER.peek()
+    if folder_text.data.is_hollow()
+        return false
+    folder: @[Byte] = folder_text.getview()
+    if file.count < folder.count
+        return false
+    each i in 0 til folder.count
+        if file.byte_at(i) == folder.byte_at(i)
+            continue
+        return false
+    then
+        return true
+
 ### Reports a crash and exits with the crash status (82): flushes standard output, then writes to standard error, in
-### red, the crash's name and message, where it happened (unless `place` is null), and the calling thread's crash
-### trace. Standard/System's crash calls it in place of the standard library's weak default.
+### red, the crash's name and message, where it happened (the place given, or else where the program's own code was),
+### and the calling thread's crash trace. Standard/System's crash calls it in place of the standard library's weak
+### default.
 ### :param name: The crash's name, such as `IntegerOverflowError`.
 ### :param message: What went wrong.
 ### :param place: Where it happened, or null when that isn't known.
@@ -71,11 +158,7 @@ routine crash_handler(name: @[Byte], message: @[Byte], place: @SourceLocation) -
         Console.alert("[91m", end: "")
     write_title(name)
     Console.alert(": {message}", end: "")
-    if not place.is_hollow()
-        file: @[Byte] = place.file.peek()
-        line: U32 = place.line.peek()
-        column: U32 = place.column.peek()
-        Console.alert("\nat {file}:{line}:{column}", end: "")
+    write_place(place)
     Console.alert("")
     write_trace()
     if Console.errors().is_terminal()
@@ -254,10 +337,12 @@ routine frame_name(depth: S32, k: S32) -> @[Byte]
         return name
 
 ### The calling thread's crash trace, most recent frame first: the last 32 frames, and how many there were in all when
-### there were more. Nothing for a build that keeps no trace.
+### there were more. Of library frames named by the library (Suflae) only the routine the program called is written.
+### Nothing for a build that keeps no trace.
 routine write_trace() -> None
     local depth: S32 = trace_depth()
     local shown: S32 = depth.min(32)
+    local written: @S32 <- 0
 
     if depth <= 0
         # The frames, most recent first.
@@ -265,17 +350,24 @@ routine write_trace() -> None
         return
     Console.alert("Stack trace:")
     each i in 0 til shown
-        back: S32 = depth -% 1 -% i
-        slot: U64 = (back & 31).to[U64]()
-        frames: @TraceFrame = trace_frames()
-        at: @TraceFrame = frames.stride(slot)
+        at: @TraceFrame = recent_frame(depth, k: i)
+        line: S32 = at.line.peek()
+        # A frame with no line is a library frame named by the library, not by its file (Suflae). Of the library
+        # frames in a row only the oldest is written: the routine the program called, not the ones it called.
+        if line == 0 and i + 1 < shown
+            if recent_frame(depth, k: i + 1).line.peek() == 0
+                continue
         routine_ptr: @CChar = at.routine_name.peek().to[@CChar]()
         file_ptr: @CChar = at.file.peek().to[@CChar]()
         routine_name: @[Byte] = routine_ptr.to[CStrView]().getview()
         file: @[Byte] = file_ptr.to[CStrView]().getview()
-        line: S32 = at.line.peek()
         column: S32 = at.column.peek()
-        Console.alert("  {i}: at {routine_name} ({file}:{line}:{column})")
+        n: S32 = written.peek()
+        if line == 0
+            Console.alert("  {n}: at {routine_name} ({file})")
+        else
+            Console.alert("  {n}: at {routine_name} ({file}:{line}:{column})")
+        (n + 1).poke_into(written)
     if not (depth > 32)
         return
     Console.alert("  ... ({depth} frames total)")
