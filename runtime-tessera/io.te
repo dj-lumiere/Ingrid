@@ -134,6 +134,8 @@ routine io_do_work(req: @IoReq) -> None
             local data: @@Byte <- .hollow()
             got: S64 = read_whole_file(cpath: req.path.peek(), data)
             if not (got >= 0)
+                # The failure's reason code, negated, for the caller's thread to record.
+                req.result.poke(got)
                 return
             req.data.poke(data.peek())
             req.result.poke(got)
@@ -234,7 +236,8 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     return req
 
 ### Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
-### rf_io_get_result_len, or null (length 0) on an error. {rf_io_last_failed} tells an error from an empty file.
+### rf_io_get_result_len, or null (length 0) on an error. {rf_io_last_failed} tells an error from an empty file, and
+### {rf_fs_last_error} why it failed.
 ### :param path: The file's path.
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
 ### :returns: The contents, or null.
@@ -249,6 +252,7 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
     c_free(req)
     IO_LAST_FAILED.poke(result < 0)
     if result < 0
+        LAST_ERROR.poke((0 - result).to[S32]())
         IO_LAST_LEN.poke(0)
         return .hollow()
     IO_LAST_LEN.poke(result.to[U64]())
@@ -279,6 +283,8 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
     io_run(req)
     result: S64 = req.result.peek()
     IO_LAST_FAILED.poke(result < 0)
+    if result < 0
+        LAST_ERROR.poke((0 - result).to[S32]())
     c_free(req.data.peek())
     c_free(req.path.peek())
     c_free(req)

@@ -1,0 +1,171 @@
+# The environment and the storage layers for RazorForge and Suflae: the program's arguments, its environment variables,
+# the storage devices and partitions the OS reports, and the partition a path is on.
+#
+# The OS work is Tessera's Standard/Os (OsEnvironment, StorageManager, PartitionManager). This file is the rf_* boundary
+# over it, in the form of files.te: a routine that returns bytes returns a malloc'd, NUL-terminated buffer and its
+# length through rf_get_result_len.
+
+module Ingrid/Runtime
+
+import Standard/Collections
+import Standard/Os
+
+# -- the arguments -----------------------------------------------------------------------
+
+### The number of arguments the program was started with, its own name not counted.
+### :returns: The count.
+@export("rf_env_argument_count")
+routine rf_env_argument_count() -> U64
+    return OsEnvironment.argument_count()
+
+### One argument the program was started with (0 is the first after its own name).
+### :param index: The argument's position.
+### :returns: Its bytes, empty (length 0) past the last one, or null when the copy can't be allocated.
+@export("rf_env_argument")
+routine rf_env_argument(index: U64) -> @Byte
+    if index >= OsEnvironment.argument_count()
+        return bytes_result(s: .hollow(), len: 0)
+    argument: @[Byte] = OsEnvironment.argument(index)
+    return bytes_result(s: argument.data, len: argument.count())
+
+# -- the variables -----------------------------------------------------------------------
+
+### The value of an environment variable, asked of the OS (on Windows the name's case doesn't matter).
+### :param name: The variable's name.
+### :param len: Its length.
+### :returns: The value, or null (length 0) when it isn't set.
+@export("rf_env_variable")
+routine rf_env_variable(name: @Byte, len: S32) -> @Byte
+    local alloc: @MemoryManager <- heap()
+
+    when OsEnvironment.variable(name: path_of(path: name, len), alloc)
+        is Memory[Byte] as value =>
+            copied: @Byte = bytes_result(s: value.data.peek(), len: value.count())
+            drop value
+            return copied
+        is None => return no_result()
+
+### Every environment variable as the process has it now: each name and value followed by a NUL.
+### :returns: The variables, empty (length 0) for none, or null when the buffer can't grow.
+@export("rf_env_snapshot")
+routine rf_env_snapshot() -> @Byte
+    local alloc: @MemoryManager <- heap()
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    local entries: @List[EnvironmentEntry] <- OsEnvironment.variables(alloc)
+
+    if not out.start(1024)
+        drop entries
+        return out.fail()
+    each i in 0 til entries.count()
+        entry: @EnvironmentEntry = entries.getslot(i)
+        name: @[Byte] = entry.name.getview()
+        value: @[Byte] = entry.value.getview()
+        if not out.room(name.count() + value.count() + 2)
+            drop entries
+            return out.fail()
+        out.add_bytes(data: name.data, n: name.count())
+        out.byte(0x00)
+        out.add_bytes(data: value.data, n: value.count())
+        out.byte(0x00)
+    drop entries
+    return out.finish()
+
+# -- the storage layers ----------------------------------------------------------------
+
+### Appends `text` with a tab after it.
+### :param text: The bytes.
+### :returns: False when the buffer can't grow.
+routine @ResultBuffer.field(text: @[Byte]) -> Bool
+    if not me.room(text.count() + 1)
+        return false
+    me.add_bytes(data: text.data, n: text.count())
+    me.byte(b'\t')
+    return true
+
+### Appends `v` in decimal.
+### :param v: The value.
+### :returns: False when the buffer can't grow.
+routine @ResultBuffer.number(v: U64) -> Bool
+    local digit_buffer: @Array[Byte, 24] <- .hollow()
+    local digits: @Byte = digit_buffer.to[@Byte]()
+
+    n: U64 = decimal(v, out: digits)
+    if not me.room(n)
+        return false
+    me.add_bytes(data: digits, n: n)
+    return true
+
+### Appends one partition as a line of name, device, root, file system and size, separated by tabs, with '\n' before
+### it when it isn't the first.
+### :param p: The partition.
+### :returns: False when the buffer can't grow.
+routine @ResultBuffer.partition(p: @PartitionManager) -> Bool
+    if me.len.peek() > 0
+        if not me.room(1)
+            return false
+        me.byte(b'\n')
+    if not (me.field(p.name.getview()) and me.field(p.device.getview()))
+        return false
+    if not (me.field(p.mounted_at.getview()) and me.field(p.file_system.getview()))
+        return false
+    return me.number(p.size.peek())
+
+### The storage devices the OS reports, one per line: name, a tab, and the size in bytes.
+### :returns: The listing, empty (length 0) for none, or null when the buffer can't grow.
+@export("rf_storage_list")
+routine rf_storage_list() -> @Byte
+    local alloc: @MemoryManager <- heap()
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    local devices: @List[StorageManager] <- StorageManager.list(alloc)
+
+    if not out.start(256)
+        drop devices
+        return out.fail()
+    each i in 0 til devices.count()
+        device: @StorageManager = devices.getslot(i)
+        if out.len.peek() > 0
+            if not out.room(1)
+                drop devices
+                return out.fail()
+            out.byte(b'\n')
+        if not (out.field(device.name.getview()) and out.number(device.size.peek()))
+            drop devices
+            return out.fail()
+    drop devices
+    return out.finish()
+
+### The partitions the OS reports, one per line: name, device, root, file system and size, separated by tabs.
+### :returns: The listing, empty (length 0) for none, or null when the buffer can't grow.
+@export("rf_partition_list")
+routine rf_partition_list() -> @Byte
+    local alloc: @MemoryManager <- heap()
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    local partitions: @List[PartitionManager] <- PartitionManager.list(alloc)
+
+    if not out.start(256)
+        drop partitions
+        return out.fail()
+    each i in 0 til partitions.count()
+        if not out.partition(partitions.getslot(i))
+            drop partitions
+            return out.fail()
+    drop partitions
+    return out.finish()
+
+### The partition a path is on, as one line of {rf_partition_list}.
+### :param path: The path.
+### :param len: Its length.
+### :returns: The line, or null (length 0) on a failure (its reason for {rf_fs_last_error}).
+@export("rf_partition_of")
+routine rf_partition_of(path: @Byte, len: S32) -> @Byte
+    local alloc: @MemoryManager <- heap()
+    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+
+    when OsFileManager.partition_result(at: File.at(path_of(path, len)), alloc)
+        is PartitionManager as partition =>
+            if not (out.start(256) and out.partition(partition))
+                drop partition
+                return out.fail()
+            drop partition
+            return out.finish()
+        is FsError as error => return failed_result(error)
