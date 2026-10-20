@@ -1,0 +1,109 @@
+# The text pattern exports, called the way RazorForge calls them: every word as two encoded characters.
+
+import Standard/Collections
+import Standard/Os
+
+### Encodes words as characters, two per word.
+### :param words: The words.
+### :returns: The characters.
+routine encode(words: @[U32]) -> List[U32]
+    local chars: @List[U32] <- .construct(HEAP)
+
+    each i: U64 in 0 til words.count()
+        word: U32 = words.getitem(i)
+        chars.add_last((word >> 16) + 0x10000)
+        chars.add_last((word & 0xFFFF) + 0x10000)
+    then
+        return chars
+
+### Decodes a slot from its four characters.
+### :param chars: The characters.
+### :param slot: The slot's index.
+### :returns: The slot's value.
+routine slot(chars: @[U32], slot: U64) -> U64
+    each part: U64 in 0 til 4 with value: U64 = 0
+        bits: U64 = (chars.getitem(slot * 4 + part) - 0x10000).to[U64]()
+        continue with value: (value << 16) | bits
+    then
+        return value
+
+### The code points of UTF-8 text.
+### :param text: The text.
+### :returns: The code points.
+routine points(text: @[Byte]) -> List[U32]
+    local result: @List[U32] <- .construct(HEAP)
+
+    while pos < text.count() with pos: U64 = 0
+        decoded: Utf8Decoded = utf8_decode(bytes: text.to[@Byte](), pos, len: text.count())
+        result.add_last(decoded.char.to[U32]())
+        continue with pos: decoded.next_pos
+    then
+        return result
+
+### Compiles a piece tree, searches a text with it and shows the slots.
+### :param tree: The piece tree.
+### :param text: The text.
+routine search(tree: @[U32], text: @[Byte]) -> None
+    local code: @List[U32] <- encode(words: tree)
+    local program: @[U32] <- [0] * 400
+    local slots: @[U32] <- [0] * 64
+    local chars: @List[U32] <- points(text)
+
+    length: S64 = pattern_compile(code: code.getview().to[@U32](), code_count: code.count(),
+        mode: 0, out: program.to[@U32](), out_count: 400)
+    count: U64 = pattern_slot_count(program: program.to[@U32](), program_count: length.to[U64](),
+        mode: 0)
+    found: S64 = pattern_find_utf32(program: program.to[@U32](), program_count: length.to[U64](),
+        text: chars.getview().to[@U32](), text_count: chars.count(), from: 0, out: slots.to[@U32](),
+        out_count: 64)
+    Console.show("program {length} characters, {count} slots, found {found}")
+    each i: U64 in 0 til count
+        Console.show("  slot {i}: {slot(chars: slots, slot: i)}")
+    whole: S64 = pattern_matches_utf32(program: program.to[@U32](), program_count: length.to[U64](),
+        text: chars.getview().to[@U32](), text_count: chars.count())
+    Console.show("  whole: {whole}")
+    drop code
+    drop chars
+    return
+
+### Shows the message of a regular expression that can't be read.
+### :param regex: The expression.
+routine regex_message(regex: @[Byte]) -> None
+    local chars: @List[U32] <- points(text: regex)
+    local program: @[U32] <- [0] * 400
+    local message: @[U32] <- [0] * 200
+    local bytes: @List[Byte] <- .construct(HEAP)
+
+    length: S64 = pattern_from_regex(regex: chars.getview().to[@U32](), regex_count: chars.count(),
+        mode: 0, out: program.to[@U32](), out_count: 400)
+    written: U64 = pattern_regex_message(regex: chars.getview().to[@U32](),
+        regex_count: chars.count(), mode: 0, out: message.to[@U32](), out_count: 200)
+    each i: U64 in 0 til written
+        local buffer: @Array[Byte, 4] <- [b'\x00'] * 4
+        char: Char = message.getitem(i).to[Char]()
+        n: U64 = utf8_encode_into(char, out: buffer.to[@Byte]())
+        each k: U64 in 0 til n
+            bytes.add_last(buffer.getitem(k))
+    Console.show("{regex}: {length}, {bytes.getview()}")
+    drop chars
+    drop bytes
+    return
+
+routine start() -> None
+    # The date: SEQUENCE of capture "y" (4 digits), "-", capture "m" (2 digits).
+    search(tree: [3, 3, 7, 1, 0x79, 6, 4, 4, 10, 0, 0, 1, 1, 0x2D, 7, 1, 0x6D, 6, 2, 2, 10, 0, 0],
+        text: "on 2026-10")
+    # Two captures with one name don't compile.
+    local duplicate: @List[U32] <- encode(words: [3, 2, 7, 1, 0x61, 1, 1, 0x61, 7, 1, 0x61, 1, 1,
+        0x62])
+    local message: @[U32] <- [0] * 200
+
+    status: S64 = pattern_compile(code: duplicate.getview().to[@U32](),
+        code_count: duplicate.count(), mode: 0, out: message.to[@U32](), out_count: 200)
+    written: U64 = pattern_compile_message(code: duplicate.getview().to[@U32](),
+        code_count: duplicate.count(), mode: 0, out: message.to[@U32](), out_count: 200)
+    Console.show("duplicate: {status}, message of {written} characters")
+    drop duplicate
+    regex_message("a(b")
+    regex_message("x\\1")
+    return

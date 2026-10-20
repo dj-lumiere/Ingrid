@@ -21,7 +21,8 @@ on their own:
 
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
 Roamed entity runtime and its cycle collector, the crash handler, SipHash, the xoshiro256** generator with its
-splitmix64 seeding, JSON string escaping, the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
+splitmix64 seeding, JSON string escaping, the text pattern engine (Tessera's `Standard/Text/Patterns`, which compiles a
+pattern and searches text in time that grows with the text's length), the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
 numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
 widths), and the arbitrary-precision Integer (`tessera/generated/numerics.te`, with the scratch arena
@@ -75,7 +76,8 @@ before they moved here (and the crashes their checked arithmetic reports), the D
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
 D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal
 transcendentals against mpmath, Integer through its C calls (and the scratch and result-buffer retries)
-against what RazorForge's engines computed, the word division on its edge cases, the Roamed counts and lock, the cycle
+against what RazorForge's engines computed, the word division on its edge cases, the text patterns through their C calls (compiling a pattern, searching, the
+capture slots and the messages of patterns that don't compile), the Roamed counts and lock, the cycle
 collector, the heap calls, and the crash report, and from
 `runtime-tessera/` the SignalCaster (`monitor.te`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the

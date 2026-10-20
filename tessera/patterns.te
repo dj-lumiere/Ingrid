@@ -1,0 +1,352 @@
+# Text patterns shared by the RazorForge and Suflae standard libraries. The engine is Tessera's
+# (Standard/Text/Patterns): the piece tree a program builds is compiled into a program, and a search runs the program
+# over text in time that grows with the text's length. These are its C entry points.
+#
+# Every word crosses as two characters of a RazorForge Text, so the languages keep a piece tree and a program in a
+# Text (a value a preset can hold): the high 16 bits plus 0x10000, then the low 16 bits plus 0x10000. Capture slots
+# come back the same way, a U64 as four characters, high part first. Text goes in as code points, bytes as bytes.
+# A routine whose result needs more room than the caller gave returns how much it needs, and the caller calls it
+# again with that much.
+
+import Standard/Collections
+import Standard/Os
+import Standard/Text/Patterns
+
+### The first character value of an encoded 16-bit part.
+preset PART_BASE: U32 = 0x10000
+
+### Where a search starts and where its slots go.
+record FindJob
+    ### The first position a match may start at.
+    from: U64
+    ### Where the slots go.
+    out: @U32
+    ### How many characters fit there.
+    out_count: U64
+
+### The words a run of encoded characters stands for.
+### :param chars: The characters, two per word.
+### :param count: How many characters.
+### :returns: The words (empty when `count` is odd or a character isn't an encoded part).
+secret routine decode_words(chars: @U32, count: U64) -> List[U32]
+    local words: @List[U32] <- .construct(HEAP)
+
+    if count % 2 != 0
+        return words
+    each i: U64 in 0 til count // 2
+        high: U32 = chars.stride(i * 2).peek()
+        low: U32 = chars.stride(i * 2 + 1).peek()
+        if not (PART_BASE <= high <= 0x1FFFF and PART_BASE <= low <= 0x1FFFF)
+            words.clear()
+            return words
+        words.add_last(((high - PART_BASE) << 16) | (low - PART_BASE))
+    then
+        return words
+
+### Writes words as encoded characters when they fit.
+### :param words: The words.
+### :param out: Where the characters go.
+### :param out_count: How many characters fit there.
+### :returns: How many characters the words take.
+secret routine encode_words(words: @[U32], out: @U32, out_count: U64) -> S64
+    local needed: U64 = words.count() * 2
+
+    if needed > out_count
+        return needed.to[S64]()
+    each i: U64 in 0 til words.count()
+        word: U32 = words.getitem(i)
+        out.stride(i * 2).poke((word >> 16) + PART_BASE)
+        out.stride(i * 2 + 1).poke((word & 0xFFFF) + PART_BASE)
+    then
+        return needed.to[S64]()
+
+### Writes UTF-8 text as code points when it fits.
+### :param text: The text.
+### :param out: Where the code points go.
+### :param out_count: How many fit there.
+### :returns: How many code points the text has.
+secret routine write_utf32(text: @[Byte], out: @U32, out_count: U64) -> U64
+    local input: PatternInput = PatternInput.of_utf8(text)
+
+    while pos < input.count() with pos: U64 = 0, written: U64 = 0
+        unit: InputUnit = input.unit_at(pos)
+        if written < out_count
+            out.stride(written).poke(unit.value)
+        continue with pos: pos + unit.size, written: written + 1
+    then
+        return written
+
+### The program of encoded characters, read, or None when they aren't a program of that mode.
+### :param words: The decoded words.
+### :param mode: MODE_TEXT or MODE_BYTES.
+### :returns: The program view.
+secret routine program_view(words: @List[U32], mode: U32) -> Maybe[Program]
+    return read_program(words: words.getview(), mode)
+
+### Compiles a piece tree into a program.
+### :param code: The piece tree, encoded.
+### :param code_count: How many characters it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :param out: Where the encoded program goes.
+### :param out_count: How many characters fit there.
+### :returns: How many characters the program takes (more than `out_count`: call again with that room), or -1 when the
+### tree doesn't compile (`ingrid_pattern_compile_message` says why).
+@export("ingrid_pattern_compile")
+routine pattern_compile(code: @U32, code_count: U64, mode: U32, out: @U32, out_count: U64) -> S64
+    local words: @List[U32] <- decode_words(chars: code, count: code_count)
+
+    when compile_pattern(code: words.getview(), mode, alloc: HEAP)
+        is Memory[U32] as program =>
+            written: S64 = encode_words(words: program.getview(), out, out_count)
+            drop program
+            drop words
+            return written
+        is PatternError =>
+            drop words
+            return -1
+
+### Why a piece tree doesn't compile, as code points.
+### :param code: The piece tree, encoded.
+### :param code_count: How many characters it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :param out: Where the message goes.
+### :param out_count: How many code points fit there.
+### :returns: How many code points the message has (0 when the tree compiles).
+@export("ingrid_pattern_compile_message")
+routine pattern_compile_message(code: @U32, code_count: U64, mode: U32, out: @U32,
+    out_count: U64) -> U64
+    local words: @List[U32] <- decode_words(chars: code, count: code_count)
+    local message: @List[Byte] <- .construct(HEAP)
+
+    when compile_pattern(code: words.getview(), mode, alloc: HEAP)
+        is Memory[U32] as program =>
+            drop program
+        is PatternError as error => write_pattern_error(error, code: words.getview(), out: message)
+    written: U64 = write_utf32(text: message.getview(), out, out_count)
+    drop message
+    drop words
+    return written
+
+### Reads a regular expression and compiles it.
+### :param regex: The expression's code points.
+### :param regex_count: How many it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :param out: Where the encoded program goes.
+### :param out_count: How many characters fit there.
+### :returns: How many characters the program takes (more than `out_count`: call again with that room), or -1 when the
+### expression can't be read (`ingrid_pattern_regex_message` says why and where).
+@export("ingrid_pattern_from_regex")
+routine pattern_from_regex(regex: @U32, regex_count: U64, mode: U32, out: @U32,
+    out_count: U64) -> S64
+    input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: regex,
+        count: regex_count))
+    when read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
+        is List[U32] as tree =>
+            when compile_pattern(code: tree.getview(), mode, alloc: HEAP)
+                is Memory[U32] as program =>
+                    written: S64 = encode_words(words: program.getview(), out, out_count)
+                    drop program
+                    drop tree
+                    return written
+                is PatternError =>
+                    drop tree
+                    return -1
+        is RegexError => return -1
+
+### Why a regular expression can't be read, and where, as code points: `Backreferences aren't supported ... (at
+### position 3).`
+### :param regex: The expression's code points.
+### :param regex_count: How many it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :param out: Where the message goes.
+### :param out_count: How many code points fit there.
+### :returns: How many code points the message has (0 when it can be read).
+@export("ingrid_pattern_regex_message")
+routine pattern_regex_message(regex: @U32, regex_count: U64, mode: U32, out: @U32,
+    out_count: U64) -> U64
+    local message: @List[Byte] <- .construct(HEAP)
+
+    input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: regex,
+        count: regex_count))
+    when read_regex(input, bytes: mode == MODE_BYTES, alloc: HEAP)
+        is List[U32] as tree =>
+            when compile_pattern(code: tree.getview(), mode, alloc: HEAP)
+                is Memory[U32] as program =>
+                    drop program
+                is PatternError as error =>
+                    kind: RegexErrorKind = when
+                        error.kind == PatternErrorKind.DUPLICATE_NAME => RegexErrorKind.DUPLICATE_NAME
+                        else => RegexErrorKind.TOO_LARGE
+                    write_regex_error(error: RegexError(kind, at: 0), out: message)
+            drop tree
+        is RegexError as error => write_regex_error(error, out: message)
+    written: U64 = write_utf32(text: message.getview(), out, out_count)
+    drop message
+    return written
+
+### How many capture slots a match of the program fills: a start and an end for the whole match and each capture.
+### Four characters hold each slot.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :returns: The slot count, 0 when the characters aren't such a program.
+@export("ingrid_pattern_slot_count")
+routine pattern_slot_count(program: @U32, program_count: U64, mode: U32) -> U64
+    local words: @List[U32] <- decode_words(chars: program, count: program_count)
+
+    count: U64 = when program_view(words, mode)
+        is Program as view => view.slot_count()
+        is None => 0
+    drop words
+    return count
+
+### The number of the capture with a name, from 1.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param mode: 0 for a text pattern, 1 for a bytes pattern.
+### :param name: The name's code points.
+### :param name_count: How many it has.
+### :returns: The capture's number, 0 when no capture has the name or the characters aren't a program.
+@export("ingrid_pattern_group_number")
+routine pattern_group_number(program: @U32, program_count: U64, mode: U32, name: @U32,
+    name_count: U64) -> U64
+    local words: @List[U32] <- decode_words(chars: program, count: program_count)
+
+    number: U64 = when program_view(words, mode)
+        is Program as view => view.group_named(name: @[U32].construct(data: name,
+            count: name_count))
+        is None => 0
+    drop words
+    return number
+
+### Writes slots as encoded characters, four per slot.
+### :param slots: The slots.
+### :param out: Where they go (room for four characters per slot).
+secret routine encode_slots(slots: @[U64], out: @U32) -> None
+    each i: U64 in 0 til slots.count()
+        value: U64 = slots.getitem(i)
+        each part: U64 in 0 til 4
+            shift: U64 = (3 - part) * 16
+            bits: U64 = (value >> shift) & 0xFFFF
+            out.stride(i * 4 + part).poke(bits.to[U32]() + PART_BASE)
+    then
+        return
+
+### Searches an input with an encoded program.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param input: The input.
+### :param job: Where the search starts and where its slots go.
+### :returns: 1 when there is a match (its slots written), 0 when there is none, -1 when the characters aren't a
+### program of the input's mode or the slots don't fit.
+secret routine find_encoded(program: @U32, program_count: U64, input: PatternInput,
+    job: FindJob) -> S64
+    local mode: U32 = when
+
+        input.mode == INPUT_BYTES => MODE_BYTES
+        else => MODE_TEXT
+    local words: @List[U32] <- decode_words(chars: program, count: program_count)
+
+    when program_view(words, mode)
+        is Program as view =>
+            local slots: @Memory[U64] <- [NO_POSITION] * view.slot_count() at HEAP
+            if slots.count() * 4 > job.out_count
+                drop slots
+                drop words
+                return -1
+            found: Bool = find_match(search: Search.construct(program: view, input), from: job.from,
+                slots: slots.getview(), alloc: HEAP)
+            if found
+                encode_slots(slots: slots.getview(), out: job.out)
+            drop slots
+            drop words
+            return found.to[S64]()
+        is None =>
+            drop words
+            return -1
+
+### Makes a find job.
+### :param from: The first position a match may start at.
+### :param out: Where the slots go.
+### :param out_count: How many characters fit there.
+### :returns: The job.
+common routine FindJob.construct(from: U64, out: @U32, out_count: U64) -> Me
+    return Me(from, out, out_count)
+
+### Releases nothing.
+routine @FindJob.destruct() -> None
+    return
+
+### The leftmost match of a text pattern in text at or after a position.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param text: The text's code points.
+### :param text_count: How many it has.
+### :param from: The first position (a code point index) a match may start at.
+### :param out: Where the slots go, four characters each (`ingrid_pattern_slot_count` slots).
+### :param out_count: How many characters fit there.
+### :returns: 1 when there is a match, 0 when there is none, -1 when the program isn't a text pattern's.
+@export("ingrid_pattern_find_utf32")
+routine pattern_find_utf32(program: @U32, program_count: U64, text: @U32, text_count: U64,
+    from: U64, out: @U32, out_count: U64) -> S64
+    input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: text,
+        count: text_count))
+    return find_encoded(program, program_count, input, job: FindJob.construct(from, out, out_count))
+
+### The leftmost match of a bytes pattern in bytes at or after a position.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param bytes: The bytes.
+### :param bytes_count: How many there are.
+### :param from: The first position a match may start at.
+### :param out: Where the slots go, four characters each.
+### :param out_count: How many characters fit there.
+### :returns: 1 when there is a match, 0 when there is none, -1 when the program isn't a bytes pattern's.
+@export("ingrid_pattern_find_bytes")
+routine pattern_find_bytes(program: @U32, program_count: U64, bytes: @Byte, bytes_count: U64,
+    from: U64, out: @U32, out_count: U64) -> S64
+    input: PatternInput = PatternInput.of_bytes(@[Byte].construct(data: bytes, count: bytes_count))
+    return find_encoded(program, program_count, input, job: FindJob.construct(from, out, out_count))
+
+### Whether a whole input matches an encoded program.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param input: The input.
+### :returns: 1 when it does, 0 when it doesn't, -1 when the characters aren't a program of the input's mode.
+secret routine matches_encoded(program: @U32, program_count: U64, input: PatternInput) -> S64
+    local mode: U32 = when
+
+        input.mode == INPUT_BYTES => MODE_BYTES
+        else => MODE_TEXT
+    local words: @List[U32] <- decode_words(chars: program, count: program_count)
+
+    result: S64 = when program_view(words, mode)
+        is Program as view => matches_whole(search: Search.construct(program: view, input),
+            alloc: HEAP).to[S64]()
+        is None => -1
+    drop words
+    return result
+
+### Whether all of a text matches a text pattern.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param text: The text's code points.
+### :param text_count: How many it has.
+### :returns: 1 when it does, 0 when it doesn't, -1 when the program isn't a text pattern's.
+@export("ingrid_pattern_matches_utf32")
+routine pattern_matches_utf32(program: @U32, program_count: U64, text: @U32, text_count: U64) -> S64
+    input: PatternInput = PatternInput.of_utf32(words: @[U32].construct(data: text,
+        count: text_count))
+    return matches_encoded(program, program_count, input)
+
+### Whether all of some bytes match a bytes pattern.
+### :param program: The program, encoded.
+### :param program_count: How many characters it has.
+### :param bytes: The bytes.
+### :param bytes_count: How many there are.
+### :returns: 1 when they do, 0 when they don't, -1 when the program isn't a bytes pattern's.
+@export("ingrid_pattern_matches_bytes")
+routine pattern_matches_bytes(program: @U32, program_count: U64, bytes: @Byte,
+    bytes_count: U64) -> S64
+    input: PatternInput = PatternInput.of_bytes(@[Byte].construct(data: bytes, count: bytes_count))
+    return matches_encoded(program, program_count, input)
