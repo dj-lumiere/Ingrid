@@ -141,7 +141,7 @@ routine file_path_result(r: Check[File]) -> @Byte
         is FsError as error => return failed_result(error)
 
 ### The malloc heap as an MemoryManager, so what Standard/Os hands back is freed by rf_invalidate.
-### :returns: The C heap allocator.
+### :returns: The C heap memory manager.
 routine heap() -> MemoryManager
     return C_HEAP.peek()
 
@@ -527,9 +527,9 @@ routine rf_file_is_eof(fd: S32) -> Bool
 ### :param data: Where the buffer goes.
 ### :returns: The length, or a negative reason code on a failure.
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), alloc)
+    when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), manager)
         is Memory[Byte] as text =>
             n: U64 = text.count()
             buf: Addr = c_realloc(.hollow(), (n + 1).to[CSize]())
@@ -735,9 +735,9 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_remove_all")
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), alloc))
+    return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), manager))
 
 ### Copies a file, replacing what is at the destination.
 ### :param src: The source path.
@@ -811,18 +811,20 @@ failable routine rename_either(p: @[Byte], n: @[Byte], replacing: Bool, is_direc
 ### :param p: The path.
 ### :param d: The directory.
 ### :param replacing: Whether something of that name in `d` is replaced.
-### :param alloc: The allocator for the child paths of a copied tree.
+### :param manager: The memory manager for the child paths of a copied tree.
 ### :throws: Throws the FsError the OS reported, or `OriginalKeptError` when the copy is whole and the original is still
 ###     there.
-failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, alloc: @MemoryManager) -> None
+failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool,
+    manager: @MemoryManager) -> None
     m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     is_directory: Bool = when m
         is Metadata as info => info.kind == FileKind.DIRECTORY
         is FsError as error => throw error
     if is_directory
-        when check OsFileManager.move(at: Directory.at(p), into: Directory.at(d), replacing, alloc)
+        when check OsFileManager.move(at: Directory.at(p), into: Directory.at(d), replacing,
+            manager)
             is None => return
-    when check OsFileManager.move(at: File.at(p), into: Directory.at(d), replacing, alloc)
+    when check OsFileManager.move(at: File.at(p), into: Directory.at(d), replacing, manager)
         is None => return
 
 ### Puts the path into the directory `into`, keeping its name: renamed by the OS on the same partition, else copied
@@ -839,9 +841,9 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     replacing: Bool) -> S32
     local p: @[Byte] = path_of(path, len: path_len)
     local d: @[Byte] = path_of(path: into, len: into_len)
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    when check move_either(p, d, replacing, alloc)
+    when check move_either(p, d, replacing, manager)
         is None => return 0
         is AlreadyExistsError as error =>
             if not replacing
@@ -1036,25 +1038,25 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_current_dir")
 routine rf_fs_current_dir() -> @Byte
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return path_result(check OsEnvironment.working_directory(alloc))
+    return path_result(check OsEnvironment.working_directory(manager))
 
 ### The directory for temporary files.
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_temp_dir")
 routine rf_fs_temp_dir() -> @Byte
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return path_result(check OsEnvironment.temp_directory(alloc))
+    return path_result(check OsEnvironment.temp_directory(manager))
 
 ### The user's home directory, or null when it can't be told.
 ### :returns: The path, or null (length 0).
 @export("rf_fs_home_dir")
 routine rf_fs_home_dir() -> @Byte
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return path_result(check OsEnvironment.home_directory(alloc))
+    return path_result(check OsEnvironment.home_directory(manager))
 
 ### Makes an empty file. The directory it goes in must exist.
 ### :param path: The path.
@@ -1079,9 +1081,9 @@ routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
 ### :returns: The absolute path, or null (length 0) on a failure.
 @export("rf_fs_absolute_path")
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), alloc))
+    return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), manager))
 
 ### The path with links, ".", and ".." resolved. It must exist.
 ### :param path: The path.
@@ -1089,9 +1091,9 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 ### :returns: The canonical path, or null (length 0) on a failure.
 @export("rf_fs_canonical_path")
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
-    local alloc: @MemoryManager <- heap()
+    local manager: @MemoryManager <- heap()
 
-    return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), alloc))
+    return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), manager))
 
 ### Makes the existing file exactly size bytes, extending it with zeros or cutting it short: 0, or -1 (a missing
 ### file included: nothing is made).

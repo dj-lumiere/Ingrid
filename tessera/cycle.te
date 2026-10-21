@@ -91,8 +91,8 @@ routine @HeaderBuffer.destruct() -> None
 routine my_slot() -> @WorldSlot
     mine: Addr = MY_SLOT.peek()
     if mine.to[@Byte]().is_hollow()
-        local alloc: @MemoryManager <- C_HEAP.peek()
-        slot: @WorldSlot = allocate[WorldSlot](count: 1, alloc)
+        local manager: @MemoryManager <- C_HEAP.peek()
+        slot: @WorldSlot = allocate[WorldSlot](count: 1, manager)
         slot.poke(WorldSlot(inside: 0, next: .hollow()))
         MY_SLOT.poke(slot)
 
@@ -213,9 +213,9 @@ routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> None
         larger: U64 = when
             capacity == 0 => 16
             else => capacity * 2
-        local alloc: @MemoryManager <- C_HEAP.peek()
+        local manager: @MemoryManager <- C_HEAP.peek()
         grown: @Addr = reallocate[Addr](ptr: buffer.items.peek(), new_count: larger.to[U64](),
-            alloc)
+            manager)
         if grown.is_hollow()
             crash_allocation()
         grown.poke_into(buffer.items)
@@ -321,11 +321,11 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> None
 ### Paints `root` and everything it reaches SCANNING, subtracting each internal edge from its target's count. What
 ### is left of a count afterwards is the references from outside the scanned graph.
 ### :param root: The possible cycle root to start from.
-### :param alloc: The allocator for the walk's work lists.
+### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(alloc)
-    local kids: @List[Addr] <- .construct(alloc)
+routine mark_scanning(root: @RoamHeader, manager: @MemoryManager) -> None
+    local work: @List[Addr] <- .construct(manager)
+    local kids: @List[Addr] <- .construct(manager)
 
     if root.state.peek() == SCANNING
         drop work
@@ -358,11 +358,11 @@ routine mark_scanning(root: @RoamHeader, alloc: @MemoryManager) -> None
 ### Decides each SCANNING node: one with references from outside is live, with everything it reaches. One without
 ### is garbage for now, and its children are decided the same way.
 ### :param root: The root whose graph to decide.
-### :param alloc: The allocator for the walk's work lists.
+### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(alloc)
-    local kids: @List[Addr] <- .construct(alloc)
+routine scan(root: @RoamHeader, manager: @MemoryManager) -> None
+    local work: @List[Addr] <- .construct(manager)
+    local kids: @List[Addr] <- .construct(manager)
 
     work.add_last(root)
 
@@ -371,7 +371,7 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
         if not (node.state.peek() == SCANNING)
             continue
         if node.count.peek() > 0
-            scan_live(root: node, alloc)
+            scan_live(root: node, manager)
             continue
         GARBAGE.poke_into(node.state)
         children(node, kids)
@@ -388,11 +388,11 @@ routine scan(root: @RoamHeader, alloc: @MemoryManager) -> None
 
 ### Undoes the scan below a node that turned out live: paints its graph LIVE again and gives back each edge's count.
 ### :param root: The node found live.
-### :param alloc: The allocator for the walk's work lists.
+### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(alloc)
-    local kids: @List[Addr] <- .construct(alloc)
+routine scan_live(root: @RoamHeader, manager: @MemoryManager) -> None
+    local work: @List[Addr] <- .construct(manager)
+    local kids: @List[Addr] <- .construct(manager)
 
     LIVE.poke_into(root.state)
     work.add_last(root)
@@ -420,11 +420,11 @@ routine scan_live(root: @RoamHeader, alloc: @MemoryManager) -> None
 ### Gathers the garbage reachable from `root` into REAP, painting it LIVE so no node is gathered twice. A node still
 ### in the roots buffer is left for a later pass.
 ### :param root: The root whose garbage to gather.
-### :param alloc: The allocator for the walk's work lists.
+### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
-routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(alloc)
-    local kids: @List[Addr] <- .construct(alloc)
+routine collect_garbage(root: @RoamHeader, manager: @MemoryManager) -> None
+    local work: @List[Addr] <- .construct(manager)
+    local kids: @List[Addr] <- .construct(manager)
 
     work.add_last(root)
 
@@ -452,19 +452,19 @@ routine collect_garbage(root: @RoamHeader, alloc: @MemoryManager) -> None
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 @export("ingrid_cyclic_collect")
 routine collect() -> U64
-    local alloc: @MemoryManager <- .hollow()
+    local manager: @MemoryManager <- .hollow()
     local roots: @List[Addr] <- .hollow()
 
     world_stop()
-    alloc.poke(C_HEAP.peek())
-    roots.poke(.construct(alloc))
+    manager.poke(C_HEAP.peek())
+    roots.poke(.construct(manager))
 
     # MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.
     n: U64 = ROOTS.count.peek()
     each i in 0 til n
         node: @RoamHeader = buffer_at(buffer: ROOTS, i)
         if node.state.peek() == SUSPECTED
-            mark_scanning(root: node, alloc)
+            mark_scanning(root: node, manager)
             roots.add_last(node)
         else
             false.poke_into(node.buffered)
@@ -476,7 +476,7 @@ routine collect() -> U64
 
         each i2 in 0 til n2
             root_address: Addr = roots[i2]
-            scan(root: root_address.to[@RoamHeader](), alloc)
+            scan(root: root_address.to[@RoamHeader](), manager)
         buffer_clear(REAP)
 
         n3: U64 = roots.count()
@@ -485,7 +485,7 @@ routine collect() -> U64
             root_address: Addr = roots[i3]
             root: @RoamHeader = root_address.to[@RoamHeader]()
             false.poke_into(root.buffered)
-            collect_garbage(root, alloc)
+            collect_garbage(root, manager)
         # Frees the garbage: each entity's type tears it down, then its header goes unless a weak observer remains.
         m: U64 = REAP.count.peek()
         each j in 0 til m
