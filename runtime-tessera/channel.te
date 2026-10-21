@@ -212,7 +212,7 @@ routine @Channel.wait(list: @@ChannelWaiter) -> None
         # nothing can ever wake it: its own scope holds what it waits on (a sender it still has, the receiver it reads),
         # and it stops loudly instead of hanging.
 
-        while quiet < CHANNEL_DEADLOCK_SLICES with quiet: U64 = 0
+        until quiet >= CHANNEL_DEADLOCK_SLICES with quiet: U64 = 0
             if me.cond.wait_for(access: me.lock, timeout: CHANNEL_GRACE)
                 return
             if not (LIVE_TASKS.peek_atomic() == 0)
@@ -237,7 +237,7 @@ routine @Channel.wait(list: @@ChannelWaiter) -> None
 ### :param list: The list's head.
 ### :param node: The node to remove.
 routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> None
-    while true with at: @@ChannelWaiter = list
+    loop with at: @@ChannelWaiter = list
         w2: @ChannelWaiter = at.peek()
         if w2.is_hollow()
             return
@@ -265,7 +265,7 @@ routine rf_channel_feed(chan: @Channel, payload: Addr) -> U32
 routine @Channel.feed(payload: Addr) -> U32
     me.lock.lock()
 
-    while (me.count.peek() == me.slot_cap.peek()) and (not me.closed.peek() and (me.consumer_refs.peek() > 0))
+    until (me.count.peek() != me.slot_cap.peek()) or (me.closed.peek() or (me.consumer_refs.peek() == 0))
         if not (rf_cancel_requested() == 0)
             # A rendezvous: not over until this item was taken.
             me.lock.unlock()
@@ -343,7 +343,7 @@ routine rf_channel_next(chan: @Channel) -> Addr
 routine @Channel.next() -> Addr
     me.lock.lock()
 
-    while (me.count.peek() == 0) and not me.closed.peek()
+    until (me.count.peek() != 0) or me.closed.peek()
         if not (rf_cancel_requested() == 0)
             me.lock.unlock()
             return .hollow()
