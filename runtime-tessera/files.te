@@ -811,12 +811,14 @@ failable routine rename_either(p: @[Byte], n: @[Byte], replacing: Bool, is_direc
 ### :param p: The path.
 ### :param d: The directory.
 ### :param replacing: Whether something of that name in `d` is replaced.
-### :param is_directory: Whether `p` is a directory.
 ### :param alloc: The allocator for the child paths of a copied tree.
 ### :throws: Throws the FsError the OS reported, or `OriginalKeptError` when the copy is whole and the original is still
 ###     there.
-failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, is_directory: Bool,
-    alloc: @MemoryManager) -> None
+failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, alloc: @MemoryManager) -> None
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
+    is_directory: Bool = when m
+        is Metadata as info => info.kind == FileKind.DIRECTORY
+        is FsError as error => throw error
     if is_directory
         when check OsFileManager.move(at: Directory.at(p), into: Directory.at(d), replacing, alloc)
             is None => return
@@ -839,11 +841,7 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     local d: @[Byte] = path_of(path: into, len: into_len)
     local alloc: @MemoryManager <- heap()
 
-    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
-    is_directory: Bool = when m
-        is Metadata as info => info.kind == FileKind.DIRECTORY
-        is FsError as error => return failed(error)
-    when check move_either(p, d, replacing, is_directory, alloc)
+    when check move_either(p, d, replacing, alloc)
         is None => return 0
         is AlreadyExistsError as error =>
             if not replacing
