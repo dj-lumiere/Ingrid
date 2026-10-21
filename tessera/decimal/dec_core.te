@@ -543,14 +543,24 @@ routine dec_add_special(a: Dec, b: Dec) -> Dec
         a.is_inf() => return dec_inf(a.neg)
         else => return dec_inf(b.neg)
 
-### a + b rounded to f, the preferred exponent the smaller one. Operands are aligned to the smaller exponent, the
-### larger-exponent coefficient scaled by at most 10^40; past that the other one is cut to that window with a sticky
-### unit (its digits sit at least seven places below the rounding, where a sticky unit only breaks ties right).
+### a + b rounded to f, the preferred exponent the smaller one.
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :param f: The format the result rounds to.
 ### :returns: a + b rounded to f, the preferred exponent the smaller one.
 routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
+    if not (a.is_finite() and b.is_finite())
+        return dec_add_special(a, b)
+    return dec_finish(value: dec_sum(a, b), f)
+
+### a + b of two finite values before its rounding, the preferred exponent the smaller one. Operands are aligned to
+### the smaller exponent, the larger-exponent coefficient scaled by at most 10^40; past that the other one is cut to
+### that window with a sticky unit (its digits sit at least seven places below the rounding, where a sticky unit only
+### breaks ties right and makes the sum inexact).
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: a + b before its rounding.
+routine dec_sum(a: Dec, b: Dec) -> DecExact
     local a_high: Bool = a.exp >= b.exp
     local h: Dec = when
 
@@ -560,13 +570,9 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
         a_high => b
         else => a
 
-    if not (a.is_finite() and b.is_finite())
-        return dec_add_special(a, b)
-
     # h: the operand with the larger exponent, l: the other
     if h.coeff == 0 and l.coeff != 0
-        return dec_finish(
-            value: DecExact(neg: l.neg, coeff: l.coeff.to[U256](), exp: l.exp, pref: l.exp), f)
+        return DecExact(neg: l.neg, coeff: l.coeff.to[U256](), exp: l.exp, pref: l.exp)
     shift: S64 = h.exp - l.exp
     near: Bool = shift <= 40
     values2: (U256, U256, S64) = when
@@ -595,7 +601,32 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
     sign: Bool = when
         zero => both
         else => neg
-    return dec_finish(value: DecExact(neg: sign, coeff: c, exp: e, pref: l.exp), f)
+    return DecExact(neg: sign, coeff: c, exp: e, pref: l.exp)
+
+### a × b of two finite values before its rounding, the preferred exponent the sum of theirs.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: a × b before its rounding.
+routine dec_product(a: Dec, b: Dec) -> DecExact
+    e: S64 = a.exp + b.exp
+    return DecExact(neg: a.neg != b.neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e)
+
+### Whether `value` rounds to the format f without losing a digit: every digit it has to drop (past f.digits, or
+### below f.qmin) is a zero. A value too large for f is not caught here: its rounding gives an infinity.
+### :param value: The exact value.
+### :param f: The format.
+### :returns: Whether rounding `value` to f keeps it exact.
+routine dec_exact_in(value: DecExact, f: DecFormat) -> Bool
+    if value.coeff == 0
+        return true
+    nd: S64 = dec_digits256(value.coeff)
+    dropped: S64 = (nd - f.digits).max(f.qmin - value.exp)
+    if dropped <= 0
+        return true
+    if dropped >= nd
+        return false
+    q: U256 = dec_div_p10_256(x: value.coeff, k: dropped)
+    return q *% dec_p10(dropped) == value.coeff
 
 ### a × b for an infinity or a NaN among them: a NaN, or an infinity times zero, gives a NaN.
 ### :param a: The first operand.
@@ -616,10 +647,7 @@ routine dec_mul_special(a: Dec, b: Dec) -> Dec
 routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
     if not (a.is_finite() and b.is_finite())
         return dec_mul_special(a, b)
-    neg: Bool = a.neg != b.neg
-    e: S64 = a.exp + b.exp
-    return dec_finish(value: DecExact(neg: neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e),
-        f)
+    return dec_finish(value: dec_product(a, b), f)
 
 ### a / b for an infinity or a NaN among them: a NaN or infinity over infinity gives a NaN, an infinity over a
 ### number an infinity, a number over an infinity a zero at the smallest exponent.
