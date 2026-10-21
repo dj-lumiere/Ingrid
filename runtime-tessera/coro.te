@@ -55,8 +55,7 @@ entity Coro
     awaiter: @Coro  # a coroutine waiting for this one to finish
     home: @Sched  # the scheduler it was spawned on, where its wakes go
     completion_seq: U64  # when it finished, in completion order (race! picks the first); U64.MAX until then
-    stack: StackManager  # its stack, on pages from PAGES
-    sp: Addr  # its stack pointer while it isn't running
+    stack: StackManager  # its stack, on pages from PAGES, whose sp is its stack pointer while it isn't running
     resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
     access: @AccessFlow  # what the AccessManager keeps of it, made at its first access
 
@@ -79,7 +78,6 @@ entity Coro
 ### :param home: Its `home`.
 ### :param completion_seq: Its `completion_seq`.
 ### :param stack: Its `stack`.
-### :param sp: Its `sp`.
 ### :param resumer_sp: Its `resumer_sp`.
 ### :param access: Its `access`.
 ### :returns: The new value.
@@ -87,10 +85,10 @@ common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, st
     cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
-    stack: StackManager, sp: Addr, resumer_sp: Addr, access: @AccessFlow) -> Me
+    stack: StackManager, resumer_sp: Addr, access: @AccessFlow) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
-        awaiter, home, completion_seq, stack: steal stack, sp, resumer_sp, access)
+        awaiter, home, completion_seq, stack: steal stack, resumer_sp, access)
 
 ### Releases nothing: a `Coro` holds no memory of its own.
 routine @Coro.destruct() -> None
@@ -118,7 +116,7 @@ routine coro_trampoline() -> None
     body.call(this_coro.userdata.peek())
     this_coro.completion_seq.poke_atomic(next_completion_seq())
     this_coro.status.poke_atomic(CORO_COMPLETED)
-    switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
+    switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
     unreachable
 
 ### A coroutine whose body is entry(userdata), on a stack of stack_size bytes (0: DEFAULT_STACK). It starts when it
@@ -146,7 +144,7 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
         rf_throw(error_type: "OutOfMemoryError",
             message: "Failed to reserve coroutine stack (out of address space or commit limit)")
     else
-        coro.sp.poke(initial_stack(stack: stack.bottom.peek(), size: stack.size().bytes(),
+        stack.sp.poke(initial_stack(stack: stack.bottom.peek(), size: stack.size().bytes(),
             entry: coro_trampoline.addr()))
         coro.stack.poke(steal stack)
         return coro
@@ -168,7 +166,10 @@ routine rf_coro_resume(coro: @Coro) -> U32
     RUNNING_STACK.poke(coro.stack)
     # The AccessManager sees the coroutine as the agent running here while it runs.
     outer_flow: @@AccessFlow = AccessManager.switch_flow(coro.access)
-    switch_stack(from: coro.resumer_sp, to: coro.sp.peek())
+    # The coroutine's stack pointer is the CPU's while it runs, and its switch out writes it back.
+    resume_at: Addr = coro.stack.sp.peek()
+    coro.stack.sp.poke(.hollow())
+    switch_stack(from: coro.resumer_sp, to: resume_at)
     AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
@@ -180,7 +181,7 @@ routine coro_switch_out() -> None
     if this_coro.is_hollow()
         return
     this_coro.status.poke_atomic(CORO_PARKED)
-    switch_stack(from: this_coro.sp, to: this_coro.resumer_sp.peek())
+    switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
     return
 
 ### A coroutine's status, a `CORO_` value.
