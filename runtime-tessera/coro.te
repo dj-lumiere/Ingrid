@@ -37,7 +37,7 @@ record CancelFrame
     prev: @CancelFrame
 
 ### rf_coro.
-record Coro
+entity Coro
     entry: Callable[(Addr,), None]
     userdata: Addr
     status: U32  # a CORO_ value; read across threads
@@ -103,7 +103,7 @@ common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, st
     stack: StackManager, sp: Addr, resumer_sp: Addr, access: @AccessFlow) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
-        awaiter, home, completion_seq, stack, sp, resumer_sp, access)
+        awaiter, home, completion_seq, stack: steal stack, sp, resumer_sp, access)
 
 ### Releases nothing: a `Coro` holds no memory of its own.
 routine @Coro.destruct() -> None
@@ -153,15 +153,15 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
     reserve: U64 = when
         stack_size == 0 => DEFAULT_STACK
         else => stack_size
-    stack: StackManager = take_stack(size: ByteSize.construct(bytes: reserve), pages: PAGES)
-    if stack.top.is_hollow()
+    local stack: @StackManager <- take_stack(size: ByteSize.construct(bytes: reserve), pages: PAGES)
+    if stack.top.peek().is_hollow()
         c_free(coro)
         rf_throw(error_type: "OutOfMemoryError",
             message: "Failed to reserve coroutine stack (out of address space or commit limit)")
     else
-        coro.stack.poke(stack)
-        coro.sp.poke(initial_stack(stack: stack.bottom, size: stack.size().bytes(),
+        coro.sp.poke(initial_stack(stack: stack.bottom.peek(), size: stack.size().bytes(),
             entry: coro_trampoline.addr()))
+        coro.stack.poke(steal stack)
         return coro
 
 ### Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
@@ -237,8 +237,8 @@ routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
 routine rf_coro_delete(coro: @Coro) -> None
     if coro.is_hollow()
         return
-    stack: StackManager = coro.stack.peek()
-    if stack.top.is_not_hollow()
+    stack: @StackManager = coro.stack
+    if stack.top.peek().is_not_hollow()
         give_back_stack(stack, pages: PAGES)
     AccessManager.end_flow(coro.access)
     c_free(coro)
