@@ -26,10 +26,6 @@ global MAP_DELTA: @U64
 @threadlocal
 global LAST_ERROR: @S32
 
-### Whether the last storage mapped on this thread was mapped for writing. Per thread, like RESULT_LEN.
-@threadlocal
-global MAP_WRITABLE: @Bool
-
 ### The code RazorForge and Suflae read for an FsError: 1 another reason, 2 nothing is there, 3 not allowed (a
 ### read-only file system too), 4 the device is full, 5 the device failed to read or write, 6 something is already
 ### there, 7 the path or name isn't one the OS takes.
@@ -57,12 +53,6 @@ routine failed(error: FsError) -> S32
 @export("rf_fs_last_error")
 routine rf_fs_last_error() -> S32
     return LAST_ERROR.peek()
-
-### Whether this thread's last {rf_file_map_storage} or {rf_file_map_storage_range} mapped the file for writing.
-### :returns: True for a writable mapping.
-@export("rf_file_map_writable")
-routine rf_file_map_writable() -> Bool
-    return MAP_WRITABLE.peek()
 
 ### The length of the last buffer a routine here returned.
 ### :returns: The length in bytes, 0 after a failure.
@@ -172,18 +162,6 @@ record ResultBuffer
     buf: @Byte
     len: U64
     cap: U64
-
-### Makes a `ResultBuffer` from its fields.
-### :param buf: Its `buf`.
-### :param len: Its `len`.
-### :param cap: Its `cap`.
-### :returns: The new value.
-common routine ResultBuffer.construct(buf: @Byte, len: U64, cap: U64) -> Me
-    return Me(buf, len, cap)
-
-### Releases nothing: a `ResultBuffer` holds no memory of its own.
-routine @ResultBuffer.destruct() -> None
-    return
 
 ### Starts an empty buffer with room for `cap` bytes (at least 16).
 ### :param cap: The starting capacity.
@@ -1118,35 +1096,31 @@ routine advise(m: FileStorage[Byte]) -> None
     m.prefetch()
     return
 
-### Maps a window of a file for reading and writing when it can be written, otherwise for reading only.
+### Maps a window of a file, for writing or for reading only.
 ### :param path: The path.
 ### :param offset: The window's first byte in the file.
 ### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: True to map it for writing.
 ### :returns: The storage.
-### :throws: Throws the FsError of the read-only mapping when the writable one wasn't allowed, else that one's.
-failable routine map_storage(path: @[Byte], offset: U64, count: U64) -> FileStorage[Byte]
-    writable: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path),
-        write: true, start: offset, count)
-    when writable
-        is FileStorage[Byte] as m =>
-            MAP_WRITABLE.poke(true)
-            return m
-        is NotEnoughPermissionError, is ReadOnlyError, is BusyError => nothing
-    MAP_WRITABLE.poke(false)
-    readable: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path),
-        write: false, start: offset, count)
-    return when readable
+### :throws: Throws the FsError of the mapping.
+failable routine map_storage(path: @[Byte], offset: U64, count: U64,
+    write: Bool) -> FileStorage[Byte]
+    mapped: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path), write,
+        start: offset, count)
+    return when mapped
         is FileStorage[Byte] as m => m
 
-### A window [offset, offset + count) of a file, clamped to its end and aligned down for the OS: the base (MAP_DELTA
-### from it to offset, the clamped length as the result), the empty-map marker for an empty window, or null.
+### A window [offset, offset + count) of a file mapped for writing or for reading only, clamped to its end and aligned
+### down for the OS: the base (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker
+### for an empty window, or null.
 ### :param path: The path.
 ### :param offset: The window's first byte in the file.
 ### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: True to map it for writing.
 ### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
-routine map_window(path: @[Byte], offset: U64, count: U64) -> @Byte
+routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
-    m: FileStorage[Byte] = when check map_storage(path, offset, count)
+    m: FileStorage[Byte] = when check map_storage(path, offset, count, write)
         is FileStorage[Byte] as mapped => mapped
         is FsError as error => return failed_result(error)
     if m.count() == 0
@@ -1156,25 +1130,18 @@ routine map_window(path: @[Byte], offset: U64, count: U64) -> @Byte
     MAP_DELTA.poke(m.delta)
     return result(buf: m.base.to[@Byte](), len: m.count())
 
-### Maps a whole file for a storage, for writing when it can be written ({rf_file_map_writable} tells).
-### :param path: The path.
-### :param path_len: Its length.
-### :returns: The view, the empty-map marker for an empty file, or null on a failure.
-@export("rf_file_map_storage")
-routine rf_file_map_storage(path: @Byte, path_len: S32) -> @Byte
-    # From offset 0 the base is the first byte: MAP_DELTA stays 0.
-    return map_window(path: path_of(path, len: path_len), offset: 0, count: U64.MAX)
-
-### Maps a window of a file for a storage, its offset from the base in {rf_file_map_delta}, for writing when the file
-### can be written ({rf_file_map_writable} tells).
+### Maps a window of a file for a storage a block enters: for writing (`modifying`) or for reading only (`viewing`).
+### The window's offset from the base is in {rf_file_map_delta}, its length in {rf_get_result_len}.
 ### :param path: The path.
 ### :param path_len: Its length.
 ### :param offset: The window's first byte in the file.
-### :param count: The window's length.
-### :returns: The base, the empty-map marker for an empty window, or null on a failure.
-@export("rf_file_map_storage_range")
-routine rf_file_map_storage_range(path: @Byte, path_len: S32, offset: U64, count: U64) -> @Byte
-    return map_window(path: path_of(path, len: path_len), offset, count)
+### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: 1 to map it for writing, 0 for reading only.
+### :returns: The base, the empty-map marker for an empty window, or null on a failure (a file that can't be written
+###     mapped for writing fails with the reason "not allowed").
+@export("rf_file_map")
+routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte
+    return map_window(path: path_of(path, len: path_len), offset, count, write: write != 0)
 
 ### Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
 ### (the empty marker) does nothing.
