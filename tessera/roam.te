@@ -327,54 +327,65 @@ routine roam_promote(header: @RoamHeader) -> None
 
 # ── The agent-keyed reentrant lock ──────────────────────────────────────────
 
-### Enters the entity's lock when it has escaped (a local entity has no contention). Re-entry by the holding agent
-### only deepens the hold: the builder brackets each statement, so a member routine called inside one enters again.
-### A contended entry records the wait with the AccessManager, which looks for agents waiting on each other when the
-### program's deadlock check is on, and yields to the scheduler instead of spinning, so a holder parked on this worker
-### can run.
+### Enters the entity's lock when it has escaped (a local entity has no contention). Only the check is inlined into
+### every statement that reaches the entity, so a local entity costs one load: the escaped path is its own routine.
 ### :param header: The entity's header.
 @export("ingrid_roam_lock_enter")
 @inline
 routine roam_lock_enter(header: @RoamHeader) -> None
     if header.escaped.peek_atomic() == 1
-        task: U64 = current_task_id()
+        roam_lock_enter_escaped(header)
+    return
 
-        until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task with waited: Bool = false
-            taken: Maybe[U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
-            when taken
-                is None =>
-                    header.holder_task.poke_atomic(task)
-                    1.poke_into(header.depth)
-                    if waited
-                        access_wait_end()
-                    return
-                is U8 =>
-                    if not waited
-                        access_wait_begin(lock: header, holder: header.holder_task)
-                    coro_yield()
-                    continue with waited: true
-        then
-            next_depth: U64 = header.depth.peek() + 1
-            next_depth.poke_into(header.depth)
-            return
-    else
+### Enters the lock of an entity that has escaped. Re-entry by the holding agent only deepens the hold: the builder
+### brackets each statement, so a member routine called inside one enters again. A contended entry records the wait
+### with the AccessManager, which looks for agents waiting on each other when the program's deadlock check is on, and
+### yields to the scheduler instead of spinning, so a holder parked on this worker can run.
+### :param header: The entity's header.
+@noinline
+routine roam_lock_enter_escaped(header: @RoamHeader) -> None
+    task: U64 = current_task_id()
+
+    until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task with waited: Bool = false
+        taken: Maybe[U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
+        when taken
+            is None =>
+                header.holder_task.poke_atomic(task)
+                1.poke_into(header.depth)
+                if waited
+                    access_wait_end()
+                return
+            is U8 =>
+                if not waited
+                    access_wait_begin(lock: header, holder: header.holder_task)
+                coro_yield()
+                continue with waited: true
+    then
+        next_depth: U64 = header.depth.peek() + 1
+        next_depth.poke_into(header.depth)
         return
 
-### Leaves one level of the lock. The outermost exit frees it, clearing the holder before the flag so a waiter never
-### sees the old holder.
+### Leaves one level of the lock of an entity that has escaped, and does nothing for a local one. Only the check is
+### inlined, as in `roam_lock_enter`.
 ### :param header: The entity's header.
-### :throws: Crashes with `IntegerOverflowError` when an escaped entity's lock depth is already 0.
 @export("ingrid_roam_lock_exit")
 @inline
 routine roam_lock_exit(header: @RoamHeader) -> None
     if header.escaped.peek_atomic() == 1
-        depth: U64 = header.depth.peek() - 1
-        depth.poke_into(header.depth)
-        if depth == 0
-            header.holder_task.poke_atomic(0)
-            header.locked.poke_atomic(0)
-            return
-        return
+        roam_lock_exit_escaped(header)
+    return
+
+### Leaves one level of the lock of an entity that has escaped. The outermost exit frees it, clearing the holder
+### before the flag so a waiter never sees the old holder.
+### :param header: The entity's header.
+### :throws: Crashes with `IntegerOverflowError` when the lock depth is already 0.
+@noinline
+routine roam_lock_exit_escaped(header: @RoamHeader) -> None
+    depth: U64 = header.depth.peek() - 1
+    depth.poke_into(header.depth)
+    if depth == 0
+        header.holder_task.poke_atomic(0)
+        header.locked.poke_atomic(0)
     return
 
 # ── Layout check ───────────────────────────────────────────────────────────
