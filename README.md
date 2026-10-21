@@ -22,7 +22,8 @@ on their own:
 **Code linked into every program** (`tessera/`): heap allocation, word division for the wide integers, the
 Roamed entity runtime and its cycle collector, the crash handler, SipHash, the xoshiro256** generator with its
 splitmix64 seeding, JSON string escaping, the text pattern engine (Tessera's `Standard/Text/Patterns`, which compiles a
-pattern and searches text in time that grows with the text's length), the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the math of the complex
+pattern and searches text in time that grows with the text's length), the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the B128
+arithmetic and the text of the binary floats and decimals (writing and reading), the math of the complex
 numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
 widths), and the arbitrary-precision Integer (`tessera/generated/numerics.te`, with the scratch arena
@@ -70,7 +71,8 @@ next to each executable. The full workspace setup is in the
 
 `tests/` holds golden tests of the code in `tessera/`, run by the Tessera builder's test runner: SipHash-2-4 against
 the reference test vectors, splitmix64, xoshiro256** and the JSON escaping against RazorForge's own streams and
-text, the binary-float exports against correctly rounded results from mpmath,
+text, the binary-float exports against correctly rounded results from mpmath, the float and decimal text against
+what RazorForge's own text routines printed,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
 before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and

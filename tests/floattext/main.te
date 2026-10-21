@@ -1,0 +1,176 @@
+# The text exports on a few values each: the shortest decimal of every binary float format, significant digits,
+# digits after the point, the diagnose text, reading text back, the decimal texts and the decimal scanner, a buffer
+# too small for the text, and the B128 arithmetic exports. floattext.expected holds what RazorForge's own text
+# routines printed for the same values before the text moved here.
+
+import Standard/Os
+
+### What text to ask for: the format (0 B64, 1 B32, 2 B16, 3 BF16, 4 B128), the style (0 shortest, 1 significant
+### digits, 2 digits after the point, 3 diagnose), and the digits for styles 1 and 2.
+record FloatAsk
+    format: U32
+    style: U32
+    digits: U64
+
+### A negative decimal coeff × 10^exp and the text to ask for: the style (0 scientific, 1 without fractional
+### trailing zeros, 2 digits after the point, 3 diagnose) and the places for style 2, the type for style 3.
+record DecimalAsk
+    coeff: U64
+    exp: S64
+    style: U32
+    places: U64
+
+### Writes the label and the code points written into `buf`, and how many the text has.
+### :param label: The label.
+### :param buf: The code points.
+### :param count: How many the text has.
+routine show_text(label: @[Byte], buf: @U32, count: U64) -> None
+    local bytes: @Array[Byte, 256] <- .hollow()
+
+    shown: U64 = count.min(256)
+    first: @Byte = bytes.to[@Byte]()
+    each i: U64 in 0 til shown
+        c: U32 = buf.stride(i).peek()
+        c.to_wrap[U8]().bits().poke_into(first.stride(i))
+    text: @[Byte] = .construct(data: first, count: shown)
+    Console.show("{label} [{count}] {text}")
+    return
+
+### Writes a binary float's text in one style.
+### :param label: The label.
+### :param bits: The float's bits.
+### :param ask: The format, the style, and the digits.
+routine float_line(label: @[Byte], bits: U128, ask: FloatAsk) -> None
+    local buf: @Array[U32, 256] <- .hollow()
+
+    first: @U32 = buf.to[@U32]()
+    count: U64 = float_text_utf32(low: bits.to_wrap[U64](), high: (bits >> 64).to_wrap[U64](),
+        format: ask.format, style: ask.style, digits: ask.digits, out: first, out_count: 256)
+    show_text(label, buf: first, count)
+    return
+
+### Writes the parse result of `text` as a float of `format`.
+### :param text: The text.
+### :param format: 0 B64, 1 B32, 2 B16, 3 BF16, 4 B128.
+routine parse_line(text: @[Byte], format: U32) -> None
+    local buf: @Array[U32, 64] <- .hollow()
+
+    first: @U32 = buf.to[@U32]()
+    each i: U64 in 0 til text.count
+        b: Byte = text.getitem(i)
+        first.stride(i).poke(b.to[U8]().to[U32]())
+    w: Words = float_parse_utf32(chars: first, count: text.count, format)
+    Console.show("parse {text} as {format}: kind {w.w0} bits {Hex[U64](value: w.w2)} {Hex[U64](value: w.w1)}")
+    return
+
+### Writes a decimal's text in one style.
+### :param label: The label.
+### :param ask: The value, the style, and the places.
+routine decimal_line(label: @[Byte], ask: DecimalAsk) -> None
+    local buf: @Array[U32, 256] <- .hollow()
+
+    first: @U32 = buf.to[@U32]()
+    count: U64 = decimal_text_utf32(sign: 1, special: 0, exp: ask.exp, c_low: ask.coeff, c_high: 0,
+        style: ask.style, places: ask.places, out: first, out_count: 256)
+    show_text(label, buf: first, count)
+    return
+
+### Writes the scanned fields of decimal text.
+### :param text: The text.
+routine scan_line(text: @[Byte]) -> None
+    local buf: @Array[U32, 64] <- .hollow()
+
+    first: @U32 = buf.to[@U32]()
+    each i: U64 in 0 til text.count
+        b: Byte = text.getitem(i)
+        first.stride(i).poke(b.to[U8]().to[U32]())
+    w: Words = decimal_scan_utf32(chars: first, count: text.count)
+    exp: S64 = w.w3.to_wrap[S64]()
+    Console.show("scan {text}: flags {Hex[U64](value: w.w0)} coeff {w.w1} exp {exp}")
+    return
+
+### Writes a B128 result's bits.
+### :param label: The label.
+### :param w: The result.
+routine b128_line(label: @[Byte], w: Words) -> None
+    Console.show("{label} {Hex[U64](value: w.w1)} {Hex[U64](value: w.w0)}")
+    return
+
+### Writes each case.
+routine start() -> None
+    float_line(label: "b64 0.1", bits: 0x3FB999999999999A, ask: (format: 0, style: 0, digits: 0))
+    float_line(label: "b64 0.1 sig 3", bits: 0x3FB999999999999A,
+        ask: (format: 0, style: 1, digits: 3))
+    float_line(label: "b64 0.1 sig 25", bits: 0x3FB999999999999A,
+        ask: (format: 0, style: 1, digits: 25))
+    float_line(label: "b64 0.1 places 20", bits: 0x3FB999999999999A,
+        ask: (format: 0, style: 2, digits: 20))
+    float_line(label: "b64 0.1 diagnose", bits: 0x3FB999999999999A,
+        ask: (format: 0, style: 3, digits: 0))
+    float_line(label: "b64 1e16", bits: 0x4341C37937E08000, ask: (format: 0, style: 0, digits: 0))
+    float_line(label: "b64 smallest", bits: 1, ask: (format: 0, style: 0, digits: 0))
+    float_line(label: "b64 -0", bits: 0x8000000000000000, ask: (format: 0, style: 0, digits: 0))
+    float_line(label: "b64 -inf", bits: 0xFFF0000000000000, ask: (format: 0, style: 0, digits: 0))
+    float_line(label: "b64 nan", bits: 0x7FF8000000000000, ask: (format: 0, style: 3, digits: 0))
+    float_line(label: "b64 0.0995 sig 2", bits: 0x3FB978D4FDF3B646,
+        ask: (format: 0, style: 1, digits: 2))
+    float_line(label: "b64 2.675 places 2", bits: 0x4005666666666666,
+        ask: (format: 0, style: 2, digits: 2))
+    float_line(label: "b32 0.1", bits: 0x3DCCCCCD, ask: (format: 1, style: 0, digits: 0))
+    float_line(label: "b16 0.1", bits: 0x2E66, ask: (format: 2, style: 0, digits: 0))
+    float_line(label: "b16 max", bits: 0x7BFF, ask: (format: 2, style: 0, digits: 0))
+    float_line(label: "bf16 0.1", bits: 0x3DCD, ask: (format: 3, style: 0, digits: 0))
+    float_line(label: "b128 0.1", bits: 0x3FFB999999999999999999999999999A,
+        ask: (format: 4, style: 0, digits: 0))
+    float_line(label: "b128 smallest", bits: 1, ask: (format: 4, style: 0, digits: 0))
+    float_line(label: "b128 max", bits: 0x7FFEFFFFFFFFFFFFFFFFFFFFFFFFFFFF,
+        ask: (format: 4, style: 3, digits: 0))
+    float_line(label: "b128 1.5 places 3", bits: 0x3FFF8000000000000000000000000000,
+        ask: (format: 4, style: 2, digits: 3))
+    float_line(label: "b128 -0", bits: 0x80000000000000000000000000000000,
+        ask: (format: 4, style: 0, digits: 0))
+    local small: @Array[U32, 4] <- .hollow()
+    tight: U64 = float_text_utf32(low: 0x3FB999999999999A, high: 0, format: 0, style: 2, digits: 20,
+        out: small.to[@U32](), out_count: 4)
+    Console.show("b64 0.1 places 20 in a buffer of 4 needs {tight}")
+    show_text(label: "b64 0.1 places 20, the part that fit", buf: small.to[@U32](), count: 4)
+
+    parse_line(text: "0.1", format: 0)
+    parse_line(text: "1e400", format: 0)
+    parse_line(text: "-1e400", format: 1)
+    parse_line(text: "2.4703282292062328e-324", format: 0)
+    parse_line(text: "65520", format: 2)
+    parse_line(text: "1.e5", format: 3)
+    parse_line(text: "-nan", format: 0)
+    parse_line(text: "INFINITY", format: 4)
+    parse_line(text: "1e", format: 0)
+    parse_line(text: "0.1", format: 4)
+
+    decimal_line(label: "d -2.50", ask: (coeff: 250, exp: -2, style: 0, places: 0))
+    decimal_line(label: "dec -2.50", ask: (coeff: 250, exp: -2, style: 1, places: 0))
+    decimal_line(label: "d -2.50 places 1", ask: (coeff: 250, exp: -2, style: 2, places: 1))
+    decimal_line(label: "d -2.50 places 4", ask: (coeff: 250, exp: -2, style: 2, places: 4))
+    decimal_line(label: "d -2.55 places 1", ask: (coeff: 255, exp: -2, style: 2, places: 1))
+    decimal_line(label: "d -0.0000001", ask: (coeff: 1, exp: -7, style: 0, places: 0))
+    decimal_line(label: "d -1.23e+40", ask: (coeff: 123, exp: 38, style: 0, places: 0))
+    decimal_line(label: "d128 diagnose", ask: (coeff: 250, exp: -2, style: 3, places: 128))
+    decimal_line(label: "Decimal diagnose", ask: (coeff: 250, exp: -2, style: 3, places: 0))
+    scan_line(text: "1.230e5")
+    scan_line(text: "-inf")
+    scan_line(text: "nan")
+    scan_line(text: "12345678901234567890123456789012345678901")
+    scan_line(text: "1..2")
+
+    one: U64 = 0x3FFF000000000000
+    two: U64 = 0x4000000000000000
+    b128_line("b128 1 + 2", w: b128_add(low: 0, high: one, y_low: 0, y_high: two))
+    b128_line("b128 1 / 3", w: b128_div(low: 0, high: one, y_low: 0, y_high: 0x4000800000000000))
+    b128_line("b128 2.5 round even",
+        w: b128_round_int_export(low: 0, high: 0x4000400000000000, mode: 4))
+    b128_line("b128 2^256 + 1", w: b128_from_u256(w0: 1, w1: 0, w2: 0, w3: 0x8000000000000000))
+    b128_line("b128 from b64 snan", w: b128_from_b64(x: 0x7FF0000000000001))
+    Console.show("b128 to b64 1/3 {Hex[U64](value: b128_to_b64(low: 0x5555555555555555, high: 0x3FFD555555555555))}")
+    Console.show("b16 fma 2*3+1 {Hex[U16](value: b16_mul_add(x: 0x4000, y: 0x4200, z: 0x3C00))}")
+    Console.show("b32 fmod 7 2 {Hex[U32](value: b32_mod_trunc(x: 0x40E00000, y: 0x40000000))}")
+    Console.show("b64 to bf16 1/3 {Hex[U16](value: b64_to_bf16(x: 0x3FD5555555555555))}")
+    return
