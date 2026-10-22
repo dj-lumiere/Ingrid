@@ -74,9 +74,9 @@ routine my_slot() -> @WorldSlot
         MY_SLOT.poke(slot)
 
         loop
-            head: Addr = SLOTS.peek_atomic()
+            head: Addr = SLOTS.peek_unbroken()
             slot.next.poke(head)
-            added: Maybe[Addr] = SLOTS.atomic_compare_exchange(expected: head, new: slot)
+            added: Maybe[Addr] = SLOTS.unbroken_compare_exchange(expected: head, new: slot)
             when added
                 is None => return slot
                 is Addr => continue
@@ -85,14 +85,14 @@ routine my_slot() -> @WorldSlot
 
 ### Takes ROOTS_FLAG, sleeping while another thread holds it.
 routine lock_roots() -> None
-    until ROOTS_FLAG.atomic_swap(1) == 0
+    until ROOTS_FLAG.unbroken_swap(1) == 0
         wait_on(at: ROOTS_FLAG, expected: 1)
     then
         return
 
 ### Gives ROOTS_FLAG up, waking one thread that sleeps on it.
 routine unlock_roots() -> None
-    ROOTS_FLAG.poke_atomic(0)
+    ROOTS_FLAG.poke_unbroken(0)
     wake_one(ROOTS_FLAG)
     return
 
@@ -105,8 +105,8 @@ routine world_enter() -> None
 
     slot: @WorldSlot = my_slot()
 
-    until slot.inside.atomic_fetch_add(1) & WAITING.bitnot() != 0
-        state: U32 = WORLD.peek_atomic()
+    until slot.inside.unbroken_fetch_add(1) & WAITING.bitnot() != 0
+        state: U32 = WORLD.peek_unbroken()
         if state & WRITER == 0
             return
         # A pass is running: step back out (waking it if it waits for this thread) and wait for it to finish.
@@ -127,9 +127,9 @@ routine world_leave() -> None
 ### wakes nobody, so sharing and releasing an entity make no system call.
 ### :param slot: This thread's slot.
 routine step_out(slot: @WorldSlot) -> None
-    previous: U32 = slot.inside.atomic_fetch_sub(1)
+    previous: U32 = slot.inside.unbroken_fetch_sub(1)
     if previous == WAITING.bitor(1)
-        before: U32 = slot.inside.atomic_fetch_and(WAITING.bitnot())
+        before: U32 = slot.inside.unbroken_fetch_and(WAITING.bitnot())
         wake_all(slot.inside)
         return
     return
@@ -138,9 +138,9 @@ routine step_out(slot: @WorldSlot) -> None
 ### thread's slot is empty. A slot with someone inside gets WAITING, so leaving wakes the pass.
 routine world_stop() -> None
     loop
-        state: U32 = WORLD.peek_atomic()
+        state: U32 = WORLD.peek_unbroken()
         if state & WRITER == 0
-            taken: Maybe[U32] = WORLD.atomic_compare_exchange(expected: state, new: WRITER)
+            taken: Maybe[U32] = WORLD.unbroken_compare_exchange(expected: state, new: WRITER)
             when taken
                 is None => break
                 is U32 => continue
@@ -150,15 +150,15 @@ routine world_stop() -> None
             continue
     true.poke_into(IN_COLLECTOR)
 
-    until at.to[@Byte]().is_hollow() with at: Addr = SLOTS.peek_atomic()
+    until at.to[@Byte]().is_hollow() with at: Addr = SLOTS.peek_unbroken()
         slot: @WorldSlot = at.to[@WorldSlot]()
 
         loop
-            inside2: U32 = slot.inside.peek_atomic()
+            inside2: U32 = slot.inside.peek_unbroken()
             if inside2 & WAITING.bitnot() == 0
                 break
             waiting: U32 = inside2 | WAITING
-            set: Maybe[U32] = slot.inside.atomic_compare_exchange(expected: inside2, new: waiting)
+            set: Maybe[U32] = slot.inside.unbroken_compare_exchange(expected: inside2, new: waiting)
             when set
                 is None =>
                     wait_on(at: slot.inside, expected: waiting)
@@ -172,7 +172,7 @@ routine world_stop() -> None
 ### Restarts the world after a pass and wakes every mutator and pass waiting for it.
 routine world_restart() -> None
     false.poke_into(IN_COLLECTOR)
-    WORLD.poke_atomic(0)
+    WORLD.poke_unbroken(0)
     wake_all(WORLD)
     return
 

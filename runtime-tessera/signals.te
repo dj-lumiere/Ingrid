@@ -75,13 +75,13 @@ routine invoke(box: Addr) -> None
 ### :param which: `SIG_TERMINATE` or `SIG_INTERRUPT`.
 ### :returns: False when no handler holds the slot now, so the system's action is due.
 routine run_handler(which: S32) -> Bool
-    box: Addr = holder_of(which).peek_atomic()
+    box: Addr = holder_of(which).peek_unbroken()
     if box.is_hollow()
         return false
     invoke(box)
     if which == SIG_TERMINATE
         ProcessManager.exit_process(exit_code())
-    running_of(which).poke_atomic(0)
+    running_of(which).poke_unbroken(0)
     return true
 
 ### Puts a handler in one kind's slot, and on the first handler installs the event dispatch.
@@ -95,7 +95,7 @@ routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
         which == SIG_TERMINATE => SIG_TERMINATE
         else => SIG_INTERRUPT
     held: Authorized[U8] <- SIGNALS_GUARD.get_exclusive_access()
-    before: Addr = holder_of(kind).atomic_swap(handler_box)
+    before: Addr = holder_of(kind).unbroken_swap(handler_box)
     if not handler_box.is_hollow() and not SIGNALS_INSTALLED.peek()
         install_signal_dispatch()
     listen(kind, on: not handler_box.is_hollow())
@@ -135,17 +135,17 @@ routine console_ctrl_handler(ctrl_type: U32) -> CInt
     which: S32 = when
         ctrl_type <= 1 => SIG_INTERRUPT
         else => SIG_TERMINATE
-    if holder_of(which).peek_atomic().is_hollow()
+    if holder_of(which).peek_unbroken().is_hollow()
         return 0
-    if running_of(which).atomic_swap(1) == 1
+    if running_of(which).unbroken_swap(1) == 1
         return 0
     if which == SIG_INTERRUPT
-        INTERRUPT_PENDING.poke_atomic(1)
+        INTERRUPT_PENDING.poke_unbroken(1)
         wake_one(INTERRUPT_PENDING)
         return 1
     if run_handler(which)
         return 1
-    running_of(which).poke_atomic(0)
+    running_of(which).poke_unbroken(0)
     return 0
 
 ### The dispatch thread: runs the interrupt handler for each interrupt the console handler hands it. When the slot has
@@ -156,7 +156,7 @@ routine interrupt_dispatch_main(pending: @U32) -> None
     rf_thread_stack_guarantee()
 
     loop
-        if pending.atomic_swap(0) == 0
+        if pending.unbroken_swap(0) == 0
             wait_on(at: pending, expected: 0)
             continue
         if not run_handler(SIG_INTERRUPT)
@@ -357,7 +357,7 @@ routine posix_signal_handler(signo: CInt) -> None
     which: S32 = when
         signo == SIGTERM => SIG_TERMINATE
         else => SIG_INTERRUPT
-    if running_of(which).atomic_swap(1) == 1
+    if running_of(which).unbroken_swap(1) == 1
         system_action(signo)
         return
     until c_write(SELF_PIPE.to[@CInt]().stride(1).peek(), byte.to[@Byte](), 1) >= 0 or errno() != 4
@@ -395,8 +395,8 @@ routine install_signal_dispatch() -> None
         return
     DEFAULT_THREADS.launch_unwatched(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE)
     SIGNALS_INSTALLED.poke(true)
-    if not INTERRUPT_HOLDER.peek_atomic().is_hollow()
+    if not INTERRUPT_HOLDER.peek_unbroken().is_hollow()
         set_signal_action(SIGINT, on: true)
-    if not TERMINATE_HOLDER.peek_atomic().is_hollow()
+    if not TERMINATE_HOLDER.peek_unbroken().is_hollow()
         set_signal_action(SIGTERM, on: true)
     return

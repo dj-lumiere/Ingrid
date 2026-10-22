@@ -237,7 +237,7 @@ routine @Deque.remove(c: @Coro) -> Bool
 ### :param c: The coroutine.
 routine @Sched.push_injector(c: @Coro) -> None
     c.sched_next.poke(.hollow())
-    c.sched_state.poke_atomic(SCHED_QUEUED)
+    c.sched_state.poke_unbroken(SCHED_QUEUED)
     tail: @Coro = me.injector_tail.peek()
     if tail.is_hollow()
         me.injector_head.poke(c)
@@ -259,7 +259,7 @@ routine @Sched.pop_injector() -> @Coro
     if next.is_hollow()
         me.injector_tail.poke(.hollow())
     c.sched_next.poke(.hollow())
-    c.sched_state.poke_atomic(SCHED_RUNNING)
+    c.sched_state.poke_unbroken(SCHED_RUNNING)
     return c
 
 ### A runnable coroutine goes, QUEUED, to this worker's deque if a pool worker made it ready, else to the injector.
@@ -270,7 +270,7 @@ routine @Sched.enqueue_ready(c: @Coro) -> None
     deques: @Deque = me.deques.peek()
 
     if id >= 0 and deques.is_not_hollow()
-        c.sched_state.poke_atomic(SCHED_QUEUED)
+        c.sched_state.poke_unbroken(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return
     me.push_injector(c)
@@ -418,7 +418,7 @@ routine @Sched.unlink_timer(c: @Coro) -> None
 routine @Sched.make_ready(c: @Coro) -> None
     if me.is_hollow() or c.is_hollow()
         return
-    state: U32 = c.sched_state.peek_atomic()
+    state: U32 = c.sched_state.peek_unbroken()
     when
         state == SCHED_IDLE =>
             me.unlink_timer(c)
@@ -426,7 +426,7 @@ routine @Sched.make_ready(c: @Coro) -> None
             me.deadlock_confirm.poke(0)
             return
         state == SCHED_RUNNING =>
-            c.sched_state.poke_atomic(SCHED_NOTIFIED)
+            c.sched_state.poke_unbroken(SCHED_NOTIFIED)
             me.deadlock_confirm.poke(0)
             return
         else => return
@@ -523,14 +523,14 @@ routine rf_coro_yield() -> None
 routine rf_coro_request_cancel(coro: @Coro) -> None
     if coro.is_hollow()
         return
-    coro.cancel_requested.poke_atomic(1)
+    coro.cancel_requested.poke_unbroken(1)
     s: @Sched = coro.home.peek()
     if s.is_hollow()
         return
     # Under the scheduler lock: either the worker parking it has not taken the lock yet and sees the flag, or the
     # coroutine is on the timer heap already and is taken off it here.
     held: Authorized[U8] <- s.guard.get_exclusive_access()
-    if coro.timer_idx.peek() >= 0 and coro.sched_state.peek_atomic() == SCHED_IDLE
+    if coro.timer_idx.peek() >= 0 and coro.sched_state.peek_unbroken() == SCHED_IDLE
         s.make_ready(coro)
         s.cond.cast_one()
     drop held
@@ -545,7 +545,7 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> None
     if s.is_hollow() or c.is_hollow()
         return
     held: Authorized[U8] <- s.guard.get_exclusive_access()
-    before: U32 = c.sched_state.peek_atomic()
+    before: U32 = c.sched_state.peek_unbroken()
     s.make_ready(c)
     if before == SCHED_IDLE
         s.cond.cast_one()
@@ -621,7 +621,7 @@ routine @Sched.try_steal() -> @Coro
         c: @Coro = victim.steal_top()
         if c.is_hollow()
             continue
-        c.sched_state.poke_atomic(SCHED_RUNNING)
+        c.sched_state.poke_unbroken(SCHED_RUNNING)
         return c
     then
         return .hollow()
@@ -633,7 +633,7 @@ routine @Sched.run_coro(c: @Coro) -> None
     st: U32 = rf_coro_resume(c)
     if st == CORO_COMPLETED
         held: Authorized[U8] <- me.guard.get_exclusive_access()
-        c.sched_state.poke_atomic(SCHED_DONE)
+        c.sched_state.poke_unbroken(SCHED_DONE)
         if not c.counted_done.peek()
             c.counted_done.poke(true)
             remaining_live: S64 = me.live.peek() - 1
@@ -665,27 +665,27 @@ routine @Sched.run_coro(c: @Coro) -> None
     # leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
     intent: U32 = c.park_intent.peek()
     c.park_intent.poke(PARK_NONE)
-    notified: Bool = c.sched_state.peek_atomic() == SCHED_NOTIFIED
+    notified: Bool = c.sched_state.peek_unbroken() == SCHED_NOTIFIED
     id: S64 = worker_id()
     deques: @Deque = me.deques.peek()
     if id >= 0 and deques.is_not_hollow() and (notified or intent == PARK_YIELD)
-        c.sched_state.poke_atomic(SCHED_QUEUED)
+        c.sched_state.poke_unbroken(SCHED_QUEUED)
         deques.stride(id).push_bottom(c)
         return
     held2: Authorized[U8] <- me.guard.get_exclusive_access()
     when
-        c.sched_state.peek_atomic() == SCHED_NOTIFIED =>
+        c.sched_state.peek_unbroken() == SCHED_NOTIFIED =>
             me.enqueue_ready(c)
             drop held2
             return
-        intent == PARK_TIMER and c.cancel_requested.peek_atomic() != 0 =>
+        intent == PARK_TIMER and c.cancel_requested.peek_unbroken() != 0 =>
             # Asked to stop while it was parking: its wait ends now.
             me.enqueue_ready(c)
             drop held2
             return
         intent == PARK_TIMER =>
             me.insert_timer(c)
-            c.sched_state.poke_atomic(SCHED_IDLE)
+            c.sched_state.poke_unbroken(SCHED_IDLE)
             drop held2
             return
         intent == PARK_YIELD =>
@@ -693,7 +693,7 @@ routine @Sched.run_coro(c: @Coro) -> None
             drop held2
             return
         else =>
-            c.sched_state.poke_atomic(SCHED_IDLE)
+            c.sched_state.poke_unbroken(SCHED_IDLE)
             drop held2
             return
 
@@ -705,7 +705,7 @@ routine @Sched.claim_work() -> @Coro
     if id >= 0 and deques.is_not_hollow()
         c: @Coro = deques.stride(id).pop_bottom()
         if not c.is_hollow()
-            c.sched_state.poke_atomic(SCHED_RUNNING)
+            c.sched_state.poke_unbroken(SCHED_RUNNING)
             return c
     held: Authorized[U8] <- me.guard.get_exclusive_access()
     c: @Coro = me.pop_injector()
@@ -730,7 +730,7 @@ routine @Sched.step() -> Bool
         if id >= 0 and deques.is_not_hollow()
             mine: @Coro = deques.stride(id).pop_bottom()
             if not mine.is_hollow()
-                mine.sched_state.poke_atomic(SCHED_RUNNING)
+                mine.sched_state.poke_unbroken(SCHED_RUNNING)
                 drop held
                 me.run_coro(mine)
                 return true
@@ -828,7 +828,7 @@ routine rf_sched_run(s: @Sched) -> None
 ### :param c: The coroutine.
 ### :returns: True when it is over.
 routine is_finished(c: @Coro) -> Bool
-    st: U32 = c.status.peek_atomic()
+    st: U32 = c.status.peek_unbroken()
     return st == CORO_COMPLETED or st == CORO_CANCELLED
 
 ### Drives the scheduler on this thread until target finishes, leaving the others parked. A null `s` or `target`
@@ -937,18 +937,18 @@ routine pool_start() -> @Sched
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
 @export("rf_sched_thread_default")
 routine rf_sched_thread_default() -> @Sched
-    if POOL_STATE.peek_atomic() == 2
-        return POOL.peek_atomic()
+    if POOL_STATE.peek_unbroken() == 2
+        return POOL.peek_unbroken()
     seen: &U32 <- 0
-    if POOL_STATE.atomic_compare_exchange_raw(expected: 0, new: 1, previous: seen)
-        POOL.poke_atomic(pool_start())
-        POOL_STATE.poke_atomic(2)
+    if POOL_STATE.unbroken_compare_exchange_raw(expected: 0, new: 1, previous: seen)
+        POOL.poke_unbroken(pool_start())
+        POOL_STATE.poke_unbroken(2)
         wake_all(POOL_STATE)
-        return POOL.peek_atomic()
-    until POOL_STATE.peek_atomic() == 2
+        return POOL.peek_unbroken()
+    until POOL_STATE.peek_unbroken() == 2
         wait_on(at: POOL_STATE, expected: 1)
     then
-        return POOL.peek_atomic()
+        return POOL.peek_unbroken()
 
 ### The scheduler start_here() runs a job on: this thread's own, made on first use. A job started with start_now()
 ### can move between threads, so it has no thread of its own to run a job beside.
@@ -1112,7 +1112,7 @@ secret routine @Sched.unqueue_injected(c: @Coro) -> Bool
             if me.injector_tail.peek() === c
                 me.injector_tail.poke(prev)
             c.sched_next.poke(.hollow())
-            c.sched_state.poke_atomic(SCHED_IDLE)
+            c.sched_state.poke_unbroken(SCHED_IDLE)
             return true
         continue with prev: at, at: at.sched_next.peek()
     then
@@ -1137,7 +1137,7 @@ secret routine @Sched.unqueue_deques(c: @Coro) -> Bool
         return false
     until i == me.workers_total.peek() with i: S64 = 0
         if d.stride(i).remove(c)
-            c.sched_state.poke_atomic(SCHED_IDLE)
+            c.sched_state.poke_unbroken(SCHED_IDLE)
             return true
         continue with i: i + 1
     then
@@ -1180,7 +1180,7 @@ routine rf_sched_dispose_default(c: @Coro) -> U32
 routine home_of(c: @Coro) -> @Sched
     home: @Sched = c.home.peek()
     if home.is_hollow()
-        return POOL.peek_atomic()
+        return POOL.peek_unbroken()
     return home
 
 ### rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
@@ -1190,7 +1190,7 @@ routine home_of(c: @Coro) -> @Sched
 routine @Sched.dispose(c: @Coro) -> U32
     access: Authorized[U8] <- me.guard.get_exclusive_access()
     found: Bool = me.remove_locked(c)
-    st: U32 = c.sched_state.peek_atomic()
+    st: U32 = c.sched_state.peek_unbroken()
     held: Bool = not found and (st == SCHED_RUNNING or st == SCHED_QUEUED)
     caller_frees: U32 = when
         held =>

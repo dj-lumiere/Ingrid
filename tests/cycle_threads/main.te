@@ -49,7 +49,7 @@ routine trace_node(subject: Addr) -> None
 ### The entity type's collector free routine: counts the node and frees it.
 ### :param subject: The node.
 routine free_node(subject: Addr) -> None
-    before: U64 = FREED.atomic_fetch_add(1)
+    before: U64 = FREED.unbroken_fetch_add(1)
     manager: @MemoryManager = C_HEAP
     deallocate(data: subject.to[@Node](), manager)
     return
@@ -100,14 +100,14 @@ routine worker(unused: @U64) -> None
         roam_unhold(mine)
     then
         roam_unhold(mine)
-        before: U64 = DONE.atomic_fetch_add(1)
+        before: U64 = DONE.unbroken_fetch_add(1)
         return
 
 ### Starts `left` more workers, runs passes until they have all finished, and waits for them.
 ### :param left: How many workers are still to start.
 routine run_workers(left: U64) -> None
     if left == 0
-        until DONE.peek_atomic() == WORKERS
+        until DONE.peek_unbroken() == WORKERS
             freed: U64 = collect()
         then
             return
@@ -116,6 +116,7 @@ routine run_workers(left: U64) -> None
         thread: Thread[None] <- get_thread[None]()
         work_thread: Work[None] <- worker.to[Work](unused: unused)
         thread.put_work(work_thread)
+        drop work_thread
         run_workers(left - 1)
         thread.wait_finished()
         drop thread
@@ -131,7 +132,7 @@ routine collect_the_rest() -> None
 routine start() -> None
     run_workers(WORKERS)
     collect_the_rest()
-    freed: U64 = FREED.peek_atomic()
+    freed: U64 = FREED.peek_unbroken()
     expected: U64 = WORKERS.mul(ROUNDS) * 2
     all: Bool = freed == expected
     left: U64 = ROOTS.count.peek()

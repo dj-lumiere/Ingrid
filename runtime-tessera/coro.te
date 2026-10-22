@@ -106,7 +106,7 @@ routine current_coro() -> @Coro
 ### Takes the next completion stamp, shared by coroutines and threaded tasks.
 ### :returns: The stamp, starting at 1.
 routine next_completion_seq() -> U64
-    seq: U64 = COMPLETION_SEQ.atomic_fetch_add(1)
+    seq: U64 = COMPLETION_SEQ.unbroken_fetch_add(1)
     return seq
 
 ### A new coroutine's first frame: runs its routine, marks it completed, and goes back to its resumer for the last
@@ -116,8 +116,8 @@ routine coro_trampoline() -> None
     this_coro: @Coro = current_coro()
     body: Callable[(Addr,), None] = this_coro.entry.peek()
     body.call(this_coro.userdata.peek())
-    this_coro.completion_seq.poke_atomic(next_completion_seq())
-    this_coro.status.poke_atomic(CORO_COMPLETED)
+    this_coro.completion_seq.poke_unbroken(next_completion_seq())
+    this_coro.status.poke_unbroken(CORO_COMPLETED)
     switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
     unreachable
 
@@ -160,11 +160,11 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
 routine rf_coro_resume(coro: @Coro) -> U32
     if coro.is_hollow()
         return CORO_COMPLETED
-    if coro.status.peek_atomic() == CORO_COMPLETED
+    if coro.status.peek_unbroken() == CORO_COMPLETED
         return CORO_COMPLETED
     prev: @Coro = current_coro()
     CURRENT_CORO.poke(coro)
-    coro.status.poke_atomic(CORO_RUNNING)
+    coro.status.poke_unbroken(CORO_RUNNING)
     # The running flow's StackManager is the coroutine's while it runs.
     outer_stack: @StackManager = RUNNING_STACK.peek()
     RUNNING_STACK.poke(coro.stack)
@@ -177,14 +177,14 @@ routine rf_coro_resume(coro: @Coro) -> U32
     AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
-    return coro.status.peek_atomic()
+    return coro.status.peek_unbroken()
 
 ### The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
 routine coro_switch_out() -> None
     this_coro: @Coro = current_coro()
     if this_coro.is_hollow()
         return
-    this_coro.status.poke_atomic(CORO_PARKED)
+    this_coro.status.poke_unbroken(CORO_PARKED)
     switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
     return
 
@@ -195,7 +195,7 @@ routine coro_switch_out() -> None
 routine rf_coro_status_get(coro: @Coro) -> U32
     if coro.is_hollow()
         return CORO_COMPLETED
-    return coro.status.peek_atomic()
+    return coro.status.peek_unbroken()
 
 ### The coroutine running on this thread, or null.
 ### :returns: The running coroutine, or null on a plain thread.
@@ -220,7 +220,7 @@ routine rf_current_task_id() -> U64
 routine rf_coro_is_cancel_requested(coro: @Coro) -> U32
     if coro.is_hollow()
         return 0
-    return coro.cancel_requested.peek_atomic()
+    return coro.cancel_requested.peek_unbroken()
 
 ### Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon). A null
 ### `coro` does nothing.
@@ -284,13 +284,13 @@ routine rf_coro_cf_pop(frame: @CancelFrame) -> None
 routine rf_coro_abandon(coro: @Coro) -> None
     if coro.is_hollow()
         return
-    if coro.status.peek_atomic() == CORO_COMPLETED
+    if coro.status.peek_unbroken() == CORO_COMPLETED
         # Stamped like a completion, so a cancelled coroutine that finished first still wins a race!.
         rf_coro_delete(coro)
         return
-    if coro.completion_seq.peek_atomic() == U64.MAX
-        coro.completion_seq.poke_atomic(next_completion_seq())
-    coro.status.poke_atomic(CORO_CANCELLED)
+    if coro.completion_seq.peek_unbroken() == U64.MAX
+        coro.completion_seq.poke_unbroken(next_completion_seq())
+    coro.status.poke_unbroken(CORO_CANCELLED)
 
     until f.is_hollow() with f: @CancelFrame = coro.cf_top.peek()
         prev: @CancelFrame = f.prev.peek()

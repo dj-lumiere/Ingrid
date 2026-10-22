@@ -1,5 +1,5 @@
 # The runtime behind a Roamed entity, shared by the RazorForge and Suflae standard libraries: the reference count,
-# the one-way promotion to atomic counting when the entity reaches another task, the task-keyed reentrant lock, weak
+# the one-way promotion to unbroken counting when the entity reaches another task, the task-keyed reentrant lock, weak
 # observers, and the candidate reports to the cycle collector. Each language keeps a thin generic wrapper
 # (RazorForge's `RoamManager[T]`) whose methods call these routines on the controller's address.
 #
@@ -13,7 +13,7 @@ import Standard/Os
 ### The state every handle to one Roamed entity shares. The layout is the one RazorForge's `RoamManager[T]`
 ### entity has, field for field (a test compares the two), so the generic wrapper passes its own address here.
 record RoamHeader
-    ### Strong handles. Plain while the entity is local to its task, atomic once escaped.
+    ### Strong handles. Plain while the entity is local to its task, unbroken once escaped.
     count: U64
     ### Weak observers. They keep the header (as a tombstone) alive, not the entity.
     weak: U64
@@ -109,8 +109,8 @@ routine free_header_memory(header: @RoamHeader) -> None
 @inline
 routine roam_hold(header: @RoamHeader) -> None
     world_enter()
-    if header.escaped.peek_atomic() == 1
-        previous: U64 = header.count.atomic_fetch_add(1)
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.count.unbroken_fetch_add(1)
     else
         next_count: U64 = header.count.peek() + 1
         next_count.poke_into(header.count)
@@ -126,10 +126,10 @@ routine roam_hold(header: @RoamHeader) -> None
 @inline
 routine roam_unhold(header: @RoamHeader) -> None
     world_enter()
-    escaped: Bool = header.escaped.peek_atomic() == 1
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     was_last: Bool = when
         escaped =>
-            previous: U64 = header.count.atomic_fetch_sub(1)
+            previous: U64 = header.count.unbroken_fetch_sub(1)
             becomes previous == 1
         else =>
             remaining: U64 = header.count.peek() - 1
@@ -143,9 +143,9 @@ routine roam_unhold(header: @RoamHeader) -> None
     if header.buffered.peek()
         remove_candidate(header)
     run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
-    header.dead.poke_atomic(1)
+    header.dead.poke_unbroken(1)
     weak: U64 = when
-        escaped => header.weak.peek_atomic()
+        escaped => header.weak.peek_unbroken()
         else => header.weak.peek()
     if weak == 0
         free_header_memory(header)
@@ -160,12 +160,12 @@ routine roam_unhold(header: @RoamHeader) -> None
 @export("ingrid_roam_release_inner")
 routine roam_release_inner(header: @RoamHeader) -> Addr
     world_enter()
-    escaped: Bool = header.escaped.peek_atomic() == 1
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     count: U64 = when
-        escaped => header.count.peek_atomic()
+        escaped => header.count.peek_unbroken()
         else => header.count.peek()
     weak: U64 = when
-        escaped => header.weak.peek_atomic()
+        escaped => header.weak.peek_unbroken()
         else => header.weak.peek()
     if count == 1 and weak == 0
         data: Addr = header.data.peek()
@@ -209,9 +209,9 @@ routine run_hook(hook: Addr, subject: Addr) -> None
 @export("ingrid_roam_strong_count")
 @inline
 routine roam_strong_count(header: @RoamHeader) -> U64
-    escaped: Bool = header.escaped.peek_atomic() == 1
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     count: U64 = when
-        escaped => header.count.peek_atomic()
+        escaped => header.count.peek_unbroken()
         else => header.count.peek()
     return count
 
@@ -222,8 +222,8 @@ routine roam_strong_count(header: @RoamHeader) -> U64
 @export("ingrid_roam_observe")
 routine roam_observe(header: @RoamHeader) -> None
     world_enter()
-    if header.escaped.peek_atomic() == 1
-        previous: U64 = header.weak.atomic_fetch_add(1)
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.weak.unbroken_fetch_add(1)
     else
         next_weak: U64 = header.weak.peek() + 1
         next_weak.poke_into(header.weak)
@@ -236,16 +236,16 @@ routine roam_observe(header: @RoamHeader) -> None
 @export("ingrid_roam_unobserve")
 routine roam_unobserve(header: @RoamHeader) -> None
     world_enter()
-    escaped: Bool = header.escaped.peek_atomic() == 1
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     last: Bool = when
         escaped =>
-            previous: U64 = header.weak.atomic_fetch_sub(1)
+            previous: U64 = header.weak.unbroken_fetch_sub(1)
             becomes previous == 1
         else =>
             remaining: U64 = header.weak.peek() - 1
             remaining.poke_into(header.weak)
             becomes remaining == 0
-    if last and header.dead.peek_atomic() == 1
+    if last and header.dead.peek_unbroken() == 1
         free_header_memory(header)
     world_leave()
     return
@@ -256,17 +256,17 @@ routine roam_unobserve(header: @RoamHeader) -> None
 @export("ingrid_roam_is_destroyed")
 @inline
 routine roam_is_destroyed(header: @RoamHeader) -> Bool
-    return header.dead.peek_atomic() == 1
+    return header.dead.peek_unbroken() == 1
 
 ### The collector's finalizer, after the free hook has torn the entity down: marks it dead and frees the header
 ### unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
 ### :param header: The entity's header.
 @export("ingrid_roam_cyclic_finalize")
 routine roam_cyclic_finalize(header: @RoamHeader) -> None
-    header.dead.poke_atomic(1)
-    escaped: Bool = header.escaped.peek_atomic() == 1
+    header.dead.poke_unbroken(1)
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     weak: U64 = when
-        escaped => header.weak.peek_atomic()
+        escaped => header.weak.peek_unbroken()
         else => header.weak.peek()
     if weak == 0
         free_header_memory(header)
@@ -281,9 +281,9 @@ routine roam_cyclic_finalize(header: @RoamHeader) -> None
 @export("ingrid_roam_is_escaped")
 @inline
 routine roam_is_escaped(header: @RoamHeader) -> Bool
-    return header.escaped.peek_atomic() == 1
+    return header.escaped.peek_unbroken() == 1
 
-### Promotes the entity, and every entity reachable from it through Roamed fields, to escaped: atomic counting and
+### Promotes the entity, and every entity reachable from it through Roamed fields, to escaped: unbroken counting and
 ### the lock from now on. Runs on the owner before the handle is published, so nothing races the flip. Escape is a
 ### property of the graph, since whatever the entity reaches the other task reaches too. Iterative over an explicit
 ### worklist (a deep graph would overflow the stack), and already-escaped headers end the walk, so cycles terminate.
@@ -295,7 +295,7 @@ routine roam_promote(header: @RoamHeader) -> None
     work: &List[Addr] <- .construct(manager)
     kids: &List[Addr] <- .construct(manager)
 
-    if header.escaped.peek_atomic() == 1
+    if header.escaped.peek_unbroken() == 1
         drop work
         drop kids
         return
@@ -303,11 +303,11 @@ routine roam_promote(header: @RoamHeader) -> None
 
     until work.is_empty()
         node: @RoamHeader = work.remove_last().to[@RoamHeader]()
-        if node.escaped.peek_atomic() == 1
+        if node.escaped.peek_unbroken() == 1
             continue
-        node.holder_task.poke_atomic(0)
+        node.holder_task.poke_unbroken(0)
         0.poke_into(node.depth)
-        node.escaped.poke_atomic(1)
+        node.escaped.poke_unbroken(1)
         children(node, kids)
 
         n: U64 = kids.count()
@@ -329,7 +329,7 @@ routine roam_promote(header: @RoamHeader) -> None
 @export("ingrid_roam_lock_enter")
 @inline
 routine roam_lock_enter(header: @RoamHeader) -> None
-    if header.escaped.peek_atomic() == 1
+    if header.escaped.peek_unbroken() == 1
         roam_lock_enter_escaped(header)
     return
 
@@ -342,11 +342,11 @@ routine roam_lock_enter(header: @RoamHeader) -> None
 routine roam_lock_enter_escaped(header: @RoamHeader) -> None
     task: U64 = current_task_id()
 
-    until header.locked.peek_atomic() == 1 and header.holder_task.peek_atomic() == task with waited: Bool = false
-        taken: Maybe[U8] = header.locked.atomic_compare_exchange(expected: 0, new: 1)
+    until header.locked.peek_unbroken() == 1 and header.holder_task.peek_unbroken() == task with waited: Bool = false
+        taken: Maybe[U8] = header.locked.unbroken_compare_exchange(expected: 0, new: 1)
         when taken
             is None =>
-                header.holder_task.poke_atomic(task)
+                header.holder_task.poke_unbroken(task)
                 1.poke_into(header.depth)
                 if waited
                     access_wait_end()
@@ -367,7 +367,7 @@ routine roam_lock_enter_escaped(header: @RoamHeader) -> None
 @export("ingrid_roam_lock_exit")
 @inline
 routine roam_lock_exit(header: @RoamHeader) -> None
-    if header.escaped.peek_atomic() == 1
+    if header.escaped.peek_unbroken() == 1
         roam_lock_exit_escaped(header)
     return
 
@@ -380,8 +380,8 @@ routine roam_lock_exit_escaped(header: @RoamHeader) -> None
     depth: U64 = header.depth.peek() - 1
     depth.poke_into(header.depth)
     if depth == 0
-        header.holder_task.poke_atomic(0)
-        header.locked.poke_atomic(0)
+        header.holder_task.poke_unbroken(0)
+        header.locked.poke_unbroken(0)
     return
 
 # ── Layout check ───────────────────────────────────────────────────────────

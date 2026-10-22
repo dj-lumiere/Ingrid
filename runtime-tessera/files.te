@@ -508,7 +508,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
     manager: @MemoryManager = heap()
 
     when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), manager)
-        is Memory[Byte] as text =>
+        is BorrowedSlice[Byte] as text =>
             n: U64 = text.count()
             buf: Addr = c_realloc(.hollow(), (n + 1).to[CSize]())
             if buf.is_hollow()
@@ -1088,7 +1088,7 @@ routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
 ### A storage read front to back pages in ahead, and within half the physical memory is read in at once: a bigger one
 ### would evict the pages it just read, so it pages in on demand.
 ### :param m: The storage.
-routine advise(m: FileStorage[Byte]) -> None
+routine advise(m: @FileStorage[Byte]) -> None
     m.advise_sequential()
     mapped: U64 = m.count().to[U64]()
     if not (mapped <= physical_memory().bytes() // 2)
@@ -1105,10 +1105,8 @@ routine advise(m: FileStorage[Byte]) -> None
 ### :throws: Throws the FsError of the mapping.
 failable routine map_storage(path: @[Byte], offset: U64, count: U64,
     write: Bool) -> FileStorage[Byte]
-    mapped: Check[FileStorage[Byte]] = check OsFileManager.storage[Byte](at: File.at(path), write,
-        start: offset, count)
-    return when mapped
-        is FileStorage[Byte] as m => m
+    when check OsFileManager.storage[Byte](at: File.at(path), write, start: offset, count)
+        is FileStorage[Byte] as m => return m
 
 ### A window [offset, offset + count) of a file mapped for writing or for reading only, clamped to its end and aligned
 ### down for the OS: the base (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker
@@ -1120,15 +1118,25 @@ failable routine map_storage(path: @[Byte], offset: U64, count: U64,
 ### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
 routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
     MAP_DELTA.poke(0)
-    m: FileStorage[Byte] = when check map_storage(path, offset, count, write)
-        is FileStorage[Byte] as mapped => mapped
+    when check map_storage(path, offset, count, write)
+        is FileStorage[Byte] as m => return handed_on(steal m)
         is FsError as error => return failed_result(error)
-    if m.count() == 0
+
+### The window a storage maps, handed on by its base (MAP_DELTA from it to the first byte, the length as the result):
+### {rf_file_unmap} gives it back. An empty storage is the empty-map marker.
+### :param m: The storage.
+### :returns: The base, or the empty-map marker.
+routine handed_on(m: FileStorage[Byte]) -> @Byte
+    count: U64 = m.count()
+    if count == 0
+        drop m
         RESULT_LEN.poke(0)
         return empty_map()
     advise(m)
-    MAP_DELTA.poke(m.delta)
-    return result(buf: m.base.to[@Byte](), len: m.count())
+    MAP_DELTA.poke(m.delta.peek())
+    base: Addr = m.take_mapping()
+    drop m
+    return result(buf: base.to[@Byte](), len: count)
 
 ### Maps a window of a file for a storage a block enters: for writing (`modifying`) or for reading only (`viewing`).
 ### The window's offset from the base is in {rf_file_map_delta}, its length in {rf_get_result_len}.
@@ -1151,8 +1159,8 @@ routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: 
 routine rf_file_unmap(ptr: @Byte, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
-    m: FileStorage[Byte] = FileStorage[Byte](base: ptr, delta: 0, count: len, writable: true)
-    m.unmap()
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr.to[Addr](), delta: 0, count: len)
+    drop m
     return
 
 ### Writes a mapping's dirty pages back to the file, ignoring a failure. A null view or length 0 does nothing.
@@ -1162,6 +1170,9 @@ routine rf_file_unmap(ptr: @Byte, len: U64) -> None
 routine rf_file_map_flush(ptr: @Byte, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
-    m: FileStorage[Byte] = FileStorage[Byte](base: ptr, delta: 0, count: len, writable: true)
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr.to[Addr](), delta: 0, count: len)
     try m.flush()
+    # the mapping stays: rf_file_unmap gives it back
+    m.take_mapping()
+    drop m
     return

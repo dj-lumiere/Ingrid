@@ -122,13 +122,13 @@ global HEAP_LIMIT: &U64
 ### Counts a block the heap just gave out. Null (a failed or empty allocation) counts nothing.
 ### :param p: The block.
 routine count_allocated(p: Addr) -> None
-    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_hollow()
+    if HEAP_COUNTING.peek_unbroken_relaxed() == 0 or p.is_hollow()
         return
     size: S64 = c_block_size(p).to[U64]().to[S64]()
-    now: S64 = HEAP_IN_USE.atomic_fetch_add_relaxed(size) + size
-    peak: &S64 <- HEAP_PEAK.peek_atomic_relaxed()
+    now: S64 = HEAP_IN_USE.unbroken_fetch_add_relaxed(size) + size
+    peak: &S64 <- HEAP_PEAK.peek_unbroken_relaxed()
     until now <= peak.load()
-        when HEAP_PEAK.atomic_compare_exchange(expected: peak.load(), new: now)
+        when HEAP_PEAK.unbroken_compare_exchange(expected: peak.load(), new: now)
             is None => return
             else as seen => seen.poke_into(peak)
     return
@@ -136,10 +136,10 @@ routine count_allocated(p: Addr) -> None
 ### Counts a block about to go back to the heap. Null counts nothing.
 ### :param p: The block.
 routine count_freed(p: Addr) -> None
-    if HEAP_COUNTING.peek_atomic_relaxed() == 0 or p.is_hollow()
+    if HEAP_COUNTING.peek_unbroken_relaxed() == 0 or p.is_hollow()
         return
     size: S64 = c_block_size(p).to[U64]().to[S64]()
-    HEAP_IN_USE.atomic_fetch_sub_relaxed(size)
+    HEAP_IN_USE.unbroken_fetch_sub_relaxed(size)
     return
 
 ### C's getenv: the value of the environment variable `name`, or null when it is not set.
@@ -166,9 +166,9 @@ routine rf_heap_limit_init() -> None
     if limit.load() == 0
         return
     HEAP_LIMIT.poke(limit.load())
-    HEAP_IN_USE.poke_atomic(0)
-    HEAP_PEAK.poke_atomic(0)
-    HEAP_COUNTING.poke_atomic(1)
+    HEAP_IN_USE.poke_unbroken(0)
+    HEAP_PEAK.poke_unbroken(0)
+    HEAP_COUNTING.poke_unbroken(1)
     return
 
 ### The exit status the program ends with: `status`, or the crash status (82) with a report when the counted heap went
@@ -178,7 +178,7 @@ routine rf_heap_limit_init() -> None
 @export("rf_heap_limit_status")
 routine rf_heap_limit_status(status: CInt) -> CInt
     limit: U64 = HEAP_LIMIT.peek()
-    peak: S64 = HEAP_PEAK.peek_atomic()
+    peak: S64 = HEAP_PEAK.peek_unbroken()
     if limit == 0 or peak <= 0 or peak.to[U64]() <= limit
         return status
     used: U64 = peak.to[U64]()

@@ -48,7 +48,7 @@ routine c_calloc(count: CSize, size: CSize) -> Addr
 routine c_free(ptr: Addr) -> None
     if ptr.is_hollow()
         return
-    discard_previous: U64 = FREES.atomic_fetch_add(1)
+    discard_previous: U64 = FREES.unbroken_fetch_add(1)
     return
 
 ### count zeroed Ts.
@@ -92,15 +92,15 @@ routine drop_each_round(at: Addr) -> None
     race: @Race = dropper.race.peek()
 
     until round > ROUNDS with round: U32 = 1
-        if not (race.round.peek_atomic() >= round)
+        if not (race.round.peek_unbroken() >= round)
             continue with round: round
         else
-            chan: @Channel = race.chan.peek_atomic()
+            chan: @Channel = race.chan.peek_unbroken()
             if dropper.producer.peek()
                 rf_channel_drop_feeder(chan)
             else
                 rf_channel_drop_consumer(chan)
-            discard_previous: U32 = race.done.atomic_fetch_add(1)
+            discard_previous: U32 = race.done.unbroken_fetch_add(1)
             continue with round: round + 1
     then
         return
@@ -114,15 +114,17 @@ routine start() -> None
 
     work_a: Work[None] <- drop_each_round.to[Work](at: producer.to[Addr]())
     a.put_work(work_a)
+    drop work_a
     work_b: Work[None] <- drop_each_round.to[Work](at: consumer.to[Addr]())
     b.put_work(work_b)
+    drop work_b
 
     each n in 1 to ROUNDS
         chan: @Channel = rf_channel_create(1)
-        race.chan.poke_atomic(chan)
-        race.round.poke_atomic(n)
+        race.chan.poke_unbroken(chan)
+        race.round.poke_unbroken(n)
 
-        until race.done.peek_atomic() == n * 2
+        until race.done.peek_unbroken() == n * 2
             nothing
         then
             continue
@@ -131,6 +133,6 @@ routine start() -> None
     b.wait_finished()
     drop b
     expected: U64 = ROUNDS.to[U64]() * 2
-    frees: U64 = FREES.peek_atomic()
+    frees: U64 = FREES.peek_unbroken()
     Console.show("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}")
     return
