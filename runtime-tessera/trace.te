@@ -11,6 +11,7 @@
 module Ingrid/Runtime
 
 import Standard/Os
+import Standard/System/Cpu
 
 global TRACE_MODE: &CInt <- 1
 
@@ -394,10 +395,10 @@ routine rf_thread_stack_guarantee() -> None
     c_set_thread_stack_guarantee(size)
     return
 
-### Does nothing: only Windows keeps stack back for the exception handler.
-@export("rf_thread_stack_guarantee")
-@target(os: not "windows")
-routine rf_thread_stack_guarantee() -> None
+### Does nothing: Windows keeps stack back for the exception handler of each thread for its whole life.
+@export("rf_thread_stack_release")
+@target(os: "windows")
+routine rf_thread_stack_release() -> None
     return
 
 ### Every exception passes through here first. A stack overflow is reported as a crash (exit status 82), with how deep
@@ -457,27 +458,15 @@ routine install_fault_handlers() -> None
 
 # -- fault handlers: POSIX -----------------------------------------------------------
 
+### The fault stack given to this thread by rf_thread_stack_guarantee, null when it has none of its own.
+@threadlocal
+@target(os: not "windows")
+global THREAD_FAULT_STACK: &Addr
+
 preset SIGILL:  CInt = 4
 preset SIGABRT: CInt = 6
 preset SIGFPE:  CInt = 8
 preset SIGSEGV: CInt = 11
-
-### C's `signal`: sets the handler of a signal.
-### :param signo: The signal.
-### :param handler: The handler, or null for the default.
-### :returns: The previous handler.
-@external("c")
-@symbol("signal")
-@target(os: not "windows")
-routine c_signal(signo: CInt, handler: Callable[(CInt,), None]) -> Addr
-
-### C's `raise`: sends a signal to the calling thread.
-### :param signo: The signal.
-### :returns: 0 on success.
-@external("c")
-@symbol("raise")
-@target(os: not "windows")
-routine c_raise(signo: CInt) -> CInt
 
 ### Linux's `SIGBUS`.
 ### :returns: 7.
@@ -491,22 +480,27 @@ routine sigbus() -> CInt
 routine sigbus() -> CInt
     return 10
 
-### Gives standard output what it buffered, prints the fault's name and the stack, then restores the default and
-### raises the signal again, so the process ends with the status the signal gives. With tracing off, it only re-raises.
-### :param signo: The signal that came.
+### The runtime's fault handler, in place of the standard library's fault report (CpuEventManager.when_faulted). It
+### runs on the thread's fault stack, so a stack that ran out can still be reported: a memory fault in the closed pages
+### below the running flow's stack (a thread's, or a coroutine's) is a stack overflow, reported as a crash (exit status
+### 82). In a tracing mode any other fault prints its name and the stack. When this returns, the signal ends the
+### process as it would have.
+### :param event: The fault, with its signal and the address it touched.
 @target(os: not "windows")
-routine fault_handler(signo: CInt) -> None
+routine fault_handler(event: CpuEvent) -> None
     rf_console_flush_on_fault()
+    if event.ran_out_of_stack()
+        report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
+        if report.addr().is_not_hollow()
+            report.call(StackManager.current().size().bytes())
     if not (TRACE_MODE.peek() == TRACE_NONE)
-        name: @[Byte] = signal_name(signo).getview()
+        name: @[Byte] = signal_name(event.code.to[CInt]()).getview()
         if Console.errors().is_terminal()
             Console.alert("[91m", end: "")
         Console.alert("\n{name}")
         if Console.errors().is_terminal()
             Console.alert("[0m", end: "")
         print_platform_stack(0)
-    c_signal(signo, .hollow())
-    c_raise(signo)
     return
 
 ### The name of a fault signal.
@@ -522,13 +516,31 @@ routine signal_name(signo: CInt) -> CStrView
         signo == SIGABRT => return "Abort"
         else => return "Signal"
 
-### Sets {fault_handler} for SIGSEGV, SIGFPE, SIGILL, SIGBUS, and SIGABRT.
+### Gives the calling thread a stack of its own for the fault handler, so a stack overflow on the thread can still be
+### reported, and reads its stack's bounds now, so the handler only reads them. Each thread the runtime starts calls
+### it first. A second call on the same thread does nothing.
+@export("rf_thread_stack_guarantee")
+@target(os: not "windows")
+routine rf_thread_stack_guarantee() -> None
+    if THREAD_FAULT_STACK.peek().is_not_hollow()
+        return
+    bounds: @StackManager = StackManager.current()
+    THREAD_FAULT_STACK.poke(give_fault_stack())
+    return
+
+### Takes the calling thread's fault stack away and gives its memory back: a thread the runtime started for one task
+### calls it as it ends.
+@export("rf_thread_stack_release")
+@target(os: not "windows")
+routine rf_thread_stack_release() -> None
+    release_fault_stack(THREAD_FAULT_STACK.peek())
+    THREAD_FAULT_STACK.poke(.hollow())
+    return
+
+### Sets {fault_handler} for SIGSEGV, SIGBUS, SIGFPE, SIGILL, and SIGABRT through the standard library's fault
+### handlers, which also give the main thread its fault stack. The main thread's stack bounds are read first.
 @target(os: not "windows")
 routine install_fault_handlers() -> None
-    handler: Callable[(CInt,), None] = fault_handler.to[Callable]()
-    c_signal(SIGSEGV, handler)
-    c_signal(SIGFPE, handler)
-    c_signal(SIGILL, handler)
-    c_signal(sigbus(), handler)
-    c_signal(SIGABRT, handler)
+    bounds: @StackManager = StackManager.current()
+    before: Callable[(CpuEvent,), None] = CpuEventManager.when_faulted(fault_handler.to[Callable]())
     return
