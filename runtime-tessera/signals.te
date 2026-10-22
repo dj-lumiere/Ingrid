@@ -32,7 +32,7 @@ global TERMINATE_RUNNING: @U32
 global INTERRUPT_PENDING: @U32
 
 ### Guards the one-time setup.
-global SIGNALS_LOCK: @ExclusiveAccess
+global SIGNALS_GUARD: @U8
 global SIGNALS_INSTALLED: @Bool
 
 preset SIG_INTERRUPT: S32 = 0
@@ -94,12 +94,12 @@ routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
     kind: S32 = when
         which == SIG_TERMINATE => SIG_TERMINATE
         else => SIG_INTERRUPT
-    SIGNALS_LOCK.lock()
+    held: Authorized[U8] = SIGNALS_GUARD.get_exclusive_access()
     before: Addr = holder_of(kind).atomic_swap(handler_box)
     if not handler_box.is_hollow() and not SIGNALS_INSTALLED.peek()
         install_signal_dispatch()
     listen(kind, on: not handler_box.is_hollow())
-    SIGNALS_LOCK.unlock()
+    drop held
     return before
 
 # -- Windows: the console's control handler ------------------------------------------

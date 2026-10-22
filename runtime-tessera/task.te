@@ -60,7 +60,7 @@ record Task
     prerequisite_count: U32
     prerequisites_remaining: U32
     task_id: U64
-    coro_lock: ExclusiveAccess  # the fields below, and the reap flags
+    coro_guard: U8  # the fields below, and the reap flags
     coro_sched: @Sched  # the scheduler of a coroutine waiting for it
     coro_waiter: @Coro
     race_sched: @Sched  # the scheduler of a race! over a set that has it
@@ -94,7 +94,7 @@ record ThreadedStart
 ### :param prerequisite_count: Its `prerequisite_count`.
 ### :param prerequisites_remaining: Its `prerequisites_remaining`.
 ### :param task_id: Its `task_id`.
-### :param coro_lock: Its `coro_lock`.
+### :param coro_guard: Its `coro_guard`.
 ### :param coro_sched: Its `coro_sched`.
 ### :param coro_waiter: Its `coro_waiter`.
 ### :param race_sched: Its `race_sched`.
@@ -106,12 +106,12 @@ common routine Task.construct(kind: U32, status: U32, completion_seq: U64, compl
     detached: Bool, worker_exited: Bool, consumer_released: Bool, reaped: Bool, done: U32,
     execution_backend: Addr, wait_backend: Addr, dependents_head: @TaskNode,
     dependents_tail: @TaskNode, prerequisite_count: U32, prerequisites_remaining: U32, task_id: U64,
-    coro_lock: ExclusiveAccess, coro_sched: @Sched, coro_waiter: @Coro, race_sched: @Sched,
-    race_waiter: @Coro, counted: U32) -> Me
+    coro_guard: U8, coro_sched: @Sched, coro_waiter: @Coro, race_sched: @Sched, race_waiter: @Coro,
+    counted: U32) -> Me
     return Me(kind, status, completion_seq, completion, value_payload, error_payload,
         cancel_requested, result_consumed, detached, worker_exited, consumer_released, reaped, done,
         execution_backend, wait_backend, dependents_head, dependents_tail, prerequisite_count,
-        prerequisites_remaining, task_id, coro_lock, coro_sched, coro_waiter, race_sched,
+        prerequisites_remaining, task_id, coro_guard, coro_sched, coro_waiter, race_sched,
         race_waiter, counted)
 
 ### The threaded task running on this thread.
@@ -138,14 +138,14 @@ routine @Task.stamp() -> None
 ### The completion is in: a coroutine waiting for it is woken, a race! over it re-polls, and a thread waiting in
 ### rf_task_wait returns.
 routine @Task.signal_completion() -> None
-    me.coro_lock.lock()
+    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
     sched: @Sched = me.coro_sched.peek()
     waiter: @Coro = me.coro_waiter.peek()
     race_sched: @Sched = me.race_sched.peek()
     race_waiter: @Coro = me.race_waiter.peek()
     me.coro_sched.poke(.hollow())
     me.coro_waiter.poke(.hollow())
-    me.coro_lock.unlock()
+    drop held
     if not sched.is_hollow()
         # the waiter's promise of a wake from this thread is kept
         rf_sched_disarm_cross_waker(sched)
@@ -171,10 +171,10 @@ routine @Task.signal_completion() -> None
 routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> None
     if task.is_hollow()
         return
-    task.coro_lock.lock()
+    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
     task.race_sched.poke(s)
     task.race_waiter.poke(coro)
-    task.coro_lock.unlock()
+    drop held
     return
 
 ### The running coroutine waits for task: 1 if it is complete already (read it, don't park), 0 if registered (park
@@ -224,7 +224,7 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 ### :param waiter: The coroutine to wake.
 ### :returns: 1 when complete already, 0 once registered.
 routine @Task.register_waiter(sched: @Sched, waiter: @Coro) -> U32
-    me.coro_lock.lock()
+    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
     values2: (U32, Bool) = when
         me.is_completed() => (1, false)
         else =>
@@ -233,7 +233,7 @@ routine @Task.register_waiter(sched: @Sched, waiter: @Coro) -> U32
             me.coro_waiter.poke(waiter)
             becomes (0, arm)
     complete, arm = values2
-    me.coro_lock.unlock()
+    drop held
     if not arm
         return complete
     rf_sched_arm_cross_waker(sched)
@@ -245,7 +245,7 @@ routine @Task.register_waiter(sched: @Sched, waiter: @Coro) -> U32
 ### :param waiter: The coroutine that gives up.
 ### :returns: 1 when the task completed meanwhile, else 0.
 routine @Task.withdraw_waiter(sched: @Sched, waiter: @Coro) -> U32
-    me.coro_lock.lock()
+    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
     values2: (U32, Bool) = when
         me.is_completed() => (1, false)
         else =>
@@ -258,7 +258,7 @@ routine @Task.withdraw_waiter(sched: @Sched, waiter: @Coro) -> U32
                 me.coro_waiter.poke(.hollow())
                 becomes (0, disarm)
     complete, disarm = values2
-    me.coro_lock.unlock()
+    drop held
     if not disarm
         return complete
     rf_sched_disarm_cross_waker(sched)
@@ -360,7 +360,7 @@ routine rf_task_release(task: @Task) -> None
     if not (task.kind.peek() == TASK_THREADED)
         task.free()
         return
-    task.coro_lock.lock()
+    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
     task.consumer_released.poke(true)
     reap: Bool = task.worker_exited.peek() and not task.reaped.peek()
     reap2: Bool = when
@@ -368,7 +368,7 @@ routine rf_task_release(task: @Task) -> None
         else =>
             task.reaped.poke(true)
             becomes true
-    task.coro_lock.unlock()
+    drop held
     if reap2
         task.free()
         return
@@ -500,7 +500,7 @@ routine threaded_task_main(start: @ThreadedStart) -> None
 
     # The thread's final act, after the completion (and its wakes) are over: it frees the task if the consumer
     # is already done with it, or if it is detached, which has no consumer.
-    task.coro_lock.lock()
+    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
     task.worker_exited.poke(true)
     owner: Bool = task.consumer_released.peek() or task.detached.peek()
     reap: Bool = owner and not task.reaped.peek()
@@ -517,7 +517,7 @@ routine threaded_task_main(start: @ThreadedStart) -> None
                 task.value_payload.poke(.hollow())
                 becomes (true, box)
     reap2, box = values2
-    task.coro_lock.unlock()
+    drop held
     if not box.is_hollow()
         rf_invalidate(box)
     if not reap2
@@ -617,15 +617,15 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> None
 routine rf_task_set_detached(task: @Task) -> None
     if task.is_hollow()
         return
-    task.coro_lock.lock()
+    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
     task.detached.poke(true)
     threaded: Bool = task.kind.peek() == TASK_THREADED
     exited: Bool = threaded and task.worker_exited.peek()
     if not (exited and not task.reaped.peek())
-        task.coro_lock.unlock()
+        drop held
         return
     task.reaped.poke(true)
-    task.coro_lock.unlock()
+    drop held
     payload: Addr = task.value_payload.peek()
     task.value_payload.poke(.hollow())
     if not payload.is_hollow()

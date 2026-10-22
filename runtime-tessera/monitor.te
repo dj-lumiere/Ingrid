@@ -1,6 +1,6 @@
 # RazorForge's SignalCaster: a monitor (a lock and a wait set). A waiter takes the lock, checks its condition, and
 # waits while it doesn't hold: wait releases the lock, suspends, and takes it again when woken. The lock and the
-# waiting of plain threads are Standard/Os's ExclusiveAccess and SignalCaster. What is RazorForge's own is here: the handle count
+# waiting of plain threads are Standard/Os's exclusive access and SignalCaster. What is RazorForge's own is here: the handle count
 # the agents sharing one SignalCaster hold, and the coroutines a wait parks on the RazorForge scheduler (a cast on any
 # thread wakes them, before any thread).
 
@@ -10,7 +10,7 @@ import Standard/Os
 
 ### rf_signal.
 record Monitor
-    lock: ExclusiveAccess  # the monitor lock, which guards the caller's condition
+    guard: U8  # the byte whose exclusive access is the monitor's, which guards the caller's condition
     cond: SignalCaster  # plain threads wait here
     waiters: @ChannelWaiter  # parked coroutines
     refcount: U32
@@ -30,10 +30,10 @@ routine rf_signal_create() -> @Monitor
 routine rf_signal_add_ref(sig: @Monitor) -> None
     if sig.is_hollow()
         return
-    sig.lock.lock()
+    held: Authorized[U8] = sig.guard.get_exclusive_access()
     next_refcount: U32 = sig.refcount.peek() + 1
     next_refcount.poke_into(sig.refcount)
-    sig.lock.unlock()
+    drop held
     return
 
 ### Drops a handle. The monitor is freed with the last. A null `sig` does nothing.
@@ -42,11 +42,11 @@ routine rf_signal_add_ref(sig: @Monitor) -> None
 routine rf_signal_drop(sig: @Monitor) -> None
     if sig.is_hollow()
         return
-    sig.lock.lock()
+    held: Authorized[U8] = sig.guard.get_exclusive_access()
     refs: U32 = sig.refcount.peek()
     left: U32 = refs -^ 1
     sig.refcount.poke(left)
-    sig.lock.unlock()
+    drop held
     if not (left == 0)
         return
     c_free(sig)
@@ -58,7 +58,7 @@ routine rf_signal_drop(sig: @Monitor) -> None
 routine rf_signal_lock(sig: @Monitor) -> None
     if sig.is_hollow()
         return
-    sig.lock.lock()
+    AccessManager.take_exclusive(at: sig.guard, size: 1)
     return
 
 ### Releases the monitor lock. A null `sig` does nothing.
@@ -67,7 +67,7 @@ routine rf_signal_lock(sig: @Monitor) -> None
 routine rf_signal_unlock(sig: @Monitor) -> None
     if sig.is_hollow()
         return
-    sig.lock.unlock()
+    AccessManager.give_back(at: sig.guard)
     return
 
 ### Waits for a cast, holding the monitor lock: releases it, suspends, and takes it again. A coroutine parks on the
@@ -82,17 +82,17 @@ routine rf_signal_wait(sig: @Monitor) -> None
     if sched.is_hollow() or coro.is_hollow()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
         # a cast may come from another thread: not a deadlock meanwhile
-        sig.cond.wait(sig.lock)
+        sig.cond.wait(Authorized[U8](at: sig.guard))
         return
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
     node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
-    sig.lock.unlock()
+    AccessManager.give_back(at: sig.guard)
     rf_sched_arm_cross_waker(sched)
     rf_sched_park_external()
     rf_sched_disarm_cross_waker(sched)
-    sig.lock.lock()
+    AccessManager.take_exclusive(at: sig.guard, size: 1)
     unlink(list: sig.waiters, node)
     c_free(node)
     return
@@ -111,15 +111,15 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
     coro: @Coro = current_coro()
     if sched.is_hollow() or coro.is_hollow()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
-        in_time: Bool = sig.cond.wait_until(access: sig.lock, deadline)
+        in_time: Bool = sig.cond.wait_until(access: Authorized[U8](at: sig.guard), deadline)
         return in_time.to[U32]()
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
     node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
     sig.waiters.poke(node)
-    sig.lock.unlock()
+    AccessManager.give_back(at: sig.guard)
     rf_sched_park_deadline(timeout_ns)
-    sig.lock.lock()
+    AccessManager.take_exclusive(at: sig.guard, size: 1)
     unlink(list: sig.waiters, node)
     c_free(node)
     if Clock.monotonic() >= deadline
@@ -137,13 +137,13 @@ routine rf_signal_cast_one(sig: @Monitor) -> None
 
 ### rf_signal_cast_one on a monitor that is there, under its lock.
 routine @Monitor.cast_one() -> None
-    me.lock.lock()
+    held: Authorized[U8] = me.guard.get_exclusive_access()
     w: @ChannelWaiter = me.waiters.peek()
     if w.is_hollow()
         me.cond.cast_one()
     else
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
-    me.lock.unlock()
+    drop held
     return
 
 ### Wakes every waiter: each parked coroutine and every waiting thread. A null `sig` does nothing.
@@ -152,11 +152,11 @@ routine @Monitor.cast_one() -> None
 routine rf_signal_cast_all(sig: @Monitor) -> None
     if sig.is_hollow()
         return
-    sig.lock.lock()
+    held: Authorized[U8] = sig.guard.get_exclusive_access()
 
     until w.is_hollow() with w: @ChannelWaiter = sig.waiters.peek()
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         continue with w: w.next.peek()
     sig.cond.cast_all()
-    sig.lock.unlock()
+    drop held
     return

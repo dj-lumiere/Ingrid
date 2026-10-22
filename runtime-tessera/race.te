@@ -7,6 +7,8 @@
 
 module Ingrid/Runtime
 
+import Standard/Os
+
 ### rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
 record Race
     handles: @Addr
@@ -165,7 +167,7 @@ secret routine wait_for_winner(r: @Race) -> S64
     local this_coro: @Coro = current_coro()
 
     r.register(s, coro: this_coro, on: true)
-    s.lock.lock()
+    held: Authorized[U8] = s.guard.get_exclusive_access()
     next_waiters: S64 = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
     if not this_coro.is_hollow()
@@ -179,20 +181,20 @@ secret routine wait_for_winner(r: @Race) -> S64
                 r.await_coros(awaiter: this_coro, set: false)
                 remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
-                s.lock.unlock()
+                drop held
                 r.register(s, coro: .hollow(), on: false)
                 return winner2
             remaining_waiters: S64 = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
-            s.lock.unlock()
+            drop held
             r.register(s, coro: .hollow(), on: false)
             return winner2
         if this_coro.is_hollow()
             s.block_wait()
             continue
-        s.lock.unlock()
+        AccessManager.give_back(at: s.guard)
         rf_sched_park_external()
-        s.lock.lock()
+        AccessManager.take_exclusive(at: s.guard, size: 1)
         continue
 
 ### Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.

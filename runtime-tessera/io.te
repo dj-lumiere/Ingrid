@@ -63,7 +63,7 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
 
 # -- requests and the I/O threads ----------------------------------------------------
 
-global IO_LOCK: @ExclusiveAccess
+global IO_GUARD: @U8
 global IO_WORK: @SignalCaster
 global IO_HEAD: @@IoReq
 global IO_TAIL: @@IoReq
@@ -131,21 +131,21 @@ routine io_do_work(req: @IoReq) -> None
             return
 
 ### An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
-### :param lock: The lock the request queue is kept under (IO_LOCK).
-routine io_thread_main(lock: @ExclusiveAccess) -> None
+### :param guard: The byte whose exclusive access the request queue is kept under (IO_GUARD).
+routine io_thread_main(guard: @U8) -> None
     loop
         rf_thread_stack_guarantee()
-        lock.lock()
+        held: Authorized[U8] = guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
         until not req.is_hollow() with req: @IoReq = IO_HEAD.peek()
-            IO_WORK.wait(lock)
+            IO_WORK.wait(held)
             continue with req: IO_HEAD.peek()
         then
             next: @IoReq = req.qnext.peek()
             IO_HEAD.poke(next)
             if next.is_hollow()
                 IO_TAIL.poke(.hollow())
-            lock.unlock()
+            drop held
             io_do_work(req)
             rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
 
@@ -159,7 +159,7 @@ routine rf_io_runtime_init() -> None
 
     loop with i: U64 = 0
         if not (i == IO_THREADS)
-            DEFAULT_THREADS.launch_unwatched(entry: io_thread_main.to[Callable](), arg: IO_LOCK)
+            DEFAULT_THREADS.launch_unwatched(entry: io_thread_main.to[Callable](), arg: IO_GUARD)
             continue with i: i + 1
         IO_OK.poke(1)
         return
@@ -167,7 +167,7 @@ routine rf_io_runtime_init() -> None
 ### Appends a request to the I/O queue and wakes one I/O thread.
 ### :param req: The request.
 routine io_submit(req: @IoReq) -> None
-    IO_LOCK.lock()
+    held: Authorized[U8] = IO_GUARD.get_exclusive_access()
     req.qnext.poke(.hollow())
     tail: @IoReq = IO_TAIL.peek()
     if tail.is_hollow()
@@ -176,7 +176,7 @@ routine io_submit(req: @IoReq) -> None
         tail.qnext.poke(req)
     IO_TAIL.poke(req)
     IO_WORK.cast_one()
-    IO_LOCK.unlock()
+    drop held
     return
 
 ### Runs a request to completion: inside a scheduler-driven coroutine on an I/O thread while the coroutine is

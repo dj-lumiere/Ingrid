@@ -16,7 +16,7 @@ import Standard/Os
 
 @threadlocal
 global EMUTLS: @@EmutlsArray
-global EMUTLS_LOCK: @ExclusiveAccess
+global EMUTLS_GUARD: @U8
 global EMUTLS_NEXT: @U64
 
 ### compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
@@ -91,7 +91,7 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
     seen: U64 = control.index.peek_atomic()
     index: U64 = when
         seen == 0 =>
-            EMUTLS_LOCK.lock()
+            held: Authorized[U8] = EMUTLS_GUARD.get_exclusive_access()
             current: U64 = control.index.peek()
             assigned: U64 = when
                 current != 0 => current
@@ -100,7 +100,7 @@ routine emutls_get_address(control: @EmutlsControl) -> Addr
                     EMUTLS_NEXT.poke(next)
                     control.index.poke_atomic(next)
                     becomes next
-            EMUTLS_LOCK.unlock()
+            drop held
             becomes assigned
         else => seen
     known: @EmutlsArray = EMUTLS.peek()
