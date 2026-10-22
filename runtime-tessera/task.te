@@ -10,15 +10,15 @@ module Ingrid/Runtime
 
 import Standard/Os
 
-global NEXT_TASK_ID: @U64 <- 1
+global NEXT_TASK_ID: &U64 <- 1
 
 ### Agents made and not finished yet (coroutines and threads), from creation to completion or to being freed
 ### unfinished. A thread waiting on a channel when none is left knows that no one else can ever wake it.
-global LIVE_TASKS: @U64
+global LIVE_TASKS: &U64
 
 ### The threaded task running on this thread, or null.
 @threadlocal
-global CURRENT_TASK: @@Task
+global CURRENT_TASK: &@Task
 
 # rf_task_kind, rf_task_status, rf_task_completion_kind (razorforge_runtime.h).
 preset TASK_SUSPENDED: U32 = 0
@@ -138,7 +138,7 @@ routine @Task.stamp() -> None
 ### The completion is in: a coroutine waiting for it is woken, a race! over it re-polls, and a thread waiting in
 ### rf_task_wait returns.
 routine @Task.signal_completion() -> None
-    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- me.coro_guard.get_exclusive_access()
     sched: @Sched = me.coro_sched.peek()
     waiter: @Coro = me.coro_waiter.peek()
     race_sched: @Sched = me.race_sched.peek()
@@ -171,7 +171,7 @@ routine @Task.signal_completion() -> None
 routine rf_task_race_register(task: @Task, s: @Sched, coro: @Coro) -> None
     if task.is_hollow()
         return
-    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- task.coro_guard.get_exclusive_access()
     task.race_sched.poke(s)
     task.race_waiter.poke(coro)
     drop held
@@ -224,7 +224,7 @@ routine rf_task_await_coro_deadline(task: @Task, timeout_ns: U64) -> U32
 ### :param waiter: The coroutine to wake.
 ### :returns: 1 when complete already, 0 once registered.
 routine @Task.register_waiter(sched: @Sched, waiter: @Coro) -> U32
-    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- me.coro_guard.get_exclusive_access()
     values2: (U32, Bool) = when
         me.is_completed() => (1, false)
         else =>
@@ -245,7 +245,7 @@ routine @Task.register_waiter(sched: @Sched, waiter: @Coro) -> U32
 ### :param waiter: The coroutine that gives up.
 ### :returns: 1 when the task completed meanwhile, else 0.
 routine @Task.withdraw_waiter(sched: @Sched, waiter: @Coro) -> U32
-    held: Authorized[U8] = me.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- me.coro_guard.get_exclusive_access()
     values2: (U32, Bool) = when
         me.is_completed() => (1, false)
         else =>
@@ -360,7 +360,7 @@ routine rf_task_release(task: @Task) -> None
     if not (task.kind.peek() == TASK_THREADED)
         task.free()
         return
-    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- task.coro_guard.get_exclusive_access()
     task.consumer_released.poke(true)
     reap: Bool = task.worker_exited.peek() and not task.reaped.peek()
     reap2: Bool = when
@@ -500,7 +500,7 @@ routine threaded_task_main(start: @ThreadedStart) -> None
 
     # The thread's final act, after the completion (and its wakes) are over: it frees the task if the consumer
     # is already done with it, or if it is detached, which has no consumer.
-    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- task.coro_guard.get_exclusive_access()
     task.worker_exited.poke(true)
     owner: Bool = task.consumer_released.peek() or task.detached.peek()
     reap: Bool = owner and not task.reaped.peek()
@@ -617,7 +617,7 @@ routine rf_task_complete_value(task: @Task, result_payload: Addr) -> None
 routine rf_task_set_detached(task: @Task) -> None
     if task.is_hollow()
         return
-    held: Authorized[U8] = task.coro_guard.get_exclusive_access()
+    held: Authorized[U8] <- task.coro_guard.get_exclusive_access()
     task.detached.poke(true)
     threaded: Bool = task.kind.peek() == TASK_THREADED
     exited: Bool = threaded and task.worker_exited.peek()

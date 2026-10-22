@@ -20,20 +20,20 @@ module Ingrid/Runtime
 import Standard/Os
 
 ### The box in the interrupt slot, null for none.
-global INTERRUPT_HOLDER: @Addr
+global INTERRUPT_HOLDER: &Addr
 ### The box in the terminate slot, null for none.
-global TERMINATE_HOLDER: @Addr
+global TERMINATE_HOLDER: &Addr
 ### 1 from when an interrupt is taken until its handler returns.
-global INTERRUPT_RUNNING: @U32
+global INTERRUPT_RUNNING: &U32
 ### 1 from when a termination request is taken until the process ends.
-global TERMINATE_RUNNING: @U32
+global TERMINATE_RUNNING: &U32
 
 ### 1 from when the console handler hands an interrupt to the dispatch thread until the thread takes it (Windows).
-global INTERRUPT_PENDING: @U32
+global INTERRUPT_PENDING: &U32
 
 ### Guards the one-time setup.
-global SIGNALS_GUARD: @U8
-global SIGNALS_INSTALLED: @Bool
+global SIGNALS_GUARD: &U8
+global SIGNALS_INSTALLED: &Bool
 
 preset SIG_INTERRUPT: S32 = 0
 preset SIG_TERMINATE: S32 = 1
@@ -62,7 +62,7 @@ routine running_of(which: S32) -> @U32
 routine invoke(box: Addr) -> None
     fn: Addr = box.to[@Addr]().peek()
     bound: Addr = box.to[@Addr]().stride(1).peek()
-    local slot: @Addr <- fn
+    slot: &Addr <- fn
     if bound.is_hollow()
         bare: Callable[(), None] = slot.to[@Callable[(), None]]().peek()
         bare.call()
@@ -94,7 +94,7 @@ routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
     kind: S32 = when
         which == SIG_TERMINATE => SIG_TERMINATE
         else => SIG_INTERRUPT
-    held: Authorized[U8] = SIGNALS_GUARD.get_exclusive_access()
+    held: Authorized[U8] <- SIGNALS_GUARD.get_exclusive_access()
     before: Addr = holder_of(kind).atomic_swap(handler_box)
     if not handler_box.is_hollow() and not SIGNALS_INSTALLED.peek()
         install_signal_dispatch()
@@ -183,7 +183,7 @@ routine listen(which: S32, on: Bool) -> None
 # -- POSIX: the self-pipe ------------------------------------------------------------
 
 ### [0] read by the dispatch thread, [1] written by the signal handler.
-global SELF_PIPE: @Array[CInt, 2] <- [-1, -1]
+global SELF_PIPE: &Array[CInt, 2] <- [-1, -1]
 
 preset SIGINT:  CInt = 2
 preset SIGTERM: CInt = 15
@@ -314,7 +314,7 @@ routine signal_of(which: S32) -> CInt
 ### :param on: True for posix_signal_handler, false for the system's action.
 @target(os: not "windows")
 routine set_signal_action(signo: CInt, on: Bool) -> None
-    local sa: @SigAction <- .hollow()
+    sa: &SigAction <- .hollow()
 
     c_memset(sa, 0, sizeof[SigAction]().to[CSize]())
     c_sigemptyset(sa.mask)
@@ -348,11 +348,11 @@ routine listen(which: S32, on: Bool) -> None
 ### :param signo: The signal that came: SIGTERM writes 1, anything else 0.
 @target(os: not "windows")
 routine posix_signal_handler(signo: CInt) -> None
-    local code: U8 = when
+    code: U8 = when
 
         signo == SIGTERM => 1
         else => 0
-    local byte: @U8 <- code
+    byte: &U8 <- code
 
     which: S32 = when
         signo == SIGTERM => SIG_TERMINATE
@@ -370,14 +370,14 @@ routine posix_signal_handler(signo: CInt) -> None
 ### :param pipe: The self-pipe (SELF_PIPE), read from its first end.
 @target(os: not "windows")
 routine signal_dispatch_main(pipe: @Array[CInt, 2]) -> None
-    local code: @U8 <- 0
+    code: &U8 <- 0
 
     rf_thread_stack_guarantee()
 
     loop
         rc2: S64 = c_read(pipe[0], code.to[@Byte](), 1).to[S64]()
         if rc2 == 1
-            which: S32 = code.peek().to[S32]()
+            which: S32 = code.load().to[S32]()
             if not run_handler(which)
                 system_action(signal_of(which))
             continue

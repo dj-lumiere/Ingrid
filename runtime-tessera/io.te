@@ -63,18 +63,18 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
 
 # -- requests and the I/O threads ----------------------------------------------------
 
-global IO_GUARD: @U8
-global IO_WORK: @SignalCaster
-global IO_HEAD: @@IoReq
-global IO_TAIL: @@IoReq
+global IO_GUARD: &U8
+global IO_WORK: &SignalCaster
+global IO_HEAD: &@IoReq
+global IO_TAIL: &@IoReq
 ### 1 once the I/O threads run. Until then the work runs inline.
-global IO_OK: @U32
+global IO_OK: &U32
 ### The length of the last read, set just before rf_io_read_file_all returns and read right after.
 @threadlocal
-global IO_LAST_LEN: @U64
+global IO_LAST_LEN: &U64
 ### Whether this thread's last rf_io_read_file_all or rf_io_write_file_all failed, set just before it returns.
 @threadlocal
-global IO_LAST_FAILED: @Bool
+global IO_LAST_FAILED: &Bool
 
 record IoReq
     kind: U32
@@ -109,13 +109,13 @@ routine io_do_work(req: @IoReq) -> None
     kind: U32 = req.kind.peek()
     when
         kind == IO_READ_FILE =>
-            local data: @@Byte <- .hollow()
+            data: &@Byte <- .hollow()
             got: S64 = read_whole_file(cpath: req.path.peek(), data)
             if not (got >= 0)
                 # The failure's reason code, negated, for the caller's thread to record.
                 req.result.poke(got)
                 return
-            req.data.poke(data.peek())
+            req.data.poke(data.load())
             req.result.poke(got)
             return
         kind == IO_WRITE_FILE =>
@@ -135,7 +135,7 @@ routine io_do_work(req: @IoReq) -> None
 routine io_thread_main(guard: @U8) -> None
     loop
         rf_thread_stack_guarantee()
-        held: Authorized[U8] = guard.get_exclusive_access()
+        held: Authorized[U8] <- guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
         until not req.is_hollow() with req: @IoReq = IO_HEAD.peek()
             IO_WORK.wait(held)
@@ -167,7 +167,7 @@ routine rf_io_runtime_init() -> None
 ### Appends a request to the I/O queue and wakes one I/O thread.
 ### :param req: The request.
 routine io_submit(req: @IoReq) -> None
-    held: Authorized[U8] = IO_GUARD.get_exclusive_access()
+    held: Authorized[U8] <- IO_GUARD.get_exclusive_access()
     req.qnext.poke(.hollow())
     tail: @IoReq = IO_TAIL.peek()
     if tail.is_hollow()
@@ -247,8 +247,8 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
 ### :throws: Crashes with `OutOfMemoryError` when the request or the copy of the payload can't be allocated.
 @export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
-    local req: @IoReq = io_req_new(kind: IO_WRITE_FILE, path, path_len)
-    local len: S64 = data_len.max(0)
+    req: @IoReq = io_req_new(kind: IO_WRITE_FILE, path, path_len)
+    len: S64 = data_len.max(0)
 
     req.data_len.poke(len)
     if len > 0
@@ -335,16 +335,16 @@ routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> None
 
 ### The captured result of the last subprocess, set just before rf_proc_run returns and read right after.
 @threadlocal
-global PROC_SIGNAL: @CInt
+global PROC_SIGNAL: &CInt
 
 @threadlocal
-global PROC_OUT: @@Byte
+global PROC_OUT: &@Byte
 @threadlocal
-global PROC_OUT_LEN: @U64
+global PROC_OUT_LEN: &U64
 @threadlocal
-global PROC_ERR: @@Byte
+global PROC_ERR: &@Byte
 @threadlocal
-global PROC_ERR_LEN: @U64
+global PROC_ERR_LEN: &U64
 
 ### A subprocess to run (a command line for the shell, or a program and its arguments), and once it ran, how.
 record ProcState
@@ -506,7 +506,7 @@ failable routine run_state(st: @ProcState, options: ProcessOptions,
 ### exit status, the signal that stopped it, or that it couldn't start.
 ### :param st: The prepared state.
 routine proc_run_blocking(st: @ProcState) -> None
-    local manager: @MemoryManager = C_HEAP
+    manager: @MemoryManager = C_HEAP
 
     dir: @[Byte] = st.directory.peek()
     directory: Maybe[@[Byte]] = when

@@ -13,18 +13,18 @@ import Standard/Os
 ### The length of the last buffer a routine here returned on this thread. Per thread: the caller reads it right after
 ### the call, with no yield in between, so another thread's call can't overwrite it.
 @threadlocal
-global RESULT_LEN: @U64
+global RESULT_LEN: &U64
 
 ### From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
 ### requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping. Per thread, like
 ### RESULT_LEN.
 @threadlocal
-global MAP_DELTA: @U64
+global MAP_DELTA: &U64
 
 ### Why the last file system call on this thread failed, a code of {reason_code}: 0 when it didn't. Per thread, like
 ### RESULT_LEN.
 @threadlocal
-global LAST_ERROR: @S32
+global LAST_ERROR: &S32
 
 ### The code RazorForge and Suflae read for an FsError: 1 another reason, 2 nothing is there, 3 not allowed (a
 ### read-only file system too), 4 the device is full, 5 the device failed to read or write, 6 something is already
@@ -225,7 +225,7 @@ routine @ResultBuffer.fail() -> @Byte
 # -- files by handle -----------------------------------------------------------------
 
 ### The open files by handle.
-global FILE_TABLE: @Array[OpenFile, 256]
+global FILE_TABLE: &Array[OpenFile, 256]
 
 preset MAX_OPEN_FILES: U64 = 256
 preset FILE_BUFFER:    U64 = 8192
@@ -304,7 +304,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     if buffer.is_hollow()
         LAST_ERROR.poke(1)
         c_free(buffer)
-        local f2: @FileHandle <- f
+        f2: &FileHandle <- f
         f2.close()
         return -1
     buffer2: @Byte = buffer.to[@Byte]()
@@ -319,7 +319,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     then
         LAST_ERROR.poke(1)
         c_free(buffer2)
-        local f2: @FileHandle <- f
+        f2: &FileHandle <- f
         f2.close()
         return -1
 
@@ -365,8 +365,8 @@ routine rf_file_close(fd: S32) -> None
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't grow.
 @export("rf_file_read_all")
 routine rf_file_read_all(fd: S32) -> @Byte
-    local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    of: @OpenFile = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
     if of.is_hollow()
         return no_result()
@@ -400,8 +400,8 @@ routine rf_file_read_all(fd: S32) -> @Byte
 ### :returns: The line, or null (length 0) for a handle not open or when the buffer can't grow.
 @export("rf_file_read_line")
 routine rf_file_read_line(fd: S32) -> @Byte
-    local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    of: @OpenFile = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
     if of.is_hollow()
         return no_result()
@@ -430,8 +430,8 @@ routine rf_file_read_line(fd: S32) -> @Byte
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
 @export("rf_file_read_bytes")
 routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
-    local of: @OpenFile = open_file(fd)
-    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    of: @OpenFile = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
     if of.is_hollow()
         return no_result()
@@ -458,7 +458,7 @@ routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
 ### :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
 @export("rf_file_write")
 routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
-    local of: @OpenFile = open_file(fd)
+    of: @OpenFile = open_file(fd)
 
     if of.is_hollow()
         return 0
@@ -505,7 +505,7 @@ routine rf_file_is_eof(fd: S32) -> Bool
 ### :param data: Where the buffer goes.
 ### :returns: The length, or a negative reason code on a failure.
 routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), manager)
         is Memory[Byte] as text =>
@@ -545,9 +545,9 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 ### :returns: The joined path, or null (length 0) when the allocation fails.
 @export("rf_fs_join_path")
 routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
-    local first: @[Byte] = path_of(path: a, len: a_len)
-    local second: @[Byte] = path_of(path: b, len: b_len)
-    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    first: @[Byte] = path_of(path: a, len: a_len)
+    second: @[Byte] = path_of(path: b, len: b_len)
+    out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
     joined_count: U64 = first.count() + second.count()
     if not out.start(joined_count + 2)
@@ -564,8 +564,8 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
 ### :returns: The parent, or null (length 0) when the allocation fails.
 @export("rf_fs_parent_path")
 routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
-    local file: @File <- File.at(path_of(path, len))
-    local parent: @Directory <- file.parent()
+    file: &File <- File.at(path_of(path, len))
+    parent: &Directory <- file.parent()
 
     p: @[Byte] = parent.path.peek()
     copied: @Byte = bytes_result(s: p.data, len: p.count())
@@ -579,7 +579,7 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
 ### :returns: The name, or null (length 0) when the allocation fails.
 @export("rf_fs_file_name")
 routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
-    local file: @File <- File.at(path_of(path, len))
+    file: &File <- File.at(path_of(path, len))
 
     n: @[Byte] = file.name()
     copied: @Byte = bytes_result(s: n.data, len: n.count())
@@ -592,7 +592,7 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
 ### :returns: The stem, or null (length 0) when the allocation fails.
 @export("rf_fs_file_stem")
 routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
-    local file: @File <- File.at(path_of(path, len))
+    file: &File <- File.at(path_of(path, len))
 
     s: @[Byte] = file.stem()
     copied: @Byte = bytes_result(s: s.data, len: s.count())
@@ -605,7 +605,7 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
 ### :returns: The extension, or null (length 0) when the allocation fails.
 @export("rf_fs_extension")
 routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
-    local file: @File <- File.at(path_of(path, len))
+    file: &File <- File.at(path_of(path, len))
 
     e: @[Byte] = file.extension()
     copied: @Byte = bytes_result(s: e.data, len: e.count())
@@ -697,7 +697,7 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_remove")
 routine rf_fs_remove(path: @Byte, len: S32) -> S32
-    local p: @[Byte] = path_of(path, len)
+    p: @[Byte] = path_of(path, len)
 
     m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     when m
@@ -713,7 +713,7 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
 ### :returns: 0, or -1 on a failure.
 @export("rf_fs_remove_all")
 routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), manager))
 
@@ -756,8 +756,8 @@ routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 ###     name (empty, "." or "..", or holding a separator), -1 another error (its reason for {rf_fs_last_error}).
 @export("rf_fs_rename")
 routine rf_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, replacing: Bool) -> S32
-    local p: @[Byte] = path_of(path, len: path_len)
-    local n: @[Byte] = path_of(path: name, len: name_len)
+    p: @[Byte] = path_of(path, len: path_len)
+    n: @[Byte] = path_of(path: name, len: name_len)
 
     m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
     is_directory: Bool = when m
@@ -817,9 +817,9 @@ failable routine move_either(p: @[Byte], d: @[Byte], replacing: Bool,
 @export("rf_fs_move_into")
 routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     replacing: Bool) -> S32
-    local p: @[Byte] = path_of(path, len: path_len)
-    local d: @[Byte] = path_of(path: into, len: into_len)
-    local manager: @MemoryManager = heap()
+    p: @[Byte] = path_of(path, len: path_len)
+    d: @[Byte] = path_of(path: into, len: into_len)
+    manager: @MemoryManager = heap()
 
     when check move_either(p, d, replacing, manager)
         is None => return 0
@@ -839,8 +839,8 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
 ### :param out: Where the digits go, room for 20.
 ### :returns: The digit count.
 routine decimal(v: U64, out: @Byte) -> U64
-    local rev_buffer: @Array[Byte, 24] <- .hollow()
-    local rev: @Byte = rev_buffer.to[@Byte]()
+    rev_buffer: &Array[Byte, 24] <- .hollow()
+    rev: @Byte = rev_buffer.to[@Byte]()
 
     loop with remaining: U64 = v, n: U64 = 0
         digit_value2: U8 = (remaining % 10).to[U8]()
@@ -864,8 +864,8 @@ routine decimal(v: U64, out: @Byte) -> U64
 ### :param mtime: The modification time in Unix seconds (typed only).
 ### :returns: False when the buffer can't grow.
 routine @ResultBuffer.entry(name: @[Byte], typed: Bool, is_dir: Bool, mtime: S64) -> Bool
-    local digit_buffer: @Array[Byte, 24] <- .hollow()
-    local digits: @Byte = digit_buffer.to[@Byte]()
+    digit_buffer: &Array[Byte, 24] <- .hollow()
+    digits: @Byte = digit_buffer.to[@Byte]()
 
     dl: U64 = when
         typed => decimal(v: mtime.max(0).to[U64](), out: digits)
@@ -896,8 +896,8 @@ routine @ResultBuffer.entry(name: @[Byte], typed: Bool, is_dir: Bool, mtime: S64
 ### :param typed: True for `<d|f><mtime> <name>` entries, false for names only.
 ### :returns: The listing, or null (length 0) when the directory can't be opened or the buffer can't grow.
 routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
-    local out: @ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
-    local iter: @DirIter <- .hollow()
+    out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
+    iter: &DirIter <- .hollow()
 
     # Every exit closes the listing (OsFileManager.list_result, the first step, sets the handle before anything can
     # fail, so close() is safe on every path) and hands the text back whole or frees it.
@@ -945,11 +945,11 @@ routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte
 
 # -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
 
-global META_SIZE: @S64
-global META_MODIFIED: @S64
-global META_CREATED: @S64
-global META_IS_DIRECTORY: @Bool
-global META_READONLY: @Bool
+global META_SIZE: &S64
+global META_MODIFIED: &S64
+global META_CREATED: &S64
+global META_IS_DIRECTORY: &Bool
+global META_READONLY: &Bool
 
 ### The size from the last {rf_fs_metadata}.
 ### :returns: The size in bytes.
@@ -1016,7 +1016,7 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_current_dir")
 routine rf_fs_current_dir() -> @Byte
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.working_directory(manager))
 
@@ -1024,7 +1024,7 @@ routine rf_fs_current_dir() -> @Byte
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_temp_dir")
 routine rf_fs_temp_dir() -> @Byte
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.temp_directory(manager))
 
@@ -1032,7 +1032,7 @@ routine rf_fs_temp_dir() -> @Byte
 ### :returns: The path, or null (length 0).
 @export("rf_fs_home_dir")
 routine rf_fs_home_dir() -> @Byte
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.home_directory(manager))
 
@@ -1059,7 +1059,7 @@ routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
 ### :returns: The absolute path, or null (length 0) on a failure.
 @export("rf_fs_absolute_path")
 routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), manager))
 
@@ -1069,7 +1069,7 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 ### :returns: The canonical path, or null (length 0) on a failure.
 @export("rf_fs_canonical_path")
 routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
-    local manager: @MemoryManager = heap()
+    manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), manager))
 

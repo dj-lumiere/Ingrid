@@ -13,21 +13,21 @@ module Ingrid/Runtime
 import Standard/Os
 
 ### The scheduler and coroutine rf_sched_current and current_coro report: null on a plain thread.
-global CURRENT_SCHED: @@Sched
-global CURRENT_CORO: @@Coro
+global CURRENT_SCHED: &@Sched
+global CURRENT_CORO: &@Coro
 
 ### The scheduler and the coroutine the test stands in for, for as long as the program runs.
-global THE_SCHED: @Sched <- (id: 1)
-global THE_CORO: @Coro <- (id: 7)
+global THE_SCHED: &Sched <- (id: 1)
+global THE_CORO: &Coro <- (id: 7)
 
 ### Two parked coroutines on a monitor's wait list, the newer first.
-global OLDER: @Coro <- (id: 1)
-global NEWER: @Coro <- (id: 2)
-global FIRST_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: .hollow())
-global SECOND_WAITER: @ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
+global OLDER: &Coro <- (id: 1)
+global NEWER: &Coro <- (id: 2)
+global FIRST_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: .hollow())
+global SECOND_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
 
 ### The SignalCaster a park casts on, as another agent would meanwhile, or null to let the time run out.
-global CAST_DURING_PARK: @@Monitor
+global CAST_DURING_PARK: &@Monitor
 
 ### The threads at the gate.
 preset GATE_THREADS: U64 = 3
@@ -125,7 +125,7 @@ routine rf_sched_park_deadline(delay_ns: U64) -> None
 
 ### Sleeps the thread until `deadline`, in Clock.monotonic() time.
 routine sleep_until(deadline: Duration) -> None
-    local never: @U32 <- 0
+    never: &U32 <- 0
 
     loop
         now2: Duration = Clock.monotonic()
@@ -135,19 +135,19 @@ routine sleep_until(deadline: Duration) -> None
 
 ### The coroutines on the SignalCaster's wait list.
 routine count_waiters(sig: @Monitor) -> U64
-    local found: @U64 <- 0
+    found: &U64 <- 0
 
     until w.is_hollow() with w: @ChannelWaiter = sig.waiters.peek()
-        (found.peek() + 1).poke_into(found)
+        (found.load() + 1).poke_into(found)
         continue with w: w.next.peek()
     then
-        return found.peek()
+        return found.load()
 
 ### Waits on `sig` from a plain thread until `timeout_ns` has passed, again after every wait that returns 1 (a wait
 ### may return without a cast).
 ### :returns: The last wait's result, 0 once the time is up.
 routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
-    local deadline: Duration = Clock.monotonic() + Duration.from_nanoseconds(timeout_ns.to[S64]())
+    deadline: Duration = Clock.monotonic() + Duration.from_nanoseconds(timeout_ns.to[S64]())
 
     loop
         left2: Duration = deadline -^ Clock.monotonic()
@@ -227,7 +227,7 @@ routine await_passed(gate: @Gate, count: U64) -> None
 ### Gives the waiting gate threads one token at a time, each with one cast_one, and waits for one to go through.
 ### :returns: Whether each token let exactly one through.
 routine hand_tokens(gate: @Gate) -> Bool
-    local exact: @Bool <- true
+    exact: &Bool <- true
 
     rf_signal_lock(gate.sig.peek())
     await_arrived(gate, count: GATE_THREADS)
@@ -240,9 +240,9 @@ routine hand_tokens(gate: @Gate) -> Bool
         await_passed(gate, count: round)
         through: U64 = gate.passed.peek()
         one: Bool = through == round and gate.tokens.peek() == 0
-        (exact.peek() and one).poke_into(exact)
+        (exact.load() and one).poke_into(exact)
     rf_signal_unlock(gate.sig.peek())
-    return exact.peek()
+    return exact.load()
 
 ### Opens the gate once every gate thread waits at it, with one cast_all, and waits for them all to go through.
 routine open_gate(gate: @Gate) -> None
@@ -298,7 +298,7 @@ routine start() -> None
     waited: Duration = Clock.monotonic() - start
     rf_signal_unlock(sig)
     Console.show("a thread waits with a deadline: result {result}, waited it out {waited >= 2ms}")
-    local tokens: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
+    tokens: &Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     t1: Thread[None] = get_thread[None]()
     t1.put_work(entry: take_token.to[Callable](), args: tokens.to[Addr]())
     t2: Thread[None] = get_thread[None]()
@@ -313,7 +313,7 @@ routine start() -> None
     t3.wait_finished()
     t3.give_back()
     Console.show("cast_one: {GATE_THREADS} tokens, one thread through for each: {exact}")
-    local gate: @Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
+    gate: &Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     u1: Thread[None] = get_thread[None]()
     u1.put_work(entry: pass_open.to[Callable](), args: gate.to[Addr]())
     u2: Thread[None] = get_thread[None]()

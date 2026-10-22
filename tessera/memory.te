@@ -92,8 +92,8 @@ secret routine rf_throw(error_type: CStrView, message: CStrView) -> None
 ### :throws: Always crashes with `OutOfMemoryError`.
 @noreturn
 secret routine out_of_memory(what: @[Byte], bytes: U64) -> None
-    local buffer: @Array[Byte, 128] <- .hollow()
-    local out: @SliceWriter <- SliceWriter.construct(data: buffer.to[@Byte](), capacity: 127)
+    buffer: &Array[Byte, 128] <- .hollow()
+    out: &SliceWriter <- SliceWriter.construct(data: buffer.to[@Byte](), capacity: 127)
 
     out.write("Failed to {what} {bytes} bytes")
     text: @[Byte] = out.getview()
@@ -108,16 +108,16 @@ secret routine out_of_memory(what: @[Byte], bytes: U64) -> None
 # count costs one load and a branch per allocation.
 
 ### Whether heap blocks are counted: 1 while a memory limit is checked, 0 otherwise.
-global HEAP_COUNTING: @U32
+global HEAP_COUNTING: &U32
 
 ### The bytes the counted heap holds now. A block made before counting began and freed after it makes this smaller
 ### than the program's heap, never larger.
-global HEAP_IN_USE: @S64
+global HEAP_IN_USE: &S64
 
 ### The most HEAP_IN_USE has been since counting began.
-global HEAP_PEAK: @S64
+global HEAP_PEAK: &S64
 ### The heap limit a routine test runs under, in bytes, or 0 when there is none.
-global HEAP_LIMIT: @U64
+global HEAP_LIMIT: &U64
 
 ### Counts a block the heap just gave out. Null (a failed or empty allocation) counts nothing.
 ### :param p: The block.
@@ -126,9 +126,9 @@ routine count_allocated(p: Addr) -> None
         return
     size: S64 = c_block_size(p).to[U64]().to[S64]()
     now: S64 = HEAP_IN_USE.atomic_fetch_add_relaxed(size) + size
-    local peak: @S64 <- HEAP_PEAK.peek_atomic_relaxed()
-    until now <= peak.peek()
-        when HEAP_PEAK.atomic_compare_exchange(expected: peak.peek(), new: now)
+    peak: &S64 <- HEAP_PEAK.peek_atomic_relaxed()
+    until now <= peak.load()
+        when HEAP_PEAK.atomic_compare_exchange(expected: peak.load(), new: now)
             is None => return
             else as seen => seen.poke_into(peak)
     return
@@ -156,16 +156,16 @@ routine rf_heap_limit_init() -> None
     text: @Byte = memory_getenv("RF_MEMORY_LIMIT")
     if text.is_hollow()
         return
-    local limit: @U64 <- 0
-    local at: @U64 <- 0
-    until text.stride(at.peek()).peek() < b'0' or text.stride(at.peek()).peek() > b'9'
-        digit: U64 = (text.stride(at.peek()).peek().to[U8]() - 48).to[U64]()
-        next: U64 = limit.peek() *% 10 +% digit
+    limit: &U64 <- 0
+    at: &U64 <- 0
+    until text.stride(at.load()).peek() < b'0' or text.stride(at.load()).peek() > b'9'
+        digit: U64 = (text.stride(at.load()).peek().to[U8]() - 48).to[U64]()
+        next: U64 = limit.load() *% 10 +% digit
         next.poke_into(limit)
-        (at.peek() + 1).poke_into(at)
-    if limit.peek() == 0
+        (at.load() + 1).poke_into(at)
+    if limit.load() == 0
         return
-    HEAP_LIMIT.poke(limit.peek())
+    HEAP_LIMIT.poke(limit.load())
     HEAP_IN_USE.poke_atomic(0)
     HEAP_PEAK.poke_atomic(0)
     HEAP_COUNTING.poke_atomic(1)
@@ -274,7 +274,7 @@ routine rf_set_bytes_at(dest_address: Addr, value: U8, bytes: U64) -> None
 # the thread's, so a computation doesn't suspend between its mark and its release.
 
 @threadlocal
-global REGION_TOP: @@RegionBlock
+global REGION_TOP: &@RegionBlock
 
 record RegionBlock
     prev: @RegionBlock
@@ -304,7 +304,7 @@ routine rf_region_alloc(bytes: U64) -> Addr
 ### :param mark: A mark from rf_region_mark.
 @export("rf_region_release")
 routine rf_region_release(mark: U64) -> None
-    local stop: @RegionBlock = inttoptr[U64, @RegionBlock](mark)
+    stop: @RegionBlock = inttoptr[U64, @RegionBlock](mark)
 
     loop
         top2: @RegionBlock = REGION_TOP.peek()

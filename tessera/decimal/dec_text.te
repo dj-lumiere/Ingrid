@@ -31,7 +31,7 @@ record DecimalScan
 ### :param digits: Where the digits go (room for 40).
 ### :returns: How many digits, 0 for 0.
 routine u128_all_digits(v: U128, digits: @U8) -> U64
-    local raw: @Array[U8, 40] <- .hollow()
+    raw: &Array[U8, 40] <- .hollow()
 
     first: @U8 = raw.to[@U8]()
     until left == 0 with left: U128 = v, n: U64 = 0
@@ -64,13 +64,13 @@ routine write_decimal_special(out: @Utf32Writer, special: U32, negative: Bool) -
 ### :param fields: The decimal (finite).
 ### :param strip: Whether fractional trailing zeros are dropped.
 routine write_decimal_scientific(out: @Utf32Writer, fields: DecimalFields, strip: Bool) -> None
-    local negative: Bool = fields.negative
-    local coeff: U128 = fields.coeff
-    local exp: S64 = fields.exp
-    local buf: @Array[U8, 40] <- .hollow()
-    local digits: @U8 = buf.to[@U8]()
-    local counted: U64 = u128_all_digits(v: coeff, digits)
-    local nd: U64 = counted.max(1)
+    negative: Bool = fields.negative
+    coeff: U128 = fields.coeff
+    exp: S64 = fields.exp
+    buf: &Array[U8, 40] <- .hollow()
+    digits: @U8 = buf.to[@U8]()
+    counted: U64 = u128_all_digits(v: coeff, digits)
+    nd: U64 = counted.max(1)
 
     # the digits digits[0 .. nd - lo), most significant first
     until not strip or coeff == 0 or e >= 0 or digits.stride(nd - 1 - lo).peek() != 0 with lo: U64 = 0, e: S64 = exp
@@ -112,9 +112,9 @@ routine write_decimal_scientific(out: @Utf32Writer, fields: DecimalFields, strip
 ### :param out: The writer.
 ### :param value: The number, 0 or more.
 secret routine write_s64_digits(out: @Utf32Writer, value: S64) -> None
-    local buf: @Array[U8, 40] <- .hollow()
-    local digits: @U8 = buf.to[@U8]()
-    local n: U64 = u128_all_digits(v: value.to_wrap[U64]().to[U128](), digits)
+    buf: &Array[U8, 40] <- .hollow()
+    digits: @U8 = buf.to[@U8]()
+    n: U64 = u128_all_digits(v: value.to_wrap[U64]().to[U128](), digits)
 
     if n == 0
         out.put(48)
@@ -129,11 +129,11 @@ secret routine write_s64_digits(out: @Utf32Writer, value: S64) -> None
 ### :param fields: The decimal (finite).
 ### :param places: The digits after the point.
 routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U64) -> None
-    local buf: @Array[U8, 41] <- .hollow()
-    local digits: @U8 = buf.to[@U8]()
-    local n: U64 = u128_all_digits(v: fields.coeff, digits)
+    buf: &Array[U8, 41] <- .hollow()
+    digits: @U8 = buf.to[@U8]()
+    n: U64 = u128_all_digits(v: fields.coeff, digits)
     # the scaled value coeff × 10^shift, rounded to an integer
-    local shift: S64 = fields.exp + places.to_wrap[S64]()
+    shift: S64 = fields.exp + places.to_wrap[S64]()
 
     if fields.negative
         out.put(45)
@@ -177,9 +177,9 @@ routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U6
 ### :param digits: The digits, most significant first.
 ### :param run: How many digits, how many zeros follow them, and the digits after the point.
 secret routine write_fixed_digits(out: @Utf32Writer, digits: @U8, run: FixedRun) -> None
-    local count: U64 = run.count
-    local zeros: U64 = run.zeros
-    local places: U64 = run.places
+    count: U64 = run.count
+    zeros: U64 = run.zeros
+    places: U64 = run.places
 
     until lead >= count or digits.stride(lead).peek() != 0 with lead: U64 = 0
         continue with lead: lead + 1
@@ -221,7 +221,7 @@ secret routine write_fixed_digits(out: @Utf32Writer, digits: @U8, run: FixedRun)
 @export("ingrid_decimal_text_utf32")
 routine decimal_text_utf32(sign: U32, special: U32, exp: S64, c_low: U64, c_high: U64, style: U32,
     places: U64, out: @U32, out_count: U64) -> U64
-    local writer: @Utf32Writer <- .construct(data: out, capacity: out_count)
+    writer: &Utf32Writer <- .construct(data: out, capacity: out_count)
 
     coeff: U128 = (c_high.to[U128]() << 64) | c_low.to[U128]()
     fields: DecimalFields = (negative: sign == 1, special: special, exp: exp, coeff: coeff)
@@ -283,7 +283,7 @@ secret routine write_decimal_value(out: @Utf32Writer, fields: DecimalFields, sty
 ###     the exponent's bits in w3.
 @export("ingrid_decimal_scan_utf32")
 routine decimal_scan_utf32(chars: @U32, count: U64) -> Words
-    local bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
+    bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
 
     if count == 0
         return bad
@@ -346,13 +346,13 @@ secret routine decimal_scan_words(negative: U64, coeff: U128, exp10: S64, sticky
 ### :param so_far: The sign, the coefficient, the exponent, and whether a dropped digit was not 0.
 ### :returns: The fields as `decimal_scan_utf32` gives them.
 secret routine decimal_scan_exponent(chars: @U32, count: U64, at: U64, so_far: DecimalScan) -> Words
-    local bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
-    local first: U32 = when
+    bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
+    first: U32 = when
 
         at < count => chars.stride(at).peek()
         else => 0
-    local minus: Bool = first == 45
-    local start: U64 = at + (first == 43 or first == 45).to[U64]()
+    minus: Bool = first == 45
+    start: U64 = at + (first == 43 or first == 45).to[U64]()
 
     until i >= count with i: U64 = start, value: S64 = 0, any: Bool = false
         c: U32 = chars.stride(i).peek()

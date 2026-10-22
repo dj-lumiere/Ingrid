@@ -11,31 +11,31 @@ import Standard/Collections
 import Standard/Os
 
 ### Possible cycle roots, reported by strong releases.
-global ROOTS: @HeaderBuffer
+global ROOTS: &HeaderBuffer
 ### The children of the entity being traced, filled by its type's trace routine.
-global SCRATCH: @HeaderBuffer
+global SCRATCH: &HeaderBuffer
 
 ### The garbage a pass found, freed once the walk is over (freeing during it would leave dangling addresses).
-global REAP: @HeaderBuffer
+global REAP: &HeaderBuffer
 
 ### Guards ROOTS, which two mutators holding the world lock shared can append to at once: 1 while one does. A plain
 ### flag rather than an exclusive access: this code is linked into every program, and the AccessManager that keeps track
 ### of accesses lives once, in the runtime library.
-global ROOTS_FLAG: @U32
+global ROOTS_FLAG: &U32
 
 ### The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
 ### cache. Which mutators are inside is kept per thread, in SLOTS.
-global WORLD: @U32
+global WORLD: &U32
 
 ### Every thread's slot, a list that only grows (a thread's slot stays after the thread ends). A pass waits on each.
-global SLOTS: @Addr
+global SLOTS: &Addr
 
 ### This thread's slot, null until its first share or release.
 @threadlocal
-global MY_SLOT: @Addr
+global MY_SLOT: &Addr
 ### Whether this thread is running a pass (and so already holds the world lock exclusive).
 @threadlocal
-global IN_COLLECTOR: @Bool
+global IN_COLLECTOR: &Bool
 
 preset WRITER: U32 = 0x80000000
 
@@ -183,8 +183,8 @@ routine world_restart() -> None
 ### :param item: The header address to append.
 ### :throws: Crashes with `MemoryAllocationError` when growing the buffer fails.
 routine buffer_push(buffer: @HeaderBuffer, item: Addr) -> None
-    local count: U64 = buffer.count.peek()
-    local capacity: U64 = buffer.capacity.peek()
+    count: U64 = buffer.count.peek()
+    capacity: U64 = buffer.capacity.peek()
 
     if count == capacity
         larger: U64 = when
@@ -301,8 +301,8 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> None
 ### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine mark_scanning(root: @RoamHeader, manager: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(manager)
-    local kids: @List[Addr] <- .construct(manager)
+    work: &List[Addr] <- .construct(manager)
+    kids: &List[Addr] <- .construct(manager)
 
     if root.state.peek() == SCANNING
         drop work
@@ -338,8 +338,8 @@ routine mark_scanning(root: @RoamHeader, manager: @MemoryManager) -> None
 ### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan(root: @RoamHeader, manager: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(manager)
-    local kids: @List[Addr] <- .construct(manager)
+    work: &List[Addr] <- .construct(manager)
+    kids: &List[Addr] <- .construct(manager)
 
     work.add_last(root)
 
@@ -368,8 +368,8 @@ routine scan(root: @RoamHeader, manager: @MemoryManager) -> None
 ### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine scan_live(root: @RoamHeader, manager: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(manager)
-    local kids: @List[Addr] <- .construct(manager)
+    work: &List[Addr] <- .construct(manager)
+    kids: &List[Addr] <- .construct(manager)
 
     LIVE.poke_into(root.state)
     work.add_last(root)
@@ -400,8 +400,8 @@ routine scan_live(root: @RoamHeader, manager: @MemoryManager) -> None
 ### :param manager: The memory manager for the walk's work lists.
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 routine collect_garbage(root: @RoamHeader, manager: @MemoryManager) -> None
-    local work: @List[Addr] <- .construct(manager)
-    local kids: @List[Addr] <- .construct(manager)
+    work: &List[Addr] <- .construct(manager)
+    kids: &List[Addr] <- .construct(manager)
 
     work.add_last(root)
 
@@ -429,12 +429,12 @@ routine collect_garbage(root: @RoamHeader, manager: @MemoryManager) -> None
 ### :throws: Crashes with `MemoryAllocationError` when an allocation fails.
 @export("ingrid_cyclic_collect")
 routine collect() -> U64
-    local manager: @MemoryManager <- .hollow()
-    local roots: @List[Addr] <- .hollow()
+    manager: &MemoryManager <- .hollow()
+    roots: &List[Addr] <- .hollow()
 
     world_stop()
-    manager.poke(C_HEAP.peek())
-    roots.poke(.construct(manager))
+    manager.store(C_HEAP.peek())
+    roots.store(.construct(manager))
 
     # MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.
     n: U64 = ROOTS.count.peek()
