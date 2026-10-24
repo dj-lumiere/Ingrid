@@ -16,14 +16,22 @@
 # A coefficient is read at its face value, as RazorForge's engines read it: a decimal128 coefficient of 35 digits
 # (an encoding IEEE 754 calls non-canonical) is that number, not zero.
 
+module Ingrid/Decimal
+
 ### Dec.kind: a finite value, an infinity, a quiet NaN, a signaling NaN.
-preset DEC_FINITE: U8 = 0
-preset DEC_INFINITE: U8 = 1
-preset DEC_QNAN: U8 = 2
-preset DEC_SNAN: U8 = 3
+secret preset DEC_FINITE: U8 = 0
+secret preset DEC_INFINITE: U8 = 1
+secret preset DEC_QNAN: U8 = 2
+secret preset DEC_SNAN: U8 = 3
+
+### How a value exactly halfway between two rounds: to the even one (IEEE 754's default, D32, D64, and D128).
+secret preset DEC_TIES_EVEN: U8 = 0
+
+### A value exactly halfway rounds away from zero (2.5 to 3, -2.5 to -3).
+secret preset DEC_TIES_AWAY: U8 = 1
 
 ### A decimal float taken apart. A finite value is (-1)^neg × coeff × 10^exp.
-record Dec
+secret record Dec
     neg: Bool
     kind: U8
     exp: S64
@@ -31,7 +39,7 @@ record Dec
 
 ### An exact (or sticky) value waiting for its one rounding: (-1)^neg × coeff × 10^exp, and the exponent IEEE 754
 ### prefers for the result.
-record DecExact
+secret record DecExact
     ### Whether the value is negative.
     neg: Bool
     ### The coefficient, below 10^77.
@@ -42,43 +50,52 @@ record DecExact
     pref: S64
 
 ### An interchange format: the digits of its coefficient and the range of its exponent, the exponent of the
-### coefficient's last digit.
-record DecFormat
+### coefficient's last digit, and how a value exactly halfway between two rounds (DEC_TIES_EVEN or DEC_TIES_AWAY).
+secret record DecFormat
     digits: S64
     qmin: S64
     qmax: S64
+    ties: U8
+
+### Whether a value exactly halfway between two rounds its magnitude up.
+### :param ties: DEC_TIES_EVEN or DEC_TIES_AWAY.
+### :param odd: Whether the magnitude below the tie is odd.
+### :returns: `true` when the tie goes to the larger magnitude.
+@inline
+secret routine dec_tie_up(ties: U8, odd: Bool) -> Bool
+    return ties == DEC_TIES_AWAY or odd
 
 ### Decimal32: 7 digits, exponents -101 to 90.
 ### :returns: The format.
 @inline
-routine dec_format32() -> DecFormat
-    return (digits: 7, qmin: -101, qmax: 90)
+secret routine dec_format32() -> DecFormat
+    return (digits: 7, qmin: -101, qmax: 90, ties: DEC_TIES_EVEN)
 
 ### Decimal64: 16 digits, exponents -398 to 369.
 ### :returns: The format.
 @inline
-routine dec_format64() -> DecFormat
-    return (digits: 16, qmin: -398, qmax: 369)
+secret routine dec_format64() -> DecFormat
+    return (digits: 16, qmin: -398, qmax: 369, ties: DEC_TIES_EVEN)
 
 ### Decimal128: 34 digits, exponents -6176 to 6111.
 ### :returns: The format.
 @inline
-routine dec_format128() -> DecFormat
-    return (digits: 34, qmin: -6176, qmax: 6111)
+secret routine dec_format128() -> DecFormat
+    return (digits: 34, qmin: -6176, qmax: 6111, ties: DEC_TIES_EVEN)
 
 # ── values ────────────────────────────────────────────────────────────────────────────────────────
 
 ### The quiet NaN every operation returns for a NaN or an invalid operation (positive, no payload).
 ### :returns: The quiet NaN every operation returns for a NaN or an invalid operation (positive, no payload).
 @inline
-routine dec_nan() -> Dec
+secret routine dec_nan() -> Dec
     return (neg: false, kind: DEC_QNAN, exp: 0, coeff: 0)
 
 ### An infinity.
 ### :param neg: Whether it is negative.
 ### :returns: The infinity.
 @inline
-routine dec_inf(neg: Bool) -> Dec
+secret routine dec_inf(neg: Bool) -> Dec
     return (neg: neg, kind: DEC_INFINITE, exp: 0, coeff: 0)
 
 ### (-1)^neg × coeff × 10^exp, as it stands.
@@ -87,38 +104,38 @@ routine dec_inf(neg: Bool) -> Dec
 ### :param exp: The exponent.
 ### :returns: (-1)^neg × coeff × 10^exp, as it stands.
 @inline
-routine dec_num(neg: Bool, coeff: U128, exp: S64) -> Dec
+secret routine dec_num(neg: Bool, coeff: U128, exp: S64) -> Dec
     return (neg: neg, kind: DEC_FINITE, exp: exp, coeff: coeff)
 
 ### Whether the value is finite (neither an infinity nor a NaN).
 ### :returns: True when finite.
 @inline
-routine Dec.is_finite() -> Bool
+secret routine Dec.is_finite() -> Bool
     return me.kind == DEC_FINITE
 
 ### Whether the value is a NaN, quiet or signaling.
 ### :returns: True for a NaN.
 @inline
-routine Dec.is_nan() -> Bool
+secret routine Dec.is_nan() -> Bool
     return me.kind >= DEC_QNAN
 
 ### Whether the value is an infinity.
 ### :returns: True for an infinity.
 @inline
-routine Dec.is_inf() -> Bool
+secret routine Dec.is_inf() -> Bool
     return me.kind == DEC_INFINITE
 
 ### Whether the value is a finite zero (either sign, any exponent).
 ### :returns: True for a zero.
 @inline
-routine Dec.is_zero() -> Bool
+secret routine Dec.is_zero() -> Bool
     finite: Bool = me.kind == DEC_FINITE
     return finite and me.coeff == 0
 
 ### The value with its sign flipped (a NaN too).
 ### :returns: The value with its sign flipped (a NaN too).
 @inline
-routine Dec.negate() -> Me
+secret routine Dec.negate() -> Me
     return (neg: not me.neg, kind: me.kind, exp: me.exp, coeff: me.coeff)
 
 # ── powers of ten ─────────────────────────────────────────────────────────────────────────────────
@@ -130,7 +147,7 @@ routine Dec.negate() -> Me
 ### :param l3: The highest limb.
 ### :returns: The U256 with limbs l0 (least significant) to l3.
 @inline
-routine dec_u256(l0: U64, l1: U64, l2: U64, l3: U64) -> U256
+secret routine dec_u256(l0: U64, l1: U64, l2: U64, l3: U64) -> U256
     top: U256 = (l3.to[U256]() << 64) | l2.to[U256]()
     mid: U256 = (top << 64) | l1.to[U256]()
     r: U256 = (mid << 64) | l0.to[U256]()
@@ -139,7 +156,7 @@ routine dec_u256(l0: U64, l1: U64, l2: U64, l3: U64) -> U256
 ### 10^k as a U256, k in 0 .. 76.
 ### :param k: The power.
 ### :returns: 10^k as a U256, k in 0 .. 76.
-routine dec_p10(k: S64) -> U256
+secret routine dec_p10(k: S64) -> U256
     at: U64 = k.to[U64]() * 4
     l0: U64 = DEC_POW10_256.getitem(at)
     l1: U64 = DEC_POW10_256.getitem(at + 1)
@@ -151,7 +168,7 @@ routine dec_p10(k: S64) -> U256
 ### :param k: The power.
 ### :returns: 10^k as a U128, k in 0 .. 38.
 @inline
-routine dec_p10_128(k: S64) -> U128
+secret routine dec_p10_128(k: S64) -> U128
     at: U64 = k.to[U64]() * 4
     low: U64 = DEC_POW10_256.getitem(at)
     high: U64 = DEC_POW10_256.getitem(at + 1)
@@ -162,7 +179,7 @@ routine dec_p10_128(k: S64) -> U128
 ### :param k: The power.
 ### :returns: 10^k as a U64, k in 0 .. 19.
 @inline
-routine dec_p10_64(k: S64) -> U64
+secret routine dec_p10_64(k: S64) -> U64
     at: U64 = k.to[U64]() * 4
     return DEC_POW10_256.getitem(at)
 
@@ -170,7 +187,7 @@ routine dec_p10_64(k: S64) -> U64
 ### compare with a power of ten settles it.
 ### :param c: The number.
 ### :returns: The number of decimal digits of c (1 for 0).
-routine dec_digits(c: U128) -> S64
+secret routine dec_digits(c: U128) -> S64
     if c == 0
         return 1
     bits: S64 = 128 - c.leading_zeros().to[S64]()
@@ -187,7 +204,7 @@ routine dec_digits(c: U128) -> S64
 ### The number of decimal digits of c (1 for 0), for c below 10^77.
 ### :param c: The number.
 ### :returns: The number of decimal digits of c (1 for 0), for c below 10^77.
-routine dec_digits256(c: U256) -> S64
+secret routine dec_digits256(c: U256) -> S64
     if c >> 128 == 0
         return dec_digits(c.to_wrap[U128]())
     bits: S64 = 256 - c.leading_zeros().to[S64]()
@@ -205,7 +222,7 @@ routine dec_digits256(c: U256) -> S64
 ### :param x: The operand.
 ### :param k: The power of ten.
 ### :returns: floor(x / 10^k) for k >= 0 (k = 0 gives x), by the reciprocal in dec_tables.te.
-routine dec_div_p10(x: U128, k: S64) -> U128
+secret routine dec_div_p10(x: U128, k: S64) -> U128
     when
         k <= 0 => return x
         k >= 39 => return 0
@@ -226,7 +243,7 @@ routine dec_div_p10(x: U128, k: S64) -> U128
 ### :param x: The operand.
 ### :param k: The power of ten.
 ### :returns: floor(x / 10^k) for k >= 0 of a U64.
-routine dec_div_p10_64(x: U64, k: S64) -> U64
+secret routine dec_div_p10_64(x: U64, k: S64) -> U64
     when
         k <= 0 => return x
         k >= 20 => return 0
@@ -245,7 +262,7 @@ routine dec_div_p10_64(x: U64, k: S64) -> U64
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: The high 256 bits of the 512-bit product a × b.
-routine dec_mulhi256(a: U256, b: U256) -> U256
+secret routine dec_mulhi256(a: U256, b: U256) -> U256
     a0: U128 = a.to_wrap[U128]()
     a1: U128 = (a >> 128).to_wrap[U128]()
     b0: U128 = b.to_wrap[U128]()
@@ -265,7 +282,7 @@ routine dec_mulhi256(a: U256, b: U256) -> U256
 ### :param x: The operand.
 ### :param k: The power of ten.
 ### :returns: floor(x / 10^k) for k >= 0 of a U256.
-routine dec_div_p10_256(x: U256, k: S64) -> U256
+secret routine dec_div_p10_256(x: U256, k: S64) -> U256
     when
         k <= 0 => return x
         x >> 128 == 0 => return dec_div_p10(x: x.to_wrap[U128](), k).to[U256]()
@@ -289,7 +306,7 @@ routine dec_div_p10_256(x: U256, k: S64) -> U256
 ### :param c: The coefficient (nonzero).
 ### :param cap: The most to count.
 ### :returns: How many times 10 divides c (c > 0), at most cap.
-routine dec_trailing_zeros(c: U128, cap: S64) -> S64
+secret routine dec_trailing_zeros(c: U128, cap: S64) -> S64
     binary: S64 = c.trailing_zeros().to[S64]()
     limit: S64 = cap.min(binary).min(38)
 
@@ -315,15 +332,15 @@ routine dec_trailing_zeros(c: U128, cap: S64) -> S64
 
 # ── rounding to a format ──────────────────────────────────────────────────────────────────────────
 
-### (-1)^neg × coeff × 10^exp (coeff below 10^77) rounded half to even to the format f, the exponent as IEEE 754
-### prefers it: every digit that has to go (past f.digits, or below f.qmin) goes in one rounding; an exact result
-### then takes the exponent nearest pref (trailing zeros stripped while it is below pref, zeros appended while it
-### is above), an inexact one keeps every digit; above f.qmax the coefficient is padded with zeros, and when it
-### cannot be the result is an infinity.
+### (-1)^neg × coeff × 10^exp (coeff below 10^77) rounded to the format f (a tie as f.ties says), the
+### exponent as IEEE 754 prefers it. Every digit that has to go (past f.digits, or below
+### f.qmin) goes in one rounding. An exact result then takes the exponent nearest pref (trailing zeros stripped while
+### it is below pref, zeros appended while it is above), and an inexact one keeps every digit. Above f.qmax the
+### coefficient is padded with zeros, and when it cannot be the result is an infinity.
 ### :param value: The exact value, with its preferred exponent.
 ### :param f: The format the result rounds to.
-### :returns: (-1)^neg × coeff × 10^exp (coeff below 10^77) rounded half to even to the format f, the exponent as IEEE 754 prefers it.
-routine dec_finish(value: DecExact, f: DecFormat) -> Dec
+### :returns: The value rounded to f, its exponent as IEEE 754 prefers it.
+secret routine dec_finish(value: DecExact, f: DecFormat) -> Dec
     neg: Bool = value.neg
     coeff: U256 = value.coeff
     exp: S64 = value.exp
@@ -339,9 +356,9 @@ routine dec_finish(value: DecExact, f: DecFormat) -> Dec
     dropped: S64 = excess.max(qmin - exp)
     values: (U128, S64, Bool) = when
         dropped >= nd =>
-            # every digit goes: 1 only above half of 10^drop (exactly half ties to the even 0)
+            # every digit goes: 1 only above half of 10^drop (exactly half as f.ties says)
             half: U256 = dec_p10(nd - 1) * 5
-            above: Bool = dropped == nd and coeff > half
+            above: Bool = dropped == nd and (coeff > half or (coeff == half and dec_tie_up(ties: f.ties, odd: false)))
             becomes (above.to[U128](), exp + dropped, true)
         dropped > 0 =>
             unit: U256 = dec_p10(dropped)
@@ -349,7 +366,7 @@ routine dec_finish(value: DecExact, f: DecFormat) -> Dec
             r: U256 = coeff - q *% unit
             twice: U256 = r << 1
             odd: Bool = q & 1 == 1
-            up: Bool = twice > unit or (twice == unit and odd)
+            up: Bool = twice > unit or (twice == unit and dec_tie_up(ties: f.ties, odd))
             q2: U128 = q.to[U128]() + up.to[U128]()
             carry: Bool = q2 == dec_p10_128(p)
             # rounding up 99...9 gives 10^p: one digit too many, all zeros
@@ -388,7 +405,7 @@ routine dec_finish(value: DecExact, f: DecFormat) -> Dec
 ### result, which keeps the exponent the wider operation chose). Specials pass through.
 ### :param f: The format the result rounds to.
 ### :returns: A value of another width rounded to f, its exponent kept when the digits allow (the narrowing of an arithmetic result, which keeps the exponent the wider operation chose).
-routine Dec.narrow(f: DecFormat) -> Me
+secret routine Dec.narrow(f: DecFormat) -> Me
     if me.is_finite()
         return dec_finish(
             value: DecExact(neg: me.neg, coeff: me.coeff.to[U256](), exp: me.exp, pref: me.exp), f)
@@ -398,7 +415,7 @@ routine Dec.narrow(f: DecFormat) -> Me
 ### function result takes). Specials and zeros pass through.
 ### :param f: The format the result rounds to.
 ### :returns: A value rounded to f and reduced.
-routine Dec.reduce(f: DecFormat) -> Me
+secret routine Dec.reduce(f: DecFormat) -> Me
     if not me.is_finite() or me.coeff == 0
         return me
     return dec_finish(
@@ -410,7 +427,7 @@ routine Dec.reduce(f: DecFormat) -> Me
 ### else a 14-bit biased exponent and a 113-bit coefficient.
 ### :param bits: The encoding.
 ### :returns: A decimal128 from its BID bits.
-routine dec_from128(bits: U128) -> Dec
+secret routine dec_from128(bits: U128) -> Dec
     neg: Bool = bits >> 127 == 1
     top5: U128 = (bits >> 122) & 0x1F
 
@@ -429,7 +446,7 @@ routine dec_from128(bits: U128) -> Dec
 
 ### The BID bits of a decimal128 (a finite value already in range, its coefficient below 2^113).
 ### :returns: The BID bits of a decimal128 (a finite value already in range, its coefficient below 2^113).
-routine Dec.to128() -> U128
+secret routine Dec.to128() -> U128
     sign: U128 = me.neg.to[U128]() << 127
 
     kind: U8 = me.kind
@@ -445,7 +462,7 @@ routine Dec.to128() -> U128
 ### 11) the exponent two bits lower and the coefficient 2^53 plus its low 51 bits.
 ### :param bits: The encoding.
 ### :returns: A decimal64 from its BID bits.
-routine dec_from64(bits: U64) -> Dec
+secret routine dec_from64(bits: U64) -> Dec
     neg: Bool = bits >> 63 == 1
     top5: U64 = (bits >> 58) & 0x1F
 
@@ -468,7 +485,7 @@ routine dec_from64(bits: U64) -> Dec
 
 ### The BID bits of a decimal64 (a finite value already in range).
 ### :returns: The BID bits of a decimal64 (a finite value already in range).
-routine Dec.to64() -> U64
+secret routine Dec.to64() -> U64
     sign: U64 = me.neg.to[U64]() << 63
 
     kind: U8 = me.kind
@@ -488,7 +505,7 @@ routine Dec.to64() -> U64
 ### the exponent two bits lower and the coefficient 2^23 plus its low 21 bits.
 ### :param bits: The encoding.
 ### :returns: A decimal32 from its BID bits.
-routine dec_from32(bits: U32) -> Dec
+secret routine dec_from32(bits: U32) -> Dec
     neg: Bool = bits >> 31 == 1
     top5: U32 = (bits >> 26) & 0x1F
 
@@ -511,7 +528,7 @@ routine dec_from32(bits: U32) -> Dec
 
 ### The BID bits of a decimal32 (a finite value already in range).
 ### :returns: The BID bits of a decimal32 (a finite value already in range).
-routine Dec.to32() -> U32
+secret routine Dec.to32() -> U32
     sign: U32 = me.neg.to[U32]() << 31
 
     kind: U8 = me.kind
@@ -534,7 +551,7 @@ routine Dec.to32() -> U32
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: a + b for an infinity or a NaN among them.
-routine dec_add_special(a: Dec, b: Dec) -> Dec
+secret routine dec_add_special(a: Dec, b: Dec) -> Dec
     is_nan: Bool = a.is_nan() or b.is_nan()
     both: Bool = a.is_inf() and b.is_inf()
     when
@@ -548,7 +565,7 @@ routine dec_add_special(a: Dec, b: Dec) -> Dec
 ### :param b: The second operand.
 ### :param f: The format the result rounds to.
 ### :returns: a + b rounded to f, the preferred exponent the smaller one.
-routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
+secret routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
     if not (a.is_finite() and b.is_finite())
         return dec_add_special(a, b)
     return dec_finish(value: dec_sum(a, b), f)
@@ -560,7 +577,7 @@ routine dec_add(a: Dec, b: Dec, f: DecFormat) -> Dec
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: a + b before its rounding.
-routine dec_sum(a: Dec, b: Dec) -> DecExact
+secret routine dec_sum(a: Dec, b: Dec) -> DecExact
     a_high: Bool = a.exp >= b.exp
     h: Dec = when
 
@@ -607,7 +624,7 @@ routine dec_sum(a: Dec, b: Dec) -> DecExact
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: a × b before its rounding.
-routine dec_product(a: Dec, b: Dec) -> DecExact
+secret routine dec_product(a: Dec, b: Dec) -> DecExact
     e: S64 = a.exp + b.exp
     return DecExact(neg: a.neg != b.neg, coeff: a.coeff.mul_wide(b.coeff), exp: e, pref: e)
 
@@ -616,7 +633,7 @@ routine dec_product(a: Dec, b: Dec) -> DecExact
 ### :param value: The exact value.
 ### :param f: The format.
 ### :returns: Whether rounding `value` to f keeps it exact.
-routine dec_exact_in(value: DecExact, f: DecFormat) -> Bool
+secret routine dec_exact_in(value: DecExact, f: DecFormat) -> Bool
     if value.coeff == 0
         return true
     nd: S64 = dec_digits256(value.coeff)
@@ -632,7 +649,7 @@ routine dec_exact_in(value: DecExact, f: DecFormat) -> Bool
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: a × b for an infinity or a NaN among them.
-routine dec_mul_special(a: Dec, b: Dec) -> Dec
+secret routine dec_mul_special(a: Dec, b: Dec) -> Dec
     is_nan: Bool = a.is_nan() or b.is_nan()
     when
         is_nan => return dec_nan()
@@ -644,7 +661,7 @@ routine dec_mul_special(a: Dec, b: Dec) -> Dec
 ### :param b: The second operand.
 ### :param f: The format the result rounds to.
 ### :returns: a × b rounded to f, the preferred exponent the sum of theirs.
-routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
+secret routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
     if not (a.is_finite() and b.is_finite())
         return dec_mul_special(a, b)
     return dec_finish(value: dec_product(a, b), f)
@@ -655,7 +672,7 @@ routine dec_mul(a: Dec, b: Dec, f: DecFormat) -> Dec
 ### :param b: The second operand.
 ### :param f: The format the result rounds to.
 ### :returns: a / b for an infinity or a NaN among them.
-routine dec_div_special(a: Dec, b: Dec, f: DecFormat) -> Dec
+secret routine dec_div_special(a: Dec, b: Dec, f: DecFormat) -> Dec
     is_nan: Bool = a.is_nan() or b.is_nan()
     neg: Bool = a.neg != b.neg
     when
@@ -671,7 +688,7 @@ routine dec_div_special(a: Dec, b: Dec, f: DecFormat) -> Dec
 ### :param b: The second operand.
 ### :param f: The format the result rounds to.
 ### :returns: a / b rounded to f, the preferred exponent the difference of theirs.
-routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
+secret routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
     neg: Bool = a.neg != b.neg
     pref: S64 = a.exp - b.exp
 
@@ -700,7 +717,7 @@ routine dec_div(a: Dec, b: Dec, f: DecFormat) -> Dec
 ### :param cb: The coefficient of b.
 ### :param eb: The exponent of b.
 ### :returns: -1, 0, or 1 as |a| = ca × 10^ea is below, equal to, or above |b| = cb × 10^eb (both coefficients nonzero).
-routine dec_compare_magnitude(ca: U128, ea: S64, cb: U128, eb: S64) -> S64
+secret routine dec_compare_magnitude(ca: U128, ea: S64, cb: U128, eb: S64) -> S64
     adj_a: S64 = dec_digits(ca) + ea
     adj_b: S64 = dec_digits(cb) + eb
     when
@@ -724,7 +741,7 @@ routine dec_compare_magnitude(ca: U128, ea: S64, cb: U128, eb: S64) -> S64
 ### :param a: The first operand.
 ### :param b: The second operand.
 ### :returns: The order of a and b.
-routine dec_order(a: Dec, b: Dec) -> S64
+secret routine dec_order(a: Dec, b: Dec) -> S64
     is_nan: Bool = a.is_nan() or b.is_nan()
     when
         is_nan => return 2

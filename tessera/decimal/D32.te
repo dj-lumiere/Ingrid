@@ -1,0 +1,523 @@
+# D32: IEEE 754 decimal32 in the BID encoding, 7 significant digits, exponents -101 to 90. Every
+# operation rounds once to 7 digits, a tie to the even one. The operators crash on a result that is an infinity
+# or a NaN (`NumericOverflowError`, `NumericDomainError`, `DivisionByZeroError` for a nonzero value over zero), and
+# the `_unchecked` routines give the raw IEEE 754 result.
+
+module Ingrid/Decimal
+
+### An IEEE 754 decimal32: 7 significant decimal digits and a power of ten. Values are exact in decimal (`0.1` is
+### one tenth), and a value keeps its exponent (`1.0` and `1.00` are equal, and their text differs).
+record D32
+obeys Equatable[D32], Comparable[D32]
+obeys Addable[D32], Subtractable[D32], Multiplicable[D32], Divisible[D32], Negatable[D32], UncheckedArithmetic[D32]
+obeys Representable[D32], Diagnosable[D32], FixedRepresentable[D32], Parsable[D32]
+    ### The BID encoding.
+    secret encoding: U32
+
+# -- bits ----------------------------------------------------------------------
+
+### The D32 whose BID encoding is `bits`.
+### :param bits: The encoding.
+### :returns: The decimal.
+@inline
+common routine D32.from_bits(bits: U32) -> Me
+    return Me(encoding: bits)
+
+### The BID encoding of `me`.
+### :returns: The encoding.
+@inline
+routine D32.bits() -> U32
+    return me.encoding
+
+### `me` taken apart for the engine.
+### :returns: The fields.
+@inline
+secret routine D32.dec() -> Dec
+    return dec_from32(me.encoding)
+
+### The D32 of the engine's value `d`, already rounded to 7 digits.
+### :param d: The value.
+### :returns: The decimal.
+@inline
+secret common routine D32.of(d: Dec) -> Me
+    return Me(encoding: d.to32())
+
+### Zero, at exponent 0.
+### :returns: `0`.
+common routine D32.zero() -> Me
+    return Me.of(dec_num(neg: false, coeff: 0, exp: 0))
+
+### An infinity.
+### :param negative: Whether it is the negative one.
+### :returns: `inf` or `-inf`.
+common routine D32.infinity(negative: Bool) -> Me
+    return Me.of(dec_inf(neg: negative))
+
+### A quiet NaN.
+### :returns: `NaN`.
+common routine D32.quiet_nan() -> Me
+    return Me.of(dec_nan())
+
+# -- classification ------------------------------------------------------------
+
+### Whether `me` is neither an infinity nor a NaN.
+### :returns: `true` for a finite value.
+routine D32.is_finite() -> Bool
+    return me.dec().is_finite()
+
+### Whether `me` is an infinity.
+### :returns: `true` for `inf` and `-inf`.
+routine D32.is_infinite() -> Bool
+    return me.dec().is_inf()
+
+### Whether `me` is a NaN, quiet or signaling.
+### :returns: `true` for a NaN.
+routine D32.is_nan() -> Bool
+    return me.dec().is_nan()
+
+### Whether `me` is a signaling NaN.
+### :returns: `true` for a signaling NaN.
+routine D32.is_signaling() -> Bool
+    return me.dec().kind == DEC_SNAN
+
+### Whether `me` is zero, of either sign and any exponent.
+### :returns: `true` for a zero.
+routine D32.is_zero() -> Bool
+    return me.dec().is_zero()
+
+### Whether the sign of `me` is negative (a negative zero, `-inf`, and a NaN with the sign set included).
+### :returns: `true` when the sign bit is set.
+routine D32.is_sign_negative() -> Bool
+    return me.dec().neg
+
+# -- arithmetic ----------------------------------------------------------------
+
+### `me` when it is finite: the last step of a checked operation.
+### :returns: `me`.
+### :throws: Crashes with `NumericDomainError` when `me` is a NaN and with `NumericOverflowError` when it is an
+###     infinity.
+@track_caller
+secret routine D32.require_finite() -> Me
+    if me.is_finite()
+        return me
+    if me.is_nan()
+        crash_numeric_domain()
+    crash(name: "NumericOverflowError",
+        message: "The result is out of D32's range: it would be infinite.")
+
+### `me + other`, rounded to 7 digits. {D32.add_unchecked} gives the raw IEEE 754 result.
+### :param other: The other operand.
+### :returns: The sum.
+### :throws: Crashes with `NumericOverflowError` when the sum is infinite and with `NumericDomainError` when it is a
+###     NaN.
+@track_caller
+routine D32.add(other: Me) -> Me
+    return me.add_unchecked(other).require_finite()
+
+### `me - other`, rounded to 7 digits. {D32.sub_unchecked} gives the raw IEEE 754 result.
+### :param other: The other operand.
+### :returns: The difference.
+### :throws: Crashes with `NumericOverflowError` when the difference is infinite and with `NumericDomainError` when it
+###     is a NaN.
+@track_caller
+routine D32.sub(other: Me) -> Me
+    return me.sub_unchecked(other).require_finite()
+
+### `me * other`, rounded to 7 digits. {D32.mul_unchecked} gives the raw IEEE 754 result.
+### :param other: The other factor.
+### :returns: The product.
+### :throws: Crashes with `NumericOverflowError` when the product is infinite and with `NumericDomainError` when it is
+###     a NaN.
+@track_caller
+routine D32.mul(other: Me) -> Me
+    return me.mul_unchecked(other).require_finite()
+
+### `me / other`, rounded to 7 digits. {D32.truediv_unchecked} gives the raw IEEE 754 result.
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `other` is zero and `me` is not, with `NumericOverflowError` when
+###     the quotient is infinite, and with `NumericDomainError` when it is a NaN (`0 / 0` among them).
+@track_caller
+routine D32.truediv(other: Me) -> Me
+    r: Me = me.truediv_unchecked(other)
+    if not r.is_finite() and other.is_zero() and not me.is_zero() and me.is_finite()
+        crash_division_by_zero()
+    return r.require_finite()
+
+### `me + other`, rounded to 7 digits, an infinity or a NaN passed on as IEEE 754 says.
+### :param other: The other operand.
+### :returns: The sum.
+routine D32.add_unchecked(other: Me) -> Me
+    return Me.of(dec_add(a: me.dec(), b: other.dec(), f: dec_format32()))
+
+### `me - other`, rounded to 7 digits, an infinity or a NaN passed on as IEEE 754 says.
+### :param other: The other operand.
+### :returns: The difference.
+routine D32.sub_unchecked(other: Me) -> Me
+    return Me.of(dec_add(a: me.dec(), b: other.dec().negate(), f: dec_format32()))
+
+### `me * other`, rounded to 7 digits, an infinity or a NaN passed on as IEEE 754 says.
+### :param other: The other factor.
+### :returns: The product.
+routine D32.mul_unchecked(other: Me) -> Me
+    return Me.of(dec_mul(a: me.dec(), b: other.dec(), f: dec_format32()))
+
+### `me / other`, rounded to 7 digits: a nonzero value over zero is an infinity, `0 / 0` a NaN.
+### :param other: The divisor.
+### :returns: The quotient.
+routine D32.truediv_unchecked(other: Me) -> Me
+    return Me.of(dec_div(a: me.dec(), b: other.dec(), f: dec_format32()))
+
+### `-me`: the sign turned over, nothing rounded.
+### :returns: The negated value.
+routine D32.neg() -> Me
+    return Me.of(me.dec().negate())
+
+### `me` with its sign cleared.
+### :returns: The absolute value.
+routine D32.abs() -> Me
+    d: Dec = me.dec()
+    if d.neg
+        return Me.of(d.negate())
+    return me
+
+### The square root of `me`, rounded to 7 digits.
+### :returns: The square root.
+### :throws: Crashes with `NumericDomainError` when `me` is below zero or a NaN, and with `NumericOverflowError` when
+###     it is `inf`.
+@track_caller
+routine D32.sqrt() -> Me
+    return me.sqrt_unchecked().require_finite()
+
+### The square root of `me`, rounded to 7 digits: a NaN for a value below zero.
+### :returns: The square root.
+routine D32.sqrt_unchecked() -> Me
+    return Me.of(dec_sqrt(x: me.dec(), f: dec_format32()))
+
+### `me` rounded to an integral value toward zero.
+### :returns: The integral value.
+routine D32.trunc() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 0, f: dec_format32()))
+
+### `me` rounded down to an integral value.
+### :returns: The integral value.
+routine D32.floor() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 1, f: dec_format32()))
+
+### `me` rounded up to an integral value.
+### :returns: The integral value.
+routine D32.ceil() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 2, f: dec_format32()))
+
+### `me` rounded to the nearest integral value, a tie away from zero.
+### :returns: The integral value.
+routine D32.round() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 3, f: dec_format32()))
+
+### `me` rounded to the nearest integral value, a tie to the even one.
+### :returns: The integral value.
+routine D32.round_ties_even() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 4, f: dec_format32()))
+
+# -- comparison ----------------------------------------------------------------
+
+### Whether `me` and `other` are the same number: a NaN equals nothing, `+0` equals `-0`, and `1.0` equals `1.00`.
+### :param other: The value to compare with.
+### :returns: `true` when they are equal.
+routine D32.eq(other: Me) -> Bool
+    return dec_order(a: me.dec(), b: other.dec()) == 0
+
+### Three-way comparison for the `Comparable` conformance.
+### :param other: The value to compare with.
+### :returns: -1 when `me < other`, 1 when `me > other`, and 0 otherwise, a comparison with a NaN included.
+routine D32.compare(other: Me) -> S32
+    order: S64 = dec_order(a: me.dec(), b: other.dec())
+    if order == -1
+        return -1
+    if order == 1
+        return 1
+    return 0
+
+### `me < other`, false when either is a NaN.
+### :param other: The value to compare with.
+### :returns: Whether `me` is smaller.
+routine D32.lt(other: Me) -> Bool
+    return dec_order(a: me.dec(), b: other.dec()) == -1
+
+### `me <= other`, false when either is a NaN.
+### :param other: The value to compare with.
+### :returns: Whether `me` is smaller or equal.
+routine D32.le(other: Me) -> Bool
+    order: S64 = dec_order(a: me.dec(), b: other.dec())
+    return order == -1 or order == 0
+
+### `me > other`, false when either is a NaN.
+### :param other: The value to compare with.
+### :returns: Whether `me` is larger.
+routine D32.gt(other: Me) -> Bool
+    return dec_order(a: me.dec(), b: other.dec()) == 1
+
+### `me >= other`, false when either is a NaN.
+### :param other: The value to compare with.
+### :returns: Whether `me` is larger or equal.
+routine D32.ge(other: Me) -> Bool
+    order: S64 = dec_order(a: me.dec(), b: other.dec())
+    return order == 1 or order == 0
+
+### The smaller of `me` and `other`, the other one when one is a NaN.
+### :param other: The value to compare with.
+### :returns: The smaller value.
+routine D32.min(other: Me) -> Me
+    if me.is_nan()
+        return other
+    if other.is_nan() or me <= other
+        return me
+    return other
+
+### The larger of `me` and `other`, the other one when one is a NaN.
+### :param other: The value to compare with.
+### :returns: The larger value.
+routine D32.max(other: Me) -> Me
+    if me.is_nan()
+        return other
+    if other.is_nan() or me >= other
+        return me
+    return other
+
+### `me` held between `lo` and `hi`.
+### :param lo: The lower bound.
+### :param hi: The upper bound.
+### :returns: `lo` below it, `hi` above it, else `me`.
+routine D32.clamp(lo: Me, hi: Me) -> Me
+    return me.max(lo).min(hi)
+
+# -- text ----------------------------------------------------------------------
+
+### Writes `me` the way decimal text is read back: positional when the exponent is at most 0 and the value is not
+### below 1e-6 (`1.50`, `0.001`, `100`), `d.dddE+x` otherwise (`1E+3`, `1.5E-7`), every digit of the coefficient
+### kept. The specials are `inf`, `-inf`, `NaN`, and `sNaN`.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+routine D32.represent_into[T](out: @T) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 0, places: 0)
+    return
+
+### Writes `D32(` and `me`'s text and `)`.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+routine D32.diagnose_into[T](out: @T) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 3, places: 32)
+    return
+
+### Writes `me` with exactly `digits` digits after the point, rounded from its exact value, a tie to the even one,
+### the integer part written in full.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+### :param digits: The digits after the point.
+routine D32.represent_fixed_into[T](out: @T, digits: U64) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 2, places: digits)
+    return
+
+### The text as a D32, rounded once to 7 digits (a tie to the even one), at the exponent the text writes. Accepts
+### an optional sign, digits with an optional point and an `e` or `E` exponent, and `inf`, `infinity`, or `nan` in any
+### letter case.
+### :returns: The decimal.
+### :throws: Throws `EmptyTextError` for an empty text or a sign alone and `InvalidValueError` for any other text that
+###     is not a number.
+failable routine @[Byte].to[D32]() -> D32
+    if dec_text_is_empty(me)
+        throw EmptyTextError(text: me, target: "D32")
+    scanned: DecScanned = dec_scan(chars: DecBytes(text: me))
+    if scanned.bad
+        throw InvalidValueError(text: me, target: "D32")
+    return D32.of(dec_from_scan(scanned, f: dec_format32()))
+
+# -- integers ------------------------------------------------------------------
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S8.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S16.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S32.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S64.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S128.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine S256.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U8.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U16.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U32.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U64.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U128.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: dec_format32()))
+
+### `me` as a D32, rounded to the nearest D32 (a tie to the even one) when it has more digits than D32 holds.
+### :returns: The decimal.
+routine U256.to[D32]() -> D32
+    return D32.of(dec_of_integer(neg: false, magnitude: me, f: dec_format32()))
+
+### The integer part of `me`, toward zero, as an S8.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S8.
+failable routine D32.to[S8]() -> S8
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S8]()
+        is S8 as v => v
+
+### The integer part of `me`, toward zero, as an S16.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S16.
+failable routine D32.to[S16]() -> S16
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S16]()
+        is S16 as v => v
+
+### The integer part of `me`, toward zero, as an S32.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S32.
+failable routine D32.to[S32]() -> S32
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S32]()
+        is S32 as v => v
+
+### The integer part of `me`, toward zero, as an S64.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S64.
+failable routine D32.to[S64]() -> S64
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S64]()
+        is S64 as v => v
+
+### The integer part of `me`, toward zero, as an S128.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S128.
+failable routine D32.to[S128]() -> S128
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S128]()
+        is S128 as v => v
+
+### The integer part of `me`, toward zero, as an S256.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit S256.
+failable routine D32.to[S256]() -> S256
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256()
+        is S256 as v => v
+
+### The integer part of `me`, toward zero, as a U8.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U8.
+failable routine D32.to[U8]() -> U8
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U8]()
+        is U8 as v => v
+
+### The integer part of `me`, toward zero, as a U16.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U16.
+failable routine D32.to[U16]() -> U16
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U16]()
+        is U16 as v => v
+
+### The integer part of `me`, toward zero, as a U32.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U32.
+failable routine D32.to[U32]() -> U32
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U32]()
+        is U32 as v => v
+
+### The integer part of `me`, toward zero, as a U64.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U64.
+failable routine D32.to[U64]() -> U64
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U64]()
+        is U64 as v => v
+
+### The integer part of `me`, toward zero, as a U128.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U128.
+failable routine D32.to[U128]() -> U128
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U128]()
+        is U128 as v => v
+
+### The integer part of `me`, toward zero, as a U256.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when `me` is an infinity or a NaN, or its integer part doesn't fit U256.
+failable routine D32.to[U256]() -> U256
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256()
+        is U256 as v => v
+
+# -- the other widths ------------------------------------------------------------
+
+### `me` as a D64: the same value, nothing rounded.
+### :returns: The decimal.
+routine D32.to[D64]() -> D64
+    return D64.of(me.dec().narrow(dec_format64()))
+
+### `me` as a D128: the same value, nothing rounded.
+### :returns: The decimal.
+routine D32.to[D128]() -> D128
+    return D128.of(me.dec())

@@ -2,18 +2,20 @@
 # evaluations at three limbs, the same algorithms and the same error bounds, on values of five words instead of
 # Mp's twenty limbs. dec_ziv tries this before the multiprecision loop, which then starts above 192 bits.
 
+module Ingrid/Decimal
+
 ### Two values.
-record WePair
+secret record WePair
     a: We
     b: We
 
 ### An argument reduced modulo pi/2: x = r + k pi/2, k taken mod 4.
-record WReduced
+secret record WReduced
     k: U64
     r: We
 
 ### A signed fixed-point number: (-1)^neg × mag.
-record XS
+secret record XS
     neg: Bool
     mag: X
 
@@ -24,7 +26,7 @@ record XS
 ### :param y: The second argument (pow and atan2), else ignored.
 ### :param f: The format the result rounds to.
 ### :returns: The result, or not ok.
-routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
+secret routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
     bits: S64 = f.digits * 4 + 40
     v: We = wide_eval(fn, x, y, bits)
     return wide_round(y: v, f)
@@ -40,7 +42,7 @@ routine dec_wide(fn: U32, x: Dec, y: Dec, f: DecFormat) -> DecTry
 ### sum above 0.9997. The tables add 2 units each and the two products 2 each.
 ### :param x: The operand.
 ### :returns: e^x.
-routine we_exp(x: We) -> We
+secret routine we_exp(x: We) -> We
     kf: B64 = x.v.to_b64() *! 1.4426950408889634
     k: S64 = kf.round().to_clamp[S64]()
     ln2k: We = we_mul_u64(a: we_const(DEC_LN2), k: k.abs_diff(0)).with_sign(k < 0)
@@ -92,7 +94,7 @@ routine we_exp(x: We) -> We
 ### e^x - 1: below 2^-24 its own series x + x^2/2 + ..., else e^x - 1 (the cancellation costs at most 24 bits).
 ### :param x: The operand.
 ### :returns: e^x - 1.
-routine we_expm1(x: We) -> We
+secret routine we_expm1(x: We) -> We
     if x.v.exp <= -24
         loop with term: We = x, sum: We = x, i: U64 = 2
             next2: We = we_div_u64(a: we_mul(a: term, b: x), k: i)
@@ -105,7 +107,7 @@ routine we_expm1(x: We) -> We
 ### ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
 ### :param t: The argument, below 1/32 in magnitude.
 ### :returns: ln(1 + t) for |t| < 1/32 by its series t - t^2/2 + t^3/3 ..., the rest after the last term below twice the next.
-routine we_ln1p_series(t: We) -> We
+secret routine we_ln1p_series(t: We) -> We
     # power = t^(i - 1)
     loop with power: We = t, sum: We = t, i: U64 = 2
         next_power2: We = we_mul(a: power, b: t)
@@ -121,7 +123,7 @@ routine we_ln1p_series(t: We) -> We
 ### ln x for x > 0: x = m 2^E with m in [0.75, 1.5), ln x = E ln 2 + ln m (we_ln_reduced).
 ### :param x: The operand.
 ### :returns: ln x for x > 0.
-routine we_ln(x: We) -> We
+secret routine we_ln(x: We) -> We
     top: B64 = x.v.magnitude().top_b64()
     low: Bool = top < 0.75
     e: S64 = x.v.exp - low.to[S64]()
@@ -136,7 +138,7 @@ routine we_ln(x: We) -> We
 ### :param a: The first term.
 ### :param b: The second term.
 ### :returns: The sum.
-routine xs_add(a: XS, b: XS) -> XS
+secret routine xs_add(a: XS, b: XS) -> XS
     if a.neg == b.neg
         return (neg: a.neg, mag: x_add(a: a.mag, b: b.mag))
     if x_compare(a: a.mag, b: b.mag) >= 0
@@ -148,7 +150,7 @@ routine xs_add(a: XS, b: XS) -> XS
 ### :param k: The multiplier.
 ### :returns: The limbs.
 @inline
-routine x_mul_u64(x: X, k: U64) -> WLimbs
+secret routine x_mul_u64(x: X, k: U64) -> WLimbs
     x0: U128 = x.l.mul_wide(k)
     x1: U128 = w_fma(x: x.m, y: k, p: (x0 >> 64).to_wrap[U64](), q: 0)
     x2: U128 = w_fma(x: x.h, y: k, p: (x1 >> 64).to_wrap[U64](), q: 0)
@@ -159,7 +161,7 @@ routine x_mul_u64(x: X, k: U64) -> WLimbs
 ### :param at: The lowest bit kept.
 ### :returns: The bits.
 @inline
-routine x_of_limbs(r: WLimbs, at: S64) -> X
+secret routine x_of_limbs(r: WLimbs, at: S64) -> X
     return (h: r.bits(at + 128), m: r.bits(at + 64), l: r.bits(at))
 
 ### ln m for m in [0.75, 1.5), in fixed point. With M = m 2^191 (its last bit cut), i = round(128 m) and r1 =
@@ -173,7 +175,7 @@ routine x_of_limbs(r: WLimbs, at: S64) -> X
 ### own bound (relative) moves ln m by m.err 2^-192: 3 + m.err units of 2^-192, added at the end.
 ### :param m: The operand, in [0.75, 1.5).
 ### :returns: ln m.
-routine we_ln_reduced(m: We) -> We
+secret routine we_ln_reduced(m: We) -> We
     big: X = x_of_w(r: m.v, scale: 191)
     i: U64 = big.h + U64.shift_left(1, 55) >> 56
     r1: U64 = U64.add(131072, i >> 1) // i
@@ -214,7 +216,7 @@ routine we_ln_reduced(m: We) -> We
 ### :param a: The minuend.
 ### :param b: The subtrahend.
 ### :returns: The difference.
-routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
+secret routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
     d0: U64 = a.l0 -% b.l0
     c0: U64 = (a.l0 < b.l0).to[U64]()
     d1: U64 = a.l1 -% b.l1 -% c0
@@ -233,7 +235,7 @@ routine w_limbs_sub(a: WLimbs, b: WLimbs) -> WLimbs
 ### :param top: The last index.
 ### :param negative: Whether t is negative (all terms add).
 ### :returns: The sum, scaled by 2^190.
-routine we_poly_signed(table: @U64, u: X, top: U64, negative: Bool) -> X
+secret routine we_poly_signed(table: @U64, u: X, top: U64, negative: Bool) -> X
     until k == 0 with k: U64 = top, acc: X = x_entry(table, i: top)
         k2: U64 = k - 1
         c: X = x_entry(table, i: k2)
@@ -247,7 +249,7 @@ routine we_poly_signed(table: @U64, u: X, top: U64, negative: Bool) -> X
 ### ln(1 + t): its series below 2^-24, else ln of the sum (the cancellation costs at most 24 bits).
 ### :param t: The argument.
 ### :returns: ln(1 + t).
-routine we_ln1p(t: We) -> We
+secret routine we_ln1p(t: We) -> We
     if t.v.exp <= -24
         return we_ln1p_series(t)
     return we_ln(we_add(a: we_int(1), b: t))
@@ -256,7 +258,7 @@ routine we_ln1p(t: We) -> We
 ### the first term left out).
 ### :param r: The argument.
 ### :returns: sin r and cos r for |r| below 1 by their Taylor series (alternating with shrinking terms, so the rest is below the first term left out).
-routine we_sincos_series(r: We) -> WePair
+secret routine we_sincos_series(r: We) -> WePair
     r2: We = we_mul(a: r, b: r)
     one: We = we_int(1)
 
@@ -286,7 +288,7 @@ routine we_sincos_series(r: We) -> WePair
 ### within 2.01 × 2^-190 of their values above 0.99997: 8.1 units. The tables add 2 units, each product 2.
 ### :param r: The argument.
 ### :returns: sin r and cos r.
-routine we_sincos(r: We) -> WePair
+secret routine we_sincos(r: We) -> WePair
     big: X = x_of_w(r: r.v, scale: 190)
 
     if r.v.exp > 0
@@ -337,7 +339,7 @@ routine we_sincos(r: We) -> WePair
 ### :param u: The variable, scaled by 2^204.
 ### :param top: The last index.
 ### :returns: The sum, scaled by 2^190.
-routine we_poly(table: @U64, u: X, top: U64) -> X
+secret routine we_poly(table: @U64, u: X, top: U64) -> X
     until k == 0 with k: U64 = top, acc: X = x_entry(table, i: top)
         k2: U64 = k - 1
         c: X = x_entry(table, i: k2)
@@ -349,7 +351,7 @@ routine we_poly(table: @U64, u: X, top: U64) -> X
 ### :param s: The value.
 ### :param delta: The absolute error in units of 2^-192.
 ### :returns: s with the wider bound.
-routine we_widen_abs(s: We, delta: B64) -> We
+secret routine we_widen_abs(s: We, delta: B64) -> We
     t: B64 = s.v.top_b64().abs()
     if s.v.is_zero()
         return (v: s.v, err: B64.from_bits(0x7FF0000000000000))
@@ -363,7 +365,7 @@ routine we_widen_abs(s: We, delta: B64) -> We
 ### 2^-197 by under 2^-203; P (above 0.99999) comes within 2.01 × 2^-190, so 8.3 units with those. The table adds 2.
 ### :param x: The operand.
 ### :returns: atan x.
-routine we_atan(x: We) -> We
+secret routine we_atan(x: We) -> We
     ax: We = x.magnitude()
 
     when
@@ -398,7 +400,7 @@ routine we_atan(x: We) -> We
 ### :param y: The second argument (pow and atan2), else ignored.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: fn(x, y) at 192 bits.
-routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
+secret routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
     when fn
         0 => return we_exp(we_of_dec(x))
         1 => return we_expm1(we_of_dec(x))
@@ -431,7 +433,7 @@ routine wide_eval(fn: U32, x: Dec, y: Dec, bits: S64) -> We
 ### ln x of a finite x > 0: within 1/2 of 1 as ln(1 + t) with t = x - 1 exact in decimal.
 ### :param x: The operand.
 ### :returns: ln x of a finite x > 0.
-routine wide_eval_ln(x: Dec) -> We
+secret routine wide_eval_ln(x: Dec) -> We
     if dec_compare_abs(x, c: 5, q: -1) > 0 and dec_compare_abs(x, c: 15, q: -1) < 0
         return we_ln1p(we_of_dec(dec_plus_int(x, k: -1)))
     return we_ln(we_of_dec(x))
@@ -439,7 +441,7 @@ routine wide_eval_ln(x: Dec) -> We
 ### ln(1 + x) of a finite x > -1: below -1/2 as ln of 1 + x exact in decimal.
 ### :param x: The operand.
 ### :returns: ln(1 + x) of a finite x > -1.
-routine wide_eval_ln1p(x: Dec) -> We
+secret routine wide_eval_ln1p(x: Dec) -> We
     if x.neg and (dec_compare_abs(x, c: 5, q: -1) > 0)
         return we_ln(we_of_dec(dec_plus_int(x, k: 1)))
     return we_ln1p(we_of_dec(x))
@@ -447,7 +449,7 @@ routine wide_eval_ln1p(x: Dec) -> We
 ### 1 - |x| for |x| <= 1: exact in decimal from 1/2 on, else at 192 bits.
 ### :param x: The operand.
 ### :returns: 1 - |x| for |x| <= 1.
-routine wide_one_minus_abs(x: Dec) -> We
+secret routine wide_one_minus_abs(x: Dec) -> We
     ax: Dec = dec_num(neg: false, coeff: x.coeff, exp: x.exp)
 
     if dec_compare_abs(x, c: 5, q: -1) >= 0
@@ -457,7 +459,7 @@ routine wide_one_minus_abs(x: Dec) -> We
 ### asin x for |x| <= 1: atan(x / sqrt(1 - x^2)), 1 - x^2 = (1 - |x|)(1 + |x|) with 1 - |x| exact near 1; ±pi/2 at ±1.
 ### :param x: The operand.
 ### :returns: asin x for |x| <= 1.
-routine wide_eval_asin(x: Dec) -> We
+secret routine wide_eval_asin(x: Dec) -> We
     omx: We = wide_one_minus_abs(x)
 
     if omx.v.is_zero()
@@ -470,7 +472,7 @@ routine wide_eval_asin(x: Dec) -> We
 ### acos x for |x| <= 1: 2 atan(sqrt((1 - x) / (1 + x))), pi at -1.
 ### :param x: The operand.
 ### :returns: acos x for |x| <= 1.
-routine wide_eval_acos(x: Dec) -> We
+secret routine wide_eval_acos(x: Dec) -> We
     omx: We = wide_one_minus_abs(x)
 
     if x.neg and omx.v.is_zero()
@@ -489,7 +491,7 @@ routine wide_eval_acos(x: Dec) -> We
 ### atan x, ±pi/2 for an infinity.
 ### :param x: The operand.
 ### :returns: atan x, ±pi/2 for an infinity.
-routine wide_eval_atan(x: Dec) -> We
+secret routine wide_eval_atan(x: Dec) -> We
     if x.is_inf()
         return we_const(DEC_PI).ldexp(-1).with_sign(x.neg)
     return we_atan(we_of_dec(x))
@@ -497,7 +499,7 @@ routine wide_eval_atan(x: Dec) -> We
 ### sinh x: below 2^-24 its series, else (e^|x| - e^-|x|) / 2 (the cancellation costs at most 24 bits).
 ### :param x: The operand.
 ### :returns: sinh x.
-routine wide_eval_sinh(x: Dec) -> We
+secret routine wide_eval_sinh(x: Dec) -> We
     xm: We = we_of_dec(x)
     x2: We = we_mul(a: xm, b: xm)
 
@@ -515,7 +517,7 @@ routine wide_eval_sinh(x: Dec) -> We
 ### cosh x = (e^|x| + e^-|x|) / 2.
 ### :param x: The operand.
 ### :returns: cosh x = (e^|x| + e^-|x|) / 2.
-routine wide_eval_cosh(x: Dec) -> We
+secret routine wide_eval_cosh(x: Dec) -> We
     e: We = we_exp(we_of_dec(x).magnitude())
     s: We = we_add(a: e, b: we_div(a: we_int(1), b: e))
     return s.ldexp(-1)
@@ -523,7 +525,7 @@ routine wide_eval_cosh(x: Dec) -> We
 ### tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
 ### :param x: The operand.
 ### :returns: tanh x = u / (u + 2) with u = e^(2|x|) - 1, signed.
-routine wide_eval_tanh(x: Dec) -> We
+secret routine wide_eval_tanh(x: Dec) -> We
     u: We = we_expm1(we_of_dec(x).magnitude().ldexp(1))
     t: We = we_div(a: u, b: we_add(a: u, b: we_int(2)))
     return t.with_sign(x.neg)
@@ -531,7 +533,7 @@ routine wide_eval_tanh(x: Dec) -> We
 ### asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
 ### :param x: The operand.
 ### :returns: asinh x = ln(|x| + sqrt(x^2 + 1)), below 1/2 as ln(1 + |x| + x^2 / (1 + sqrt(1 + x^2))), signed.
-routine wide_eval_asinh(x: Dec) -> We
+secret routine wide_eval_asinh(x: Dec) -> We
     ax: We = we_of_dec(x).magnitude()
     one: We = we_int(1)
     x2: We = we_mul(a: ax, b: ax)
@@ -545,7 +547,7 @@ routine wide_eval_asinh(x: Dec) -> We
 ### acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
 ### :param x: The operand.
 ### :returns: acosh x = ln(1 + t + sqrt(t (t + 2))) with t = x - 1 (exact in decimal below 2).
-routine wide_eval_acosh(x: Dec) -> We
+secret routine wide_eval_acosh(x: Dec) -> We
     near: Bool = dec_compare_abs(x, c: 2, q: 0) < 0
     t: We = when
         near => we_of_dec(dec_plus_int(x, k: -1))
@@ -556,7 +558,7 @@ routine wide_eval_acosh(x: Dec) -> We
 ### atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
 ### :param x: The operand.
 ### :returns: atanh x = ln(1 + 2|x| / (1 - |x|)) / 2, 1 - |x| exact near 1, signed.
-routine wide_eval_atanh(x: Dec) -> We
+secret routine wide_eval_atanh(x: Dec) -> We
     ax: We = we_of_dec(x).magnitude()
     omx: We = wide_one_minus_abs(x)
     q: We = we_div(a: ax.ldexp(1), b: omx)
@@ -565,7 +567,7 @@ routine wide_eval_atanh(x: Dec) -> We
 ### cbrt x = e^(ln|x| / 3), signed.
 ### :param x: The operand.
 ### :returns: cbrt x = e^(ln|x| / 3), signed.
-routine wide_eval_cbrt(x: Dec) -> We
+secret routine wide_eval_cbrt(x: Dec) -> We
     l: We = we_div_u64(a: wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp)), k: 3)
     return we_exp(l).with_sign(x.neg)
 
@@ -574,7 +576,7 @@ routine wide_eval_cbrt(x: Dec) -> We
 ### :param ax: The magnitude of the argument.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: erf |x|.
-routine we_erf_positive(ax: We, bits: S64) -> We
+secret routine we_erf_positive(ax: We, bits: S64) -> We
     x2: We = we_mul(a: ax, b: ax)
     x2f: B64 = x2.v.to_b64()
 
@@ -591,7 +593,7 @@ routine we_erf_positive(ax: We, bits: S64) -> We
 ### :param y: 2 x^2.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: erf |x|.
-routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
+secret routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
     yf: B64 = y.v.to_b64()
 
     loop with term: W = ax.v, sum: W = ax.v, i: U64 = 3, n: U64 = 0
@@ -611,7 +613,7 @@ routine we_erf_series(ax: We, x2: We, y: We, bits: S64) -> We
 ### :param ax: The magnitude of the argument.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: erfc x for x >= 1/2 by its asymptotic series e^(-x^2) / (x sqrt(pi)) Σ (-1)^k (2k - 1)!! / (2x^2)^k, cut at its smallest term or where terms stop mattering.
-routine we_erfc_asymptotic(ax: We, bits: S64) -> We
+secret routine we_erfc_asymptotic(ax: We, bits: S64) -> We
     x2: We = we_mul(a: ax, b: ax)
     inv: We = we_div(a: we_int(1), b: x2.ldexp(1))
     one: We = we_int(1)
@@ -647,7 +649,7 @@ routine we_erfc_asymptotic(ax: We, bits: S64) -> We
 ### :param complement: Whether erfc is wanted rather than erf.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: erf x (complement false) or erfc x.
-routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
+secret routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
     ax: We = we_of_dec(x).magnitude()
 
     when
@@ -687,7 +689,7 @@ routine wide_eval_erf(x: Dec, complement: Bool, bits: S64) -> We
 ### :param z: The argument.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: ln Γ(z).
-routine we_lngamma_stirling(z: We, bits: S64) -> We
+secret routine we_lngamma_stirling(z: We, bits: S64) -> We
     inv: We = we_recip(z)
     w: We = we_mul(a: inv, b: inv)
     zf: B64 = z.v.to_b64()
@@ -742,7 +744,7 @@ secret routine we_stirling_terms(limit: B64, wf: B64) -> (U64, B64, B64, B64)
 ### B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
 ### :param k: Which coefficient, from 0.
 ### :returns: B_2(k+1) / ((2k + 2)(2k + 1)) with its sign.
-routine wide_stirling_coefficient(k: U64) -> We
+secret routine wide_stirling_coefficient(k: U64) -> We
     c: We = we_const(DEC_STIRLING.add(k))
     neg: Bool = k & 1 == 1
     return c.with_sign(neg)
@@ -754,7 +756,7 @@ routine wide_stirling_coefficient(k: U64) -> We
 ### :param log: Whether the logarithm is wanted.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: Γ(x) (log false) or ln|Γ(x)| (log true) of a finite x that is not a pole.
-routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
+secret routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
     if x.neg
         k: Dec = dec_round_int(x, mode: 4, f: dec_format128())
         r: Dec = dec_add(a: x, b: k.negate(), f: dec_format128())
@@ -776,7 +778,7 @@ routine wide_eval_gamma(x: Dec, log: Bool, bits: S64) -> We
 ### both are within a factor of two).
 ### :param r: The argument.
 ### :returns: sin(pi r) for |r| <= 1/2.
-routine we_sin_of_pi_times(r: We) -> We
+secret routine we_sin_of_pi_times(r: We) -> We
     if r.v.exp >= -1
         s: We = we_sub(a: we_exact(w_of_u128(v: 1, scale: -1)), b: r.magnitude())
         c: We = we_sincos(we_mul(a: s, b: we_const(DEC_PI))).b
@@ -788,7 +790,7 @@ routine we_sin_of_pi_times(r: We) -> We
 ### beyond that dec_reduce's multiprecision reduction, narrowed to 192 bits.
 ### :param x: The operand.
 ### :returns: x reduced modulo pi/2.
-routine wide_reduce(x: Dec) -> WReduced
+secret routine wide_reduce(x: Dec) -> WReduced
     small: Bool = dec_compare_abs(x, c: 785, q: -3) < 0
     top: S64 = dec_digits(x.coeff) + x.exp
     when
@@ -812,7 +814,7 @@ routine wide_reduce(x: Dec) -> WReduced
 ### :param log: Whether the logarithm is wanted.
 ### :param bits: The precision the result needs, in bits.
 ### :returns: Γ(z) or ln Γ(z) for z > 0.
-routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
+secret routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
     lift: B64 = (bits + 741).to[B64]()
     floor: B64 = (lift /! 199.0).exp2_unchecked()
     zf: B64 = z.v.to_b64()
@@ -846,7 +848,7 @@ routine wide_gamma_positive(z: We, log: Bool, bits: S64) -> We
 ### :param x: The operand.
 ### :param which: 0 sine, 1 cosine, 2 tangent.
 ### :returns: sin (which 0), cos (1), or tan (2) of a finite x.
-routine wide_eval_trig(x: Dec, which: U64) -> We
+secret routine wide_eval_trig(x: Dec, which: U64) -> We
     red: WReduced = wide_reduce(x)
     sc: WePair = we_sincos(red.r)
     s: We = wide_quadrant(k: red.k, sc)
@@ -860,7 +862,7 @@ routine wide_eval_trig(x: Dec, which: U64) -> We
 ### :param k: The quarter turns.
 ### :param sc: Sine and cosine of the reduced argument.
 ### :returns: sin(r + k pi/2) from sin r and cos r.
-routine wide_quadrant(k: U64, sc: WePair) -> We
+secret routine wide_quadrant(k: U64, sc: WePair) -> We
     q: U64 = k & 3
     when q
         0 => return sc.a
@@ -873,7 +875,7 @@ routine wide_quadrant(k: U64, sc: WePair) -> We
 ### :param x: The base.
 ### :param y: The exponent.
 ### :returns: |x|^y = e^(y ln|x|), negated for a negative x and an odd integer y (finite x and y, x nonzero, the result not past the range.
-routine wide_eval_pow(x: Dec, y: Dec) -> We
+secret routine wide_eval_pow(x: Dec, y: Dec) -> We
     l: We = wide_eval_ln(dec_num(neg: false, coeff: x.coeff, exp: x.exp))
     z: We = we_mul(a: we_of_dec(y), b: l)
     neg: Bool = x.neg and dec_is_odd_integer(y)
@@ -883,7 +885,7 @@ routine wide_eval_pow(x: Dec, y: Dec) -> We
 ### :param y: The ordinate.
 ### :param x: The abscissa.
 ### :returns: The angle of (x, y) for finite nonzero x and y.
-routine wide_eval_atan2(y: Dec, x: Dec) -> We
+secret routine wide_eval_atan2(y: Dec, x: Dec) -> We
     a: We = we_atan(we_div(a: we_of_dec(y), b: we_of_dec(x)))
     if x.neg
         pi: We = we_const(DEC_PI).with_sign(y.neg)
@@ -897,7 +899,7 @@ routine wide_eval_atan2(y: Dec, x: Dec) -> We
 ### :param y: The value with its bound.
 ### :param f: The format the result rounds to.
 ### :returns: The decimal, or not ok when the band reaches a midpoint.
-routine wide_round(y: We, f: DecFormat) -> DecTry
+secret routine wide_round(y: We, f: DecFormat) -> DecTry
     neg: Bool = y.v.neg
     ay: We = y.magnitude()
     p: S64 = f.digits
@@ -969,7 +971,7 @@ routine wide_round(y: We, f: DecFormat) -> DecTry
 ### :param x: The value.
 ### :param s: How many bits.
 ### :returns: The bits.
-routine w_fraction(x: W, s: U64) -> X
+secret routine w_fraction(x: W, s: U64) -> X
     if s >= 128
         return (h: x.h & U64.shift_left(1, s - 128) - 1, m: x.m, l: x.l)
     return (h: 0, m: x.m & U64.shift_left(1, s - 64) - 1, l: x.l)
@@ -977,7 +979,7 @@ routine w_fraction(x: W, s: U64) -> X
 ### x as a B64 (rounded): h 2^128 + m 2^64 + l.
 ### :param x: The number.
 ### :returns: Its value.
-routine x_to_b64(x: X) -> B64
+secret routine x_to_b64(x: X) -> B64
     h: B64 = x.h.to[B64]() *! b64_pow2(128)
     m: B64 = x.m.to[B64]() *! b64_pow2(64)
     return h +! m +! x.l.to[B64]()
@@ -985,7 +987,7 @@ routine x_to_b64(x: X) -> B64
 ### 2^k as a fixed-point number (k < 192).
 ### :param k: The power.
 ### :returns: 2^k.
-routine x_power(k: U64) -> X
+secret routine x_power(k: U64) -> X
     when
         k >= 128 => return (h: U64.shift_left(1, k - 128), m: 0, l: 0)
         k >= 64 => return (h: 0, m: U64.shift_left(1, k - 64), l: 0)
@@ -995,7 +997,7 @@ routine x_power(k: U64) -> X
 ### :param a: The first number.
 ### :param b: The second number.
 ### :returns: -1, 0, or 1.
-routine x_compare(a: X, b: X) -> S32
+secret routine x_compare(a: X, b: X) -> S32
     when
         a.h != b.h => return w_order(a.h < b.h)
         a.m != b.m => return w_order(a.m < b.m)
@@ -1005,7 +1007,7 @@ routine x_compare(a: X, b: X) -> S32
 ### floor(|x|) of a W below 2^128 (mp_floor_u128 at three limbs).
 ### :param x: The operand.
 ### :returns: floor(|x|).
-routine w_floor_u128(x: W) -> U128
+secret routine w_floor_u128(x: W) -> U128
     when
         x.is_zero() => return 0
         x.exp <= 0 => return 0

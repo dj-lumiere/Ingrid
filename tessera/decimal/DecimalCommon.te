@@ -1,0 +1,110 @@
+# What the Tessera types D32, D64, D128, and Decimal share on top of the engine: integers made into decimals, the
+# integer part of a decimal, a value read from text, and the fields its text is written from.
+
+module Ingrid/Decimal
+
+### How a Decimal value exactly halfway between two digits rounds, in every rounding Decimal does (a quotient, a
+### value read from text, an integer or a binary float with more digits, the text with a fixed count of digits): away
+### from zero, 2.5 to 3 and -2.5 to -3. D32, D64, and D128 round a tie to the even one, as IEEE 754 does.
+secret preset DECIMAL_TIES: U8 = DEC_TIES_AWAY
+
+### The integer part of a finite decimal: its sign and its magnitude.
+secret record DecInt
+    ### Whether the decimal is negative.
+    neg: Bool
+    ### The magnitude, the fraction cut off.
+    magnitude: U256
+
+### Decimal's format: decimal128's 34 digits and exponents, a tie rounded as DECIMAL_TIES says.
+### :returns: The format.
+@inline
+secret routine decimal_format() -> DecFormat
+    return (digits: 34, qmin: -6176, qmax: 6111, ties: DECIMAL_TIES)
+
+### The integer (-1)^neg × magnitude as a decimal, rounded to f.
+### :param neg: Whether it is negative.
+### :param magnitude: Its magnitude.
+### :param f: The format the result rounds to.
+### :returns: The decimal.
+secret routine dec_of_integer(neg: Bool, magnitude: U256, f: DecFormat) -> Dec
+    return dec_finish(value: DecExact(neg, coeff: magnitude, exp: 0, pref: 0), f)
+
+### The integer part of `d`, toward zero.
+### :param d: The decimal.
+### :returns: Its sign and magnitude.
+### :throws: Throws `IntegerOverflowError` when `d` is an infinity or a NaN, or its integer part needs more than 256
+###     bits.
+secret failable routine dec_int_part(d: Dec) -> DecInt
+    if not d.is_finite()
+        throw IntegerOverflowError()
+    if d.coeff == 0
+        return (neg: d.neg, magnitude: 0)
+    if d.exp < 0
+        cut: S64 = 0 - d.exp
+        kept: U128 = when
+            cut > 38 => 0
+            else => dec_div_p10(x: d.coeff, k: cut)
+        return (neg: d.neg, magnitude: kept.to[U256]())
+    if d.exp > 76
+        throw IntegerOverflowError()
+    magnitude: U256 = when check d.coeff.to[U256]() * dec_p10(d.exp)
+        is U256 as m => m
+    return (neg: d.neg, magnitude: magnitude)
+
+### The integer part as an S256.
+### :returns: The value.
+### :throws: Throws `IntegerOverflowError` when it doesn't fit.
+secret failable routine DecInt.to_s256() -> S256
+    if me.magnitude >= 0x8000000000000000000000000000000000000000000000000000000000000000
+        throw IntegerOverflowError()
+    value: S256 = me.magnitude.to_wrap[S256]()
+    if me.neg
+        return 0 - value
+    return value
+
+### The integer part as an unsigned magnitude: a negative one is an overflow (a negative zero is 0).
+### :returns: The magnitude.
+### :throws: Throws `IntegerOverflowError` when the integer part is negative.
+secret failable routine DecInt.to_u256() -> U256
+    if me.neg and me.magnitude != 0
+        throw IntegerOverflowError()
+    return me.magnitude
+
+### A decimal rounded to an integral value: `mode` 0 toward zero, 1 down, 2 up, 3 to nearest with ties away from
+### zero, 4 to nearest with ties to even. An integral value, an infinity, and a NaN stay as they are.
+### :param d: The decimal.
+### :param mode: The rounding.
+### :param f: The format of `d`.
+### :returns: The rounded value.
+secret routine dec_integral(d: Dec, mode: U32, f: DecFormat) -> Dec
+    if dec_is_integral_as_is(d)
+        return d
+    return dec_round_int(x: d, mode, f)
+
+### The fields a decimal's text is written from.
+### :param d: The decimal.
+### :returns: Its fields.
+@inline
+secret routine dec_fields(d: Dec) -> DecimalFields
+    return (negative: d.neg, special: d.kind.to[U32](), exp: d.exp, coeff: d.coeff)
+
+### Whether text is empty or only a sign, which reads as no value at all.
+### :param text: The text.
+### :returns: `true` when there is no digit to read.
+secret routine dec_text_is_empty(text: @[Byte]) -> Bool
+    if text.count == 0
+        return true
+    first: Byte = text.getitem(0)
+    return text.count == 1 and (first == b'+' or first == b'-')
+
+### The decimal read from text, rounded once to f: an infinity, a NaN, or the scanned value at its own exponent.
+### :param scanned: The text's fields (not `bad`).
+### :param f: The format the result rounds to.
+### :returns: The decimal.
+secret routine dec_from_scan(scanned: DecScanned, f: DecFormat) -> Dec
+    if scanned.special == 1
+        return dec_inf(neg: scanned.negative)
+    if scanned.special == 2
+        return dec_nan()
+    exact: DecExact = (neg: scanned.negative, coeff: scanned.coeff.to[U256](), exp: scanned.exp, pref: scanned.exp)
+    return dec_finish(value: exact, f)

@@ -1,5 +1,5 @@
-# How an Ingrid export hands RazorForge a result wider than one register (a C128, a Q128, a Q256, a B128, or several
-# values at once).
+# What Ingrid's exports hand RazorForge and Suflae: a result wider than one register (a C128, a Q128, a Q256, a B128,
+# or several values at once) in Words, and text as code points in the caller's buffer through Utf32Writer.
 #
 # A small record of floats crosses a call by rules that differ between targets (Win64 passes 16 bytes through
 # memory, System V splits them over two registers, AArch64 passes up to four floats of one type as a homogeneous
@@ -7,6 +7,8 @@
 # words make 32 bytes of integers, which every target returns through a hidden pointer the caller passes, in the
 # same form from both builders. RazorForge declares the same record (IngridWords in Core/NativeDeclarations.rf) and
 # reads each float back from its word's bits: a B64 fills a word, a B32 the word's low half.
+
+module Ingrid/Abi
 
 ### Four 64-bit words, returned through a hidden pointer on every target.
 record Words
@@ -73,3 +75,51 @@ routine b128_from_halves(low: U64, high: U64) -> B128
     top: U128 = high.to[U128]() << 64
     bits: U128 = top | low.to[U128]()
     return B128.from_bits(bits)
+
+# ── text ─────────────────────────────────────────────────────────────────────────
+
+### Text going into a caller's buffer of code points: what doesn't fit is counted but not written.
+record Utf32Writer
+obeys Writer[Utf32Writer]
+    data: @U32
+    capacity: U64
+    count: U64
+
+### A writer over `capacity` code points at `data`, with nothing written yet.
+### :param data: The first code point of the buffer.
+### :param capacity: How many code points the buffer has room for.
+### :returns: The writer.
+common routine Utf32Writer.construct(data: @U32, capacity: U64) -> Me
+    w: Me = Me(data: data, capacity: capacity, count: 0)
+    return w
+
+### Writes one code point, or only counts it when the buffer is full.
+### :param c: The code point.
+routine @Utf32Writer.put(c: U32) -> None
+    used: U64 = me.count.peek()
+    room: U64 = me.capacity.peek()
+    if used < room
+        to: @U32 = me.data.peek()
+        to.stride(used).poke(c)
+    me.count.poke(used + 1)
+    return
+
+### Writes ASCII bytes, one code point each.
+### :param data: The first byte.
+### :param count: How many bytes.
+routine @Utf32Writer.write_bytes(data: @Byte, count: U64) -> None
+    each i: U64 in 0 til count
+        b: Byte = data.stride(i).peek()
+        me.put(b.to[U8]().to[U32]())
+    return
+
+### Writes the decimal digit `d`.
+### :param d: The digit, 0 to 9.
+routine @Utf32Writer.digit(d: U8) -> None
+    me.put(d.to[U32]() + 48)
+    return
+
+### How many code points the writer was given.
+### :returns: The text's length, what fit and what didn't.
+routine @Utf32Writer.written() -> U64
+    return me.count.peek()

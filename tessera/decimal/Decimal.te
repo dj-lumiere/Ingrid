@@ -1,0 +1,445 @@
+# Decimal: a decimal number of 34 significant digits that is always finite, kept in decimal128's BID encoding. Its
+# `+`, `-`, and `*` are exact or fail, and its text drops the zeros after the point that don't change the value.
+
+module Ingrid/Decimal
+
+### A finite decimal number: up to 34 significant digits and a power of ten from -6176 to 6111, never an infinity or
+### a NaN. `+`, `-`, and `*` are exact: a result that needs more than 34 digits throws `NumericOverflowError` instead of
+### rounding. `/` rounds to 34 digits. Every rounding Decimal does (`/`, text read in, an integer or a float with more
+### digits, the text with a fixed count of digits) takes a value exactly halfway away from zero: 2.5 to 3, -2.5 to -3.
+### Its text drops the zeros after the point (`2.50` is written `2.5`), and values
+### compare by number (`1.0` equals `1.00`).
+record Decimal
+obeys Equatable[Decimal], Comparable[Decimal]
+obeys Addable[Decimal], Subtractable[Decimal], Multiplicable[Decimal], Divisible[Decimal], Negatable[Decimal]
+obeys Representable[Decimal], Diagnosable[Decimal], FixedRepresentable[Decimal], Parsable[Decimal]
+    ### The BID encoding of a finite decimal128.
+    secret encoding: U128
+
+# -- bits ----------------------------------------------------------------------
+
+### `me` taken apart for the engine.
+### :returns: The fields.
+@inline
+secret routine Decimal.dec() -> Dec
+    return dec_from128(me.encoding)
+
+### The Decimal of the engine's finite value `d`, already rounded to 34 digits.
+### :param d: The value.
+### :returns: The decimal.
+@inline
+secret common routine Decimal.of(d: Dec) -> Me
+    return Me(encoding: d.to128())
+
+### The Decimal of a value the engine rounded, which crashes when that is an infinity or a NaN.
+### :param d: The value.
+### :returns: The decimal.
+### :throws: Crashes with `NumericOverflowError` when `d` is an infinity and with `NumericDomainError` when it is a
+###     NaN.
+@track_caller
+secret common routine Decimal.of_finite(d: Dec) -> Me
+    if d.is_nan()
+        crash(name: "NumericDomainError",
+            message: "The result is not a number, which a Decimal can't be.")
+    if d.is_inf()
+        crash(name: "NumericOverflowError", message: "The result is out of Decimal's range.")
+    return Me.of(d)
+
+### An exact result as a Decimal, or the failure when it has more than 34 significant digits.
+### :param exact: The exact value.
+### :returns: The decimal.
+### :throws: Throws `NumericOverflowError` when the exact value needs more than 34 significant digits or is out of
+###     Decimal's range.
+secret failable common routine Decimal.exactly(exact: DecExact) -> Me
+    f: DecFormat = decimal_format()
+    if not dec_exact_in(value: exact, f)
+        throw NumericOverflowError()
+    r: Dec = dec_finish(value: exact, f)
+    if not r.is_finite()
+        throw NumericOverflowError()
+    return Me.of(r)
+
+### Zero.
+### :returns: `0`.
+common routine Decimal.zero() -> Me
+    return Me.of(dec_num(neg: false, coeff: 0, exp: 0))
+
+### Whether `me` is zero.
+### :returns: `true` for zero.
+routine Decimal.is_zero() -> Bool
+    return me.dec().is_zero()
+
+### Whether `me` is below zero.
+### :returns: `true` for a negative value (not for zero).
+routine Decimal.is_negative() -> Bool
+    d: Dec = me.dec()
+    return d.neg and not d.is_zero()
+
+# -- arithmetic ----------------------------------------------------------------
+
+### The exact sum of `me` and `other`.
+### :param other: The number added.
+### :returns: The sum.
+### :throws: Throws `NumericOverflowError` when the sum needs more than 34 significant digits.
+failable routine Decimal.add(other: Me) -> Me
+    return when check Me.exactly(dec_sum(a: me.dec(), b: other.dec()))
+        is Me as sum => sum
+
+### The exact difference `me - other`.
+### :param other: The number taken away.
+### :returns: The difference.
+### :throws: Throws `NumericOverflowError` when the difference needs more than 34 significant digits.
+failable routine Decimal.sub(other: Me) -> Me
+    return when check Me.exactly(dec_sum(a: me.dec(), b: other.dec().negate()))
+        is Me as difference => difference
+
+### The exact product of `me` and `other`.
+### :param other: The other factor.
+### :returns: The product.
+### :throws: Throws `NumericOverflowError` when the product needs more than 34 significant digits.
+failable routine Decimal.mul(other: Me) -> Me
+    return when check Me.exactly(dec_product(a: me.dec(), b: other.dec()))
+        is Me as product => product
+
+### `me / other` rounded to 34 significant digits (a tie as {Decimal} rounds one). An exact quotient keeps no more
+### trailing zeros than it needs to reach the exponent `me`'s minus `other`'s.
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `other` is zero, and with `NumericOverflowError` when the quotient
+###     is out of Decimal's range.
+@track_caller
+routine Decimal.truediv(other: Me) -> Me
+    if other.is_zero()
+        crash_division_by_zero()
+    return Me.of_finite(dec_div(a: me.dec(), b: other.dec(), f: decimal_format()))
+
+### `-me`.
+### :returns: The negated number.
+routine Decimal.neg() -> Me
+    return Me.of(me.dec().negate())
+
+### `me` without its sign.
+### :returns: The absolute value.
+routine Decimal.abs() -> Me
+    d: Dec = me.dec()
+    if d.neg
+        return Me.of(d.negate())
+    return me
+
+### `me` with its fraction cut off, toward zero.
+### :returns: The whole part.
+routine Decimal.trunc() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 0, f: decimal_format()))
+
+### `me` rounded down to a whole number.
+### :returns: The whole number.
+routine Decimal.floor() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 1, f: decimal_format()))
+
+### `me` rounded up to a whole number.
+### :returns: The whole number.
+routine Decimal.ceil() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 2, f: decimal_format()))
+
+### `me` rounded to the nearest whole number, a tie away from zero.
+### :returns: The whole number.
+routine Decimal.round() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 3, f: decimal_format()))
+
+### `me` rounded to the nearest whole number, a tie to the even one.
+### :returns: The whole number.
+routine Decimal.round_ties_even() -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: 4, f: decimal_format()))
+
+# -- comparison ----------------------------------------------------------------
+
+### Whether `me` and `other` are the same number (`1.0` equals `1.00`, `0` equals `-0`).
+### :param other: The value to compare with.
+### :returns: `true` when they are equal.
+routine Decimal.eq(other: Me) -> Bool
+    return dec_order(a: me.dec(), b: other.dec()) == 0
+
+### Three-way comparison for the `Comparable` conformance.
+### :param other: The value to compare with.
+### :returns: -1 when `me < other`, 0 when they are equal, and 1 when `me > other`.
+routine Decimal.compare(other: Me) -> S32
+    order: S64 = dec_order(a: me.dec(), b: other.dec())
+    if order == -1
+        return -1
+    if order == 1
+        return 1
+    return 0
+
+### The smaller of `me` and `other`.
+### :param other: The value to compare with.
+### :returns: The smaller value.
+routine Decimal.min(other: Me) -> Me
+    if me <= other
+        return me
+    return other
+
+### The larger of `me` and `other`.
+### :param other: The value to compare with.
+### :returns: The larger value.
+routine Decimal.max(other: Me) -> Me
+    if me >= other
+        return me
+    return other
+
+### `me` held between `lo` and `hi`.
+### :param lo: The lower bound.
+### :param hi: The upper bound.
+### :returns: `lo` below it, `hi` above it, else `me`.
+routine Decimal.clamp(lo: Me, hi: Me) -> Me
+    return me.max(lo).min(hi)
+
+# -- text ----------------------------------------------------------------------
+
+### Writes `me` with the zeros after the point that don't change the value dropped (`2.5`, `100`, `0.001`), in
+### `d.dddE+x` form when the exponent is above 0 or the value is below 1e-6.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+routine Decimal.represent_into[T](out: @T) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 1, places: 0)
+    return
+
+### Writes `Decimal(` and `me`'s text and `)`.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+routine Decimal.diagnose_into[T](out: @T) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 3, places: 0)
+    return
+
+### Writes `me` with exactly `digits` digits after the point, rounded from its exact value (a tie as {Decimal}
+### rounds one), the integer part written in full.
+### :typeparam T: The type of the Writer that receives the text.
+### :param out: The Writer the text is written to.
+### :param digits: The digits after the point.
+routine Decimal.represent_fixed_into[T](out: @T, digits: U64) -> None
+needs T: typename, Writer[T]
+    write_decimal_text(out, fields: dec_fields(me.dec()), style: 4, places: digits)
+    return
+
+### The text as a Decimal, rounded once to 34 digits (a tie as {Decimal} rounds one). Accepts an optional sign
+### and digits with an optional point and an `e` or `E` exponent.
+### :returns: The decimal.
+### :throws: Throws `EmptyTextError` for an empty text or a sign alone, `InvalidValueError` for any other text that is
+###     not a finite number (`inf` and `nan` included), and `OutOfRangeError` for a number past Decimal's range.
+failable routine @[Byte].to[Decimal]() -> Decimal
+    if dec_text_is_empty(me)
+        throw EmptyTextError(text: me, target: "Decimal")
+    scanned: DecScanned = dec_scan(chars: DecBytes(text: me))
+    if scanned.bad or scanned.special != 0
+        throw InvalidValueError(text: me, target: "Decimal")
+    d: Dec = dec_from_scan(scanned, f: decimal_format())
+    if not d.is_finite()
+        throw OutOfRangeError(text: me, target: "Decimal")
+    return Decimal.of(d)
+
+# -- other numbers -------------------------------------------------------------
+
+### `me` as a D128: the same value.
+### :returns: The decimal.
+routine Decimal.to[D128]() -> D128
+    return D128.of(me.dec())
+
+### `me` as a Decimal: the same value.
+### :returns: The decimal.
+### :throws: Crashes with `NumericOverflowError` when `me` is an infinity and with `NumericDomainError` when it is a
+###     NaN.
+@track_caller
+routine D128.to[Decimal]() -> Decimal
+    return Decimal.of_finite(me.dec())
+
+### `me` as a Decimal: the same value.
+### :returns: The decimal.
+### :throws: Crashes with `NumericOverflowError` when `me` is an infinity and with `NumericDomainError` when it is a
+###     NaN.
+@track_caller
+routine D64.to[Decimal]() -> Decimal
+    return Decimal.of_finite(me.dec())
+
+### `me` as a Decimal: the same value.
+### :returns: The decimal.
+### :throws: Crashes with `NumericOverflowError` when `me` is an infinity and with `NumericDomainError` when it is a
+###     NaN.
+@track_caller
+routine D32.to[Decimal]() -> Decimal
+    return Decimal.of_finite(me.dec())
+
+# -- integers ------------------------------------------------------------------
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S8.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S16.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S32.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S64.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S128.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0).to[U256](),
+        f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine S256.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: me < 0, magnitude: me.abs_diff(0), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U8.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U16.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U32.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U64.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U128.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me.to[U256](), f: decimal_format()))
+
+### `me` as a Decimal, rounded to 34 digits (a tie as {Decimal} rounds one) when it has more.
+### :returns: The decimal.
+routine U256.to[Decimal]() -> Decimal
+    return Decimal.of(dec_of_integer(neg: false, magnitude: me, f: decimal_format()))
+
+### The integer part of `me`, toward zero, as an S8.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S8.
+failable routine Decimal.to[S8]() -> S8
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S8]()
+        is S8 as v => v
+
+### The integer part of `me`, toward zero, as an S16.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S16.
+failable routine Decimal.to[S16]() -> S16
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S16]()
+        is S16 as v => v
+
+### The integer part of `me`, toward zero, as an S32.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S32.
+failable routine Decimal.to[S32]() -> S32
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S32]()
+        is S32 as v => v
+
+### The integer part of `me`, toward zero, as an S64.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S64.
+failable routine Decimal.to[S64]() -> S64
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S64]()
+        is S64 as v => v
+
+### The integer part of `me`, toward zero, as an S128.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S128.
+failable routine Decimal.to[S128]() -> S128
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256().to[S128]()
+        is S128 as v => v
+
+### The integer part of `me`, toward zero, as an S256.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit S256.
+failable routine Decimal.to[S256]() -> S256
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_s256()
+        is S256 as v => v
+
+### The integer part of `me`, toward zero, as a U8.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U8.
+failable routine Decimal.to[U8]() -> U8
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U8]()
+        is U8 as v => v
+
+### The integer part of `me`, toward zero, as a U16.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U16.
+failable routine Decimal.to[U16]() -> U16
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U16]()
+        is U16 as v => v
+
+### The integer part of `me`, toward zero, as a U32.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U32.
+failable routine Decimal.to[U32]() -> U32
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U32]()
+        is U32 as v => v
+
+### The integer part of `me`, toward zero, as a U64.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U64.
+failable routine Decimal.to[U64]() -> U64
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U64]()
+        is U64 as v => v
+
+### The integer part of `me`, toward zero, as a U128.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U128.
+failable routine Decimal.to[U128]() -> U128
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256().to[U128]()
+        is U128 as v => v
+
+### The integer part of `me`, toward zero, as a U256.
+### :returns: The integer.
+### :throws: Throws `IntegerOverflowError` when its integer part doesn't fit U256.
+failable routine Decimal.to[U256]() -> U256
+    part: DecInt = when check dec_int_part(me.dec())
+        is DecInt as p => p
+    return when check part.to_u256()
+        is U256 as v => v

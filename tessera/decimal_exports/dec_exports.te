@@ -9,6 +9,11 @@
 #
 # D32 and D64 run the D128 engine: the same exact (or sticky) intermediate, rounded once to their own width.
 
+module Ingrid/Decimal/Exports
+
+import Ingrid/Abi
+import Ingrid/Decimal
+
 ### The D128 whose BID bits are high × 2^64 + low.
 ### :param low: The low 64 bits.
 ### :param high: The high 64 bits.
@@ -855,11 +860,92 @@ routine ingrid_d32_from_d128(x_low: U64, x_high: U64) -> U32
     d: Dec = dec_halves(low: x_low, high: x_high)
     return dec_reduced(d, f: dec_format32()).to32()
 
-### d rounded once to f and reduced (a special passes through).
-### :param d: The decimal.
-### :param f: The format the result rounds to.
-### :returns: d rounded once to f and reduced (a special passes through).
-routine dec_reduced(d: Dec, f: DecFormat) -> Dec
-    if d.is_finite()
-        return dec_round_reduced(neg: d.neg, coeff: d.coeff.to[U256](), exp: d.exp, f)
-    return d
+# ── Decimal: D128's encoding, rounded the way Decimal rounds a tie (decimal_format) ──────────────────────
+
+### `a + b` rounded to 34 digits, a tie the way Decimal rounds one.
+### :param a_low: The low 64 bits of the first operand.
+### :param a_high: The high 64 bits of the first operand.
+### :param b_low: The low 64 bits of the second operand.
+### :param b_high: The high 64 bits of the second operand.
+### :returns: The sum, in Words.
+@export("ingrid_decimal_add")
+routine ingrid_decimal_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return r.words()
+
+### `a * b` rounded to 34 digits, a tie the way Decimal rounds one.
+### :param a_low: The low 64 bits of the first factor.
+### :param a_high: The high 64 bits of the first factor.
+### :param b_low: The low 64 bits of the second factor.
+### :param b_high: The high 64 bits of the second factor.
+### :returns: The product, in Words.
+@export("ingrid_decimal_mul")
+routine ingrid_decimal_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_mul(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return r.words()
+
+### `a / b` rounded to 34 digits, a tie the way Decimal rounds one: a nonzero value over zero is an infinity, zero
+### over zero a NaN.
+### :param a_low: The low 64 bits of the dividend.
+### :param a_high: The high 64 bits of the dividend.
+### :param b_low: The low 64 bits of the divisor.
+### :param b_high: The high 64 bits of the divisor.
+### :returns: The quotient, in Words.
+@export("ingrid_decimal_div")
+routine ingrid_decimal_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_div(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return r.words()
+
+### `a * b + c` rounded once to 34 digits, a tie the way Decimal rounds one.
+### :param a_low: The low 64 bits of the first factor.
+### :param a_high: The high 64 bits of the first factor.
+### :param b_low: The low 64 bits of the second factor.
+### :param b_high: The high 64 bits of the second factor.
+### :param c_low: The low 64 bits of the addend.
+### :param c_high: The high 64 bits of the addend.
+### :returns: The result, in Words.
+@export("ingrid_decimal_mul_add")
+routine ingrid_decimal_mul_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64, c_low: U64,
+    c_high: U64) -> Words
+    r: Dec = dec_mul_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), c: dec_halves(low: c_low, high: c_high),
+        f: decimal_format())
+    return r.words()
+
+### (-1)^neg × c × 10^exp rounded to 34 digits, a tie the way Decimal rounds one.
+### :param neg: 1 for a negative value, else 0.
+### :param c_low: The low 64 bits of the coefficient.
+### :param c_high: The high 64 bits of the coefficient.
+### :param exp: The exponent.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_parts")
+routine ingrid_decimal_from_parts(neg: U32, c_low: U64, c_high: U64, exp: S64) -> Words
+    c: U256 = (c_high.to[U256]() << 64) | c_low.to[U256]()
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: c, exp: exp, pref: exp),
+        f: decimal_format())
+    return r.words()
+
+### An integer of up to 256 bits rounded to 34 digits, a tie the way Decimal rounds one.
+### :param neg: 1 for a negative integer, else 0.
+### :param m0: Bits 0 to 63 of the magnitude.
+### :param m1: Bits 64 to 127 of the magnitude.
+### :param m2: Bits 128 to 191 of the magnitude.
+### :param m3: Bits 192 to 255 of the magnitude.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_integer")
+routine ingrid_decimal_from_integer(neg: U32, m0: U64, m1: U64, m2: U64, m3: U64) -> Words
+    r: Dec = dec_of_integer(neg: neg == 1, magnitude: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3),
+        f: decimal_format())
+    return r.words()
+
+### A binary float (as B128 bits) rounded once to 34 digits and reduced, a tie the way Decimal rounds one.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_binary")
+routine ingrid_decimal_from_binary(low: U64, high: U64) -> Words
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from_binary(bits, f: decimal_format()).words()

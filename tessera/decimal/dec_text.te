@@ -1,36 +1,51 @@
-# The text of RazorForge's decimals D32, D64, D128, and Decimal, given the decoded fields of a value: the sign, the
-# special kind (0 finite, 1 an infinity, 2 a quiet NaN, 3 a signaling NaN), the base-10 exponent, and the integer
-# coefficient as two 64-bit halves. The text goes out as U32 code points into the caller's buffer and comes in the
-# same way, as in floattext.te: a routine returns how many code points the text has, and when that is more than the
-# room it wrote only what fit.
+# The text of the decimals D32, D64, D128, and Decimal, given the decoded fields of a value: the sign, the special
+# kind (0 finite, 1 an infinity, 2 a quiet NaN, 3 a signaling NaN), the base-10 exponent, and the integer
+# coefficient. The text goes into any Writer (Tessera's own, or the code-point buffer of RazorForge and Suflae), and
+# comes in as UTF-8 bytes or as code points.
+
+module Ingrid/Decimal
 
 ### The shape of a fixed-point text: how many digits there are, how many zeros follow them, and how many digits come
 ### after the point.
-record FixedRun
+secret record FixedRun
     count: U64
     zeros: U64
     places: U64
 
 ### A decoded decimal.
-record DecimalFields
+secret record DecimalFields
     negative: Bool
     special: U32
     exp: S64
     coeff: U128
 
-### A decimal's text, scanned up to its exponent: the sign (1 negative), the coefficient, the exponent, and whether a
-### dropped digit was not 0.
-record DecimalScan
-    negative: U64
-    coeff: U128
-    exp10: S64
-    sticky: Bool
+### Writes one ASCII character.
+### :param out: The writer.
+### :param c: The character's code.
+secret routine dec_put[T](out: @T, c: U8) -> None
+needs T: typename, Writer[T]
+    one: &Byte <- c.bits()
+    out.write_bytes(data: one.to[@Byte](), count: 1)
+    return
+
+### Whether a digit from `from` on (up to `count`) is not 0.
+### :param digits: The digits.
+### :param from: The first digit looked at.
+### :param count: How many digits there are.
+### :returns: `true` when one of them is not 0.
+secret routine dec_digits_after_nonzero(digits: @U8, from: U64, count: U64) -> Bool
+    until i >= count with i: U64 = from
+        if digits.stride(i).peek() != 0
+            return true
+        continue with i: i + 1
+    then
+        return false
 
 ### The decimal digits of `v` (most significant first, trailing zeros included) into `digits`.
 ### :param v: The number.
 ### :param digits: Where the digits go (room for 40).
 ### :returns: How many digits, 0 for 0.
-routine u128_all_digits(v: U128, digits: @U8) -> U64
+secret routine u128_all_digits(v: U128, digits: @U8) -> U64
     raw: &Array[U8, 40] <- .hollow()
 
     first: @U8 = raw.to[@U8]()
@@ -47,11 +62,12 @@ routine u128_all_digits(v: U128, digits: @U8) -> U64
 ### :param out: The writer.
 ### :param special: 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
 ### :param negative: The sign, shown for an infinity.
-routine write_decimal_special(out: @Utf32Writer, special: U32, negative: Bool) -> None
+secret routine write_decimal_special[T](out: @T, special: U32, negative: Bool) -> None
+needs T: typename, Writer[T]
     when special
         1 =>
             if negative
-                out.put(45)
+                dec_put(out, c: 45)
             write_str(out, text: "inf")
         3 => write_str(out, text: "sNaN")
         else => write_str(out, text: "NaN")
@@ -63,7 +79,8 @@ routine write_decimal_special(out: @Utf32Writer, special: U32, negative: Bool) -
 ### :param out: The writer.
 ### :param fields: The decimal (finite).
 ### :param strip: Whether fractional trailing zeros are dropped.
-routine write_decimal_scientific(out: @Utf32Writer, fields: DecimalFields, strip: Bool) -> None
+secret routine write_decimal_scientific[T](out: @T, fields: DecimalFields, strip: Bool) -> None
+needs T: typename, Writer[T]
     negative: Bool = fields.negative
     coeff: U128 = fields.coeff
     exp: S64 = fields.exp
@@ -79,56 +96,60 @@ routine write_decimal_scientific(out: @Utf32Writer, fields: DecimalFields, strip
         k: S64 = (nd - lo).to_wrap[S64]()
         adj: S64 = e + k - 1
         if negative
-            out.put(45)
+            dec_put(out, c: 45)
         if e <= 0 and adj >= -6
             point: S64 = k + e
             if point <= 0
-                out.put(48)
-                out.put(46)
+                dec_put(out, c: 48)
+                dec_put(out, c: 46)
                 each z in 0 til 0 - point
-                    out.put(48)
+                    dec_put(out, c: 48)
             each i in 0 til k
                 if point > 0 and i == point and e != 0
-                    out.put(46)
-                out.digit(digits.stride(i.to_wrap[U64]()).peek())
+                    dec_put(out, c: 46)
+                dec_put(out, c: digits.stride(i.to_wrap[U64]()).peek() + 48)
             return
-        out.digit(digits.peek())
+        dec_put(out, c: digits.peek() + 48)
         if k > 1
-            out.put(46)
+            dec_put(out, c: 46)
             each j in 1 til k
-                out.digit(digits.stride(j.to_wrap[U64]()).peek())
-        out.put(69)
+                dec_put(out, c: digits.stride(j.to_wrap[U64]()).peek() + 48)
+        dec_put(out, c: 69)
         magnitude: S64 = when
             adj < 0 => 0 - adj
             else => adj
-        sign_char: U32 = when
+        sign_char: U8 = when
             adj < 0 => 45
             else => 43
-        out.put(sign_char)
+        dec_put(out, c: sign_char)
         write_s64_digits(out, value: magnitude)
         return
 
 ### Writes a non-negative S64 in decimal.
 ### :param out: The writer.
 ### :param value: The number, 0 or more.
-secret routine write_s64_digits(out: @Utf32Writer, value: S64) -> None
+secret routine write_s64_digits[T](out: @T, value: S64) -> None
+needs T: typename, Writer[T]
     buf: &Array[U8, 40] <- .hollow()
     digits: @U8 = buf.to[@U8]()
     n: U64 = u128_all_digits(v: value.to_wrap[U64]().to[U128](), digits)
 
     if n == 0
-        out.put(48)
+        dec_put(out, c: 48)
         return
     each i: U64 in 0 til n
-        out.digit(digits.stride(i).peek())
+        dec_put(out, c: digits.stride(i).peek() + 48)
     return
 
-### Writes coeff × 10^exp with exactly `places` digits after the point, rounded half to even from the exact value,
-### the whole integer part written out, and a minus sign when `negative` (a value that rounds to zero keeps it).
+### Writes coeff × 10^exp with exactly `places` digits after the point, rounded from the exact value (a tie as
+### `ties` says), the whole integer part written out, and a minus sign when `negative` (a value that rounds to zero
+### keeps it).
 ### :param out: The writer.
 ### :param fields: The decimal (finite).
 ### :param places: The digits after the point.
-routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U64) -> None
+### :param ties: DEC_TIES_EVEN or DEC_TIES_AWAY.
+secret routine write_decimal_fixed[T](out: @T, fields: DecimalFields, places: U64, ties: U8) -> None
+needs T: typename, Writer[T]
     buf: &Array[U8, 41] <- .hollow()
     digits: @U8 = buf.to[@U8]()
     n: U64 = u128_all_digits(v: fields.coeff, digits)
@@ -136,7 +157,7 @@ routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U6
     shift: S64 = fields.exp + places.to_wrap[S64]()
 
     if fields.negative
-        out.put(45)
+        dec_put(out, c: 45)
     if shift >= 0
         write_fixed_digits(out, digits,
             run: (count: n, zeros: shift.to_wrap[U64](), places: places))
@@ -150,9 +171,9 @@ routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U6
     next: U8 = when
         dropped == 0 => 0
         else => digits.stride(kept).peek()
-    rest_nonzero: Bool = dropped > 1 and digits_after_nonzero(digits, from: kept + 1, count: n)
+    rest_nonzero: Bool = dropped > 1 and dec_digits_after_nonzero(digits, from: kept + 1, count: n)
     last_odd: Bool = kept > 0 and digits.stride(kept - 1).peek() & 1 == 1
-    up: Bool = next > 5 or (next == 5 and (rest_nonzero or last_odd))
+    up: Bool = next > 5 or (next == 5 and (rest_nonzero or dec_tie_up(ties, odd: last_odd)))
     if not up
         write_fixed_digits(out, digits, run: (count: kept, zeros: 0, places: places))
         return
@@ -176,7 +197,8 @@ routine write_decimal_fixed(out: @Utf32Writer, fields: DecimalFields, places: U6
 ### :param out: The writer.
 ### :param digits: The digits, most significant first.
 ### :param run: How many digits, how many zeros follow them, and the digits after the point.
-secret routine write_fixed_digits(out: @Utf32Writer, digits: @U8, run: FixedRun) -> None
+secret routine write_fixed_digits[T](out: @T, digits: @U8, run: FixedRun) -> None
+needs T: typename, Writer[T]
     count: U64 = run.count
     zeros: U64 = run.zeros
     places: U64 = run.places
@@ -191,51 +213,41 @@ secret routine write_fixed_digits(out: @Utf32Writer, digits: @U8, run: FixedRun)
         padded: U64 = total.max(places + 1)
         each at: U64 in 0 til padded
             if places > 0 and at == padded - places
-                out.put(46)
+                dec_put(out, c: 46)
             if at < padded - total
-                out.put(48)
+                dec_put(out, c: 48)
                 continue
             index: U64 = at - (padded - total)
             if significant == 0 or index >= significant
-                out.put(48)
+                dec_put(out, c: 48)
                 continue
-            out.digit(digits.stride(lead + index).peek())
+            dec_put(out, c: digits.stride(lead + index).peek() + 48)
         return
 
-### The text of a decimal given its fields: its scientific text (`style` 0, for `represent` and `diagnose` of D32,
-### D64, and D128), the same with fractional trailing zeros dropped (`style` 1, for Decimal), or exactly `places`
-### digits after the point (`style` 2, for `fixed(places:)`), or `diagnose`'s text (`style` 3): the type name, then in
-### parentheses the scientific text (`places` 32, 64, or 128 for D32, D64, or D128) or the Decimal text (`places` 0).
-### :param sign: 1 for a negative value, else 0.
-### :param special: 0 finite, 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
-### :param exp: The exponent of a finite value.
-### :param c_low: The low 64 bits of the coefficient.
-### :param c_high: The high 64 bits of the coefficient.
+### Writes a decimal's text: its scientific text (`style` 0, for `represent` and `diagnose` of D32, D64, and D128),
+### the same with fractional trailing zeros dropped (`style` 1, for Decimal), exactly `places` digits after the point
+### (`style` 2, for `fixed(places:)` of D32, D64, and D128, a tie to the even one), the same for Decimal (`style` 4,
+### a tie as DECIMAL_TIES says), or `diagnose`'s text (`style` 3): the type name, then in parentheses the
+### scientific text (`places` 32, 64, or 128 for D32, D64, or D128) or the Decimal text (`places` 0).
+### :param out: The writer.
+### :param fields: The decimal.
 ### :param style: 0 scientific, 1 scientific without fractional trailing zeros, 2 digits after the point, 3 the
-###     `diagnose` text.
-### :param places: The digits after the point for style 2, the type for style 3.
-### :param out: Where the code points go.
-### :param out_count: How many code points `out` has room for.
-### :returns: How many code points the text has: more than `out_count` when it didn't fit, and only that much was
-###     written.
-@export("ingrid_decimal_text_utf32")
-routine decimal_text_utf32(sign: U32, special: U32, exp: S64, c_low: U64, c_high: U64, style: U32,
-    places: U64, out: @U32, out_count: U64) -> U64
-    writer: &Utf32Writer <- .construct(data: out, capacity: out_count)
-
-    coeff: U128 = (c_high.to[U128]() << 64) | c_low.to[U128]()
-    fields: DecimalFields = (negative: sign == 1, special: special, exp: exp, coeff: coeff)
+###     `diagnose` text, 4 Decimal's digits after the point.
+### :param places: The digits after the point for styles 2 and 4, the type for style 3.
+secret routine write_decimal_text[T](out: @T, fields: DecimalFields, style: U32,
+    places: U64) -> None
+needs T: typename, Writer[T]
     if style == 3
-        write_str(out: writer, text: decimal_type_name(places))
-        writer.put(40)
+        write_str(out, text: decimal_type_name(places))
+        dec_put(out, c: 40)
         inner: U32 = when
             places == 0 => 1
             else => 0
-        write_decimal_value(out: writer, fields, style: inner, places: 0)
-        writer.put(41)
-        return writer.written()
-    write_decimal_value(out: writer, fields, style, places)
-    return writer.written()
+        write_decimal_value(out, fields, style: inner, places: 0)
+        dec_put(out, c: 41)
+        return
+    write_decimal_value(out, fields, style, places)
+    return
 
 ### The type name for the `diagnose` text: `D32`, `D64`, `D128`, or `Decimal`.
 ### :param width: 32, 64, or 128, or 0 for Decimal.
@@ -247,17 +259,19 @@ secret routine decimal_type_name(width: U64) -> @[Byte]
         128 => "D128"
         else => "Decimal"
 
-### Writes a decimal's text in one of the styles of `decimal_text_utf32` (0, 1, or 2).
+### Writes a decimal's text in one of the styles of `write_decimal_text` (0, 1, 2, or 4).
 ### :param out: The writer.
 ### :param fields: The decimal.
-### :param style: 0 scientific, 1 scientific without fractional trailing zeros, 2 digits after the point.
-### :param places: The digits after the point, for style 2.
-secret routine write_decimal_value(out: @Utf32Writer, fields: DecimalFields, style: U32,
+### :param style: 0 scientific, 1 scientific without fractional trailing zeros, 2 digits after the point, 4 Decimal's
+###     digits after the point.
+### :param places: The digits after the point, for styles 2 and 4.
+secret routine write_decimal_value[T](out: @T, fields: DecimalFields, style: U32,
     places: U64) -> None
+needs T: typename, Writer[T]
     negative: Bool = fields.negative
     special: U32 = fields.special
     if special != 0
-        if style == 2
+        if style == 2 or style == 4
             when special
                 1 => write_decimal_special(out, special, negative)
                 3 => write_str(out, text: "sNaN")
@@ -268,40 +282,132 @@ secret routine write_decimal_value(out: @Utf32Writer, fields: DecimalFields, sty
     when style
         0 => write_decimal_scientific(out, fields, strip: false)
         1 => write_decimal_scientific(out, fields, strip: true)
-        else => write_decimal_fixed(out, fields, places)
+        2 => write_decimal_fixed(out, fields, places, ties: DEC_TIES_EVEN)
+        else => write_decimal_fixed(out, fields, places, ties: DECIMAL_TIES)
     return
+
+# ── reading ───────────────────────────────────────────────────────────────────────────────────────
+
+### Text as code points, the way RazorForge and Suflae hand it over.
+secret record DecPoints
+obeys DecChars[DecPoints]
+    ### The first code point (anything when `count` is 0).
+    data: @U32
+    ### How many code points.
+    count: U64
+
+### Text as UTF-8 bytes, the way Tessera holds it. A decimal is ASCII, so each byte is one character.
+secret record DecBytes
+obeys DecChars[DecBytes]
+    ### The bytes.
+    text: @[Byte]
+
+### Decimal text read into its fields, not yet rounded: whether it was a number at all, the sign, the special kind
+### (0 finite, 1 an infinity, 2 a NaN), the coefficient (its lowest bit set when a dropped digit was not 0), and the
+### exponent.
+secret record DecScanned
+    bad: Bool
+    negative: Bool
+    special: U32
+    coeff: U128
+    exp: S64
+
+### A decimal's text, scanned up to its exponent: the sign (1 negative), the coefficient, the exponent, and whether a
+### dropped digit was not 0.
+secret record DecimalScan
+    negative: U64
+    coeff: U128
+    exp10: S64
+    sticky: Bool
+
+### Text a decimal is read from, one character at a time as a code point.
+### :typeparam T: The type of the text.
+secret protocol DecChars[T]
+needs T: typename
+    ### How many characters the text has.
+    ### :returns: The count.
+    routine Me.size() -> U64
+
+    ### The character at `i`, as a code point.
+    ### :param i: Its place, below `size()`.
+    ### :returns: The code point.
+    routine Me.at(i: U64) -> U32
+
+### The count of code points.
+### :returns: The count.
+@inline
+secret routine DecPoints.size() -> U64
+    return me.count
+
+### The code point at `i`.
+### :param i: Its place.
+### :returns: The code point.
+@inline
+secret routine DecPoints.at(i: U64) -> U32
+    return me.data.stride(i).peek()
+
+### The count of bytes.
+### :returns: The count.
+@inline
+secret routine DecBytes.size() -> U64
+    return me.text.count
+
+### The byte at `i`, as a code point.
+### :param i: Its place.
+### :returns: The byte's value.
+@inline
+secret routine DecBytes.at(i: U64) -> U32
+    return me.text.getitem(i).to[U8]().to[U32]()
+
+### What a text that is not a number reads as.
+### :returns: The fields with `bad` set.
+@inline
+secret routine dec_scan_bad() -> DecScanned
+    return (bad: true, negative: false, special: 0, coeff: 0, exp: 0)
+
+### Whether the characters from `at` spell `word` (lowercase ASCII letters), in any letter case.
+### :param chars: The text.
+### :param at: The first character compared.
+### :param word: The word.
+### :returns: `true` when they match.
+secret routine dec_chars_match[T](chars: T, at: U64, word: @[Byte]) -> Bool
+needs T: typename, DecChars[T]
+    each i: U64 in 0 til word.count
+        c: U32 = chars.at(at + i) | 32
+        w: U32 = word.getitem(i).to[U8]().to[U32]()
+        if c != w
+            return false
+    then
+        return true
 
 ### Reads decimal text into its fields without rounding: an optional sign, digits with an optional point, an
 ### optional `e` or `E` exponent with an optional sign, or `nan`, `inf`, `infinity` in any case. A mantissa longer
 ### than 38 digits keeps its first 38 and sets the lowest bit of the coefficient when a later digit is not 0 (every
 ### format rounds away at least 4 digits, so the rounding stays exact), and an exponent stops growing once it
 ### reaches 10^9.
-### :param chars: The text's first code point (anything when `count` is 0).
-### :param count: How many code points.
-### :returns: In w0, 1 when the text is not a number, else the sign (1 negative) in bits 8 and up and the special kind
-###     (0 finite, 1 an infinity, 2 a NaN) in bits 16 and up. The coefficient's low 64 bits in w1, its high 64 in w2,
-###     the exponent's bits in w3.
-@export("ingrid_decimal_scan_utf32")
-routine decimal_scan_utf32(chars: @U32, count: U64) -> Words
-    bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
+### :param chars: The text.
+### :returns: The fields, `bad` when the text is not a number.
+secret routine dec_scan[T](chars: T) -> DecScanned
+needs T: typename, DecChars[T]
+    count: U64 = chars.size()
 
     if count == 0
-        return bad
-    sign_char: U32 = chars.peek()
+        return dec_scan_bad()
+    sign_char: U32 = chars.at(0)
     signed: Bool = sign_char == 43 or sign_char == 45
-    negative: U64 = (sign_char == 45).to[U64]()
+    negative: Bool = sign_char == 45
     start: U64 = signed.to[U64]()
     if start >= count
-        return bad
+        return dec_scan_bad()
     rest: U64 = count - start
-    if rest == 3 and chars_match(chars, at: start, word: "nan")
-        return (w0: (negative << 8) | (2 << 16), w1: 0, w2: 0, w3: 0)
-    named_inf: Bool = rest == 3 and chars_match(chars, at: start, word: "inf")
-    named_infinity: Bool = rest == 8 and chars_match(chars, at: start, word: "infinity")
+    if rest == 3 and dec_chars_match(chars, at: start, word: "nan")
+        return (bad: false, negative: negative, special: 2, coeff: 0, exp: 0)
+    named_inf: Bool = rest == 3 and dec_chars_match(chars, at: start, word: "inf")
+    named_infinity: Bool = rest == 8 and dec_chars_match(chars, at: start, word: "infinity")
     if named_inf or named_infinity
-        return (w0: (negative << 8) | (1 << 16), w1: 0, w2: 0, w3: 0)
+        return (bad: false, negative: negative, special: 1, coeff: 0, exp: 0)
     until i >= count with i: U64 = start, coeff: U128 = 0, exp10: S64 = 0, sticky: Bool = false, point: Bool = false, seen: Bool = false
-        c: U32 = chars.stride(i).peek()
+        c: U32 = chars.at(i)
         if 48 <= c <= 57
             d: U128 = (c - 48).to[U128]()
             if coeff >= 10000000000000000000000000000000000000
@@ -316,48 +422,47 @@ routine decimal_scan_utf32(chars: @U32, count: U64) -> Words
             continue with i: i + 1, coeff: coeff * 10 + d, exp10: lowered, sticky: sticky, point: point, seen: true
         if c == 46
             if point
-                return bad
+                return dec_scan_bad()
             continue with i: i + 1, coeff: coeff, exp10: exp10, sticky: sticky, point: true, seen: seen
         if c == 101 or c == 69
             if not seen
-                return bad
-            return decimal_scan_exponent(chars, count, at: i + 1,
-                so_far: (negative: negative, coeff: coeff, exp10: exp10, sticky: sticky))
-        return bad
+                return dec_scan_bad()
+            return dec_scan_exponent(chars, at: i + 1,
+                so_far: (negative: negative.to[U64](), coeff: coeff, exp10: exp10, sticky: sticky))
+        return dec_scan_bad()
     then
         if not seen
-            return bad
-        return decimal_scan_words(negative, coeff, exp10, sticky)
+            return dec_scan_bad()
+        return dec_scanned(negative: negative.to[U64](), coeff, exp10, sticky)
 
-### The scanned fields in Words, with the sticky bit set in the coefficient.
+### The scanned fields, with the sticky bit set in the coefficient.
 ### :param negative: 1 for a negative value, else 0.
 ### :param coeff: The coefficient.
 ### :param exp10: The exponent.
 ### :param sticky: Whether a dropped digit was not 0.
-### :returns: The fields as `decimal_scan_utf32` gives them.
-secret routine decimal_scan_words(negative: U64, coeff: U128, exp10: S64, sticky: Bool) -> Words
+### :returns: The fields.
+secret routine dec_scanned(negative: U64, coeff: U128, exp10: S64, sticky: Bool) -> DecScanned
     c: U128 = coeff | sticky.to[U128]()
-    return (w0: negative << 8, w1: c.to_wrap[U64](), w2: (c >> 64).to_wrap[U64](), w3: exp10.to_wrap[U64]())
+    return (bad: false, negative: negative == 1, special: 0, coeff: c, exp: exp10)
 
 ### Reads the exponent after `e`: an optional sign and at least one digit, to the end of the text.
 ### :param chars: The text.
-### :param count: How many code points.
-### :param at: The first code point after the `e`.
+### :param at: The first character after the `e`.
 ### :param so_far: The sign, the coefficient, the exponent, and whether a dropped digit was not 0.
-### :returns: The fields as `decimal_scan_utf32` gives them.
-secret routine decimal_scan_exponent(chars: @U32, count: U64, at: U64, so_far: DecimalScan) -> Words
-    bad: Words = (w0: 1, w1: 0, w2: 0, w3: 0)
+### :returns: The fields.
+secret routine dec_scan_exponent[T](chars: T, at: U64, so_far: DecimalScan) -> DecScanned
+needs T: typename, DecChars[T]
+    count: U64 = chars.size()
     first: U32 = when
-
-        at < count => chars.stride(at).peek()
+        at < count => chars.at(at)
         else => 0
     minus: Bool = first == 45
     start: U64 = at + (first == 43 or first == 45).to[U64]()
 
     until i >= count with i: U64 = start, value: S64 = 0, any: Bool = false
-        c: U32 = chars.stride(i).peek()
+        c: U32 = chars.at(i)
         if not (48 <= c <= 57)
-            return bad
+            return dec_scan_bad()
         d: S64 = (c - 48).to[S64]()
         grown: S64 = when
             value < 1000000000 => value * 10 + d
@@ -365,9 +470,9 @@ secret routine decimal_scan_exponent(chars: @U32, count: U64, at: U64, so_far: D
         continue with i: i + 1, value: grown, any: true
     then
         if not any
-            return bad
+            return dec_scan_bad()
         signed_value: S64 = when
             minus => 0 - value
             else => value
-        return decimal_scan_words(negative: so_far.negative, coeff: so_far.coeff,
+        return dec_scanned(negative: so_far.negative, coeff: so_far.coeff,
             exp10: so_far.exp10 + signed_value, sticky: so_far.sticky)
