@@ -60,6 +60,41 @@ entity Coro
     access: @AccessFlow  # what the AccessManager keeps of it, made at its first access
     eq: EqTrack  # the entity pairs its `==` is comparing right now (equality.te)
     mold: Addr  # its failure mold (mold.te), reserved when it is made
+    trace: TraceArea  # its crash trace while it isn't running, the resumer's while it runs
+
+### One frame of a crash trace, laid out as the program keeps it: the routine's name and the source file as C strings,
+### and the line and column the routine has reached.
+record TraceSlot
+    routine_name: Addr
+    file: Addr
+    line: S32
+    column: S32
+
+### A crash trace kept aside, laid out as the program's own: how many frames were pushed, and the 32-frame ring the
+### most recent is at (depth - 1) mod 32 of.
+record TraceArea
+    depth: S32
+    frames: Array[TraceSlot, 32]
+
+### The program's trace exchange: swaps the calling thread's crash trace with the one in a `TraceArea`. Set at startup
+### by rf_set_trace_exchange, null until then (a coroutine then keeps no trace of its own).
+global TRACE_EXCHANGE: &Callable[(@TraceArea,), None]
+
+### Sets the program's trace exchange, which rf_coro_resume calls on the way into a coroutine and on the way back, so
+### each coroutine keeps its own crash trace wherever it goes on: the thread's trace is the running coroutine's.
+### :param exchange: The exchange, called with the coroutine's `trace`.
+@export("rf_set_trace_exchange")
+routine rf_set_trace_exchange(exchange: Callable[(@TraceArea,), None]) -> None
+    TRACE_EXCHANGE.poke(exchange)
+    return
+
+### Swaps the calling thread's crash trace with `area`, when the program set an exchange.
+### :param area: The trace kept aside.
+routine exchange_trace(area: @TraceArea) -> None
+    exchange: Callable[(@TraceArea,), None] = TRACE_EXCHANGE.peek()
+    if not exchange.addr().is_hollow()
+        exchange.call(area)
+    return
 
 ### Makes a `Coro` from its fields.
 ### :param entry: Its `entry`.
@@ -84,15 +119,16 @@ entity Coro
 ### :param access: Its `access`.
 ### :param eq: Its `eq`.
 ### :param mold: Its `mold`.
+### :param trace: Its `trace`.
 ### :returns: The new value.
 common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
     cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
-    stack: StackManager, resumer_sp: Addr, access: @AccessFlow, eq: EqTrack, mold: Addr) -> Me
+    stack: StackManager, resumer_sp: Addr, access: @AccessFlow, eq: EqTrack, mold: Addr, trace: TraceArea) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
-        awaiter, home, completion_seq, stack: steal stack, resumer_sp, access, eq, mold)
+        awaiter, home, completion_seq, stack: steal stack, resumer_sp, access, eq, mold, trace)
 
 ### Releases nothing: a `Coro` holds no memory of its own, its stack's pages go back with `give_back_stack`, and
 ### dropping the stack's `StackManager` releases nothing.
@@ -178,7 +214,11 @@ routine rf_coro_resume(coro: @Coro) -> U32
     # The coroutine's stack pointer is the CPU's while it runs, and its switch out writes it back.
     resume_at: Addr = coro.stack.sp.peek()
     coro.stack.sp.poke(.hollow())
+    # The thread's crash trace is the coroutine's while it runs (it may have parked on another thread), and the
+    # resumer's again after it: two swaps with the coroutine's own.
+    exchange_trace(coro.trace)
     switch_stack(from: coro.resumer_sp, to: resume_at)
+    exchange_trace(coro.trace)
     AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
