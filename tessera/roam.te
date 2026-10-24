@@ -42,6 +42,9 @@ record RoamHeader
     drop_hook: Addr
     ### How many loops and element accesses are using the entity's element positions (Suflae's shape use).
     shape_users: U64
+    ### The header of another entity this one keeps alive (one strong handle to it), or 0. An emitter adapter keeps
+    ### the collection it walks this way, wherever the adapter is stored. The last strong release lets it go.
+    kept: Addr
 
 ### Makes a `RoamHeader` from its fields.
 ### :param count: Its `count`.
@@ -58,12 +61,13 @@ record RoamHeader
 ### :param free_hook: Its `free_hook`.
 ### :param drop_hook: Its `drop_hook`.
 ### :param shape_users: Its `shape_users`.
+### :param kept: Its `kept`.
 ### :returns: The new value.
 common routine RoamHeader.construct(count: U64, weak: U64, dead: U8, escaped: U8, data: Addr,
     locked: U8, holder_task: U64, depth: U64, state: S32, buffered: Bool, trace_hook: Addr,
-    free_hook: Addr, drop_hook: Addr, shape_users: U64) -> Me
+    free_hook: Addr, drop_hook: Addr, shape_users: U64, kept: Addr) -> Me
     return Me(count, weak, dead, escaped, data, locked, holder_task, depth, state, buffered,
-        trace_hook, free_hook, drop_hook, shape_users)
+        trace_hook, free_hook, drop_hook, shape_users, kept)
 
 # ── The task scheduler (native) ──────────────────────────────────────────
 
@@ -126,30 +130,71 @@ routine roam_hold(header: @RoamHeader) -> None
 @inline
 routine roam_unhold(header: @RoamHeader) -> None
     world_enter()
-    escaped: Bool = header.escaped.peek_unbroken() == 1
-    was_last: Bool = when
-        escaped =>
-            previous: U64 = header.count.unbroken_fetch_sub(1)
-            becomes previous == 1
-        else =>
-            remaining: U64 = header.count.peek() - 1
-            remaining.poke_into(header.count)
-            becomes remaining == 0
-    if not was_last
+    if not drop_count(header)
         mark_candidate(header)
         world_leave()
         return
+    destroy_entity(header)
+    return
+
+### Takes one from the strong count, inside the shared lock.
+### :param header: The entity's header.
+### :returns: True when that was the last strong handle.
+### :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity's count is already 0.
+@inline
+secret routine drop_count(header: @RoamHeader) -> Bool
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.count.unbroken_fetch_sub(1)
+        return previous == 1
+    remaining: U64 = header.count.peek() - 1
+    remaining.poke_into(header.count)
+    return remaining == 0
+
+### The last strong handle went: destroys the entity, frees the header unless a weak observer still holds it, and
+### leaves the shared lock the release entered. What the entity kept alive is let go after that, outside the lock.
+### :param header: The entity's header.
+secret routine destroy_entity(header: @RoamHeader) -> None
+    escaped: Bool = header.escaped.peek_unbroken() == 1
     # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
     if header.buffered.peek()
         remove_candidate(header)
     run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
     header.dead.poke_unbroken(1)
+    kept: Addr = header.kept.peek()
     weak: U64 = when
         escaped => header.weak.peek_unbroken()
         else => header.weak.peek()
     if weak == 0
         free_header_memory(header)
     world_leave()
+    if ptrtoint[Addr, U64](kept) != 0
+        let_go(kept)
+    return
+
+### Drops the strong handle an entity kept to another one (its `kept`), the way `roam_unhold` drops one. Not inlined,
+### so a chain of kept entities releases one after another.
+### :param kept: The kept entity's header.
+secret routine let_go(kept: Addr) -> None
+    header: @RoamHeader = kept.to[@RoamHeader]()
+    world_enter()
+    if not drop_count(header)
+        mark_candidate(header)
+        world_leave()
+        return
+    destroy_entity(header)
+    return
+
+### Makes the entity keep another one alive: one more strong handle to `kept`, let go when the entity's last strong
+### handle goes. A kept entity it held before is let go now.
+### :param header: The entity's header.
+### :param kept: The header of the entity to keep.
+@export("ingrid_roam_keep")
+routine roam_keep(header: @RoamHeader, kept: Addr) -> None
+    roam_hold(header: kept.to[@RoamHeader]())
+    before: Addr = header.kept.peek()
+    kept.poke_into(header.kept)
+    if ptrtoint[Addr, U64](before) != 0
+        let_go(before)
     return
 
 ### Takes the entity out of its only handle: frees the header and hands back the entity's address, so a new handle
@@ -309,6 +354,10 @@ routine roam_promote(header: @RoamHeader) -> None
         0.poke_into(node.depth)
         node.escaped.poke_unbroken(1)
         children(node, kids)
+        # What the entity keeps alive is reached through it too.
+        kept: Addr = node.kept.peek()
+        if ptrtoint[Addr, U64](kept) != 0
+            work.add_last(kept)
 
         n: U64 = kids.count()
 
@@ -450,5 +499,9 @@ routine roam_field_offset(i: U64) -> U64
         13 =>
             base: U64 = ptrtoint[Addr, U64](header)
             place: U64 = ptrtoint[Addr, U64](header.shape_users)
+            return place - base
+        14 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.kept.to[Addr]())
             return place - base
         else => return U64.MAX
