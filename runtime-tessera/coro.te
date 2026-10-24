@@ -156,6 +156,8 @@ routine coro_trampoline() -> None
     this_coro: @Coro = current_coro()
     body: Callable[(Addr,), None] = this_coro.entry.peek()
     body.call(this_coro.userdata.peek())
+    # The resumer's crash trace goes back to the thread before anyone can see the coroutine finished.
+    exchange_trace(this_coro.trace)
     this_coro.completion_seq.poke_unbroken(next_completion_seq())
     this_coro.status.poke_unbroken(CORO_COMPLETED)
     switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
@@ -214,11 +216,10 @@ routine rf_coro_resume(coro: @Coro) -> U32
     # The coroutine's stack pointer is the CPU's while it runs, and its switch out writes it back.
     resume_at: Addr = coro.stack.sp.peek()
     coro.stack.sp.poke(.hollow())
-    # The thread's crash trace is the coroutine's while it runs (it may have parked on another thread), and the
-    # resumer's again after it: two swaps with the coroutine's own.
+    # The thread's crash trace is the coroutine's while it runs (it may have parked on another thread). The coroutine
+    # swaps it back itself when it parks or finishes, before another thread can resume it.
     exchange_trace(coro.trace)
     switch_stack(from: coro.resumer_sp, to: resume_at)
-    exchange_trace(coro.trace)
     AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
     CURRENT_CORO.poke(prev)
@@ -229,6 +230,9 @@ routine coro_switch_out() -> None
     this_coro: @Coro = current_coro()
     if this_coro.is_hollow()
         return
+    # The coroutine keeps its crash trace and the thread gets the resumer's back, before the coroutine is parked:
+    # once it is, another thread may resume it.
+    exchange_trace(this_coro.trace)
     this_coro.status.poke_unbroken(CORO_PARKED)
     switch_stack(from: this_coro.stack.sp, to: this_coro.resumer_sp.peek())
     return
