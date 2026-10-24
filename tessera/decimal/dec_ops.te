@@ -219,6 +219,8 @@ secret record DecDroppedFraction
     nearest: Bool
     ### Whether rounding to nearest with ties to even moves the magnitude up.
     even: Bool
+    ### Whether rounding half up (a tie toward +infinity) moves the magnitude up.
+    half_up: Bool
 
 ### Whether x comes back from round-to-integral unchanged: a special, a zero, or a value without a fraction.
 ### :param x: The operand.
@@ -228,9 +230,11 @@ secret routine dec_is_integral_as_is(x: Dec) -> Bool
     return special or x.coeff == 0 or x.exp >= 0
 
 ### x rounded to an integral value with exponent 0, for an x with a fraction (dec_is_integral_as_is false). mode: 0
-### toward zero, 1 down, 2 up, 3 nearest with ties away from zero, 4 nearest with ties to even.
+### toward zero, 1 down, 2 up, 3 nearest with ties away from zero, 4 nearest with ties to even, 5 half up (floor(x +
+### 0.5), whose zero is +0, so -0.5 gives 0).
 ### :param x: The operand.
-### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
+### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even, 5
+###     half up.
 ### :param f: The format the result rounds to.
 ### :returns: x rounded to an integral value with exponent 0, for an x with a fraction (dec_is_integral_as_is false).
 secret routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
@@ -249,12 +253,17 @@ secret routine dec_round_int(x: Dec, mode: U32, f: DecFormat) -> Dec
     odd: Bool = q & 1 == 1
     near: Bool = above or half
     even: Bool = above or (half and odd)
-    cut: DecDroppedFraction = (rest: rest, nearest: near, even: even)
+    half_up: Bool = above or (half and not x.neg)
+    cut: DecDroppedFraction = (rest: rest, nearest: near, even: even, half_up: half_up)
     up: Bool = dec_is_rounded_up(mode, neg: x.neg, cut)
-    return dec_num(neg: x.neg, coeff: q + up.to[U128](), exp: 0)
+    coeff: U128 = q + up.to[U128]()
+    # half up is floor(x + 0.5), and a floor that lands on zero is +0
+    neg: Bool = x.neg and (mode != 5 or coeff != 0)
+    return dec_num(neg, coeff, exp: 0)
 
 ### Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
-### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
+### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even, 5
+###     half up.
 ### :param neg: Whether the value is negative.
 ### :param cut: What dropping the fraction cut off.
 ### :returns: Whether rounding to an integer in `mode` (see dec_round_int) moves the magnitude up.
@@ -264,6 +273,7 @@ secret routine dec_is_rounded_up(mode: U32, neg: Bool, cut: DecDroppedFraction) 
         2 => return not neg and cut.rest
         3 => return cut.nearest
         4 => return cut.even
+        5 => return cut.half_up
         else => return false
 
 ### Whether quantize returns a unchanged: neither is a NaN, and both are infinities or their exponents match.

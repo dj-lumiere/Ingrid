@@ -27,8 +27,9 @@ secret preset DEC_SNAN: U8 = 3
 ### How a value exactly halfway between two rounds: to the even one (IEEE 754's default, D32, D64, and D128).
 secret preset DEC_TIES_EVEN: U8 = 0
 
-### A value exactly halfway rounds away from zero (2.5 to 3, -2.5 to -3).
-secret preset DEC_TIES_AWAY: U8 = 1
+### A value exactly halfway rounds up, toward +infinity: the result is the integer n with n - 0.5 <= x < n + 0.5, that
+### is floor(x + 0.5) (2.5 to 3, -2.5 to -2). A positive value's magnitude goes up, a negative value's goes down.
+secret preset DEC_TIES_UP: U8 = 1
 
 ### A decimal float taken apart. A finite value is (-1)^neg × coeff × 10^exp.
 secret record Dec
@@ -50,7 +51,7 @@ secret record DecExact
     pref: S64
 
 ### An interchange format: the digits of its coefficient and the range of its exponent, the exponent of the
-### coefficient's last digit, and how a value exactly halfway between two rounds (DEC_TIES_EVEN or DEC_TIES_AWAY).
+### coefficient's last digit, and how a value exactly halfway between two rounds (DEC_TIES_EVEN or DEC_TIES_UP).
 secret record DecFormat
     digits: S64
     qmin: S64
@@ -58,12 +59,15 @@ secret record DecFormat
     ties: U8
 
 ### Whether a value exactly halfway between two rounds its magnitude up.
-### :param ties: DEC_TIES_EVEN or DEC_TIES_AWAY.
+### :param ties: DEC_TIES_EVEN or DEC_TIES_UP.
+### :param neg: Whether the value is negative.
 ### :param odd: Whether the magnitude below the tie is odd.
 ### :returns: `true` when the tie goes to the larger magnitude.
 @inline
-secret routine dec_tie_up(ties: U8, odd: Bool) -> Bool
-    return ties == DEC_TIES_AWAY or odd
+secret routine dec_tie_up(ties: U8, neg: Bool, odd: Bool) -> Bool
+    if ties == DEC_TIES_UP
+        return not neg
+    return odd
 
 ### Decimal32: 7 digits, exponents -101 to 90.
 ### :returns: The format.
@@ -358,7 +362,7 @@ secret routine dec_finish(value: DecExact, f: DecFormat) -> Dec
         dropped >= nd =>
             # every digit goes: 1 only above half of 10^drop (exactly half as f.ties says)
             half: U256 = dec_p10(nd - 1) * 5
-            above: Bool = dropped == nd and (coeff > half or (coeff == half and dec_tie_up(ties: f.ties, odd: false)))
+            above: Bool = dropped == nd and (coeff > half or (coeff == half and dec_tie_up(ties: f.ties, neg, odd: false)))
             becomes (above.to[U128](), exp + dropped, true)
         dropped > 0 =>
             unit: U256 = dec_p10(dropped)
@@ -366,7 +370,7 @@ secret routine dec_finish(value: DecExact, f: DecFormat) -> Dec
             r: U256 = coeff - q *% unit
             twice: U256 = r << 1
             odd: Bool = q & 1 == 1
-            up: Bool = twice > unit or (twice == unit and dec_tie_up(ties: f.ties, odd))
+            up: Bool = twice > unit or (twice == unit and dec_tie_up(ties: f.ties, neg, odd))
             q2: U128 = q.to[U128]() + up.to[U128]()
             carry: Bool = q2 == dec_p10_128(p)
             # rounding up 99...9 gives 10^p: one digit too many, all zeros
