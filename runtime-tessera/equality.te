@@ -1,0 +1,140 @@
+# The entities the builder's `==` and hash are working through right now, for each running task. The `==` the builder
+# writes for an entity compares its member variables, and a member variable may lead back to an entity being compared
+# already (a parent and its children, a ring of nodes). Each task keeps the pairs it is comparing: meeting one of them
+# again counts as equal, so a cyclic structure compares by its shape and the comparison ends. A hash meeting an entity
+# it is already inside of stops there.
+#
+# The record is the task's: a coroutine keeps it in its control block (it may go on on another thread after it parks),
+# a plain thread in a thread-local. Its first entry sits inline, so a comparison that never reaches an entity member
+# variable allocates nothing.
+
+module Ingrid/Runtime
+
+import Standard/Os
+
+### The pairs a plain thread (no coroutine) is comparing right now.
+@threadlocal
+global THREAD_EQ: &EqTrack
+
+### One task's pairs being compared right now, innermost last. A hash keeps the entity it is inside of as a pair
+### whose second address is hollow, which no comparison makes.
+record EqTrack
+    ### How many pairs are kept.
+    count: U64
+    ### The first pair's first entity.
+    first_a: Addr
+    ### The first pair's second entity.
+    first_b: Addr
+    ### The pairs after the first, two addresses each, or null.
+    rest: @Addr
+    ### How many pairs `rest` has room for.
+    capacity: U64
+
+### The running task's record: the coroutine's, or this thread's outside one.
+### :returns: The record.
+routine eq_track() -> @EqTrack
+    this_coro: @Coro = current_coro()
+    if this_coro.is_hollow()
+        return THREAD_EQ
+    return this_coro.eq
+
+### Whether the pair `a`, `b` is kept, the first pair included.
+### :param track: The record to search.
+### :param a: The first entity.
+### :param b: The second entity, hollow for a hash.
+### :returns: True when the pair is being worked through already.
+routine eq_track_has(track: @EqTrack, a: Addr, b: Addr) -> Bool
+    count: U64 = track.count.peek()
+    if count == 0
+        return false
+    if track.first_a.peek() === a and track.first_b.peek() === b
+        return true
+    rest: @Addr = track.rest.peek()
+    each i in 0 til count - 1
+        if rest.stride(2 * i).peek() === a and rest.stride(2 * i + 1).peek() === b
+            return true
+        continue
+    then
+        return false
+
+### Adds the pair `a`, `b` as the innermost, growing `rest` (to 8 pairs, then twice its room) when it is full.
+### :param track: The record to add to.
+### :param a: The first entity.
+### :param b: The second entity, hollow for a hash.
+### :throws: Crashes with `OutOfMemoryError` when growing `rest` fails.
+routine eq_track_push(track: @EqTrack, a: Addr, b: Addr) -> None
+    count: U64 = track.count.peek()
+    if count == 0
+        track.first_a.poke(a)
+        track.first_b.poke(b)
+        track.count.poke(1)
+        return
+    index: U64 = count - 1
+    capacity: U64 = track.capacity.peek()
+    if index == capacity
+        larger: U64 = when
+            capacity == 0 => 8
+            else => capacity * 2
+        grown: Addr = c_realloc(track.rest.peek(), (larger * 2 * sizeof[Addr]()).to[CSize]())
+        if grown.is_hollow()
+            rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow the pairs an equality compares")
+        track.rest.poke(grown.to[@Addr]())
+        track.capacity.poke(larger)
+    slots: @Addr = track.rest.peek()
+    slots.stride(2 * index).poke(a)
+    slots.stride(2 * index + 1).poke(b)
+    track.count.poke(count + 1)
+    return
+
+### Drops the innermost pair. When none is left, `rest` goes back to the C heap.
+### :param track: The record to drop from.
+routine eq_track_pop(track: @EqTrack) -> None
+    count: U64 = track.count.peek()
+    if count == 0
+        return
+    track.count.poke(count - 1)
+    if count == 1 and track.rest.peek().is_not_hollow()
+        c_free(track.rest.peek())
+        track.rest.poke(.hollow())
+        track.capacity.poke(0)
+        return
+    return
+
+### Starts comparing the entities at `a` and `b` for the builder's `==`, unless the running task is comparing them
+### already. When it is, the caller counts them as equal and doesn't call `rf_eq_leave`.
+### :param a: The first entity's address.
+### :param b: The second entity's address.
+### :returns: True when the pair is being compared already, false when this call started comparing it.
+### :throws: Crashes with `OutOfMemoryError` when the record can't grow.
+@export("rf_eq_enter")
+routine rf_eq_enter(a: Addr, b: Addr) -> Bool
+    track: @EqTrack = eq_track()
+    if eq_track_has(track, a, b)
+        return true
+    eq_track_push(track, a, b)
+    return false
+
+### Ends the innermost comparison `rf_eq_enter` started.
+@export("rf_eq_leave")
+routine rf_eq_leave() -> None
+    eq_track_pop(eq_track())
+    return
+
+### Starts hashing the entity at `target` for the builder's hash, unless the running task is inside its hash already.
+### When it is, the caller stops there and doesn't call `rf_hash_leave`.
+### :param target: The entity's address.
+### :returns: True when the hash is inside the entity already, false when this call started it.
+### :throws: Crashes with `OutOfMemoryError` when the record can't grow.
+@export("rf_hash_enter")
+routine rf_hash_enter(target: Addr) -> Bool
+    track: @EqTrack = eq_track()
+    if eq_track_has(track, a: target, b: .hollow())
+        return true
+    eq_track_push(track, a: target, b: .hollow())
+    return false
+
+### Ends the innermost hash `rf_hash_enter` started.
+@export("rf_hash_leave")
+routine rf_hash_leave() -> None
+    eq_track_pop(eq_track())
+    return
