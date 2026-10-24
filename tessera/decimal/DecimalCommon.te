@@ -149,6 +149,34 @@ secret routine dec_divide_places(a: Dec, b: Dec, places: U64, mode: U32) -> DecT
         return (ok: false, d: dec_nan())
     return (ok: true, d: t)
 
+### The remainder of the floored division of finite Decimal values a and b (b nonzero): a - b × floor(a / b), exact,
+### with the sign of b, and a zero remainder is +0. With r the truncated remainder (dec_remainder, the sign of a), the
+### floored one is r when r is zero or a and b have the same sign, and else r + b, whose magnitude is |b| - |r| at r's
+### exponent. Not ok when that needs more than 34 digits (a far smaller than b and of the other sign: -1e-40 by 7 is
+### 7 - 1e-40). Both are normalized first, so when b's exponent is more than 42 above a's, |b| - |a| ends in a's
+### last nonzero digit and has more than 42 digits.
+### :param a: The dividend.
+### :param b: The divisor (nonzero).
+### :returns: The remainder, or not ok.
+secret routine dec_floor_remainder(a: Dec, b: Dec) -> DecTry
+    x: Dec = dec_normalized(a)
+    y: Dec = dec_normalized(b)
+    r: Dec = dec_remainder(x, y, near: false)
+    if r.coeff == 0
+        return (ok: true, d: dec_num(neg: false, coeff: 0, exp: 0))
+    if x.neg == y.neg
+        return (ok: true, d: r)
+    # r is at min(x.exp, y.exp), or is x itself when y's exponent is more than 38 above x's
+    shift: S64 = y.exp - r.exp
+    if shift > 42
+        return (ok: false, d: dec_nan())
+    yy: U256 = y.coeff.to[U256]() * dec_p10(shift)
+    value: DecExact = (neg: y.neg, coeff: yy - r.coeff.to[U256](), exp: r.exp, pref: r.exp)
+    f: DecFormat = decimal_format()
+    if not dec_exact_in(value, f)
+        return (ok: false, d: dec_nan())
+    return (ok: true, d: dec_finish(value, f))
+
 ### `value` (an exact sum or product, dec_sum or dec_product) rounded once to `places` digits after the point, `mode`
 ### as dec_round_int takes it: `add`, `subtract`, and `multiply` with places, which round where `+ - *` would fail.
 ### Not ok when even the rounded value needs more digits than f holds. A sum's sticky unit sits far below any place
