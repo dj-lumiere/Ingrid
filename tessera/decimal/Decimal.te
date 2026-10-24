@@ -8,10 +8,11 @@ module Ingrid/Decimal
 ### rounding. `/` rounds to 34 digits. Every rounding Decimal does (`/`, text read in, an integer or a float with more
 ### digits, the text with a fixed count of digits, `round()`) rounds half up: x goes to the integer n (at the digit
 ### kept) with n - 0.5 <= x < n + 0.5, so 2.5 goes to 3 and -2.5 to -2.
-### Its text drops the zeros after the point (`2.50` is written `2.5`), and values
-### compare by number (`1.0` equals `1.00`).
+### Every result is in one form: the coefficient has no trailing zeros and a zero is always `+0` (no `-0`), so `1.0`
+### and `1.00` are the same bits and hash the same. Its text drops the zeros after the point (`2.50` is written `2.5`)
+### and writes an integer of up to 34 digits in full (`100`).
 record Decimal
-obeys Equatable[Decimal], Comparable[Decimal]
+obeys Equatable[Decimal], Comparable[Decimal], Hashable[Decimal]
 obeys Addable[Decimal], Subtractable[Decimal], Multiplicable[Decimal], Divisible[Decimal], Negatable[Decimal]
 obeys Representable[Decimal], Diagnosable[Decimal], FixedRepresentable[Decimal], Parsable[Decimal]
     ### The BID encoding of a finite decimal128.
@@ -25,12 +26,12 @@ obeys Representable[Decimal], Diagnosable[Decimal], FixedRepresentable[Decimal],
 secret routine Decimal.dec() -> Dec
     return dec_from128(me.encoding)
 
-### The Decimal of the engine's finite value `d`, already rounded to 34 digits.
+### The Decimal of the engine's finite value `d`, already rounded to 34 digits, in Decimal's one form.
 ### :param d: The value.
 ### :returns: The decimal.
 @inline
 secret common routine Decimal.of(d: Dec) -> Me
-    return Me(encoding: d.to128())
+    return Me(encoding: dec_normalized(d).to128())
 
 ### The Decimal of a value the engine rounded, which crashes when that is an infinity or a NaN.
 ### :param d: The value.
@@ -102,8 +103,7 @@ failable routine Decimal.mul(other: Me) -> Me
     return when check Me.exactly(dec_product(a: me.dec(), b: other.dec()))
         is Me as product => product
 
-### `me / other` rounded to 34 significant digits (a tie as {Decimal} rounds one). An exact quotient keeps no more
-### trailing zeros than it needs to reach the exponent `me`'s minus `other`'s.
+### `me / other` rounded to 34 significant digits (a tie as {Decimal} rounds one).
 ### :param other: The divisor.
 ### :returns: The quotient.
 ### :throws: Crashes with `DivisionByZeroError` when `other` is zero, and with `NumericOverflowError` when the quotient
@@ -113,6 +113,84 @@ routine Decimal.truediv(other: Me) -> Me
     if other.is_zero()
         crash_division_by_zero()
     return Me.of_finite(dec_div(a: me.dec(), b: other.dec(), f: decimal_format()))
+
+### `me + other` computed exactly, then rounded once, half up, to `places` digits after the point (`a.add(b, places: 2)`): where the
+### operator fails past 34 digits, this rounds, and fails only when even the rounded value needs more than 34 digits.
+### :param other: The number added.
+### :param places: The digits after the point kept.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.add(other: Me, places: U64) -> Me
+    return when check me.add(other, places, rule: RoundingRule.HALF_UP)
+        is Me as r => r
+
+### `me + other` computed exactly, then rounded once, by `rule`, to `places` digits after the point.
+### :param other: The number added.
+### :param places: The digits after the point kept.
+### :param rule: How the digits past them go.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.add(other: Me, places: U64, rule: RoundingRule) -> Me
+    a: Dec = me.dec()
+    b: Dec = other.dec()
+    exact: DecExact = dec_sum(a, b)
+    r: DecTry = dec_exact_places(value: exact, places, mode: dec_rule_mode(rule),
+        f: decimal_format())
+    if not r.ok
+        throw NumericOverflowError()
+    return Me.of(r.d)
+
+### `me - other` computed exactly, then rounded once, half up, to `places` digits after the point (`a.subtract(b, places: 2)`): where the
+### operator fails past 34 digits, this rounds, and fails only when even the rounded value needs more than 34 digits.
+### :param other: The number taken away.
+### :param places: The digits after the point kept.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.subtract(other: Me, places: U64) -> Me
+    return when check me.subtract(other, places, rule: RoundingRule.HALF_UP)
+        is Me as r => r
+
+### `me - other` computed exactly, then rounded once, by `rule`, to `places` digits after the point.
+### :param other: The number taken away.
+### :param places: The digits after the point kept.
+### :param rule: How the digits past them go.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.subtract(other: Me, places: U64, rule: RoundingRule) -> Me
+    a: Dec = me.dec()
+    b: Dec = other.dec()
+    exact: DecExact = dec_sum(a, b: b.negate())
+    r: DecTry = dec_exact_places(value: exact, places, mode: dec_rule_mode(rule),
+        f: decimal_format())
+    if not r.ok
+        throw NumericOverflowError()
+    return Me.of(r.d)
+
+### `me × by` computed exactly, then rounded once, half up, to `places` digits after the point (`a.multiply(by: b, places: 2)`): where the
+### operator fails past 34 digits, this rounds, and fails only when even the rounded value needs more than 34 digits.
+### :param by: The other factor.
+### :param places: The digits after the point kept.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.multiply(by: Me, places: U64) -> Me
+    return when check me.multiply(by, places, rule: RoundingRule.HALF_UP)
+        is Me as r => r
+
+### `me × by` computed exactly, then rounded once, by `rule`, to `places` digits after the point.
+### :param by: The other factor.
+### :param places: The digits after the point kept.
+### :param rule: How the digits past them go.
+### :returns: The result.
+### :throws: Throws `NumericOverflowError` when the rounded result needs more than 34 digits.
+failable routine Decimal.multiply(by: Me, places: U64, rule: RoundingRule) -> Me
+    a: Dec = me.dec()
+    b: Dec = by.dec()
+    exact: DecExact = dec_product(a, b)
+    r: DecTry = dec_exact_places(value: exact, places, mode: dec_rule_mode(rule),
+        f: decimal_format())
+    if not r.ok
+        throw NumericOverflowError()
+    return Me.of(r.d)
 
 ### `-me`.
 ### :returns: The negated number.
@@ -147,14 +225,56 @@ routine Decimal.ceil() -> Me
 routine Decimal.round() -> Me
     return Me.of(dec_integral(d: me.dec(), mode: 5, f: decimal_format()))
 
-### `me` rounded to the nearest whole number, a tie to the even one.
+### `me` rounded to a whole number by `rule`.
+### :param rule: How the fraction goes.
 ### :returns: The whole number.
-routine Decimal.round_ties_even() -> Me
-    return Me.of(dec_integral(d: me.dec(), mode: 4, f: decimal_format()))
+routine Decimal.round(rule: RoundingRule) -> Me
+    return Me.of(dec_integral(d: me.dec(), mode: dec_rule_mode(rule), f: decimal_format()))
+
+### `me` rounded half up to `places` digits after the point (`2.675.round(places: 2)` is `2.68`).
+### :param places: The digits after the point kept.
+### :returns: The rounded value.
+routine Decimal.round(places: U64) -> Me
+    return Me.of(dec_round_places(d: me.dec(), places, mode: 5, f: decimal_format()))
+
+### `me` rounded to `places` digits after the point by `rule`.
+### :param places: The digits after the point kept.
+### :param rule: How the digits past them go.
+### :returns: The rounded value.
+routine Decimal.round(places: U64, rule: RoundingRule) -> Me
+    return Me.of(dec_round_places(d: me.dec(), places, mode: dec_rule_mode(rule),
+        f: decimal_format()))
+
+### `me / by` rounded once, half up, to `places` digits after the point (`1.divide(by: 3, places: 2)` is `0.33`).
+### :param by: The divisor.
+### :param places: The digits after the point kept.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `by` is zero, and throws `NumericOverflowError` when the quotient
+###     at that place needs more than 34 digits.
+@track_caller
+failable routine Decimal.divide(by: Me, places: U64) -> Me
+    return when check me.divide(by, places, rule: RoundingRule.HALF_UP)
+        is Me as q => q
+
+### `me / by` rounded once, by `rule`, to `places` digits after the point.
+### :param by: The divisor.
+### :param places: The digits after the point kept.
+### :param rule: How the digits past them go.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when `by` is zero, and throws `NumericOverflowError` when the quotient
+###     at that place needs more than 34 digits.
+@track_caller
+failable routine Decimal.divide(by: Me, places: U64, rule: RoundingRule) -> Me
+    if by.is_zero()
+        crash_division_by_zero()
+    r: DecTry = dec_divide_places(a: me.dec(), b: by.dec(), places, mode: dec_rule_mode(rule))
+    if not r.ok
+        throw NumericOverflowError()
+    return Me.of(r.d)
 
 # -- comparison ----------------------------------------------------------------
 
-### Whether `me` and `other` are the same number (`1.0` equals `1.00`, `0` equals `-0`).
+### Whether `me` and `other` are the same number (`1.0` equals `1.00`).
 ### :param other: The value to compare with.
 ### :returns: `true` when they are equal.
 routine Decimal.eq(other: Me) -> Bool
@@ -170,6 +290,11 @@ routine Decimal.compare(other: Me) -> S32
     if order == 1
         return 1
     return 0
+
+### SipHash-2-4 of the encoding under the process key. A value has one form, so equal values hash the same.
+### :returns: The 64-bit hash.
+routine Decimal.hash() -> U64
+    return me.encoding.hash()
 
 ### The smaller of `me` and `other`.
 ### :param other: The value to compare with.
@@ -197,7 +322,7 @@ routine Decimal.clamp(lo: Me, hi: Me) -> Me
 # -- text ----------------------------------------------------------------------
 
 ### Writes `me` with the zeros after the point that don't change the value dropped (`2.5`, `100`, `0.001`), in
-### `d.dddE+x` form when the exponent is above 0 or the value is below 1e-6.
+### `d.dddE+x` form for an integer of more than 34 digits or a value below 1e-6.
 ### :typeparam T: The type of the Writer that receives the text.
 ### :param out: The Writer the text is written to.
 routine Decimal.represent_into[T](out: @T) -> None

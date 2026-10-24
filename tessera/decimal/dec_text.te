@@ -74,8 +74,9 @@ needs T: typename, Writer[T]
     return
 
 ### Writes a finite decimal coeff × 10^exp the way decNumber's to-scientific-string does: positional when exp <= 0
-### and the adjusted exponent is at least -6, else `d.dddE+x`. With `strip`, fractional trailing zeros are dropped
-### first, up toward exponent 0.
+### and the adjusted exponent is at least -6, else `d.dddE+x`. With `strip` (Decimal's text), fractional trailing zeros
+### are dropped first, up toward exponent 0, and an integer of up to 34 digits is written out in full (`100`, not
+### `1E+2`).
 ### :param out: The writer.
 ### :param fields: The decimal (finite).
 ### :param strip: Whether fractional trailing zeros are dropped.
@@ -97,6 +98,13 @@ needs T: typename, Writer[T]
         adj: S64 = e + k - 1
         if negative
             dec_put(out, c: 45)
+        # stripped (Decimal's text): an integer of up to 34 digits is written out in full
+        if strip and e > 0 and k + e <= 34
+            each i in 0 til k
+                dec_put(out, c: digits.stride(i.to_wrap[U64]()).peek() + 48)
+            each z in 0 til e
+                dec_put(out, c: 48)
+            return
         if e <= 0 and adj >= -6
             point: S64 = k + e
             if point <= 0
@@ -142,28 +150,33 @@ needs T: typename, Writer[T]
     return
 
 ### Writes coeff × 10^exp with exactly `places` digits after the point, rounded from the exact value (a tie as
-### `ties` says), the whole integer part written out, and a minus sign when `negative` (a value that rounds to zero
-### keeps it).
+### `ties` says), the whole integer part written out, and a minus sign when `negative`. A negative value that rounds to
+### zero keeps its sign for D32, D64, and D128 (DEC_TIES_EVEN, which have -0) and loses it for Decimal (DEC_TIES_UP,
+### which has no -0: `0.00`).
 ### :param out: The writer.
 ### :param fields: The decimal (finite).
 ### :param places: The digits after the point.
 ### :param ties: DEC_TIES_EVEN or DEC_TIES_UP.
 secret routine write_decimal_fixed[T](out: @T, fields: DecimalFields, places: U64, ties: U8) -> None
 needs T: typename, Writer[T]
+    zero_sign: Bool = ties == DEC_TIES_EVEN
     buf: &Array[U8, 41] <- .hollow()
     digits: @U8 = buf.to[@U8]()
     n: U64 = u128_all_digits(v: fields.coeff, digits)
     # the scaled value coeff × 10^shift, rounded to an integer
     shift: S64 = fields.exp + places.to_wrap[S64]()
+    signed: Bool = fields.negative and zero_sign
 
-    if fields.negative
-        dec_put(out, c: 45)
     if shift >= 0
+        if fields.negative and (zero_sign or fields.coeff != 0)
+            dec_put(out, c: 45)
         write_fixed_digits(out, digits,
             run: (count: n, zeros: shift.to_wrap[U64](), places: places))
         return
     dropped: U64 = shift.abs_diff(0).to[U64]()
     if dropped > n
+        if signed
+            dec_put(out, c: 45)
         write_fixed_digits(out, digits, run: (count: 0, zeros: 0, places: places))
         return
     kept: U64 = n - dropped
@@ -174,6 +187,9 @@ needs T: typename, Writer[T]
     rest_nonzero: Bool = dropped > 1 and dec_digits_after_nonzero(digits, from: kept + 1, count: n)
     last_odd: Bool = kept > 0 and digits.stride(kept - 1).peek() & 1 == 1
     up: Bool = next > 5 or (next == 5 and (rest_nonzero or dec_tie_up(ties, neg: fields.negative, odd: last_odd)))
+    kept_nonzero: Bool = kept > 0 and dec_digits_after_nonzero(digits, from: 0, count: kept)
+    if fields.negative and (zero_sign or up or kept_nonzero)
+        dec_put(out, c: 45)
     if not up
         write_fixed_digits(out, digits, run: (count: kept, zeros: 0, places: places))
         return
@@ -231,7 +247,7 @@ needs T: typename, Writer[T]
 ### scientific text (`places` 32, 64, or 128 for D32, D64, or D128) or the Decimal text (`places` 0).
 ### :param out: The writer.
 ### :param fields: The decimal.
-### :param style: 0 scientific, 1 scientific without fractional trailing zeros, 2 digits after the point, 3 the
+### :param style: 0 scientific, 1 Decimal's (no fractional trailing zeros, integers in full), 2 digits after the point, 3 the
 ###     `diagnose` text, 4 Decimal's digits after the point.
 ### :param places: The digits after the point for styles 2 and 4, the type for style 3.
 secret routine write_decimal_text[T](out: @T, fields: DecimalFields, style: U32,
@@ -262,7 +278,7 @@ secret routine decimal_type_name(width: U64) -> @[Byte]
 ### Writes a decimal's text in one of the styles of `write_decimal_text` (0, 1, 2, or 4).
 ### :param out: The writer.
 ### :param fields: The decimal.
-### :param style: 0 scientific, 1 scientific without fractional trailing zeros, 2 digits after the point, 4 Decimal's
+### :param style: 0 scientific, 1 Decimal's (no fractional trailing zeros, integers in full), 2 digits after the point, 4 Decimal's
 ###     digits after the point.
 ### :param places: The digits after the point, for styles 2 and 4.
 secret routine write_decimal_value[T](out: @T, fields: DecimalFields, style: U32,

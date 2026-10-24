@@ -334,13 +334,13 @@ secret record DecTry
 
 ### The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when
 ### the band reaches a midpoint. A tie rule other than 0 settles a band on a midpoint: 1 takes it to be exactly
-### there (half to even), 2 rounds the magnitude up, 3 down.
+### there (rounded as f.ties says), 2 rounds the magnitude up, 3 down.
 ### The value is scaled by a power of ten so that its integer part has p digits (fewer at the bottom of the range)
 ### and the fraction decides.
 ### :param y: The value with its bound.
 ### :param f: The format the result rounds to.
 ### :param n: The precision in limbs.
-### :param tie_rule: How a band on a midpoint is settled: 0 not at all, 1 half to even, 2 up, 3 down.
+### :param tie_rule: How a band on a midpoint is settled: 0 not at all, 1 as f.ties says, 2 up, 3 down.
 ### :returns: The decimal of format f that every value within y's bound rounds to (half to even), reduced, or not ok when the band reaches a midpoint.
 secret routine dec_round_me(y: MpApprox, f: DecFormat, n: U64, tie_rule: U8) -> DecTry
     neg: Bool = y.v.neg
@@ -375,7 +375,7 @@ secret routine dec_round_me(y: MpApprox, f: DecFormat, n: U64, tie_rule: U8) -> 
         up: Bool = d > 0.0
         c: U128 = when
             clear => int + up.to[U128]()
-            tie_rule != 0 and not clear => int + dec_tie_step(tie_rule, int)
+            tie_rule != 0 and not clear => int + dec_tie_step(tie_rule, int, ties: f.ties, neg)
             else => return (ok: false, d: dec_nan())
 
         carry: Bool = c == dec_p10_128(p)
@@ -1334,20 +1334,22 @@ secret routine dec_gamma_shift(floor: B64, zf: B64) -> U64
     return gap.floor().to[U64]() + 1
 
 ### What the integer part N of a band on the midpoint N + 1/2 moves by under a tie rule (dec_round_me).
-### :param tie_rule: 1 half to even, 2 up, 3 down.
+### :param tie_rule: 1 exactly on the midpoint (rounded as `ties` says), 2 up, 3 down.
 ### :param int: N.
+### :param ties: How the format rounds a tie: DEC_TIES_EVEN or DEC_TIES_UP.
+### :param neg: Whether the value is negative.
 ### :returns: 1 to round up, 0 to round down.
-secret routine dec_tie_step(tie_rule: U8, int: U128) -> U128
+secret routine dec_tie_step(tie_rule: U8, int: U128, ties: U8, neg: Bool) -> U128
     when tie_rule
         2 => return 1
         3 => return 0
-        else => return int & 1
+        else => return dec_tie_up(ties, neg, odd: int & 1 == 1).to[U128]()
 
 ### How fn settles a band that 1024 bits leave on a midpoint. A transcendental value of a decimal is never exactly a
 ### midpoint, but f(x) = x (1 + t) with t below 2^-1000 is that close to x, and x is a midpoint when its coefficient
 ### has one digit too many (a non-canonical encoding read at its face value): then the side is t's, whose sign each
 ### function knows (2 rounds the magnitude up, 3 down). Every other band on a midpoint is taken to be exactly on it
-### (x^y and 2^x can be): 1, half to even.
+### (x^y and 2^x can be): 1, rounded as the format rounds a tie (to even for D32, D64, and D128, half up for Decimal).
 ### :param fn: Which function (a DEC_ code).
 ### :param x: The argument.
 ### :returns: The tie rule.

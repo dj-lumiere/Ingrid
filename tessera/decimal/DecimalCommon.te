@@ -16,11 +16,189 @@ secret record DecInt
     ### The magnitude, the fraction cut off.
     magnitude: U256
 
+### How a routine that rounds on purpose (`round`, `divide`) treats the digits it drops. The operators take no rule:
+### D32, D64, and D128 round a tie to the even one, as IEEE 754 does, and Decimal rounds half up.
+choice RoundingRule: U8
+    ### To the n with n - 0.5 <= x < n + 0.5: 2.5 to 3, -2.5 to -2.
+    HALF_UP
+    ### To the nearest, a tie to the even one: 2.5 to 2, -2.5 to -2.
+    HALF_EVEN
+    ### To the nearest, a tie away from zero: 2.5 to 3, -2.5 to -3.
+    HALF_AWAY
+    ### Down, toward -infinity: 2.4 to 2, -2.6 to -3.
+    FLOOR
+    ### Up, toward +infinity: 2.4 to 3, -2.6 to -2.
+    CEIL
+    ### Toward zero: 2.6 to 2, -2.6 to -2.
+    TRUNC
+
 ### Decimal's format: decimal128's 34 digits and exponents, a tie rounded as DECIMAL_TIES says.
 ### :returns: The format.
 @inline
 secret routine decimal_format() -> DecFormat
     return (digits: 34, qmin: -6176, qmax: 6111, ties: DECIMAL_TIES)
+
+### The rounding mode of dec_round_int that `rule` is.
+### :param rule: The rule.
+### :returns: 5 half up, 4 to even, 3 away from zero, 1 down, 2 up, 0 toward zero.
+secret routine dec_rule_mode(rule: RoundingRule) -> U32
+    when rule
+        RoundingRule.HALF_UP => return 5
+        RoundingRule.HALF_EVEN => return 4
+        RoundingRule.HALF_AWAY => return 3
+        RoundingRule.FLOOR => return 1
+        RoundingRule.CEIL => return 2
+        RoundingRule.TRUNC => return 0
+
+### c / 10^k when 10^k divides c, else `fits` false: c is even k times (its low k bits are 0) and c / 2^k is a multiple
+### of 5^k, which holds when c / 2^k times the inverse of 5^k modulo 2^128 is at most (2^128 - 1) / 5^k. Then that
+### product is the quotient: one wrapping multiplication, no division.
+### :param c: The coefficient.
+### :param k: 1 or 4.
+### :returns: The quotient, and whether it is exact.
+@inline
+secret routine dec_exact_tens(c: U128, k: U64) -> (U128, Bool)
+    if k == 4
+        q4: U128 = (c >> 4) *% 0x495182a9930be0ded288ce703afb7e91
+        return (q4, c & 0xF == 0 and q4 <= 0x68db8bac710cb295e9e1b089a02752)
+    q1: U128 = (c >> 1) *% 0xcccccccccccccccccccccccccccccccd
+    return (q1, c & 1 == 0 and q1 <= 0x33333333333333333333333333333333)
+
+### `d` in Decimal's one form: a zero is +0 with exponent 0, and any other finite value has no trailing zeros in its
+### coefficient (as far as Decimal's largest exponent allows), so equal values have equal bits. A coefficient that 10
+### doesn't divide settles with one multiplication (dec_exact_tens), and the zeros go four at a time, then one at a
+### time. Specials pass through.
+### :param d: The decimal.
+### :returns: The decimal in its one form.
+secret routine dec_normalized(d: Dec) -> Dec
+    if not d.is_finite() or d.coeff & 1 == 1
+        return d
+    if d.coeff == 0
+        return dec_num(neg: false, coeff: 0, exp: 0)
+    qmax: S64 = decimal_format().qmax
+    loop with c: U128 = d.coeff, e: S64 = d.exp
+        q4, by4 = dec_exact_tens(c, k: 4)
+        if by4 and e + 4 <= qmax
+            continue with c: q4, e: e + 4
+        q1, by1 = dec_exact_tens(c, k: 1)
+        if by1 and e < qmax
+            continue with c: q1, e: e + 1
+        return dec_num(neg: d.neg, coeff: c, exp: e)
+
+### How many places `round` and `divide` keep: `places`, at most as many as the format's smallest exponent allows.
+### :param places: The digits after the point asked for.
+### :param f: The format.
+### :returns: The digits after the point kept.
+secret routine dec_places_kept(places: U64, f: DecFormat) -> S64
+    return places.min((0 - f.qmin).to_wrap[U64]()).to_wrap[S64]()
+
+### `d` rounded to `places` digits after the point, `mode` as dec_round_int takes it. A special, a zero, or a value
+### with no digit past that place comes back as it is.
+### :param d: The decimal.
+### :param places: The digits after the point kept.
+### :param mode: The rounding (dec_rule_mode).
+### :param f: The format of `d`.
+### :returns: The rounded value.
+secret routine dec_round_places(d: Dec, places: U64, mode: U32, f: DecFormat) -> Dec
+    keep: S64 = dec_places_kept(places, f)
+    if not d.is_finite() or d.coeff == 0 or d.exp >= 0 - keep
+        return d
+    whole: Dec = dec_round_int(x: dec_num(neg: d.neg, coeff: d.coeff, exp: d.exp + keep), mode, f)
+    return dec_num(neg: whole.neg, coeff: whole.coeff, exp: 0 - keep)
+
+### `a / b` rounded once to `places` digits after the point, `mode` as dec_round_int takes it, for finite Decimal
+### values a and b with b nonzero. Not ok when the quotient at that place needs more than 34 digits. With N = a / b × 10^places
+### taken as num / den, the remainder against den - remainder says whether the dropped part is below, at, or above
+### one half.
+### :param a: The dividend.
+### :param b: The divisor (nonzero).
+### :param places: The digits after the point kept.
+### :param mode: The rounding (dec_rule_mode).
+### :returns: The quotient, or not ok.
+secret routine dec_divide_places(a: Dec, b: Dec, places: U64, mode: U32) -> DecTry
+    f: DecFormat = decimal_format()
+    keep: S64 = dec_places_kept(places, f)
+    neg: Bool = a.neg != b.neg
+    if a.coeff == 0
+        return (ok: true, d: dec_num(neg: false, coeff: 0, exp: 0 - keep))
+    s: S64 = a.exp - b.exp + keep
+    da: S64 = dec_digits(a.coeff)
+    db: S64 = dec_digits(b.coeff)
+    if da + s - db > f.digits
+        return (ok: false, d: dec_nan())
+    # far below the place kept: the quotient is a little above 0
+    if s < 0 and db - s > 76
+        return (ok: true, d: dec_round_tail(x: dec_num(neg, coeff: 0, exp: 0 - keep), cut: (rest: true, nearest: false, even: false, half_up: false), mode))
+    parts: (U256, U256) = when
+        s >= 0 => (a.coeff.to[U256]() * dec_p10(s), b.coeff.to[U256]())
+        else => (a.coeff.to[U256](), b.coeff.to[U256]() * dec_p10(0 - s))
+    num, den = parts
+    qr: U256DivRem = wide_divrem(u: num, d: den)
+    r: U256 = qr.remainder
+    other: U256 = den - r
+    half: Bool = r == other
+    above: Bool = r > other
+    odd: Bool = qr.quotient & 1 == 1
+    cut: DecDroppedFraction = (rest: r != 0, nearest: above or half, even: above or (half and odd), half_up: above or (half and not neg))
+    if qr.quotient >= dec_p10(f.digits)
+        return (ok: false, d: dec_nan())
+    t: Dec = dec_round_tail(x: dec_num(neg, coeff: qr.quotient.to_wrap[U128](), exp: 0 - keep), cut,
+        mode)
+    # 10^34 - 1 moved up has one digit too many
+    if t.coeff >= dec_p10_128(f.digits)
+        return (ok: false, d: dec_nan())
+    return (ok: true, d: t)
+
+### `value` (an exact sum or product, dec_sum or dec_product) rounded once to `places` digits after the point, `mode`
+### as dec_round_int takes it: `add`, `subtract`, and `multiply` with places, which round where `+ - *` would fail.
+### Not ok when even the rounded value needs more digits than f holds. A sum's sticky unit sits far below any place
+### that leaves at most f.digits digits, so it only says that something was dropped.
+### :param value: The exact value.
+### :param places: The digits after the point kept.
+### :param mode: The rounding (dec_rule_mode).
+### :param f: The format the result takes.
+### :returns: The rounded value, or not ok.
+secret routine dec_exact_places(value: DecExact, places: U64, mode: U32, f: DecFormat) -> DecTry
+    keep: S64 = dec_places_kept(places, f)
+    neg: Bool = value.neg
+    c: U256 = value.coeff
+    if c == 0
+        return (ok: true, d: dec_num(neg: false, coeff: 0, exp: 0))
+    if value.exp >= 0 - keep
+        # nothing past the place: the value itself, when it fits
+        if not dec_exact_in(value, f)
+            return (ok: false, d: dec_nan())
+        whole: Dec = dec_finish(value, f)
+        return (ok: whole.is_finite(), d: whole)
+    dropped: S64 = 0 - keep - value.exp
+    parts: (U256, Bool, Bool, Bool) = when
+        dropped > 77 => (0, true, false, false)
+        else =>
+            unit: U256 = dec_p10(dropped)
+            q: U256 = dec_div_p10_256(x: c, k: dropped)
+            r: U256 = c - q *% unit
+            other: U256 = unit - r
+            becomes (q, r != 0, r == other, r > other)
+    q, rest, half, above = parts
+    if q >= dec_p10(f.digits)
+        return (ok: false, d: dec_nan())
+    odd: Bool = q & 1 == 1
+    cut: DecDroppedFraction = (rest: rest, nearest: above or half, even: above or (half and odd), half_up: above or (half and not neg))
+    t: Dec = dec_round_tail(x: dec_num(neg, coeff: q.to_wrap[U128](), exp: 0 - keep), cut, mode)
+    if t.coeff >= dec_p10_128(f.digits)
+        return (ok: false, d: dec_nan())
+    return (ok: true, d: t)
+
+### x (its digits past the place already dropped) moved up by one unit when `mode` rounds `cut` up (a half-up zero is
+### +0, as in dec_round_int).
+### :param x: The value kept, at the exponent of the place.
+### :param cut: What the dropped part was.
+### :param mode: The rounding (dec_rule_mode).
+### :returns: The value.
+secret routine dec_round_tail(x: Dec, cut: DecDroppedFraction, mode: U32) -> Dec
+    up: Bool = dec_is_rounded_up(mode, neg: x.neg, cut)
+    coeff: U128 = x.coeff + up.to[U128]()
+    return dec_num(neg: x.neg and (mode != 5 or coeff != 0), coeff, exp: x.exp)
 
 ### The integer (-1)^neg × magnitude as a decimal, rounded to f.
 ### :param neg: Whether it is negative.
