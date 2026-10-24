@@ -1,13 +1,18 @@
 # What Suflae's ObjectHacker change hooks keep for the whole program: how many objects have hooks, and the registry
 # that finds an object's hooks. The builder puts a test of the count before every change of an entity's member
 # variable in a program that imports ObjectHacker, so a program with no hooks pays one load and one branch per change.
-# The registry itself is an ObjectHacker entity, and only its address is kept here.
+# The registry itself is an ObjectHacker entity, and only its address is kept here, with the lock every look at it and
+# change of it is made under (every thread reaches it).
 
 ### How many objects have change hooks right now.
 global HOOKED: &U64
 
 ### The controller of ObjectHacker's hook registry, null until the first hook.
 global HOOK_REGISTRY: &Addr
+
+### The lock of the hook registry: a RoamHeader used for its lock alone (`locked`, `holder_task`, `depth`), so it is
+### taken the way an escaped entity's lock is, reentrant for the agent that holds it.
+global HOOK_LOCK: &RoamHeader
 
 ### Whether any object has change hooks.
 ### :returns: True when at least one does.
@@ -34,4 +39,17 @@ routine hooks_registry() -> Addr
 @export("ingrid_hooks_set_registry")
 routine hooks_set_registry(registry: Addr) -> None
     HOOK_REGISTRY.poke_unbroken(registry)
+    return
+
+### Takes the hook registry's lock: waits while another agent holds it, and only deepens the hold for the agent that
+### does.
+@export("ingrid_hooks_enter")
+routine hooks_enter() -> None
+    roam_lock_enter_escaped(header: HOOK_LOCK)
+    return
+
+### Leaves one level of the hook registry's lock.
+@export("ingrid_hooks_leave")
+routine hooks_leave() -> None
+    roam_lock_exit_escaped(header: HOOK_LOCK)
     return
