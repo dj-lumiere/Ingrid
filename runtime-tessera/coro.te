@@ -59,6 +59,7 @@ entity Coro
     resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
     access: @AccessFlow  # what the AccessManager keeps of it, made at its first access
     eq: EqTrack  # the entity pairs its `==` is comparing right now (equality.te)
+    mold: Addr  # its failure mold (mold.te), reserved when it is made
 
 ### Makes a `Coro` from its fields.
 ### :param entry: Its `entry`.
@@ -82,15 +83,16 @@ entity Coro
 ### :param resumer_sp: Its `resumer_sp`.
 ### :param access: Its `access`.
 ### :param eq: Its `eq`.
+### :param mold: Its `mold`.
 ### :returns: The new value.
 common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
     cf_top: @CancelFrame, sched_next: @Me, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
     initial_spawned: Bool, detached: Bool, awaiter: @Me, home: @Sched, completion_seq: U64,
-    stack: StackManager, resumer_sp: Addr, access: @AccessFlow, eq: EqTrack) -> Me
+    stack: StackManager, resumer_sp: Addr, access: @AccessFlow, eq: EqTrack, mold: Addr) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
         park_intent, counted_done, owner_released, cancel_requested, initial_spawned, detached,
-        awaiter, home, completion_seq, stack: steal stack, resumer_sp, access, eq)
+        awaiter, home, completion_seq, stack: steal stack, resumer_sp, access, eq, mold)
 
 ### Releases nothing: a `Coro` holds no memory of its own, its stack's pages go back with `give_back_stack`, and
 ### dropping the stack's `StackManager` releases nothing.
@@ -153,6 +155,7 @@ routine rf_coro_create(entry: Callable[(Addr,), None], userdata: Addr, stack_siz
         stack.sp.poke(initial_stack(stack: stack.bottom.peek(), size: stack.size().bytes(),
             entry: coro_trampoline.addr()))
         coro.stack.poke(steal stack)
+        coro.mold.poke(new_mold())
         return coro
 
 ### Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
@@ -235,6 +238,8 @@ routine rf_coro_delete(coro: @Coro) -> None
     if stack.top.peek().is_not_hollow()
         give_back_stack(stack, pages: PAGES)
     AccessManager.end_flow(coro.access)
+    if coro.mold.peek().is_not_hollow()
+        c_free(coro.mold.peek())
     # A coroutine abandoned inside a comparison still holds the pairs it kept.
     if coro.eq.rest.peek().is_not_hollow()
         c_free(coro.eq.rest.peek())

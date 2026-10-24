@@ -1,0 +1,65 @@
+# The failure molds of RazorForge and Suflae programs: one per flow (each thread, and each coroutine), where a `throw`
+# writes the crashable it fails with. A failure crosses the routines it passes through as its type id and number
+# only, and the crashable stays in the mold of the flow it was thrown on until a `check` takes it out. A coroutine
+# that parks on the way up keeps its own mold, so a failure on another coroutine of the same thread never overwrites
+# it.
+#
+# The program says at startup how big a mold is (rf_failure_mold_size: the room of its largest crashable), and every
+# mold is reserved when its flow starts (a thread, a coroutine), so nothing is taken from a memory manager at the
+# moment something fails.
+
+module Ingrid/Runtime
+
+import Standard/Os
+
+### The bytes of a mold, as the program set them at startup (0 until then).
+global MOLD_SIZE: &U64
+
+### This thread's mold, when no coroutine runs on it: hollow until the thread's first failure on a thread the runtime
+### didn't start (the main thread and threaded tasks get theirs when they start).
+@threadlocal
+global THREAD_MOLD: &Addr
+
+### A new mold of MOLD_SIZE bytes, zeroed.
+### :returns: The mold.
+### :throws: Crashes with `OutOfMemoryError` when it can't be allocated.
+routine new_mold() -> Addr
+    size: U64 = MOLD_SIZE.peek().max(8)
+    mold: @Byte = zeroed[Byte](count: size, what: "Failed to allocate a failure mold")
+    return mold.to[Addr]()
+
+### Sets the bytes of a mold and reserves the calling thread's (the main thread's): the program's entry calls it once,
+### before anything can fail.
+### :param bytes: The room of the program's largest crashable.
+@export("rf_failure_mold_size")
+routine rf_failure_mold_size(bytes: U64) -> None
+    MOLD_SIZE.poke(bytes)
+    if THREAD_MOLD.peek().is_hollow()
+        THREAD_MOLD.poke(new_mold())
+    return
+
+### Reserves the calling thread's mold, for a thread the runtime starts.
+routine thread_mold_reserve() -> None
+    if THREAD_MOLD.peek().is_hollow()
+        THREAD_MOLD.poke(new_mold())
+    return
+
+### Gives back the calling thread's mold, as the thread ends.
+routine thread_mold_release() -> None
+    mold: Addr = THREAD_MOLD.peek()
+    if mold.is_not_hollow()
+        c_free(mold)
+        THREAD_MOLD.poke(.hollow())
+    return
+
+### The mold of the flow running here: the running coroutine's, or the thread's outside one.
+### :returns: The mold's address.
+@export("rf_failure_mold")
+routine rf_failure_mold() -> Addr
+    c: @Coro = current_coro()
+    if c.is_not_hollow()
+        return c.mold.peek()
+    if THREAD_MOLD.peek().is_hollow()
+        # A thread the runtime didn't start (one C made): its mold is made at its first failure.
+        THREAD_MOLD.poke(new_mold())
+    return THREAD_MOLD.peek()
