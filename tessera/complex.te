@@ -1,12 +1,14 @@
 # RazorForge's complex numbers C64, C128, and C256 (over B32, B64, and B128, which are Tessera's B32, B64, and B128):
-# the bodies of their routines, moved here from RazorForge's Core/Numerics/C64.rf, C128.rf, and C256.rf. RazorForge
-# keeps the types, their protocols, and thin routines that call the ingrid_ exports below, so both languages share
-# one implementation.
+# every routine that computes with them, which RazorForge's C64.rf, C128.rf, and C256.rf and Suflae's stubs call one
+# export at a time. RazorForge keeps the types, their protocols, the checked forms that throw, and the marshalling.
 #
-# The formulas are RazorForge's own, unchanged, so every result has the same bits as before: the textbook
-# identities, with no rescaling against overflow. Each `+ - * /` is the checked one (finite.te), which crashes on
-# a result that is not finite exactly where RazorForge's B32, B64, and B128 operators do, and the elementary
-# functions are the standard library's correctly rounded ones (CORE-MATH ports), as RazorForge's are.
+# The product, quotient, reciprocal, squared modulus, and modulus are rounded once in each part. The products are
+# exact integers (b64_dot2, b128_dot2), C64's whole computation is exact in B64, and a quotient is settled by exact
+# sign tests next to a tie. The elementary functions take their principal branches (Kahan's formulas for the square
+# root and the inverse functions), with a zero part's sign picking the side of a branch cut as C99's Annex G does, and
+# use the standard library's correctly rounded real functions (CORE-MATH ports). Each `+ - * /` of a part is the
+# checked one (finite.te), which crashes on a result that is not finite where RazorForge's B32, B64, and B128 operators
+# do, and an operand that is not finite takes the textbook formula, which crashes where RazorForge's did before.
 #
 # The exports take each part as its own float, except a C256's: a B128 is a 128-bit integer to the C ABI, which
 # Win64 passes by pointer from Tessera and by value from RazorForge, so each part goes in as its low and high 64
@@ -24,6 +26,7 @@ secret preset B128_TWO:  B128 = B128.from_bits(0x4000000000000000000000000000000
 ### ln 10 and ln 2 as each RazorForge type spells them: B32_LN_10 and B32_LN_2, the B64 literal 2.302585092994046 and
 ### B64_LN_2, B128_LN_10 and B128_LN_2.
 secret preset C64_LN_10:  B32  = B32.from_bits(0x40135D8E)
+
 secret preset C64_LN_2:   B32  = B32.from_bits(0x3F317218)
 secret preset C128_LN_10: B64  = B64.from_bits(0x40026BB1BBB55516)
 secret preset C128_LN_2:  B64  = B64.from_bits(0x3FE62E42FEFA39EF)
@@ -66,12 +69,13 @@ routine C64.sub(other: Me) -> Me
     im: B32 = me.imag.sub_finite(other.imag)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The product (ac - bd) + (ad + bc)i.
 ### :param other: The number to multiply by.
 ### :returns: The product.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.mul(other: Me) -> Me
+secret routine C64.mul_textbook(other: Me) -> Me
     ac: B32 = me.real.mul_finite(other.real)
     bd: B32 = me.imag.mul_finite(other.imag)
     re: B32 = ac.sub_finite(bd)
@@ -80,6 +84,7 @@ routine C64.mul(other: Me) -> Me
     im: B32 = ad.add_finite(bc)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The quotient: me times the conjugate of other, over other's squared modulus.
 ### :param other: The divisor.
 ### :returns: The quotient.
@@ -87,10 +92,10 @@ routine C64.mul(other: Me) -> Me
 ###     when one is NaN. Dividing by 0 + 0i is a `DivisionByZeroError`, and 0 / (0 + 0i) a `NumericDomainError`, as
 ###     with real division. A nonzero divisor whose squared modulus underflows to zero divides a nonzero value by
 ###     zero, a `DivisionByZeroError` too.
-routine C64.truediv(other: Me) -> Me
+secret routine C64.truediv_textbook(other: Me) -> Me
     if other.is_zero()
         crash_zero_divisor(me.is_zero())
-    d: B32 = other.norm()
+    d: B32 = other.norm_textbook()
     ac: B32 = me.real.mul_finite(other.real)
     bd: B32 = me.imag.mul_finite(other.imag)
     re: B32 = ac.add_finite(bd).truediv_finite(d)
@@ -105,32 +110,35 @@ routine C64.truediv(other: Me) -> Me
 routine C64.is_zero() -> Bool
     return me.real == 0.0 and me.imag == 0.0
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The squared modulus real² + imag².
 ### :returns: The squared modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.norm() -> B32
+secret routine C64.norm_textbook() -> B32
     rr: B32 = me.real.mul_finite(me.real)
     ii: B32 = me.imag.mul_finite(me.imag)
     return rr.add_finite(ii)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The modulus, the square root of the squared modulus.
 ### :returns: The modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.abs() -> B32
-    return me.norm().sqrt_unchecked()
+secret routine C64.abs_textbook() -> B32
+    return me.norm_textbook().sqrt_unchecked()
 
 ### The phase angle atan2(imag, real), in (-π, π].
 ### :returns: The phase angle.
 routine C64.arg() -> B32
     return atan2(y: me.imag, x: me.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The sine, sin a cosh b + i cos a sinh b, with cosh and sinh from e^b and e^-b.
 ### :returns: The sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.sin() -> Me
+secret routine C64.sin_textbook() -> Me
     ep: B32 = me.imag.exp_unchecked()
     em: B32 = (-me.imag).exp_unchecked()
     ch: B32 = ep.add_finite(em).truediv_finite(2.0)
@@ -139,11 +147,12 @@ routine C64.sin() -> Me
     im: B32 = me.real.cos().mul_finite(sh)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The cosine, cos a cosh b - i sin a sinh b, with cosh and sinh from e^b and e^-b.
 ### :returns: The cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.cos() -> Me
+secret routine C64.cos_textbook() -> Me
     ep: B32 = me.imag.exp_unchecked()
     em: B32 = (-me.imag).exp_unchecked()
     ch: B32 = ep.add_finite(em).truediv_finite(2.0)
@@ -152,11 +161,12 @@ routine C64.cos() -> Me
     im: B32 = -me.real.sin().mul_finite(sh)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
 ### :returns: The tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C64.tan() -> Me
+secret routine C64.tan_textbook() -> Me
     a2: B32 = me.real.add_finite(me.real)
     b2: B32 = me.imag.add_finite(me.imag)
     ep: B32 = b2.exp_unchecked()
@@ -169,33 +179,36 @@ routine C64.tan() -> Me
     im: B32 = sh.truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arcsine, -i log(iz + √(1 - z²)).
 ### :returns: The arcsine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.asin() -> Me
+secret routine C64.asin_textbook() -> Me
     iz: Me = (real: -me.imag, imag: me.real)
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     v: Me = (iz + s).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arccosine, -i log(z + i √(1 - z²)).
 ### :returns: The arccosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.acos() -> Me
+secret routine C64.acos_textbook() -> Me
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     `is`: Me = (real: -s.imag, imag: s.real)
     v: Me = (me + `is`).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arctangent, (i/2) log((i + z) / (i - z)).
 ### :returns: The arctangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C64.atan() -> Me
+secret routine C64.atan_textbook() -> Me
     num_imag: B32 = me.imag.add_finite(1.0)
     den_imag: B32 = B32.sub_finite(1.0, me.imag)
     num: Me = (real: me.real, imag: num_imag)
@@ -205,11 +218,12 @@ routine C64.atan() -> Me
     im: B32 = v.real.truediv_finite(2.0)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic sine, sinh a cos b + i cosh a sin b, with sinh and cosh from e^a and e^-a.
 ### :returns: The hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.sinh() -> Me
+secret routine C64.sinh_textbook() -> Me
     ep: B32 = me.real.exp_unchecked()
     em: B32 = (-me.real).exp_unchecked()
     sh: B32 = ep.sub_finite(em).truediv_finite(2.0)
@@ -218,11 +232,12 @@ routine C64.sinh() -> Me
     im: B32 = ch.mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic cosine, cosh a cos b + i sinh a sin b, with sinh and cosh from e^a and e^-a.
 ### :returns: The hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.cosh() -> Me
+secret routine C64.cosh_textbook() -> Me
     ep: B32 = me.real.exp_unchecked()
     em: B32 = (-me.real).exp_unchecked()
     sh: B32 = ep.sub_finite(em).truediv_finite(2.0)
@@ -231,11 +246,12 @@ routine C64.cosh() -> Me
     im: B32 = sh.mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
 ### :returns: The hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C64.tanh() -> Me
+secret routine C64.tanh_textbook() -> Me
     a2: B32 = me.real.add_finite(me.real)
     b2: B32 = me.imag.add_finite(me.imag)
     ep: B32 = a2.exp_unchecked()
@@ -247,29 +263,32 @@ routine C64.tanh() -> Me
     im: B32 = b2.sin().truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic sine, log(z + √(z² + 1)).
 ### :returns: The inverse hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.asinh() -> Me
+secret routine C64.asinh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz + Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic cosine, log(z + √(z² - 1)).
 ### :returns: The inverse hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.acosh() -> Me
+secret routine C64.acosh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz - Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
 ### :returns: The inverse hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C64.atanh() -> Me
+secret routine C64.atanh_textbook() -> Me
     p: Me = Me.one() + me
     m: Me = Me.one() - me
     v: Me = (p / m).ln()
@@ -277,11 +296,12 @@ routine C64.atanh() -> Me
     im: B32 = v.imag.truediv_finite(2.0)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### e to this power, eᵃ (cos b + i sin b).
 ### :returns: e to this power.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.exp() -> Me
+secret routine C64.exp_textbook() -> Me
     ea: B32 = me.real.exp_unchecked()
     re: B32 = ea.mul_finite(me.imag.cos())
     im: B32 = ea.mul_finite(me.imag.sin())
@@ -315,25 +335,426 @@ routine C64.log2() -> Me
     im: B32 = v.imag.truediv_finite(C64_LN_2)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### 1 / z, the conjugate over the squared modulus.
 ### :returns: 1 / z.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN. The reciprocal of 0 + 0i is 1 / 0, a `DivisionByZeroError`, as with real division. A
 ###     squared modulus that underflows to zero divides a nonzero value by zero, a `DivisionByZeroError` too.
-routine C64.reciprocal() -> Me
+secret routine C64.reciprocal_textbook() -> Me
     if me.is_zero()
         throw DivisionByZeroError()
-    d: B32 = me.norm()
+    d: B32 = me.norm_textbook()
     re: B32 = me.real.truediv_finite(d)
     im: B32 = (-me.imag).truediv_finite(d)
     return (real: re, imag: im)
 
+### The product (ac - bd) + (ad + bc)i, each part rounded once: the four products are exact in B64, and each part's
+### sum is rounded to odd there (TwoSum), which keeps what the one rounding to B32 needs.
+### :param other: The number to multiply by.
+### :returns: The product.
+### :throws: Crashes with `NumericOverflowError` when a part is past B32's range. With an operand that is not finite
+###     it crashes where the textbook formula does (`mul_textbook`).
+routine C64.mul(other: Me) -> Me
+    if not (me.is_finite() and other.is_finite())
+        return me.mul_textbook(other)
+    re: B32 = c64_dot2(a: me.real, b: other.real, c: -me.imag, d: other.imag)
+    im: B32 = c64_dot2(a: me.real, b: other.imag, c: me.imag, d: other.real)
+    return c64_finite(re, im)
+
+### The quotient (ac + bd)/(c² + d²) + (bc - ad)/(c² + d²) i, each part rounded once: the numerators and the
+### denominator are exact in B64 as a value and its error, and each quotient's rounding is checked against the exact
+### sign of numerator - midpoint × denominator when it lies next to a tie.
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when dividing by 0 + 0i, with `NumericDomainError` for 0 / (0 + 0i), and
+###     with `NumericOverflowError` when a part is past B32's range. With an operand that is not finite it crashes
+###     where the textbook formula does (`truediv_textbook`).
+routine C64.truediv(other: Me) -> Me
+    if other.is_zero()
+        crash_zero_divisor(me.is_zero())
+    if not (me.is_finite() and other.is_finite())
+        return me.truediv_textbook(other)
+    a: B64 = me.real.to[B64]()
+    b: B64 = me.imag.to[B64]()
+    c: B64 = other.real.to[B64]()
+    d: B64 = other.imag.to[B64]()
+    den: B64Pair = b64_two_sum(c *! c, d *! d)
+    re: B32 = c64_quotient(num: b64_two_sum(a *! c, b *! d), den)
+    im: B32 = c64_quotient(num: b64_two_sum(b *! c, (-a) *! d), den)
+    return c64_finite(re, im)
+
+### The squared modulus real² + imag², rounded once (exact in B64, then one rounding to B32).
+### :returns: The squared modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B32's range. With a part that is not finite it
+###     crashes where the textbook formula does (`norm_textbook`).
+routine C64.norm() -> B32
+    if not me.is_finite()
+        return me.norm_textbook()
+    n: B32 = c64_dot2(a: me.real, b: me.real, c: me.imag, d: me.imag)
+    if n.is_finite()
+        return n
+    crash_not_finite(false)
+
+### The modulus √(real² + imag²), rounded once (the correctly rounded hypot), with no overflow or underflow on the
+### way.
+### :returns: The modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B32's range. With a part that is not finite it
+###     crashes where the textbook formula does (`abs_textbook`).
+routine C64.abs() -> B32
+    if not me.is_finite()
+        return me.abs_textbook()
+    r: B32 = hypot_unchecked(x: me.real, y: me.imag)
+    if r.is_finite()
+        return r
+    crash_not_finite(false)
+
+### 1 / z = real/(real² + imag²) - imag/(real² + imag²) i, each part rounded once (as in `truediv`).
+### :returns: 1 / z.
+### :throws: Crashes with `DivisionByZeroError` for 0 + 0i, as with real division, and with `NumericOverflowError` when
+###     a part is past B32's range. With a part that is not finite it crashes where the textbook formula does
+###     (`reciprocal_textbook`).
+routine C64.reciprocal() -> Me
+    if me.is_zero()
+        throw DivisionByZeroError()
+    if not me.is_finite()
+        return me.reciprocal_textbook()
+    c: B64 = me.real.to[B64]()
+    d: B64 = me.imag.to[B64]()
+    den: B64Pair = b64_two_sum(c *! c, d *! d)
+    re: B32 = c64_quotient(num: (hi: c, lo: 0.0), den)
+    im: B32 = c64_quotient(num: (hi: -d, lo: 0.0), den)
+    return c64_finite(re, im)
+
+### Both parts, crashing unless both are finite: the check behind the arithmetic rounded once, whose operands were
+### finite, so a part that is not finite is past the range.
+### :param re: The real part.
+### :param im: The imaginary part.
+### :returns: The number re + im i.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@inline
+secret routine c64_finite(re: B32, im: B32) -> C64
+    if re.is_finite() and im.is_finite()
+        return (real: re, imag: im)
+    crash_not_finite(re.is_nan() or im.is_nan())
+
+### The negation, part by part.
+### :returns: -real - imag i.
+@inline
+routine C64.neg() -> Me
+    return (real: -me.real, imag: -me.imag)
+
+### The conjugate: the imaginary part negated.
+### :returns: real - imag i.
+@inline
+routine C64.conjugate() -> Me
+    return (real: me.real, imag: -me.imag)
+
+### Whether both parts compare equal, as floats do: -0 equals +0, and a NaN equals nothing.
+### :param other: The number to compare with.
+### :returns: True when real == other.real and imag == other.imag.
+@inline
+routine C64.eq(other: Me) -> Bool
+    return me.real == other.real and me.imag == other.imag
+
+### Whether both parts are finite.
+### :returns: True when neither part is infinite or NaN.
+@inline
+routine C64.is_finite() -> Bool
+    return me.real.is_finite() and me.imag.is_finite()
+
+### Whether a part is NaN.
+### :returns: True when the real or the imaginary part is NaN.
+@inline
+routine C64.is_nan() -> Bool
+    return me.real.is_nan() or me.imag.is_nan()
+
+### Whether a part is infinite.
+### :returns: True when the real or the imaginary part is an infinity.
+@inline
+routine C64.is_infinite() -> Bool
+    return me.real.is_infinite() or me.imag.is_infinite()
+
+### What kind of number this is, as flags: 1 both parts zero, 2 the imaginary part zero (on the real axis), 4 the real
+### part zero (on the imaginary axis), 8 a part NaN, 16 a part infinite, 32 both parts finite. A zero is +0 or -0.
+### :returns: The flags.
+@inline
+routine C64.classify() -> U32
+    real_zero: Bool = me.real == 0.0
+    imag_zero: Bool = me.imag == 0.0
+    zero: U32 = (real_zero and imag_zero).to[U32]()
+    on_real: U32 = imag_zero.to[U32]() << 1
+    on_imaginary: U32 = real_zero.to[U32]() << 2
+    not_a_number: U32 = me.is_nan().to[U32]() << 3
+    infinite: U32 = me.is_infinite().to[U32]() << 4
+    finite: U32 = me.is_finite().to[U32]() << 5
+    return zero | on_real | on_imaginary | not_a_number | infinite | finite
+
+### The product with a real number, both parts multiplied by it (the real part first).
+### :param factor: The real factor.
+### :returns: real × factor + imag × factor i.
+### :throws: Crashes with `NumericOverflowError` when a product is infinite, or with `NumericDomainError` when one is
+###     NaN.
+@inline
+routine C64.mul_real(factor: B32) -> Me
+    re: B32 = me.real.mul_finite(factor)
+    im: B32 = me.imag.mul_finite(factor)
+    return (real: re, imag: im)
+
+### The quotient by a real number, both parts divided by it (the real part first).
+### :param divisor: The real divisor.
+### :returns: real / divisor + imag / divisor i.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@inline
+routine C64.truediv_real(divisor: B32) -> Me
+    re: B32 = me.real.truediv_finite(divisor)
+    im: B32 = me.imag.truediv_finite(divisor)
+    return (real: re, imag: im)
+
+### The polar form: the modulus (`abs`) and the phase angle (`arg`).
+### :returns: The modulus in `real` and the angle in `imag`.
+### :throws: Crashes where `abs` does.
+@inline
+routine C64.to_polar() -> Me
+    return (real: me.abs(), imag: me.arg())
+
+### SipHash-2-4 of the value under the key (k0, k1): both parts' bits with a zero part as +0, so numbers that compare
+### equal hash the same.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+routine C64.hash_keyed(k0: U64, k1: U64) -> U64
+    re: U64 = c64_hash_bits(me.real)
+    im: U64 = c64_hash_bits(me.imag)
+    return siphash24_u64(value: re | (im << 32), k0, k1)
+
+### Whether both parts are at most 2^62 in magnitude: past it the products the inverse functions form could
+### overflow, so those keep the textbook formulas.
+### :returns: True when neither part is larger.
+@inline
+secret routine C64.is_moderate() -> Bool
+    return me.real.abs() <= B32.from_bits(0x5E800000) and me.imag.abs() <= B32.from_bits(0x5E800000)
+
+### The principal square root (real part >= 0), Kahan's: t = √((|z| + |real|) / 2) from the correctly rounded modulus,
+### then the other part as imag / 2t, so neither part cancels. The imaginary part takes the sign of this imaginary part,
+### so -0 and +0 pick the two sides of the cut along the negative reals: √(-4 - 0i) is 0 - 2i. A modulus below
+### 2^-78 is computed from this number scaled up by 4^26, exactly.
+### :returns: The principal square root.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sqrt_textbook`).
+routine C64.sqrt() -> Me
+    if not me.is_finite()
+        return me.sqrt_textbook()
+    if me.real == 0.0 and me.imag == 0.0
+        return (real: 0.0, imag: me.imag)
+    r: B32 = hypot_unchecked(x: me.real, y: me.imag)
+    if r < B32.from_bits(0x18800000)
+        up: B32 = B32.from_bits(0x4C800000)
+        big: Me = (real: me.real *! up *! up, imag: me.imag *! up *! up)
+        root: Me = big.sqrt()
+        down: B32 = B32.from_bits(0x32800000)
+        return (real: root.real *! down, imag: root.imag *! down)
+    t: B32 = ((r *! 0.5) +! (me.real.abs() *! 0.5)).sqrt_unchecked()
+    if not me.real.is_sign_negative()
+        return (real: t, imag: me.imag /! (t +! t))
+    return (real: me.imag.abs() /! (t +! t), imag: t.copysign(me.imag))
+
+### The arcsine on the principal branch, Kahan's: real part atan(real / Re(√(1 - z) √(1 + z))), imaginary part
+### asinh(Im(conj(√(1 - z)) √(1 + z))). On the cuts beyond ±1 the sign of a zero imaginary part picks the side.
+### :returns: The arcsine.
+### :throws: With a part that is not finite or larger than 2^62 it crashes where the textbook formula does
+###     (`asin_textbook`).
+routine C64.asin() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asin_textbook()
+    s1: Me = Me.sqrt_of(real: 1.0 -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: 1.0 +! me.real, imag: me.imag)
+    den: B32 = (s1.real *! s2.real) -! (s1.imag *! s2.imag)
+    re: B32 = atan2(y: me.real, x: den)
+    im: B32 = ((s1.real *! s2.imag) -! (s1.imag *! s2.real)).asinh()
+    return c64_finite(re, im)
+
+### The arccosine on the principal branch, Kahan's: real part 2 atan(Re √(1 - z) / Re √(1 + z)), imaginary part
+### asinh(Im(conj(√(1 + z)) √(1 - z))).
+### :returns: The arccosine.
+### :throws: With a part that is not finite or larger than 2^62 it crashes where the textbook formula does
+###     (`acos_textbook`).
+routine C64.acos() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acos_textbook()
+    s1: Me = Me.sqrt_of(real: 1.0 -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: 1.0 +! me.real, imag: me.imag)
+    re: B32 = 2.0 *! atan2(y: s1.real, x: s2.real)
+    im: B32 = ((s2.real *! s1.imag) -! (s2.imag *! s1.real)).asinh()
+    return c64_finite(re, im)
+
+### The inverse hyperbolic sine, -i asin(iz), on the principal branch.
+### :returns: The inverse hyperbolic sine.
+### :throws: With a part that is not finite or larger than 2^62 it crashes where the textbook formula does
+###     (`asinh_textbook`).
+routine C64.asinh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asinh_textbook()
+    v: Me = (real: -me.imag, imag: me.real).asin()
+    return (real: v.imag, imag: -v.real)
+
+### The inverse hyperbolic cosine on the principal branch, Kahan's: real part asinh(Re(conj(√(z - 1)) √(z + 1))),
+### imaginary part 2 atan(Im √(z - 1) / Re √(z + 1)).
+### :returns: The inverse hyperbolic cosine.
+### :throws: With a part that is not finite or larger than 2^62 it crashes where the textbook formula does
+###     (`acosh_textbook`).
+routine C64.acosh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acosh_textbook()
+    s1: Me = Me.sqrt_of(real: me.real -! 1.0, imag: me.imag)
+    s2: Me = Me.sqrt_of(real: me.real +! 1.0, imag: me.imag)
+    re: B32 = ((s1.real *! s2.real) +! (s1.imag *! s2.imag)).asinh()
+    im: B32 = 2.0 *! atan2(y: s1.imag, x: s2.real)
+    return c64_finite(re, im)
+
+### The inverse hyperbolic tangent on the principal branch: real part ln(((1 + real)² + imag²) / ((1 - real)² + imag²))
+### / 4, as ln_1p(4 real / ((1 - real)² + imag²)) / 4 when |real| < 1/2 so nothing cancels, imaginary part
+### atan2(2 imag, (1 - real)(1 + real) - imag²) / 2. On the cuts beyond ±1 the sign of a zero imaginary part picks the
+### side.
+### :returns: The inverse hyperbolic tangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±1. With a part that is not finite or larger than
+###     2^62 it crashes where the textbook formula does (`atanh_textbook`).
+routine C64.atanh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atanh_textbook()
+    if me.imag == 0.0 and me.real.abs() == 1.0
+        throw DivisionByZeroError()
+    one_minus: B32 = 1.0 -! me.real
+    one_plus: B32 = 1.0 +! me.real
+    yy: B32 = me.imag *! me.imag
+    den: B32 = (one_minus *! one_minus) +! yy
+    re: B32 = when
+        me.real.abs() < 0.5 => (4.0 *! me.real /! den).ln_1p_unchecked() *! 0.25
+        else => (((one_plus *! one_plus) +! yy) /! den).ln_unchecked() *! 0.25
+    x: B32 = (one_minus *! one_plus) -! yy
+    im: B32 = atan2(y: 2.0 *! me.imag, x) *! 0.5
+    return c64_finite(re, im)
+
+### The arctangent, -i atanh(iz), on the principal branch.
+### :returns: The arctangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±i. With a part that is not finite or larger than
+###     2^62 it crashes where the textbook formula does (`atan_textbook`).
+routine C64.atan() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).atanh()
+    return (real: v.imag, imag: -v.real)
+
+### The hyperbolic tangent, Kahan's: with t = tan(imag), β = 1 + t², s = sinh(real) and ρ = √(1 + s²), it is
+### (β ρ s + i t) / (1 + β s²), with nothing to cancel. Where β s² is past the range the real part is ±1 and the
+### imaginary part t / (β s²).
+### :returns: The hyperbolic tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tanh_textbook`).
+routine C64.tanh() -> Me
+    if not me.is_finite()
+        return me.tanh_textbook()
+    t: B32 = me.imag.tan()
+    beta: B32 = 1.0 +! (t *! t)
+    s: B32 = me.real.sinh_unchecked()
+    if s.abs() > B32.from_bits(0x5E800000)
+        return (real: 1.0.copysign(me.real), imag: (t /! (beta *! s)) /! s)
+    rho: B32 = (1.0 +! (s *! s)).sqrt_unchecked()
+    den: B32 = 1.0 +! (beta *! s *! s)
+    return c64_finite(re: (beta *! rho *! s) /! den, im: t /! den)
+
+### The tangent, -i tanh(iz).
+### :returns: The tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tan_textbook`).
+routine C64.tan() -> Me
+    if not me.is_finite()
+        return me.tan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).tanh()
+    return (real: v.imag, imag: -v.real)
+
+### The principal square root of real + imag i, for the inverse functions.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: Its square root.
+@inline
+secret common routine C64.sqrt_of(real: B32, imag: B32) -> Me
+    z: Me = (real: real, imag: imag)
+    return z.sqrt()
+
+### e to this power, e^real (cos imag + i sin imag), from the real exponential and the correctly rounded cosine and
+### sine.
+### Past the range a part is an infinity, not a crash (it is `exp_unchecked`), and a zero imaginary part stays as it is,
+### so e^(real + 0i) is e^real + 0i.
+### :returns: e to this power.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`exp_textbook`).
+routine C64.exp() -> Me
+    if not me.is_finite()
+        return me.exp_textbook()
+    e: B32 = me.real.exp_unchecked()
+    im: B32 = when
+        me.imag == 0.0 => me.imag
+        else => e *! me.imag.sin()
+    return (real: e *! me.imag.cos(), imag: im)
+
+### The sine, sin real cosh imag + i cos real sinh imag, from the correctly rounded real functions. A zero real part
+### stays as it is.
+### :returns: The sine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B32's range. With a part that is not finite it
+###     crashes where the textbook formula does (`sin_textbook`).
+routine C64.sin() -> Me
+    if not me.is_finite()
+        return me.sin_textbook()
+    re: B32 = when
+        me.real == 0.0 => me.real
+        else => me.real.sin() *! me.imag.cosh_unchecked()
+    return c64_finite(re, im: me.real.cos() *! me.imag.sinh_unchecked())
+
+### The cosine, cos real cosh imag - i sin real sinh imag, from the correctly rounded real functions. A zero real part
+### gives a zero imaginary part with the sign -real × imag has.
+### :returns: The cosine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B32's range. With a part that is not finite it
+###     crashes where the textbook formula does (`cos_textbook`).
+routine C64.cos() -> Me
+    if not me.is_finite()
+        return me.cos_textbook()
+    im: B32 = when
+        me.real == 0.0 and me.imag.is_sign_negative() => me.real
+        me.real == 0.0 => -me.real
+        else => -(me.real.sin() *! me.imag.sinh_unchecked())
+    return c64_finite(re: me.real.cos() *! me.imag.cosh_unchecked(), im)
+
+### The hyperbolic sine, sinh real cos imag + i cosh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `sinh_unchecked`), and a zero imaginary part stays as it is.
+### :returns: The hyperbolic sine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sinh_textbook`).
+routine C64.sinh() -> Me
+    if not me.is_finite()
+        return me.sinh_textbook()
+    im: B32 = when
+        me.imag == 0.0 => me.imag
+        else => me.real.cosh_unchecked() *! me.imag.sin()
+    return (real: me.real.sinh_unchecked() *! me.imag.cos(), imag: im)
+
+### The hyperbolic cosine, cosh real cos imag + i sinh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `cosh_unchecked`), and a zero imaginary part gives a zero
+### imaginary part with the sign real × imag has.
+### :returns: The hyperbolic cosine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`cosh_textbook`).
+routine C64.cosh() -> Me
+    if not me.is_finite()
+        return me.cosh_textbook()
+    im: B32 = when
+        me.imag == 0.0 and me.real.is_sign_negative() => -me.imag
+        me.imag == 0.0 => me.imag
+        else => me.real.sinh_unchecked() *! me.imag.sin()
+    return (real: me.real.cosh_unchecked() *! me.imag.cos(), imag: im)
+
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
 ### takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
 ### :returns: The principal square root.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C64.sqrt() -> Me
+secret routine C64.sqrt_textbook() -> Me
     r: B32 = me.abs()
 
     if r == 0.0
@@ -350,7 +771,8 @@ routine C64.sqrt() -> Me
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
 routine C64.pow(power: Me) -> Me
-    return (power * me.ln()).exp()
+    r: Me = (power * me.ln()).exp()
+    return c64_finite(re: r.real, im: r.imag)
 
 ### This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
 ### negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
@@ -721,6 +1143,114 @@ routine c64_powi(real: B32, imag: B32, n: S64) -> U64
 routine c64_from_polar(r: B32, theta: B32) -> U64
     return C64.from_polar(r, theta).bits()
 
+### The sum, for C64.add (a real addend comes as a number whose imaginary part is +0).
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c64_add")
+@inline
+routine c64_add(real: B32, imag: B32, other_real: B32, other_imag: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    w: C64 = (real: other_real, imag: other_imag)
+    return (z + w).bits()
+
+### The difference, for C64.sub.
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c64_sub")
+@inline
+routine c64_sub(real: B32, imag: B32, other_real: B32, other_imag: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    w: C64 = (real: other_real, imag: other_imag)
+    return (z - w).bits()
+
+### The product with a real number, for C64.mul with a B32.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param factor: The real factor.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c64_mul_real")
+@inline
+routine c64_mul_real(real: B32, imag: B32, factor: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    return (z.mul_real(factor)).bits()
+
+### The quotient by a real number, for C64.truediv with a B32.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param divisor: The real divisor.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@export("ingrid_c64_div_real")
+@inline
+routine c64_div_real(real: B32, imag: B32, divisor: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    return (z.truediv_real(divisor)).bits()
+
+### The negation, for C64.neg.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+@export("ingrid_c64_neg")
+@inline
+routine c64_neg(real: B32, imag: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    return (z.neg()).bits()
+
+### The conjugate, for C64.conjugate.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+@export("ingrid_c64_conjugate")
+@inline
+routine c64_conjugate(real: B32, imag: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    return (z.conjugate()).bits()
+
+### Whether two numbers compare equal, for C64.eq.
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: 1 when both parts compare equal, else 0.
+@export("ingrid_c64_eq")
+@inline
+routine c64_eq(real: B32, imag: B32, other_real: B32, other_imag: B32) -> U32
+    z: C64 = (real: real, imag: imag)
+    w: C64 = (real: other_real, imag: other_imag)
+    return z.eq(w).to[U32]()
+
+### What kind of number this is, for C64.is_zero, is_real, is_imaginary, is_nan, is_infinite, and is_finite.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The flags of `classify`: 1 zero, 2 on the real axis, 4 on the imaginary axis, 8 NaN, 16 infinite, 32
+###     finite.
+@export("ingrid_c64_class")
+@inline
+routine c64_class(real: B32, imag: B32) -> U32
+    z: C64 = (real: real, imag: imag)
+    return z.classify()
+
+### The polar form, for C64.to_polar.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The modulus's bits in the low 32 bits, the angle's in the high 32.
+### :throws: Crashes where `abs` does.
+@export("ingrid_c64_polar")
+@inline
+routine c64_polar(real: B32, imag: B32) -> U64
+    z: C64 = (real: real, imag: imag)
+    return z.to_polar().bits()
+
 # ── C128 ──────────────────────────────────────────────────────────────────────────
 
 ### RazorForge's C128: a complex number over B64, RazorForge's B64.
@@ -757,12 +1287,13 @@ routine C128.sub(other: Me) -> Me
     im: B64 = me.imag.sub_finite(other.imag)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The product (ac - bd) + (ad + bc)i.
 ### :param other: The number to multiply by.
 ### :returns: The product.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.mul(other: Me) -> Me
+secret routine C128.mul_textbook(other: Me) -> Me
     ac: B64 = me.real.mul_finite(other.real)
     bd: B64 = me.imag.mul_finite(other.imag)
     re: B64 = ac.sub_finite(bd)
@@ -771,6 +1302,7 @@ routine C128.mul(other: Me) -> Me
     im: B64 = ad.add_finite(bc)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The quotient: me times the conjugate of other, over other's squared modulus.
 ### :param other: The divisor.
 ### :returns: The quotient.
@@ -778,10 +1310,10 @@ routine C128.mul(other: Me) -> Me
 ###     when one is NaN. Dividing by 0 + 0i is a `DivisionByZeroError`, and 0 / (0 + 0i) a `NumericDomainError`, as
 ###     with real division. A nonzero divisor whose squared modulus underflows to zero divides a nonzero value by
 ###     zero, a `DivisionByZeroError` too.
-routine C128.truediv(other: Me) -> Me
+secret routine C128.truediv_textbook(other: Me) -> Me
     if other.is_zero()
         crash_zero_divisor(me.is_zero())
-    d: B64 = other.norm()
+    d: B64 = other.norm_textbook()
     ac: B64 = me.real.mul_finite(other.real)
     bd: B64 = me.imag.mul_finite(other.imag)
     re: B64 = ac.add_finite(bd).truediv_finite(d)
@@ -796,32 +1328,35 @@ routine C128.truediv(other: Me) -> Me
 routine C128.is_zero() -> Bool
     return me.real == 0.0 and me.imag == 0.0
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The squared modulus real² + imag².
 ### :returns: The squared modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.norm() -> B64
+secret routine C128.norm_textbook() -> B64
     rr: B64 = me.real.mul_finite(me.real)
     ii: B64 = me.imag.mul_finite(me.imag)
     return rr.add_finite(ii)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The modulus, the square root of the squared modulus.
 ### :returns: The modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.abs() -> B64
-    return me.norm().sqrt_unchecked()
+secret routine C128.abs_textbook() -> B64
+    return me.norm_textbook().sqrt_unchecked()
 
 ### The phase angle atan2(imag, real), in (-π, π].
 ### :returns: The phase angle.
 routine C128.arg() -> B64
     return atan2(y: me.imag, x: me.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The sine, sin a cosh b + i cos a sinh b, with cosh and sinh from e^b and e^-b.
 ### :returns: The sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.sin() -> Me
+secret routine C128.sin_textbook() -> Me
     ep: B64 = me.imag.exp_unchecked()
     em: B64 = (-me.imag).exp_unchecked()
     ch: B64 = ep.add_finite(em).truediv_finite(2.0)
@@ -830,11 +1365,12 @@ routine C128.sin() -> Me
     im: B64 = me.real.cos().mul_finite(sh)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The cosine, cos a cosh b - i sin a sinh b, with cosh and sinh from e^b and e^-b.
 ### :returns: The cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.cos() -> Me
+secret routine C128.cos_textbook() -> Me
     ep: B64 = me.imag.exp_unchecked()
     em: B64 = (-me.imag).exp_unchecked()
     ch: B64 = ep.add_finite(em).truediv_finite(2.0)
@@ -843,11 +1379,12 @@ routine C128.cos() -> Me
     im: B64 = -me.real.sin().mul_finite(sh)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
 ### :returns: The tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C128.tan() -> Me
+secret routine C128.tan_textbook() -> Me
     a2: B64 = me.real.add_finite(me.real)
     b2: B64 = me.imag.add_finite(me.imag)
     ep: B64 = b2.exp_unchecked()
@@ -860,33 +1397,36 @@ routine C128.tan() -> Me
     im: B64 = sh.truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arcsine, -i log(iz + √(1 - z²)).
 ### :returns: The arcsine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.asin() -> Me
+secret routine C128.asin_textbook() -> Me
     iz: Me = (real: -me.imag, imag: me.real)
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     v: Me = (iz + s).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arccosine, -i log(z + i √(1 - z²)).
 ### :returns: The arccosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.acos() -> Me
+secret routine C128.acos_textbook() -> Me
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     `is`: Me = (real: -s.imag, imag: s.real)
     v: Me = (me + `is`).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arctangent, (i/2) log((i + z) / (i - z)).
 ### :returns: The arctangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C128.atan() -> Me
+secret routine C128.atan_textbook() -> Me
     num_imag: B64 = me.imag.add_finite(1.0)
     den_imag: B64 = B64.sub_finite(1.0, me.imag)
     num: Me = (real: me.real, imag: num_imag)
@@ -896,11 +1436,12 @@ routine C128.atan() -> Me
     im: B64 = v.real.truediv_finite(2.0)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic sine, sinh a cos b + i cosh a sin b, with sinh and cosh from e^a and e^-a.
 ### :returns: The hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.sinh() -> Me
+secret routine C128.sinh_textbook() -> Me
     ep: B64 = me.real.exp_unchecked()
     em: B64 = (-me.real).exp_unchecked()
     sh: B64 = ep.sub_finite(em).truediv_finite(2.0)
@@ -909,11 +1450,12 @@ routine C128.sinh() -> Me
     im: B64 = ch.mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic cosine, cosh a cos b + i sinh a sin b, with sinh and cosh from e^a and e^-a.
 ### :returns: The hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.cosh() -> Me
+secret routine C128.cosh_textbook() -> Me
     ep: B64 = me.real.exp_unchecked()
     em: B64 = (-me.real).exp_unchecked()
     sh: B64 = ep.sub_finite(em).truediv_finite(2.0)
@@ -922,11 +1464,12 @@ routine C128.cosh() -> Me
     im: B64 = sh.mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
 ### :returns: The hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C128.tanh() -> Me
+secret routine C128.tanh_textbook() -> Me
     a2: B64 = me.real.add_finite(me.real)
     b2: B64 = me.imag.add_finite(me.imag)
     ep: B64 = a2.exp_unchecked()
@@ -938,29 +1481,32 @@ routine C128.tanh() -> Me
     im: B64 = b2.sin().truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic sine, log(z + √(z² + 1)).
 ### :returns: The inverse hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.asinh() -> Me
+secret routine C128.asinh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz + Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic cosine, log(z + √(z² - 1)).
 ### :returns: The inverse hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.acosh() -> Me
+secret routine C128.acosh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz - Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
 ### :returns: The inverse hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C128.atanh() -> Me
+secret routine C128.atanh_textbook() -> Me
     p: Me = Me.one() + me
     m: Me = Me.one() - me
     v: Me = (p / m).ln()
@@ -968,11 +1514,12 @@ routine C128.atanh() -> Me
     im: B64 = v.imag.truediv_finite(2.0)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### e to this power, eᵃ (cos b + i sin b).
 ### :returns: e to this power.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.exp() -> Me
+secret routine C128.exp_textbook() -> Me
     ea: B64 = me.real.exp_unchecked()
     re: B64 = ea.mul_finite(me.imag.cos())
     im: B64 = ea.mul_finite(me.imag.sin())
@@ -1006,25 +1553,424 @@ routine C128.log2() -> Me
     im: B64 = v.imag.truediv_finite(C128_LN_2)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### 1 / z, the conjugate over the squared modulus.
 ### :returns: 1 / z.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN. The reciprocal of 0 + 0i is 1 / 0, a `DivisionByZeroError`, as with real division. A
 ###     squared modulus that underflows to zero divides a nonzero value by zero, a `DivisionByZeroError` too.
-routine C128.reciprocal() -> Me
+secret routine C128.reciprocal_textbook() -> Me
     if me.is_zero()
         throw DivisionByZeroError()
-    d: B64 = me.norm()
+    d: B64 = me.norm_textbook()
     re: B64 = me.real.truediv_finite(d)
     im: B64 = (-me.imag).truediv_finite(d)
     return (real: re, imag: im)
 
+### The product (ac - bd) + (ad + bc)i, each part rounded once (b64_dot2: the products are exact integers).
+### :param other: The number to multiply by.
+### :returns: The product.
+### :throws: Crashes with `NumericOverflowError` when a part is past B64's range. With an operand that is not finite
+###     it crashes where the textbook formula does (`mul_textbook`).
+routine C128.mul(other: Me) -> Me
+    if not (me.is_finite() and other.is_finite())
+        return me.mul_textbook(other)
+    re: B64 = b64_dot2_fast(a: me.real, b: other.real, c: -me.imag, d: other.imag).hi
+    im: B64 = b64_dot2_fast(a: me.real, b: other.imag, c: me.imag, d: other.real).hi
+    return c128_finite(re, im)
+
+### The quotient (ac + bd)/(c² + d²) + (bc - ad)/(c² + d²) i, each part rounded once (b64_divide).
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when dividing by 0 + 0i, with `NumericDomainError` for 0 / (0 + 0i), and
+###     with `NumericOverflowError` when a part is past B64's range. With an operand that is not finite it crashes
+###     where the textbook formula does (`truediv_textbook`).
+routine C128.truediv(other: Me) -> Me
+    if other.is_zero()
+        crash_zero_divisor(me.is_zero())
+    if not (me.is_finite() and other.is_finite())
+        return me.truediv_textbook(other)
+    q: B64Pair = b64_divide(operands: (a: me.real, b: me.imag, c: other.real, d: other.imag))
+    return c128_finite(re: q.hi, im: q.lo)
+
+### The squared modulus real² + imag², rounded once.
+### :returns: The squared modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B64's range. With a part that is not finite it
+###     crashes where the textbook formula does (`norm_textbook`).
+routine C128.norm() -> B64
+    if not me.is_finite()
+        return me.norm_textbook()
+    n: B64 = b64_dot2_fast(a: me.real, b: me.real, c: me.imag, d: me.imag).hi
+    if n.is_finite()
+        return n
+    crash_not_finite(false)
+
+### The modulus √(real² + imag²), rounded once (the correctly rounded hypot), with no overflow or underflow on the
+### way.
+### :returns: The modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B64's range. With a part that is not finite it
+###     crashes where the textbook formula does (`abs_textbook`).
+routine C128.abs() -> B64
+    if not me.is_finite()
+        return me.abs_textbook()
+    r: B64 = hypot_unchecked(x: me.real, y: me.imag)
+    if r.is_finite()
+        return r
+    crash_not_finite(false)
+
+### 1 / z = real/(real² + imag²) - imag/(real² + imag²) i, each part rounded once (as in `truediv`), a zero part
+### with the sign of real / (real² + imag²) and -imag / (real² + imag²).
+### :returns: 1 / z.
+### :throws: Crashes with `DivisionByZeroError` for 0 + 0i, as with real division, and with `NumericOverflowError` when
+###     a part is past B64's range. With a part that is not finite it crashes where the textbook formula does
+###     (`reciprocal_textbook`).
+routine C128.reciprocal() -> Me
+    if me.is_zero()
+        throw DivisionByZeroError()
+    if not me.is_finite()
+        return me.reciprocal_textbook()
+    q: B64Pair = b64_divide(operands: (a: 1.0, b: 0.0, c: me.real, d: me.imag))
+    re: B64 = when
+        me.real == 0.0 => me.real
+        else => q.hi
+    im: B64 = when
+        me.imag == 0.0 => -me.imag
+        else => q.lo
+    return c128_finite(re, im)
+
+### Both parts, crashing unless both are finite: the check behind the arithmetic rounded once, whose operands were
+### finite, so a part that is not finite is past the range.
+### :param re: The real part.
+### :param im: The imaginary part.
+### :returns: The number re + im i.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@inline
+secret routine c128_finite(re: B64, im: B64) -> C128
+    if re.is_finite() and im.is_finite()
+        return (real: re, imag: im)
+    crash_not_finite(re.is_nan() or im.is_nan())
+
+### The negation, part by part.
+### :returns: -real - imag i.
+@inline
+routine C128.neg() -> Me
+    return (real: -me.real, imag: -me.imag)
+
+### The conjugate: the imaginary part negated.
+### :returns: real - imag i.
+@inline
+routine C128.conjugate() -> Me
+    return (real: me.real, imag: -me.imag)
+
+### Whether both parts compare equal, as floats do: -0 equals +0, and a NaN equals nothing.
+### :param other: The number to compare with.
+### :returns: True when real == other.real and imag == other.imag.
+@inline
+routine C128.eq(other: Me) -> Bool
+    return me.real == other.real and me.imag == other.imag
+
+### Whether both parts are finite.
+### :returns: True when neither part is infinite or NaN.
+@inline
+routine C128.is_finite() -> Bool
+    return me.real.is_finite() and me.imag.is_finite()
+
+### Whether a part is NaN.
+### :returns: True when the real or the imaginary part is NaN.
+@inline
+routine C128.is_nan() -> Bool
+    return me.real.is_nan() or me.imag.is_nan()
+
+### Whether a part is infinite.
+### :returns: True when the real or the imaginary part is an infinity.
+@inline
+routine C128.is_infinite() -> Bool
+    return me.real.is_infinite() or me.imag.is_infinite()
+
+### What kind of number this is, as flags: 1 both parts zero, 2 the imaginary part zero (on the real axis), 4 the real
+### part zero (on the imaginary axis), 8 a part NaN, 16 a part infinite, 32 both parts finite. A zero is +0 or -0.
+### :returns: The flags.
+@inline
+routine C128.classify() -> U32
+    real_zero: Bool = me.real == 0.0
+    imag_zero: Bool = me.imag == 0.0
+    zero: U32 = (real_zero and imag_zero).to[U32]()
+    on_real: U32 = imag_zero.to[U32]() << 1
+    on_imaginary: U32 = real_zero.to[U32]() << 2
+    not_a_number: U32 = me.is_nan().to[U32]() << 3
+    infinite: U32 = me.is_infinite().to[U32]() << 4
+    finite: U32 = me.is_finite().to[U32]() << 5
+    return zero | on_real | on_imaginary | not_a_number | infinite | finite
+
+### The product with a real number, both parts multiplied by it (the real part first).
+### :param factor: The real factor.
+### :returns: real × factor + imag × factor i.
+### :throws: Crashes with `NumericOverflowError` when a product is infinite, or with `NumericDomainError` when one is
+###     NaN.
+@inline
+routine C128.mul_real(factor: B64) -> Me
+    re: B64 = me.real.mul_finite(factor)
+    im: B64 = me.imag.mul_finite(factor)
+    return (real: re, imag: im)
+
+### The quotient by a real number, both parts divided by it (the real part first).
+### :param divisor: The real divisor.
+### :returns: real / divisor + imag / divisor i.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@inline
+routine C128.truediv_real(divisor: B64) -> Me
+    re: B64 = me.real.truediv_finite(divisor)
+    im: B64 = me.imag.truediv_finite(divisor)
+    return (real: re, imag: im)
+
+### The polar form: the modulus (`abs`) and the phase angle (`arg`).
+### :returns: The modulus in `real` and the angle in `imag`.
+### :throws: Crashes where `abs` does.
+@inline
+routine C128.to_polar() -> Me
+    return (real: me.abs(), imag: me.arg())
+
+### SipHash-2-4 of the value under the key (k0, k1): both parts' bits with a zero part as +0, so numbers that compare
+### equal hash the same.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+routine C128.hash_keyed(k0: U64, k1: U64) -> U64
+    re: U64 = when
+        me.real == 0.0 => 0
+        else => me.real.bits()
+    im: U64 = when
+        me.imag == 0.0 => 0
+        else => me.imag.bits()
+    return siphash24_u128(low: re, high: im, k0, k1)
+
+### Whether both parts are at most 2^509 in magnitude: past it the products the inverse functions form could
+### overflow, so those keep the textbook formulas.
+### :returns: True when neither part is larger.
+@inline
+secret routine C128.is_moderate() -> Bool
+    return me.real.abs() <= B64.from_bits(0x5FC0000000000000) and me.imag.abs() <= B64.from_bits(0x5FC0000000000000)
+
+### The principal square root (real part >= 0), Kahan's: t = √((|z| + |real|) / 2) from the correctly rounded modulus,
+### then the other part as imag / 2t, so neither part cancels. The imaginary part takes the sign of this imaginary part,
+### so -0 and +0 pick the two sides of the cut along the negative reals: √(-4 - 0i) is 0 - 2i. A modulus below
+### 2^-916 is computed from this number scaled up by 4^55, exactly.
+### :returns: The principal square root.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sqrt_textbook`).
+routine C128.sqrt() -> Me
+    if not me.is_finite()
+        return me.sqrt_textbook()
+    if me.real == 0.0 and me.imag == 0.0
+        return (real: 0.0, imag: me.imag)
+    r: B64 = hypot_unchecked(x: me.real, y: me.imag)
+    if r < B64.from_bits(0x06B0000000000000)
+        up: B64 = B64.from_bits(0x4360000000000000)
+        big: Me = (real: me.real *! up *! up, imag: me.imag *! up *! up)
+        root: Me = big.sqrt()
+        down: B64 = B64.from_bits(0x3C80000000000000)
+        return (real: root.real *! down, imag: root.imag *! down)
+    t: B64 = ((r *! 0.5) +! (me.real.abs() *! 0.5)).sqrt_unchecked()
+    if not me.real.is_sign_negative()
+        return (real: t, imag: me.imag /! (t +! t))
+    return (real: me.imag.abs() /! (t +! t), imag: t.copysign(me.imag))
+
+### The arcsine on the principal branch, Kahan's: real part atan(real / Re(√(1 - z) √(1 + z))), imaginary part
+### asinh(Im(conj(√(1 - z)) √(1 + z))). On the cuts beyond ±1 the sign of a zero imaginary part picks the side.
+### :returns: The arcsine.
+### :throws: With a part that is not finite or larger than 2^509 it crashes where the textbook formula does
+###     (`asin_textbook`).
+routine C128.asin() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asin_textbook()
+    s1: Me = Me.sqrt_of(real: 1.0 -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: 1.0 +! me.real, imag: me.imag)
+    den: B64 = (s1.real *! s2.real) -! (s1.imag *! s2.imag)
+    re: B64 = atan2(y: me.real, x: den)
+    im: B64 = ((s1.real *! s2.imag) -! (s1.imag *! s2.real)).asinh()
+    return c128_finite(re, im)
+
+### The arccosine on the principal branch, Kahan's: real part 2 atan(Re √(1 - z) / Re √(1 + z)), imaginary part
+### asinh(Im(conj(√(1 + z)) √(1 - z))).
+### :returns: The arccosine.
+### :throws: With a part that is not finite or larger than 2^509 it crashes where the textbook formula does
+###     (`acos_textbook`).
+routine C128.acos() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acos_textbook()
+    s1: Me = Me.sqrt_of(real: 1.0 -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: 1.0 +! me.real, imag: me.imag)
+    re: B64 = 2.0 *! atan2(y: s1.real, x: s2.real)
+    im: B64 = ((s2.real *! s1.imag) -! (s2.imag *! s1.real)).asinh()
+    return c128_finite(re, im)
+
+### The inverse hyperbolic sine, -i asin(iz), on the principal branch.
+### :returns: The inverse hyperbolic sine.
+### :throws: With a part that is not finite or larger than 2^509 it crashes where the textbook formula does
+###     (`asinh_textbook`).
+routine C128.asinh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asinh_textbook()
+    v: Me = (real: -me.imag, imag: me.real).asin()
+    return (real: v.imag, imag: -v.real)
+
+### The inverse hyperbolic cosine on the principal branch, Kahan's: real part asinh(Re(conj(√(z - 1)) √(z + 1))),
+### imaginary part 2 atan(Im √(z - 1) / Re √(z + 1)).
+### :returns: The inverse hyperbolic cosine.
+### :throws: With a part that is not finite or larger than 2^509 it crashes where the textbook formula does
+###     (`acosh_textbook`).
+routine C128.acosh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acosh_textbook()
+    s1: Me = Me.sqrt_of(real: me.real -! 1.0, imag: me.imag)
+    s2: Me = Me.sqrt_of(real: me.real +! 1.0, imag: me.imag)
+    re: B64 = ((s1.real *! s2.real) +! (s1.imag *! s2.imag)).asinh()
+    im: B64 = 2.0 *! atan2(y: s1.imag, x: s2.real)
+    return c128_finite(re, im)
+
+### The inverse hyperbolic tangent on the principal branch: real part ln(((1 + real)² + imag²) / ((1 - real)² + imag²))
+### / 4, as ln_1p(4 real / ((1 - real)² + imag²)) / 4 when |real| < 1/2 so nothing cancels, imaginary part
+### atan2(2 imag, (1 - real)(1 + real) - imag²) / 2. On the cuts beyond ±1 the sign of a zero imaginary part picks the
+### side.
+### :returns: The inverse hyperbolic tangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±1. With a part that is not finite or larger than
+###     2^509 it crashes where the textbook formula does (`atanh_textbook`).
+routine C128.atanh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atanh_textbook()
+    if me.imag == 0.0 and me.real.abs() == 1.0
+        throw DivisionByZeroError()
+    one_minus: B64 = 1.0 -! me.real
+    one_plus: B64 = 1.0 +! me.real
+    yy: B64 = me.imag *! me.imag
+    den: B64 = (one_minus *! one_minus) +! yy
+    re: B64 = when
+        me.real.abs() < 0.5 => (4.0 *! me.real /! den).ln_1p_unchecked() *! 0.25
+        else => (((one_plus *! one_plus) +! yy) /! den).ln_unchecked() *! 0.25
+    x: B64 = (one_minus *! one_plus) -! yy
+    im: B64 = atan2(y: 2.0 *! me.imag, x) *! 0.5
+    return c128_finite(re, im)
+
+### The arctangent, -i atanh(iz), on the principal branch.
+### :returns: The arctangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±i. With a part that is not finite or larger than
+###     2^509 it crashes where the textbook formula does (`atan_textbook`).
+routine C128.atan() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).atanh()
+    return (real: v.imag, imag: -v.real)
+
+### The hyperbolic tangent, Kahan's: with t = tan(imag), β = 1 + t², s = sinh(real) and ρ = √(1 + s²), it is
+### (β ρ s + i t) / (1 + β s²), with nothing to cancel. Where β s² is past the range the real part is ±1 and the
+### imaginary part t / (β s²).
+### :returns: The hyperbolic tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tanh_textbook`).
+routine C128.tanh() -> Me
+    if not me.is_finite()
+        return me.tanh_textbook()
+    t: B64 = me.imag.tan()
+    beta: B64 = 1.0 +! (t *! t)
+    s: B64 = me.real.sinh_unchecked()
+    if s.abs() > B64.from_bits(0x5FC0000000000000)
+        return (real: 1.0.copysign(me.real), imag: (t /! (beta *! s)) /! s)
+    rho: B64 = (1.0 +! (s *! s)).sqrt_unchecked()
+    den: B64 = 1.0 +! (beta *! s *! s)
+    return c128_finite(re: (beta *! rho *! s) /! den, im: t /! den)
+
+### The tangent, -i tanh(iz).
+### :returns: The tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tan_textbook`).
+routine C128.tan() -> Me
+    if not me.is_finite()
+        return me.tan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).tanh()
+    return (real: v.imag, imag: -v.real)
+
+### The principal square root of real + imag i, for the inverse functions.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: Its square root.
+@inline
+secret common routine C128.sqrt_of(real: B64, imag: B64) -> Me
+    z: Me = (real: real, imag: imag)
+    return z.sqrt()
+
+### e to this power, e^real (cos imag + i sin imag), from the real exponential and the correctly rounded cosine and
+### sine.
+### Past the range a part is an infinity, not a crash (it is `exp_unchecked`), and a zero imaginary part stays as it is,
+### so e^(real + 0i) is e^real + 0i.
+### :returns: e to this power.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`exp_textbook`).
+routine C128.exp() -> Me
+    if not me.is_finite()
+        return me.exp_textbook()
+    e: B64 = me.real.exp_unchecked()
+    im: B64 = when
+        me.imag == 0.0 => me.imag
+        else => e *! me.imag.sin()
+    return (real: e *! me.imag.cos(), imag: im)
+
+### The sine, sin real cosh imag + i cos real sinh imag, from the correctly rounded real functions. A zero real part
+### stays as it is.
+### :returns: The sine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B64's range. With a part that is not finite it
+###     crashes where the textbook formula does (`sin_textbook`).
+routine C128.sin() -> Me
+    if not me.is_finite()
+        return me.sin_textbook()
+    re: B64 = when
+        me.real == 0.0 => me.real
+        else => me.real.sin() *! me.imag.cosh_unchecked()
+    return c128_finite(re, im: me.real.cos() *! me.imag.sinh_unchecked())
+
+### The cosine, cos real cosh imag - i sin real sinh imag, from the correctly rounded real functions. A zero real part
+### gives a zero imaginary part with the sign -real × imag has.
+### :returns: The cosine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B64's range. With a part that is not finite it
+###     crashes where the textbook formula does (`cos_textbook`).
+routine C128.cos() -> Me
+    if not me.is_finite()
+        return me.cos_textbook()
+    im: B64 = when
+        me.real == 0.0 and me.imag.is_sign_negative() => me.real
+        me.real == 0.0 => -me.real
+        else => -(me.real.sin() *! me.imag.sinh_unchecked())
+    return c128_finite(re: me.real.cos() *! me.imag.cosh_unchecked(), im)
+
+### The hyperbolic sine, sinh real cos imag + i cosh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `sinh_unchecked`), and a zero imaginary part stays as it is.
+### :returns: The hyperbolic sine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sinh_textbook`).
+routine C128.sinh() -> Me
+    if not me.is_finite()
+        return me.sinh_textbook()
+    im: B64 = when
+        me.imag == 0.0 => me.imag
+        else => me.real.cosh_unchecked() *! me.imag.sin()
+    return (real: me.real.sinh_unchecked() *! me.imag.cos(), imag: im)
+
+### The hyperbolic cosine, cosh real cos imag + i sinh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `cosh_unchecked`), and a zero imaginary part gives a zero
+### imaginary part with the sign real × imag has.
+### :returns: The hyperbolic cosine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`cosh_textbook`).
+routine C128.cosh() -> Me
+    if not me.is_finite()
+        return me.cosh_textbook()
+    im: B64 = when
+        me.imag == 0.0 and me.real.is_sign_negative() => -me.imag
+        me.imag == 0.0 => me.imag
+        else => me.real.sinh_unchecked() *! me.imag.sin()
+    return (real: me.real.cosh_unchecked() *! me.imag.cos(), imag: im)
+
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
 ### takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
 ### :returns: The principal square root.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C128.sqrt() -> Me
+secret routine C128.sqrt_textbook() -> Me
     r: B64 = me.abs()
 
     if r == 0.0
@@ -1041,7 +1987,8 @@ routine C128.sqrt() -> Me
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
 routine C128.pow(power: Me) -> Me
-    return (power * me.ln()).exp()
+    r: Me = (power * me.ln()).exp()
+    return c128_finite(re: r.real, im: r.imag)
 
 ### This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
 ### negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
@@ -1410,6 +2357,114 @@ routine c128_powi(real: B64, imag: B64, n: S64) -> Words
 routine c128_from_polar(r: B64, theta: B64) -> Words
     return C128.from_polar(r, theta).words()
 
+### The sum, for C128.add (a real addend comes as a number whose imaginary part is +0).
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c128_add")
+@inline
+routine c128_add(real: B64, imag: B64, other_real: B64, other_imag: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    w: C128 = (real: other_real, imag: other_imag)
+    return (z + w).words()
+
+### The difference, for C128.sub.
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c128_sub")
+@inline
+routine c128_sub(real: B64, imag: B64, other_real: B64, other_imag: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    w: C128 = (real: other_real, imag: other_imag)
+    return (z - w).words()
+
+### The product with a real number, for C128.mul with a B64.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param factor: The real factor.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c128_mul_real")
+@inline
+routine c128_mul_real(real: B64, imag: B64, factor: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    return (z.mul_real(factor)).words()
+
+### The quotient by a real number, for C128.truediv with a B64.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param divisor: The real divisor.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@export("ingrid_c128_div_real")
+@inline
+routine c128_div_real(real: B64, imag: B64, divisor: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    return (z.truediv_real(divisor)).words()
+
+### The negation, for C128.neg.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+@export("ingrid_c128_neg")
+@inline
+routine c128_neg(real: B64, imag: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    return (z.neg()).words()
+
+### The conjugate, for C128.conjugate.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The result's real part in w0, its imaginary part in w1, and zero in w2 and w3.
+@export("ingrid_c128_conjugate")
+@inline
+routine c128_conjugate(real: B64, imag: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    return (z.conjugate()).words()
+
+### Whether two numbers compare equal, for C128.eq.
+### :param real: The first number's real part.
+### :param imag: The first number's imaginary part.
+### :param other_real: The second number's real part.
+### :param other_imag: The second number's imaginary part.
+### :returns: 1 when both parts compare equal, else 0.
+@export("ingrid_c128_eq")
+@inline
+routine c128_eq(real: B64, imag: B64, other_real: B64, other_imag: B64) -> U32
+    z: C128 = (real: real, imag: imag)
+    w: C128 = (real: other_real, imag: other_imag)
+    return z.eq(w).to[U32]()
+
+### What kind of number this is, for C128.is_zero, is_real, is_imaginary, is_nan, is_infinite, and is_finite.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The flags of `classify`: 1 zero, 2 on the real axis, 4 on the imaginary axis, 8 NaN, 16 infinite, 32
+###     finite.
+@export("ingrid_c128_class")
+@inline
+routine c128_class(real: B64, imag: B64) -> U32
+    z: C128 = (real: real, imag: imag)
+    return z.classify()
+
+### The polar form, for C128.to_polar.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The modulus in w0, the angle in w1, and zero in w2 and w3.
+### :throws: Crashes where `abs` does.
+@export("ingrid_c128_polar")
+@inline
+routine c128_polar(real: B64, imag: B64) -> Words
+    z: C128 = (real: real, imag: imag)
+    return z.to_polar().words()
+
 # ── C256 ──────────────────────────────────────────────────────────────────────────
 
 ### RazorForge's C256: a complex number over B128, RazorForge's B128.
@@ -1446,12 +2501,13 @@ routine C256.sub(other: Me) -> Me
     im: B128 = me.imag.sub_finite(other.imag)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The product (ac - bd) + (ad + bc)i.
 ### :param other: The number to multiply by.
 ### :returns: The product.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.mul(other: Me) -> Me
+secret routine C256.mul_textbook(other: Me) -> Me
     ac: B128 = me.real.mul_finite(other.real)
     bd: B128 = me.imag.mul_finite(other.imag)
     re: B128 = ac.sub_finite(bd)
@@ -1460,6 +2516,7 @@ routine C256.mul(other: Me) -> Me
     im: B128 = ad.add_finite(bc)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The quotient: me times the conjugate of other, over other's squared modulus.
 ### :param other: The divisor.
 ### :returns: The quotient.
@@ -1467,10 +2524,10 @@ routine C256.mul(other: Me) -> Me
 ###     when one is NaN. Dividing by 0 + 0i is a `DivisionByZeroError`, and 0 / (0 + 0i) a `NumericDomainError`, as
 ###     with real division. A nonzero divisor whose squared modulus underflows to zero divides a nonzero value by
 ###     zero, a `DivisionByZeroError` too.
-routine C256.truediv(other: Me) -> Me
+secret routine C256.truediv_textbook(other: Me) -> Me
     if other.is_zero()
         crash_zero_divisor(me.is_zero())
-    d: B128 = other.norm()
+    d: B128 = other.norm_textbook()
     ac: B128 = me.real.mul_finite(other.real)
     bd: B128 = me.imag.mul_finite(other.imag)
     re: B128 = ac.add_finite(bd).truediv_finite(d)
@@ -1485,50 +2542,55 @@ routine C256.truediv(other: Me) -> Me
 routine C256.is_zero() -> Bool
     return me.real.is_zero() and me.imag.is_zero()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The squared modulus real² + imag².
 ### :returns: The squared modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.norm() -> B128
+secret routine C256.norm_textbook() -> B128
     rr: B128 = me.real.mul_finite(me.real)
     ii: B128 = me.imag.mul_finite(me.imag)
     return rr.add_finite(ii)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The modulus, the square root of the squared modulus.
 ### :returns: The modulus.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.abs() -> B128
-    return me.norm().sqrt_unchecked()
+secret routine C256.abs_textbook() -> B128
+    return me.norm_textbook().sqrt_unchecked()
 
 ### The phase angle atan2(imag, real), in (-π, π].
 ### :returns: The phase angle.
 routine C256.arg() -> B128
     return atan2(y: me.imag, x: me.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The sine, sin a cosh b + i cos a sinh b.
 ### :returns: The sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.sin() -> Me
+secret routine C256.sin_textbook() -> Me
     re: B128 = me.real.sin().mul_finite(me.imag.cosh_unchecked())
     im: B128 = me.real.cos().mul_finite(me.imag.sinh_unchecked())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The cosine, cos a cosh b - i sin a sinh b.
 ### :returns: The cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.cos() -> Me
+secret routine C256.cos_textbook() -> Me
     re: B128 = me.real.cos().mul_finite(me.imag.cosh_unchecked())
     im: B128 = -me.real.sin().mul_finite(me.imag.sinh_unchecked())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The tangent, (sin 2a + i sinh 2b) / (cos 2a + cosh 2b).
 ### :returns: The tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C256.tan() -> Me
+secret routine C256.tan_textbook() -> Me
     a2: B128 = me.real.add_finite(me.real)
     b2: B128 = me.imag.add_finite(me.imag)
     d: B128 = a2.cos().add_finite(b2.cosh_unchecked())
@@ -1536,33 +2598,36 @@ routine C256.tan() -> Me
     im: B128 = b2.sinh_unchecked().truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arcsine, -i log(iz + √(1 - z²)).
 ### :returns: The arcsine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.asin() -> Me
+secret routine C256.asin_textbook() -> Me
     iz: Me = (real: -me.imag, imag: me.real)
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     v: Me = (iz + s).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arccosine, -i log(z + i √(1 - z²)).
 ### :returns: The arccosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.acos() -> Me
+secret routine C256.acos_textbook() -> Me
     zz: Me = me * me
     s: Me = (Me.one() - zz).sqrt()
     `is`: Me = (real: -s.imag, imag: s.real)
     v: Me = (me + `is`).ln()
     return (real: v.imag, imag: -v.real)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The arctangent, (i/2) log((i + z) / (i - z)).
 ### :returns: The arctangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C256.atan() -> Me
+secret routine C256.atan_textbook() -> Me
     num_imag: B128 = me.imag.add_finite(B128_ONE)
     den_imag: B128 = B128.sub_finite(B128_ONE, me.imag)
     num: Me = (real: me.real, imag: num_imag)
@@ -1572,29 +2637,32 @@ routine C256.atan() -> Me
     im: B128 = v.real.truediv_finite(B128_TWO)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic sine, sinh a cos b + i cosh a sin b.
 ### :returns: The hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.sinh() -> Me
+secret routine C256.sinh_textbook() -> Me
     re: B128 = me.real.sinh_unchecked().mul_finite(me.imag.cos())
     im: B128 = me.real.cosh_unchecked().mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic cosine, cosh a cos b + i sinh a sin b.
 ### :returns: The hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.cosh() -> Me
+secret routine C256.cosh_textbook() -> Me
     re: B128 = me.real.cosh_unchecked().mul_finite(me.imag.cos())
     im: B128 = me.real.sinh_unchecked().mul_finite(me.imag.sin())
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The hyperbolic tangent, (sinh 2a + i sin 2b) / (cosh 2a + cos 2b).
 ### :returns: The hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C256.tanh() -> Me
+secret routine C256.tanh_textbook() -> Me
     a2: B128 = me.real.add_finite(me.real)
     b2: B128 = me.imag.add_finite(me.imag)
     d: B128 = a2.cosh_unchecked().add_finite(b2.cos())
@@ -1602,29 +2670,32 @@ routine C256.tanh() -> Me
     im: B128 = b2.sin().truediv_finite(d)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic sine, log(z + √(z² + 1)).
 ### :returns: The inverse hyperbolic sine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.asinh() -> Me
+secret routine C256.asinh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz + Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic cosine, log(z + √(z² - 1)).
 ### :returns: The inverse hyperbolic cosine.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.acosh() -> Me
+secret routine C256.acosh_textbook() -> Me
     zz: Me = me * me
     s: Me = (zz - Me.one()).sqrt()
     return (me + s).ln()
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The inverse hyperbolic tangent, log((1 + z) / (1 - z)) / 2.
 ### :returns: The inverse hyperbolic tangent.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, with `NumericDomainError` when
 ###     one is NaN, or with `DivisionByZeroError` when it divides a nonzero value by zero.
-routine C256.atanh() -> Me
+secret routine C256.atanh_textbook() -> Me
     p: Me = Me.one() + me
     m: Me = Me.one() - me
     v: Me = (p / m).ln()
@@ -1632,11 +2703,12 @@ routine C256.atanh() -> Me
     im: B128 = v.imag.truediv_finite(B128_TWO)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### e to this power, eᵃ (cos b + i sin b).
 ### :returns: e to this power.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.exp() -> Me
+secret routine C256.exp_textbook() -> Me
     ea: B128 = me.real.exp_unchecked()
     re: B128 = ea.mul_finite(me.imag.cos())
     im: B128 = ea.mul_finite(me.imag.sin())
@@ -1670,25 +2742,427 @@ routine C256.log2() -> Me
     im: B128 = v.imag.truediv_finite(C256_LN_2)
     return (real: re, imag: im)
 
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### 1 / z, the conjugate over the squared modulus.
 ### :returns: 1 / z.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN. The reciprocal of 0 + 0i is 1 / 0, a `DivisionByZeroError`, as with real division. A
 ###     squared modulus that underflows to zero divides a nonzero value by zero, a `DivisionByZeroError` too.
-routine C256.reciprocal() -> Me
+secret routine C256.reciprocal_textbook() -> Me
     if me.is_zero()
         throw DivisionByZeroError()
-    d: B128 = me.norm()
+    d: B128 = me.norm_textbook()
     re: B128 = me.real.truediv_finite(d)
     im: B128 = (-me.imag).truediv_finite(d)
     return (real: re, imag: im)
 
+### The product (ac - bd) + (ad + bc)i, each part rounded once (b128_dot2: the products are exact integers).
+### :param other: The number to multiply by.
+### :returns: The product.
+### :throws: Crashes with `NumericOverflowError` when a part is past B128's range. With an operand that is not finite
+###     it crashes where the textbook formula does (`mul_textbook`).
+routine C256.mul(other: Me) -> Me
+    if not (me.is_finite() and other.is_finite())
+        return me.mul_textbook(other)
+    re: B128 = b128_dot2(a: me.real, b: other.real, c: -me.imag, d: other.imag).hi
+    im: B128 = b128_dot2(a: me.real, b: other.imag, c: me.imag, d: other.real).hi
+    return c256_finite(re, im)
+
+### The quotient (ac + bd)/(c² + d²) + (bc - ad)/(c² + d²) i, each part rounded once (b128_divide).
+### :param other: The divisor.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError` when dividing by 0 + 0i, with `NumericDomainError` for 0 / (0 + 0i), and
+###     with `NumericOverflowError` when a part is past B128's range. With an operand that is not finite it crashes
+###     where the textbook formula does (`truediv_textbook`).
+routine C256.truediv(other: Me) -> Me
+    if other.is_zero()
+        crash_zero_divisor(me.is_zero())
+    if not (me.is_finite() and other.is_finite())
+        return me.truediv_textbook(other)
+    q: B128Pair = b128_divide(operands: (a: me.real, b: me.imag, c: other.real, d: other.imag))
+    return c256_finite(re: q.hi, im: q.lo)
+
+### The squared modulus real² + imag², rounded once.
+### :returns: The squared modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B128's range. With a part that is not finite it
+###     crashes where the textbook formula does (`norm_textbook`).
+routine C256.norm() -> B128
+    if not me.is_finite()
+        return me.norm_textbook()
+    n: B128 = b128_dot2(a: me.real, b: me.real, c: me.imag, d: me.imag).hi
+    if n.is_finite()
+        return n
+    crash_not_finite(false)
+
+### The modulus √(real² + imag²), rounded once (the correctly rounded hypot), with no overflow or underflow on the
+### way.
+### :returns: The modulus.
+### :throws: Crashes with `NumericOverflowError` when it is past B128's range. With a part that is not finite it
+###     crashes where the textbook formula does (`abs_textbook`).
+routine C256.abs() -> B128
+    if not me.is_finite()
+        return me.abs_textbook()
+    r: B128 = hypot_unchecked(x: me.real, y: me.imag)
+    if r.is_finite()
+        return r
+    crash_not_finite(false)
+
+### 1 / z = real/(real² + imag²) - imag/(real² + imag²) i, each part rounded once (as in `truediv`), a zero part
+### with the sign of real / (real² + imag²) and -imag / (real² + imag²).
+### :returns: 1 / z.
+### :throws: Crashes with `DivisionByZeroError` for 0 + 0i, as with real division, and with `NumericOverflowError` when
+###     a part is past B128's range. With a part that is not finite it crashes where the textbook formula does
+###     (`reciprocal_textbook`).
+routine C256.reciprocal() -> Me
+    if me.is_zero()
+        throw DivisionByZeroError()
+    if not me.is_finite()
+        return me.reciprocal_textbook()
+    q: B128Pair = b128_divide(operands: (a: B128_ONE, b: B128_ZERO, c: me.real, d: me.imag))
+    re: B128 = when
+        me.real.is_zero() => me.real
+        else => q.hi
+    im: B128 = when
+        me.imag.is_zero() => -me.imag
+        else => q.lo
+    return c256_finite(re, im)
+
+### Both parts, crashing unless both are finite: the check behind the arithmetic rounded once, whose operands were
+### finite, so a part that is not finite is past the range.
+### :param re: The real part.
+### :param im: The imaginary part.
+### :returns: The number re + im i.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@inline
+secret routine c256_finite(re: B128, im: B128) -> C256
+    if re.is_finite() and im.is_finite()
+        return (real: re, imag: im)
+    crash_not_finite(re.is_nan() or im.is_nan())
+
+### The negation, part by part.
+### :returns: -real - imag i.
+@inline
+routine C256.neg() -> Me
+    return (real: -me.real, imag: -me.imag)
+
+### The conjugate: the imaginary part negated.
+### :returns: real - imag i.
+@inline
+routine C256.conjugate() -> Me
+    return (real: me.real, imag: -me.imag)
+
+### Whether both parts compare equal, as floats do: -0 equals +0, and a NaN equals nothing.
+### :param other: The number to compare with.
+### :returns: True when real == other.real and imag == other.imag.
+@inline
+routine C256.eq(other: Me) -> Bool
+    return me.real == other.real and me.imag == other.imag
+
+### Whether both parts are finite.
+### :returns: True when neither part is infinite or NaN.
+@inline
+routine C256.is_finite() -> Bool
+    return me.real.is_finite() and me.imag.is_finite()
+
+### Whether a part is NaN.
+### :returns: True when the real or the imaginary part is NaN.
+@inline
+routine C256.is_nan() -> Bool
+    return me.real.is_nan() or me.imag.is_nan()
+
+### Whether a part is infinite.
+### :returns: True when the real or the imaginary part is an infinity.
+@inline
+routine C256.is_infinite() -> Bool
+    return me.real.is_infinite() or me.imag.is_infinite()
+
+### What kind of number this is, as flags: 1 both parts zero, 2 the imaginary part zero (on the real axis), 4 the real
+### part zero (on the imaginary axis), 8 a part NaN, 16 a part infinite, 32 both parts finite. A zero is +0 or -0.
+### :returns: The flags.
+@inline
+routine C256.classify() -> U32
+    real_zero: Bool = me.real.is_zero()
+    imag_zero: Bool = me.imag.is_zero()
+    zero: U32 = (real_zero and imag_zero).to[U32]()
+    on_real: U32 = imag_zero.to[U32]() << 1
+    on_imaginary: U32 = real_zero.to[U32]() << 2
+    not_a_number: U32 = me.is_nan().to[U32]() << 3
+    infinite: U32 = me.is_infinite().to[U32]() << 4
+    finite: U32 = me.is_finite().to[U32]() << 5
+    return zero | on_real | on_imaginary | not_a_number | infinite | finite
+
+### The product with a real number, both parts multiplied by it (the real part first).
+### :param factor: The real factor.
+### :returns: real × factor + imag × factor i.
+### :throws: Crashes with `NumericOverflowError` when a product is infinite, or with `NumericDomainError` when one is
+###     NaN.
+@inline
+routine C256.mul_real(factor: B128) -> Me
+    re: B128 = me.real.mul_finite(factor)
+    im: B128 = me.imag.mul_finite(factor)
+    return (real: re, imag: im)
+
+### The quotient by a real number, both parts divided by it (the real part first).
+### :param divisor: The real divisor.
+### :returns: real / divisor + imag / divisor i.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@inline
+routine C256.truediv_real(divisor: B128) -> Me
+    re: B128 = me.real.truediv_finite(divisor)
+    im: B128 = me.imag.truediv_finite(divisor)
+    return (real: re, imag: im)
+
+### The polar form: the modulus (`abs`) and the phase angle (`arg`).
+### :returns: The modulus in `real` and the angle in `imag`.
+### :throws: Crashes where `abs` does.
+@inline
+routine C256.to_polar() -> Me
+    return (real: me.abs(), imag: me.arg())
+
+### SipHash-2-4 of the value under the key (k0, k1): both parts' bits with a zero part as +0, so numbers that compare
+### equal hash the same.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+routine C256.hash_keyed(k0: U64, k1: U64) -> U64
+    re: U128 = when
+        me.real.is_zero() => 0
+        else => me.real.bits()
+    im: U128 = when
+        me.imag.is_zero() => 0
+        else => me.imag.bits()
+    words: &[U64] <- [re.to_wrap[U64](), (re >> 64).to_wrap[U64](), im.to_wrap[U64](),
+        (im >> 64).to_wrap[U64]()]
+    key: SipKey = (k0: k0, k1: k1)
+    return siphash24(data: words.to[@U64]().to[@Byte](), count: 32, key)
+
+### Whether both parts are at most 2^8189 in magnitude: past it the products the inverse functions form could
+### overflow, so those keep the textbook formulas.
+### :returns: True when neither part is larger.
+@inline
+secret routine C256.is_moderate() -> Bool
+    return me.real.abs() <= CX_B128_BIG and me.imag.abs() <= CX_B128_BIG
+
+### The principal square root (real part >= 0), Kahan's: t = √((|z| + |real|) / 2) from the correctly rounded modulus,
+### then the other part as imag / 2t, so neither part cancels. The imaginary part takes the sign of this imaginary part,
+### so -0 and +0 pick the two sides of the cut along the negative reals: √(-4 - 0i) is 0 - 2i. A modulus below
+### 2^-16156 is computed from this number scaled up by 4^115, exactly.
+### :returns: The principal square root.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sqrt_textbook`).
+routine C256.sqrt() -> Me
+    if not me.is_finite()
+        return me.sqrt_textbook()
+    if me.real.is_zero() and me.imag.is_zero()
+        return (real: B128_ZERO, imag: me.imag)
+    r: B128 = hypot_unchecked(x: me.real, y: me.imag)
+    if r < CX_B128_SQRT_TINY
+        up: B128 = CX_B128_SQRT_UP
+        big: Me = (real: me.real *! up *! up, imag: me.imag *! up *! up)
+        root: Me = big.sqrt()
+        down: B128 = CX_B128_SQRT_DOWN
+        return (real: root.real *! down, imag: root.imag *! down)
+    t: B128 = ((r *! CX_B128_HALF) +! (me.real.abs() *! CX_B128_HALF)).sqrt_unchecked()
+    if not me.real.is_sign_negative()
+        return (real: t, imag: me.imag /! (t +! t))
+    return (real: me.imag.abs() /! (t +! t), imag: t.copysign(me.imag))
+
+### The arcsine on the principal branch, Kahan's: real part atan(real / Re(√(1 - z) √(1 + z))), imaginary part
+### asinh(Im(conj(√(1 - z)) √(1 + z))). On the cuts beyond ±1 the sign of a zero imaginary part picks the side.
+### :returns: The arcsine.
+### :throws: With a part that is not finite or larger than 2^8189 it crashes where the textbook formula does
+###     (`asin_textbook`).
+routine C256.asin() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asin_textbook()
+    s1: Me = Me.sqrt_of(real: B128_ONE -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: B128_ONE +! me.real, imag: me.imag)
+    den: B128 = (s1.real *! s2.real) -! (s1.imag *! s2.imag)
+    re: B128 = atan2(y: me.real, x: den)
+    im: B128 = ((s1.real *! s2.imag) -! (s1.imag *! s2.real)).asinh()
+    return c256_finite(re, im)
+
+### The arccosine on the principal branch, Kahan's: real part 2 atan(Re √(1 - z) / Re √(1 + z)), imaginary part
+### asinh(Im(conj(√(1 + z)) √(1 - z))).
+### :returns: The arccosine.
+### :throws: With a part that is not finite or larger than 2^8189 it crashes where the textbook formula does
+###     (`acos_textbook`).
+routine C256.acos() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acos_textbook()
+    s1: Me = Me.sqrt_of(real: B128_ONE -! me.real, imag: -me.imag)
+    s2: Me = Me.sqrt_of(real: B128_ONE +! me.real, imag: me.imag)
+    re: B128 = B128_TWO *! atan2(y: s1.real, x: s2.real)
+    im: B128 = ((s2.real *! s1.imag) -! (s2.imag *! s1.real)).asinh()
+    return c256_finite(re, im)
+
+### The inverse hyperbolic sine, -i asin(iz), on the principal branch.
+### :returns: The inverse hyperbolic sine.
+### :throws: With a part that is not finite or larger than 2^8189 it crashes where the textbook formula does
+###     (`asinh_textbook`).
+routine C256.asinh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.asinh_textbook()
+    v: Me = (real: -me.imag, imag: me.real).asin()
+    return (real: v.imag, imag: -v.real)
+
+### The inverse hyperbolic cosine on the principal branch, Kahan's: real part asinh(Re(conj(√(z - 1)) √(z + 1))),
+### imaginary part 2 atan(Im √(z - 1) / Re √(z + 1)).
+### :returns: The inverse hyperbolic cosine.
+### :throws: With a part that is not finite or larger than 2^8189 it crashes where the textbook formula does
+###     (`acosh_textbook`).
+routine C256.acosh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.acosh_textbook()
+    s1: Me = Me.sqrt_of(real: me.real -! B128_ONE, imag: me.imag)
+    s2: Me = Me.sqrt_of(real: me.real +! B128_ONE, imag: me.imag)
+    re: B128 = ((s1.real *! s2.real) +! (s1.imag *! s2.imag)).asinh()
+    im: B128 = B128_TWO *! atan2(y: s1.imag, x: s2.real)
+    return c256_finite(re, im)
+
+### The inverse hyperbolic tangent on the principal branch: real part ln(((1 + real)² + imag²) / ((1 - real)² + imag²))
+### / 4, as ln_1p(4 real / ((1 - real)² + imag²)) / 4 when |real| < 1/2 so nothing cancels, imaginary part
+### atan2(2 imag, (1 - real)(1 + real) - imag²) / 2. On the cuts beyond ±1 the sign of a zero imaginary part picks the
+### side.
+### :returns: The inverse hyperbolic tangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±1. With a part that is not finite or larger than
+###     2^8189 it crashes where the textbook formula does (`atanh_textbook`).
+routine C256.atanh() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atanh_textbook()
+    if me.imag.is_zero() and me.real.abs() == B128_ONE
+        throw DivisionByZeroError()
+    one_minus: B128 = B128_ONE -! me.real
+    one_plus: B128 = B128_ONE +! me.real
+    yy: B128 = me.imag *! me.imag
+    den: B128 = (one_minus *! one_minus) +! yy
+    re: B128 = when
+        me.real.abs() < CX_B128_HALF => (CX_B128_FOUR *! me.real /! den).ln_1p_unchecked() *! CX_B128_QUARTER
+        else => (((one_plus *! one_plus) +! yy) /! den).ln_unchecked() *! CX_B128_QUARTER
+    x: B128 = (one_minus *! one_plus) -! yy
+    im: B128 = atan2(y: B128_TWO *! me.imag, x) *! CX_B128_HALF
+    return c256_finite(re, im)
+
+### The arctangent, -i atanh(iz), on the principal branch.
+### :returns: The arctangent.
+### :throws: Crashes with `DivisionByZeroError` at the poles ±i. With a part that is not finite or larger than
+###     2^8189 it crashes where the textbook formula does (`atan_textbook`).
+routine C256.atan() -> Me
+    if not (me.is_finite() and me.is_moderate())
+        return me.atan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).atanh()
+    return (real: v.imag, imag: -v.real)
+
+### The hyperbolic tangent, Kahan's: with t = tan(imag), β = 1 + t², s = sinh(real) and ρ = √(1 + s²), it is
+### (β ρ s + i t) / (1 + β s²), with nothing to cancel. Where β s² is past the range the real part is ±1 and the
+### imaginary part t / (β s²).
+### :returns: The hyperbolic tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tanh_textbook`).
+routine C256.tanh() -> Me
+    if not me.is_finite()
+        return me.tanh_textbook()
+    t: B128 = me.imag.tan()
+    beta: B128 = B128_ONE +! (t *! t)
+    s: B128 = me.real.sinh_unchecked()
+    if s.abs() > CX_B128_BIG
+        return (real: B128_ONE.copysign(me.real), imag: (t /! (beta *! s)) /! s)
+    rho: B128 = (B128_ONE +! (s *! s)).sqrt_unchecked()
+    den: B128 = B128_ONE +! (beta *! s *! s)
+    return c256_finite(re: (beta *! rho *! s) /! den, im: t /! den)
+
+### The tangent, -i tanh(iz).
+### :returns: The tangent.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`tan_textbook`).
+routine C256.tan() -> Me
+    if not me.is_finite()
+        return me.tan_textbook()
+    v: Me = (real: -me.imag, imag: me.real).tanh()
+    return (real: v.imag, imag: -v.real)
+
+### The principal square root of real + imag i, for the inverse functions.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: Its square root.
+@inline
+secret common routine C256.sqrt_of(real: B128, imag: B128) -> Me
+    z: Me = (real: real, imag: imag)
+    return z.sqrt()
+
+### e to this power, e^real (cos imag + i sin imag), from the real exponential and the correctly rounded cosine and
+### sine.
+### Past the range a part is an infinity, not a crash (it is `exp_unchecked`), and a zero imaginary part stays as it is,
+### so e^(real + 0i) is e^real + 0i.
+### :returns: e to this power.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`exp_textbook`).
+routine C256.exp() -> Me
+    if not me.is_finite()
+        return me.exp_textbook()
+    e: B128 = me.real.exp_unchecked()
+    im: B128 = when
+        me.imag.is_zero() => me.imag
+        else => e *! me.imag.sin()
+    return (real: e *! me.imag.cos(), imag: im)
+
+### The sine, sin real cosh imag + i cos real sinh imag, from the correctly rounded real functions. A zero real part
+### stays as it is.
+### :returns: The sine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B128's range. With a part that is not finite it
+###     crashes where the textbook formula does (`sin_textbook`).
+routine C256.sin() -> Me
+    if not me.is_finite()
+        return me.sin_textbook()
+    re: B128 = when
+        me.real.is_zero() => me.real
+        else => me.real.sin() *! me.imag.cosh_unchecked()
+    return c256_finite(re, im: me.real.cos() *! me.imag.sinh_unchecked())
+
+### The cosine, cos real cosh imag - i sin real sinh imag, from the correctly rounded real functions. A zero real part
+### gives a zero imaginary part with the sign -real × imag has.
+### :returns: The cosine.
+### :throws: Crashes with `NumericOverflowError` when a part is past B128's range. With a part that is not finite it
+###     crashes where the textbook formula does (`cos_textbook`).
+routine C256.cos() -> Me
+    if not me.is_finite()
+        return me.cos_textbook()
+    im: B128 = when
+        me.real.is_zero() and me.imag.is_sign_negative() => me.real
+        me.real.is_zero() => -me.real
+        else => -(me.real.sin() *! me.imag.sinh_unchecked())
+    return c256_finite(re: me.real.cos() *! me.imag.cosh_unchecked(), im)
+
+### The hyperbolic sine, sinh real cos imag + i cosh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `sinh_unchecked`), and a zero imaginary part stays as it is.
+### :returns: The hyperbolic sine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`sinh_textbook`).
+routine C256.sinh() -> Me
+    if not me.is_finite()
+        return me.sinh_textbook()
+    im: B128 = when
+        me.imag.is_zero() => me.imag
+        else => me.real.cosh_unchecked() *! me.imag.sin()
+    return (real: me.real.sinh_unchecked() *! me.imag.cos(), imag: im)
+
+### The hyperbolic cosine, cosh real cos imag + i sinh real sin imag, from the correctly rounded real functions. Past
+### the range a part is an infinity, not a crash (it is `cosh_unchecked`), and a zero imaginary part gives a zero
+### imaginary part with the sign real × imag has.
+### :returns: The hyperbolic cosine.
+### :throws: With a part that is not finite it crashes where the textbook formula does (`cosh_textbook`).
+routine C256.cosh() -> Me
+    if not me.is_finite()
+        return me.cosh_textbook()
+    im: B128 = when
+        me.imag.is_zero() and me.real.is_sign_negative() => -me.imag
+        me.imag.is_zero() => me.imag
+        else => me.real.sinh_unchecked() *! me.imag.sin()
+    return (real: me.real.cosh_unchecked() *! me.imag.cos(), imag: im)
+
+### The textbook formula, kept for operands that are not finite: it crashes where RazorForge's did before C98.
 ### The principal square root (real part >= 0), from half the modulus plus and minus the real part. The imaginary part
 ### takes the sign of this imaginary part, so -0 and +0 pick the two sides of the cut along the negative reals.
 ### :returns: The principal square root.
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
-routine C256.sqrt() -> Me
+secret routine C256.sqrt_textbook() -> Me
     r: B128 = me.abs()
 
     if r == B128_ZERO
@@ -1705,7 +3179,8 @@ routine C256.sqrt() -> Me
 ### :throws: Crashes with `NumericOverflowError` when an intermediate result is infinite, or with `NumericDomainError`
 ###     when one is NaN.
 routine C256.pow(power: Me) -> Me
-    return (power * me.ln()).exp()
+    r: Me = (power * me.ln()).exp()
+    return c256_finite(re: r.real, im: r.imag)
 
 ### This number to the integer power n, by repeated squaring: each product rounds once, with no ln and exp. A
 ### negative n starts from the reciprocal, and n = 0 gives 1. The base is squared once more after the last product,
@@ -2144,3 +3619,1687 @@ routine c256_powi(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, 
 routine c256_from_polar(r_low: U64, r_high: U64, theta_low: U64, theta_high: U64) -> C256
     return C256.from_polar(r: b128_from_halves(low: r_low, high: r_high),
         theta: b128_from_halves(low: theta_low, high: theta_high))
+
+### The sum, for C256.add (a real addend comes as a number whose imaginary part is +0).
+### :param real_low: The low 64 bits of the first number's real part.
+### :param real_high: The high 64 bits of the first number's real part.
+### :param imag_low: The low 64 bits of the first number's imaginary part.
+### :param imag_high: The high 64 bits of the first number's imaginary part.
+### :param other_real_low: The low 64 bits of the second number's real part.
+### :param other_real_high: The high 64 bits of the second number's real part.
+### :param other_imag_low: The low 64 bits of the second number's imaginary part.
+### :param other_imag_high: The high 64 bits of the second number's imaginary part.
+### :returns: The result.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c256_add")
+@inline
+routine c256_add(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    w: C256 = C256.from_halves(real_low: other_real_low, real_high: other_real_high,
+        imag_low: other_imag_low, imag_high: other_imag_high)
+    return z + w
+
+### The difference, for C256.sub.
+### :param real_low: The low 64 bits of the first number's real part.
+### :param real_high: The high 64 bits of the first number's real part.
+### :param imag_low: The low 64 bits of the first number's imaginary part.
+### :param imag_high: The high 64 bits of the first number's imaginary part.
+### :param other_real_low: The low 64 bits of the second number's real part.
+### :param other_real_high: The high 64 bits of the second number's real part.
+### :param other_imag_low: The low 64 bits of the second number's imaginary part.
+### :param other_imag_high: The high 64 bits of the second number's imaginary part.
+### :returns: The result.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c256_sub")
+@inline
+routine c256_sub(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    w: C256 = C256.from_halves(real_low: other_real_low, real_high: other_real_high,
+        imag_low: other_imag_low, imag_high: other_imag_high)
+    return z - w
+
+### The product with a real number, for C256.mul with a B128.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :param factor_low: The low 64 bits of the real factor.
+### :param factor_high: The high 64 bits of the real factor.
+### :returns: The result.
+### :throws: Crashes with `NumericOverflowError` when a part is infinite, or with `NumericDomainError` when one is NaN.
+@export("ingrid_c256_mul_real")
+@inline
+routine c256_mul_real(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, factor_low: U64,
+    factor_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.mul_real(b128_from_halves(low: factor_low, high: factor_high))
+
+### The quotient by a real number, for C256.truediv with a B128.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :param divisor_low: The low 64 bits of the real divisor.
+### :param divisor_high: The high 64 bits of the real divisor.
+### :returns: The result.
+### :throws: Crashes with `DivisionByZeroError` when a nonzero part is divided by zero, with `NumericDomainError` when a
+###     quotient is NaN, or with `NumericOverflowError` when one is infinite.
+@export("ingrid_c256_div_real")
+@inline
+routine c256_div_real(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64,
+    divisor_low: U64, divisor_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.truediv_real(b128_from_halves(low: divisor_low, high: divisor_high))
+
+### The negation, for C256.neg.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The result.
+@export("ingrid_c256_neg")
+@inline
+routine c256_neg(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.neg()
+
+### The conjugate, for C256.conjugate.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The result.
+@export("ingrid_c256_conjugate")
+@inline
+routine c256_conjugate(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> C256
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.conjugate()
+
+### Whether two numbers compare equal, for C256.eq.
+### :param real_low: The low 64 bits of the first number's real part.
+### :param real_high: The high 64 bits of the first number's real part.
+### :param imag_low: The low 64 bits of the first number's imaginary part.
+### :param imag_high: The high 64 bits of the first number's imaginary part.
+### :param other_real_low: The low 64 bits of the second number's real part.
+### :param other_real_high: The high 64 bits of the second number's real part.
+### :param other_imag_low: The low 64 bits of the second number's imaginary part.
+### :param other_imag_high: The high 64 bits of the second number's imaginary part.
+### :returns: 1 when both parts compare equal, else 0.
+@export("ingrid_c256_eq")
+@inline
+routine c256_eq(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, other_real_low: U64,
+    other_real_high: U64, other_imag_low: U64, other_imag_high: U64) -> U32
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    w: C256 = C256.from_halves(real_low: other_real_low, real_high: other_real_high,
+        imag_low: other_imag_low, imag_high: other_imag_high)
+    return z.eq(w).to[U32]()
+
+### What kind of number this is, for C256.is_zero, is_real, is_imaginary, is_nan, is_infinite, and is_finite.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The flags of `classify`: 1 zero, 2 on the real axis, 4 on the imaginary axis, 8 NaN, 16 infinite, 32
+###     finite.
+@export("ingrid_c256_class")
+@inline
+routine c256_class(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> U32
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.classify()
+
+### The polar form, for C256.to_polar.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The modulus's low and high 64 bits in w0 and w1, the angle's in w2 and w3.
+### :throws: Crashes where `abs` does.
+@export("ingrid_c256_polar")
+@inline
+routine c256_polar(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Words
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return Words.construct(a: z.abs(), b: z.arg())
+
+# ── B64: rounded once ─────────────────────────────────────────────────────────────
+
+### A B64 and what is left over: the exact error of the operation that made `hi` (TwoSum, TwoProd), or, for a sum of
+### products rounded once, that sum's remainder rounded once more.
+record B64Pair
+    hi: B64
+    lo: B64
+
+### Four B64s: the factors of a sum of two products, a × b + c × d, or a quotient (a + b i) / (c + d i).
+record B64Dot
+    a: B64
+    b: B64
+    c: B64
+    d: B64
+
+### A finite B64 as an integer times a power of two: the value is (-1)^negative × significand × 2^exponent.
+secret record B64Parts
+    negative: Bool
+    exponent: S64
+    significand: U64
+
+### `a + b` and its exact error (Knuth's TwoSum), for finite operands whose sum does not overflow.
+### :param a: One addend.
+### :param b: The other addend.
+### :returns: The sum rounded to nearest in `hi`, and `a + b - hi` exactly in `lo`.
+@inline
+routine b64_two_sum(a: B64, b: B64) -> B64Pair
+    s: B64 = a +! b
+    bb: B64 = s -! a
+    err: B64 = (a -! (s -! bb)) +! (b -! bb)
+    return (hi: s, lo: err)
+
+### `a × b` and its error, from one fused multiply-add: the error is exact unless it falls below the subnormal range.
+### :param a: One factor.
+### :param b: The other factor.
+### :returns: The product rounded to nearest in `hi`, and `a × b - hi` in `lo`.
+@inline
+routine b64_two_prod(a: B64, b: B64) -> B64Pair
+    h: B64 = a *! b
+    err: B64 = a.mul_add_unchecked(a: b, b: -h)
+    return (hi: h, lo: err)
+
+### The parts of a finite B64.
+### :param x: The value.
+### :returns: Its sign, exponent, and integer significand (a subnormal's without the hidden bit).
+@inline
+secret routine b64_parts(x: B64) -> B64Parts
+    bits: U64 = x.bits()
+    field: U64 = (bits >> 52) & 0x7FF
+    fraction: U64 = bits & 0xFFFFFFFFFFFFF
+    negative: Bool = (bits >> 63) == 1
+    if field == 0
+        return (negative: negative, exponent: -1074, significand: fraction)
+    exponent: S64 = field.to[S64]() - 1075
+    return (negative: negative, exponent: exponent, significand: fraction | 0x10000000000000)
+
+### The B64 nearest (-1)^negative × (z + f) × 2^ex for some f in (0, 1) when `sticky` (f = 0 otherwise), a tie to
+### the even one: past the range it is an infinity, below it a subnormal or zero.
+### :param z: The integer part of the magnitude, not 0 unless `sticky`.
+### :param sticky: Whether a fraction below z's last bit was dropped.
+### :param ex: The power of two z is scaled by.
+### :param negative: The sign.
+### :returns: The rounded value, and in `lo` what is left of the exact value, rounded once (0 when the value is
+###     exact). A nonzero value that rounds to zero leaves the smallest subnormal with its sign in `lo`, so a zero `hi`
+###     with a zero `lo` is an exact zero.
+secret routine b64_round_scaled(z: U128, sticky: Bool, ex: S64, negative: Bool) -> B64Pair
+    if z == 0
+        return (hi: b64_signed(0.0, negative), lo: b64_signed(0.0, negative))
+    length: S64 = (128 - z.leading_zeros()).to[S64]()
+    top: S64 = ex + length - 1
+    quantum: S64 = when
+        top < -1022 => -1022 - 52
+        else => top - 52
+    shift: S64 = quantum - ex
+    if shift <= 0
+        n: U128 = z << (0 - shift).to[U128]()
+        return (hi: b64_encode(n, quantum, negative), lo: b64_signed(0.0, negative))
+    if shift > 128
+        return (hi: b64_signed(0.0, negative), lo: b64_signed(B64.from_bits(1), negative))
+    amount: U128 = shift.to[U128]()
+    n: U128 = z >> amount
+    rem: U128 = z - (n << amount)
+    half: U128 = 1 << (amount - 1)
+    up: Bool = rem > half or (rem == half and (sticky or n & 1 == 1))
+    if not up
+        rest: B64 = when
+            rem == 0 and not sticky => b64_signed(0.0, negative)
+            n == 0 => b64_signed(B64.from_bits(1), negative)
+            else => b64_round_plain(z: rem, sticky, ex, negative)
+        return (hi: b64_encode(n, quantum, negative), lo: rest)
+    # rounded up: the remainder is 2^shift - rem - f, below zero
+    gap: U128 = half - (rem - half)
+    left: U128 = when
+        sticky => gap - 1
+        else => gap
+    rest: B64 = b64_round_plain(z: left, sticky, ex, negative: not negative)
+    return (hi: b64_encode(n: n + 1, quantum, negative), lo: rest)
+
+### The B64 nearest (-1)^negative × (z + f) × 2^ex, f in (0, 1) when `sticky`, a tie to the even one.
+### :param z: The integer part of the magnitude.
+### :param sticky: Whether a fraction below z's last bit was dropped.
+### :param ex: The power of two z is scaled by.
+### :param negative: The sign.
+### :returns: The rounded value.
+secret routine b64_round_plain(z: U128, sticky: Bool, ex: S64, negative: Bool) -> B64
+    if z == 0
+        return b64_signed(0.0, negative)
+    length: S64 = (128 - z.leading_zeros()).to[S64]()
+    top: S64 = ex + length - 1
+    quantum: S64 = when
+        top < -1022 => -1022 - 52
+        else => top - 52
+    shift: S64 = quantum - ex
+    if shift <= 0
+        return b64_encode(n: z << (0 - shift).to[U128](), quantum, negative)
+    if shift > 128
+        return b64_signed(0.0, negative)
+    amount: U128 = shift.to[U128]()
+    n: U128 = z >> amount
+    rem: U128 = z - (n << amount)
+    half: U128 = 1 << (amount - 1)
+    up: Bool = rem > half or (rem == half and (sticky or n & 1 == 1))
+    if up
+        return b64_encode(n: n + 1, quantum, negative)
+    return b64_encode(n, quantum, negative)
+
+### The B64 (-1)^negative × n × 2^quantum, for n of at most 53 bits plus one (a rounding carry) at a quantum the
+### rounding chose: a subnormal below the normal range, an infinity past it.
+### :param n: The significand, at most 2^53.
+### :param quantum: The power of two of n's last bit.
+### :param negative: The sign.
+### :returns: The value.
+secret routine b64_encode(n: U128, quantum: S64, negative: Bool) -> B64
+    sign: U64 = when
+        negative => 0x8000000000000000
+        else => 0
+    carry: Bool = n >> 53 != 0
+    m: U128 = when
+        carry => n >> 1
+        else => n
+    q: S64 = when
+        carry => quantum + 1
+        else => quantum
+    if m >> 52 == 0
+        return B64.from_bits(sign | m.to_wrap[U64]())
+    field: S64 = q + 1075
+    if field >= 2047
+        return B64.from_bits(sign | 0x7FF0000000000000)
+    frac: U64 = m.to_wrap[U64]() & 0xFFFFFFFFFFFFF
+    return B64.from_bits(sign | (field.to[U64]() << 52) | frac)
+
+### `x` with the sign `negative` (x is a magnitude).
+### :param x: The magnitude.
+### :param negative: Whether the result is negative.
+### :returns: x or -x.
+@inline
+secret routine b64_signed(x: B64, negative: Bool) -> B64
+    if negative
+        return -x
+    return x
+
+### `a × b + c × d` rounded once (to nearest, ties to even), for finite operands: the two products are exact
+### integers of up to 106 bits, added with the smaller one's dropped bits kept as a sticky bit, and the sum is
+### rounded once. A zero sum takes its sign as IEEE addition gives it to the two rounded products. `lo` is the
+### sum's remainder, rounded once more, so `hi + lo` is the sum to about twice B64's precision.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: The rounded sum in `hi`, its remainder in `lo`.
+secret routine b64_dot2(a: B64, b: B64, c: B64, d: B64) -> B64Pair
+    pa: B64Parts = b64_parts(a)
+    pb: B64Parts = b64_parts(b)
+    pc: B64Parts = b64_parts(c)
+    pd: B64Parts = b64_parts(d)
+    first: U128 = pa.significand.mul_wide(pb.significand)
+    second: U128 = pc.significand.mul_wide(pd.significand)
+    if first == 0 and second == 0
+        return (hi: (a *! b) +! (c *! d), lo: 0.0)
+    first_negative: Bool = pa.negative != pb.negative
+    second_negative: Bool = pc.negative != pd.negative
+    # both products with their top bit at bit 128 - 2, the exponent moved to match
+    first_shift: S64 = when
+        first == 0 => 0
+        else => first.leading_zeros().to[S64]() - 1
+    second_shift: S64 = when
+        second == 0 => 0
+        else => second.leading_zeros().to[S64]() - 1
+    first_top: U128 = first << first_shift.to[U128]()
+    second_top: U128 = second << second_shift.to[U128]()
+    first_ex: S64 = pa.exponent + pb.exponent - first_shift
+    second_ex: S64 = pc.exponent + pd.exponent - second_shift
+    first_ahead: Bool = first_ex > second_ex or (first_ex == second_ex and first_top >= second_top)
+    first_larger: Bool = second == 0 or (first != 0 and first_ahead)
+    big: U128 = when
+        first_larger => first_top
+        else => second_top
+    small: U128 = when
+        first_larger => second_top
+        else => first_top
+    big_ex: S64 = when
+        first_larger => first_ex
+        else => second_ex
+    small_ex: S64 = when
+        first_larger => second_ex
+        else => first_ex
+    negative: Bool = when
+        first_larger => first_negative
+        else => second_negative
+    same_sign: Bool = first_negative == second_negative
+    gap: S64 = big_ex - small_ex
+    aligned: U128 = when
+        small == 0 or gap >= 128 => 0
+        else => small >> gap.to[U128]()
+    sticky: Bool = when
+        small == 0 => false
+        gap >= 128 => true
+        else => (aligned << gap.to[U128]()) != small
+    if same_sign
+        return b64_round_scaled(z: big + aligned, sticky, ex: big_ex, negative)
+    difference: U128 = big - aligned
+    if difference == 0 and not sticky
+        return (hi: (a *! b) +! (c *! d), lo: 0.0)
+    z: U128 = when
+        sticky => difference - 1
+        else => difference
+    return b64_round_scaled(z, sticky, ex: big_ex, negative)
+
+### b64_dot2 by fused multiply-adds, for operands whose nonzero products are inside [2^-900, 2^1000], where TwoProd's
+### errors are exact: the two products and their errors are summed with TwoSum, and the sum rounds once unless the part
+### that rounding drops is too near half a unit in the last place, which goes to the exact b64_dot2.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: The rounded sum in `hi`, its remainder in `lo`.
+@inline
+secret routine b64_dot2_fast(a: B64, b: B64, c: B64, d: B64) -> B64Pair
+    p: B64Pair = b64_two_prod(a, b)
+    q: B64Pair = b64_two_prod(c, d)
+    low: B64 = B64.from_bits(0x07B0000000000000)
+    high: B64 = B64.from_bits(0x7E70000000000000)
+    p_ok: Bool = a == 0.0 or b == 0.0 or (p.hi.abs() >= low and p.hi.abs() <= high)
+    q_ok: Bool = c == 0.0 or d == 0.0 or (q.hi.abs() >= low and q.hi.abs() <= high)
+    if not (p_ok and q_ok)
+        return b64_dot2(a, b, c, d)
+    s: B64Pair = b64_two_sum(p.hi, q.hi)
+    t: B64 = p.lo +! q.lo
+    if s.hi == 0.0 and s.lo == 0.0 and t == 0.0
+        return (hi: s.hi, lo: 0.0)
+    u: B64Pair = b64_two_sum(s.lo, t)
+    r: B64Pair = b64_two_sum(s.hi, u.hi)
+    tail: B64 = r.lo +! u.lo
+    # the exact sum is r.hi + tail, give or take this much
+    slack: B64 = (t.abs() +! tail.abs()) *! B64.from_bits(0x3CC0000000000000)
+    up: B64 = r.hi +! (tail +! slack)
+    down: B64 = r.hi +! (tail -! slack)
+    if up != down
+        return b64_dot2(a, b, c, d)
+    return (hi: up, lo: (r.hi -! up) +! tail)
+
+### The sign of the exact sum of `count` finite values (at most 16): Shewchuk's Grow-Expansion adds them one at a
+### time into a nonoverlapping expansion, and the largest nonzero component of one has the sign of the whole.
+### :param terms: The first value.
+### :param count: How many values.
+### :returns: 1, 0, or -1.
+secret routine b64_sum_sign(terms: @B64, count: U64) -> S64
+    parts: &[B64] <- [0.0] * 16
+    each i: U64 in 0 til count
+        until j >= i with j: U64 = 0, q: B64 = terms.stride(i).peek()
+            t: B64Pair = b64_two_sum(q, parts[j])
+            parts.getslot(j).poke(t.lo)
+            continue with j: j + 1, q: t.hi
+        then
+            parts.getslot(i).poke(q)
+    until k == 0 or parts[k - 1] != 0.0 with k: U64 = count
+        continue with k: k - 1
+    then
+        if k == 0
+            return 0
+        if parts[k - 1] > 0.0
+            return 1
+        return -1
+
+### The quotient numerator / denominator rounded once, given both rounded once with their remainders (from
+### b64_dot2). A double-word division gives the quotient to about twice B64's precision, which rounds it correctly
+### unless it lies within that error of a tie, or near the subnormal range: then exact sign tests decide
+### (b64_quotient_settle).
+### :param num: The numerator rounded once, with its remainder.
+### :param den: The denominator rounded once, with its remainder (positive and finite).
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: The quotient rounded once, an infinity past the range.
+secret routine b64_quotient(num: B64Pair, den: B64Pair, numerator: B64Dot,
+    denominator: B64Dot) -> B64
+    th: B64 = num.hi /! den.hi
+    if not th.is_finite()
+        return th
+    if num.hi == 0.0
+        return b64_quotient_tiny(num, den, numerator, denominator)
+    tp: B64Pair = b64_two_prod(th, den.hi)
+    r: B64 = (((num.hi -! tp.hi) -! tp.lo) +! num.lo) -! (th *! den.lo)
+    tl: B64 = r /! den.hi
+    ts: B64Pair = b64_two_sum(th, tl)
+    y: B64 = ts.hi
+    if y.abs() < B64.from_bits(0x0AA0000000000000)
+        return b64_quotient_tiny(num, den, numerator, denominator)
+    if ts.lo == 0.0
+        return y
+    # half the step from y to its neighbour on ts.lo's side: 2^(e - 53) for y = m × 2^e, a quarter of a step below a
+    # power of two
+    bits: U64 = y.bits()
+    field: U64 = (bits >> 52) & 0x7FF
+    if field >= 2047
+        return y
+    inward: Bool = bits & 0xFFFFFFFFFFFFF == 0 and (ts.lo < 0.0) == (y > 0.0)
+    below: U64 = when
+        inward => 54
+        else => 53
+    half: B64 = B64.from_bits((field - below) << 52)
+    if half -! ts.lo.abs() > y.abs() *! B64.from_bits(0x39F0000000000000)
+        return y
+    return b64_quotient_settle(y, numerator, denominator)
+
+### b64_quotient for a quotient near the subnormal range, where the numerator rounded once has lost bits: the numerator
+### scaled up by 2^221 (exact) gives a candidate within a unit in the last place, which the exact tests settle.
+### A quotient that rounds to zero keeps the numerator's sign.
+### :param num: The numerator rounded once, with its remainder.
+### :param den: The denominator rounded once, with its remainder.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: The quotient rounded once.
+secret routine b64_quotient_tiny(num: B64Pair, den: B64Pair, numerator: B64Dot,
+    denominator: B64Dot) -> B64
+    up: B64Dot = b64_scale_products(numerator, scale: B64.from_bits(0x4DC0000000000000))
+    if not (up.a.is_finite() and up.c.is_finite())
+        return num.hi /! den.hi
+    scaled: B64Pair = b64_dot2(a: up.a, b: up.b, c: up.c, d: up.d)
+    if scaled.hi == 0.0
+        return num.hi /! den.hi
+    estimate: B64 = (scaled.hi /! den.hi) *! B64.from_bits(0x3220000000000000)
+    q: B64 = b64_quotient_settle(y: estimate, numerator, denominator)
+    if q != 0.0
+        return q
+    return b64_signed(0.0, negative: scaled.hi < 0.0)
+
+### The quotient numerator / denominator rounded once, from a candidate y within two units in the last place of it:
+### the exact signs of numerator - m × denominator for the midpoints m on either side of y move y until the quotient
+### lies between them, and a quotient on a midpoint goes to the even one.
+### :param y: The candidate.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors (its value positive).
+### :returns: The quotient rounded once.
+secret routine b64_quotient_settle(y: B64, numerator: B64Dot, denominator: B64Dot) -> B64
+    until steps >= 4 with steps: U64 = 0, at: B64 = y
+        up: B64 = at.next_after(B64.from_bits(0x7FF0000000000000))
+        down: B64 = at.next_after(-B64.from_bits(0x7FF0000000000000))
+        above: S64 = when
+            up.is_finite() => b64_midpoint_sign(y: at, neighbour: up, numerator, denominator)
+            else => -1
+        if above > 0
+            continue with steps: steps + 1, at: up
+        below: S64 = when
+            down.is_finite() => b64_midpoint_sign(y: at, neighbour: down, numerator, denominator)
+            else => 1
+        if below < 0
+            continue with steps: steps + 1, at: down
+        if above == 0 and at.bits() & 1 == 1
+            return up
+        if below == 0 and at.bits() & 1 == 1
+            return down
+        return at
+    then
+        return at
+
+### The sign of the exact numerator - m × denominator, for m the midpoint of y and its neighbour: the sum of 16 values
+### (TwoProd's two for each product, m × each part of the denominator as y's TwoProd and an exact half step), whose sign
+### Grow-Expansion gives. Near the subnormal range the numerator and m are scaled up by 2^221 first, so
+### every value stays exact.
+### :param y: One end.
+### :param neighbour: The other end, next to y.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: 1 when the quotient is above m, -1 below it, 0 on it.
+secret routine b64_midpoint_sign(y: B64, neighbour: B64, numerator: B64Dot,
+    denominator: B64Dot) -> S64
+    up: B64Dot = b64_scale_products(numerator, scale: B64.from_bits(0x4DC0000000000000))
+    tiny: Bool = y.abs() < B64.from_bits(0x0AA0000000000000) and up.a.is_finite() and up.c.is_finite()
+    scale: B64 = when
+        tiny => B64.from_bits(0x4DC0000000000000)
+        else => 1.0
+    scaled: B64Dot = when
+        scale == 1.0 => numerator
+        else => up
+    terms: &[B64] <- [0.0] * 16
+    p1: B64Pair = b64_two_prod(scaled.a, scaled.b)
+    p2: B64Pair = b64_two_prod(scaled.c, scaled.d)
+    cc: B64Pair = b64_two_prod(denominator.a, denominator.b)
+    dd: B64Pair = b64_two_prod(denominator.c, denominator.d)
+    mid: B64Pair = (hi: y *! scale, lo: (neighbour -! y) *! scale *! 0.5)
+    terms.getslot(0).poke(p1.hi)
+    terms.getslot(1).poke(p1.lo)
+    terms.getslot(2).poke(p2.hi)
+    terms.getslot(3).poke(p2.lo)
+    put_product_terms_b64(terms, at: 4, mid, part: cc.hi)
+    put_product_terms_b64(terms, at: 7, mid, part: cc.lo)
+    put_product_terms_b64(terms, at: 10, mid, part: dd.hi)
+    put_product_terms_b64(terms, at: 13, mid, part: dd.lo)
+    return b64_sum_sign(terms: terms.to[@B64](), count: 16)
+
+### Both products of `numerator` times `scale` (a power of two), each by scaling its factor of smaller magnitude, so
+### a large factor does not leave the range: the result's `a` and `c` are the scaled factors.
+### :param numerator: The products' factors.
+### :param scale: The power of two.
+### :returns: The factors, the scaled one of each product first.
+@inline
+secret routine b64_scale_products(numerator: B64Dot, scale: B64) -> B64Dot
+    first: B64Dot = when
+        numerator.a.abs() <= numerator.b.abs() => (a: numerator.a *! scale, b: numerator.b, c: 0.0, d: 0.0)
+        else => (a: numerator.b *! scale, b: numerator.a, c: 0.0, d: 0.0)
+    second: B64Dot = when
+        numerator.c.abs() <= numerator.d.abs() => (a: numerator.c *! scale, b: numerator.d, c: 0.0, d: 0.0)
+        else => (a: numerator.d *! scale, b: numerator.c, c: 0.0, d: 0.0)
+    return (a: first.a, b: first.b, c: second.a, d: second.b)
+
+### Writes -(y + offset) × part as three exact values at `at`: TwoProd's two for y × part, and offset × part (offset is
+### a power of two).
+### :param terms: The values.
+### :param at: Where the three go.
+### :param mid: The candidate quotient y in `hi` and half the step to its neighbour, the offset, in `lo`.
+### :param part: One part of the denominator.
+secret routine put_product_terms_b64(terms: @[B64], at: U64, mid: B64Pair, part: B64) -> None
+    yp: B64Pair = b64_two_prod(mid.hi, part)
+    terms.getslot(at).poke(-yp.hi)
+    terms.getslot(at + 1).poke(-yp.lo)
+    terms.getslot(at + 2).poke(-(mid.lo *! part))
+    return
+
+### The exponent of a finite nonzero B64: floor(log2 |x|), subnormals included.
+### :param x: The value.
+### :returns: Its exponent.
+@inline
+secret routine b64_exponent(x: B64) -> S64
+    parts: B64Parts = b64_parts(x)
+    width: S64 = (64 - parts.significand.leading_zeros()).to[S64]()
+    return parts.exponent + width - 1
+
+### The quotient (a + b i) / (c + d i) rounded once part by part, for finite operands and a divisor that is not 0 + 0i.
+### Each part is (a c + b d) / (c² + d²) or (b c - a d) / (c² + d²), computed with all four values scaled by one power
+### of two (b64_quotient_shift), which leaves the quotient as it is and keeps its numerator and denominator inside the
+### range. Scaling down can drop bits of a value below the normal range, which can move a quotient in the subnormal
+### range by one unit in the last place. A part that rounds to zero takes the sign of its exact numerator.
+### :param operands: The dividend a + b i and the divisor c + d i.
+### :returns: The real part of the quotient in `hi` and the imaginary part in `lo`, each rounded once (an infinity past
+###     the range).
+secret routine b64_divide(operands: B64Dot) -> B64Pair
+    divisor: B64 = operands.c.abs().max(operands.d.abs())
+    dividend: B64 = operands.a.abs().max(operands.b.abs())
+    small: Bool = divisor < B64.from_bits(0x3E20000000000000)
+    large: Bool = divisor > B64.from_bits(0x5F30000000000000) or dividend > B64.from_bits(0x5F30000000000000)
+    if small or large
+        re: B64 = b64_divide_part(operands, imaginary: false)
+        im: B64 = b64_divide_part(operands, imaginary: true)
+        return (hi: re, lo: im)
+    # the divisor's larger part in [2^-29, 2^500] and the dividend's below 2^500: nothing to scale
+    den: B64Pair = b64_dot2_fast(a: operands.c, b: operands.c, c: operands.d, d: operands.d)
+    divisor_factors: B64Dot = (a: operands.c, b: operands.c, c: operands.d, d: operands.d)
+    real_factors: B64Dot = (a: operands.a, b: operands.c, c: operands.b, d: operands.d)
+    imag_factors: B64Dot = (a: operands.b, b: operands.c, c: -operands.a, d: operands.d)
+    num_re: B64Pair = b64_dot2_fast(a: real_factors.a, b: real_factors.b, c: real_factors.c,
+        d: real_factors.d)
+    num_im: B64Pair = b64_dot2_fast(a: imag_factors.a, b: imag_factors.b, c: imag_factors.c,
+        d: imag_factors.d)
+    re: B64 = b64_quotient(num: num_re, den, numerator: real_factors, denominator: divisor_factors)
+    im: B64 = b64_quotient(num: num_im, den, numerator: imag_factors, denominator: divisor_factors)
+    return (hi: re, lo: im)
+
+### One part of b64_divide.
+### :param operands: The dividend a + b i and the divisor c + d i.
+### :param imaginary: False for (a c + b d) / (c² + d²), true for (b c - a d) / (c² + d²).
+### :returns: That part rounded once, an infinity past the range.
+secret routine b64_divide_part(operands: B64Dot, imaginary: Bool) -> B64
+    numerator: B64Dot = when
+        imaginary => (a: operands.b, b: operands.c, c: -operands.a, d: operands.d)
+        else => (a: operands.a, b: operands.c, c: operands.b, d: operands.d)
+    exact: B64Pair = b64_dot2(a: numerator.a, b: numerator.b, c: numerator.c, d: numerator.d)
+    if exact.hi == 0.0 and exact.lo == 0.0
+        return exact.hi
+    shift: S64 = b64_quotient_shift(numerator, divisor: operands)
+    a: B64 = numerator.a.scalbn_unchecked(n: shift)
+    c: B64 = numerator.c.scalbn_unchecked(n: shift)
+    if not (a.is_finite() and c.is_finite())
+        return b64_signed(B64.from_bits(0x7FF0000000000000), negative: exact.hi < 0.0)
+    scaled: B64Dot = (a: a, b: numerator.b.scalbn_unchecked(n: shift), c: c, d: numerator.d.scalbn_unchecked(n: shift))
+    x: B64 = operands.c.scalbn_unchecked(n: shift)
+    y: B64 = operands.d.scalbn_unchecked(n: shift)
+    den: B64Pair = b64_dot2(a: x, b: x, c: y, d: y)
+    num: B64Pair = b64_dot2(a: scaled.a, b: scaled.b, c: scaled.c, d: scaled.d)
+    q: B64 = b64_quotient(num, den, numerator: scaled, denominator: (a: x, b: x, c: y, d: y))
+    if q == 0.0
+        return b64_signed(0.0, negative: exact.hi < 0.0 or (exact.hi == 0.0 and exact.lo < 0.0))
+    return q
+
+### The power of two b64_divide_part scales its four values by: 0 when the numerator and the denominator are well
+### inside the range, else the one that brings the larger of them to about 2^1015, and the denominator above
+### 2^-58.
+### :param numerator: The numerator's factors (n1 × n2 + n3 × n4).
+### :param divisor: The divisor in `c` and `d`.
+### :returns: The shift.
+secret routine b64_quotient_shift(numerator: B64Dot, divisor: B64Dot) -> S64
+    e_d: S64 = 2 * b64_exponent(divisor.c.abs().max(divisor.d.abs()))
+    e_n: S64 = b64_product_exponent(x: numerator.a,
+        y: numerator.b).max(b64_product_exponent(x: numerator.c, y: numerator.d))
+    top: S64 = e_n.max(e_d)
+    if top <= 1015 and e_d >= -58
+        return 0
+    if top > 1015
+        return (1015 - top) >> 1
+    up: S64 = (-58 - e_d + 1) >> 1
+    return up.min((1015 - top) >> 1)
+
+### The exponent of x × y (the sum of the two exponents), or a value far below every other one when a factor is 0.
+### :param x: One factor.
+### :param y: The other.
+### :returns: The exponent.
+@inline
+secret routine b64_product_exponent(x: B64, y: B64) -> S64
+    if x == 0.0 or y == 0.0
+        return -100000
+    return b64_exponent(x.abs()) + b64_exponent(y.abs())
+
+# ── B128: rounded once ─────────────────────────────────────────────────────────────
+
+### A B128 and what is left over: the exact error of the operation that made `hi` (TwoSum, TwoProd), or, for a sum of
+### products rounded once, that sum's remainder rounded once more.
+record B128Pair
+    hi: B128
+    lo: B128
+
+### Four B128s: the factors of a sum of two products, a × b + c × d, or a quotient (a + b i) / (c + d i).
+record B128Dot
+    a: B128
+    b: B128
+    c: B128
+    d: B128
+
+### A finite B128 as an integer times a power of two: the value is (-1)^negative × significand × 2^exponent.
+secret record B128Parts
+    negative: Bool
+    exponent: S64
+    significand: U128
+
+### `a + b` and its exact error (Knuth's TwoSum), for finite operands whose sum does not overflow.
+### :param a: One addend.
+### :param b: The other addend.
+### :returns: The sum rounded to nearest in `hi`, and `a + b - hi` exactly in `lo`.
+@inline
+routine b128_two_sum(a: B128, b: B128) -> B128Pair
+    s: B128 = a +! b
+    bb: B128 = s -! a
+    err: B128 = (a -! (s -! bb)) +! (b -! bb)
+    return (hi: s, lo: err)
+
+### `a × b` and its error, from one fused multiply-add: the error is exact unless it falls below the subnormal range.
+### :param a: One factor.
+### :param b: The other factor.
+### :returns: The product rounded to nearest in `hi`, and `a × b - hi` in `lo`.
+@inline
+routine b128_two_prod(a: B128, b: B128) -> B128Pair
+    h: B128 = a *! b
+    err: B128 = a.mul_add_unchecked(a: b, b: -h)
+    return (hi: h, lo: err)
+
+### The parts of a finite B128.
+### :param x: The value.
+### :returns: Its sign, exponent, and integer significand (a subnormal's without the hidden bit).
+@inline
+secret routine b128_parts(x: B128) -> B128Parts
+    bits: U128 = x.bits()
+    field: U128 = (bits >> 112) & 0x7FFF
+    fraction: U128 = bits & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    negative: Bool = (bits >> 127) == 1
+    if field == 0
+        return (negative: negative, exponent: -16494, significand: fraction)
+    exponent: S64 = field.to[S64]() - 16495
+    return (negative: negative, exponent: exponent, significand: fraction | 0x10000000000000000000000000000)
+
+### The B128 nearest (-1)^negative × (z + f) × 2^ex for some f in (0, 1) when `sticky` (f = 0 otherwise), a tie to
+### the even one: past the range it is an infinity, below it a subnormal or zero.
+### :param z: The integer part of the magnitude, not 0 unless `sticky`.
+### :param sticky: Whether a fraction below z's last bit was dropped.
+### :param ex: The power of two z is scaled by.
+### :param negative: The sign.
+### :returns: The rounded value, and in `lo` what is left of the exact value, rounded once (0 when the value is
+###     exact). A nonzero value that rounds to zero leaves the smallest subnormal with its sign in `lo`, so a zero `hi`
+###     with a zero `lo` is an exact zero.
+secret routine b128_round_scaled(z: U256, sticky: Bool, ex: S64, negative: Bool) -> B128Pair
+    if z == 0
+        return (hi: b128_signed(B128_ZERO, negative), lo: b128_signed(B128_ZERO, negative))
+    length: S64 = (256 - z.leading_zeros()).to[S64]()
+    top: S64 = ex + length - 1
+    quantum: S64 = when
+        top < -16382 => -16382 - 112
+        else => top - 112
+    shift: S64 = quantum - ex
+    if shift <= 0
+        n: U256 = z << (0 - shift).to[U256]()
+        return (hi: b128_encode(n, quantum, negative), lo: b128_signed(B128_ZERO, negative))
+    if shift > 256
+        return (hi: b128_signed(B128_ZERO, negative), lo: b128_signed(B128.from_bits(1), negative))
+    amount: U256 = shift.to[U256]()
+    n: U256 = z >> amount
+    rem: U256 = z - (n << amount)
+    half: U256 = 1 << (amount - 1)
+    up: Bool = rem > half or (rem == half and (sticky or n & 1 == 1))
+    if not up
+        rest: B128 = when
+            rem == 0 and not sticky => b128_signed(B128_ZERO, negative)
+            n == 0 => b128_signed(B128.from_bits(1), negative)
+            else => b128_round_plain(z: rem, sticky, ex, negative)
+        return (hi: b128_encode(n, quantum, negative), lo: rest)
+    # rounded up: the remainder is 2^shift - rem - f, below zero
+    gap: U256 = half - (rem - half)
+    left: U256 = when
+        sticky => gap - 1
+        else => gap
+    rest: B128 = b128_round_plain(z: left, sticky, ex, negative: not negative)
+    return (hi: b128_encode(n: n + 1, quantum, negative), lo: rest)
+
+### The B128 nearest (-1)^negative × (z + f) × 2^ex, f in (0, 1) when `sticky`, a tie to the even one.
+### :param z: The integer part of the magnitude.
+### :param sticky: Whether a fraction below z's last bit was dropped.
+### :param ex: The power of two z is scaled by.
+### :param negative: The sign.
+### :returns: The rounded value.
+secret routine b128_round_plain(z: U256, sticky: Bool, ex: S64, negative: Bool) -> B128
+    if z == 0
+        return b128_signed(B128_ZERO, negative)
+    length: S64 = (256 - z.leading_zeros()).to[S64]()
+    top: S64 = ex + length - 1
+    quantum: S64 = when
+        top < -16382 => -16382 - 112
+        else => top - 112
+    shift: S64 = quantum - ex
+    if shift <= 0
+        return b128_encode(n: z << (0 - shift).to[U256](), quantum, negative)
+    if shift > 256
+        return b128_signed(B128_ZERO, negative)
+    amount: U256 = shift.to[U256]()
+    n: U256 = z >> amount
+    rem: U256 = z - (n << amount)
+    half: U256 = 1 << (amount - 1)
+    up: Bool = rem > half or (rem == half and (sticky or n & 1 == 1))
+    if up
+        return b128_encode(n: n + 1, quantum, negative)
+    return b128_encode(n, quantum, negative)
+
+### The B128 (-1)^negative × n × 2^quantum, for n of at most 113 bits plus one (a rounding carry) at a quantum the
+### rounding chose: a subnormal below the normal range, an infinity past it.
+### :param n: The significand, at most 2^113.
+### :param quantum: The power of two of n's last bit.
+### :param negative: The sign.
+### :returns: The value.
+secret routine b128_encode(n: U256, quantum: S64, negative: Bool) -> B128
+    sign: U128 = when
+        negative => 0x80000000000000000000000000000000
+        else => 0
+    carry: Bool = n >> 113 != 0
+    m: U256 = when
+        carry => n >> 1
+        else => n
+    q: S64 = when
+        carry => quantum + 1
+        else => quantum
+    if m >> 112 == 0
+        return B128.from_bits(sign | m.to_wrap[U128]())
+    field: S64 = q + 16495
+    if field >= 32767
+        return B128.from_bits(sign | 0x7FFF0000000000000000000000000000)
+    frac: U128 = m.to_wrap[U128]() & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    return B128.from_bits(sign | (field.to[U128]() << 112) | frac)
+
+### `x` with the sign `negative` (x is a magnitude).
+### :param x: The magnitude.
+### :param negative: Whether the result is negative.
+### :returns: x or -x.
+@inline
+secret routine b128_signed(x: B128, negative: Bool) -> B128
+    if negative
+        return -x
+    return x
+
+### `a × b + c × d` rounded once (to nearest, ties to even), for finite operands: the two products are exact
+### integers of up to 226 bits, added with the smaller one's dropped bits kept as a sticky bit, and the sum is
+### rounded once. A zero sum takes its sign as IEEE addition gives it to the two rounded products. `lo` is the
+### sum's remainder, rounded once more, so `hi + lo` is the sum to about twice B128's precision.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: The rounded sum in `hi`, its remainder in `lo`.
+secret routine b128_dot2(a: B128, b: B128, c: B128, d: B128) -> B128Pair
+    pa: B128Parts = b128_parts(a)
+    pb: B128Parts = b128_parts(b)
+    pc: B128Parts = b128_parts(c)
+    pd: B128Parts = b128_parts(d)
+    first: U256 = pa.significand.mul_wide(pb.significand)
+    second: U256 = pc.significand.mul_wide(pd.significand)
+    if first == 0 and second == 0
+        return (hi: (a *! b) +! (c *! d), lo: B128_ZERO)
+    first_negative: Bool = pa.negative != pb.negative
+    second_negative: Bool = pc.negative != pd.negative
+    # both products with their top bit at bit 256 - 2, the exponent moved to match
+    first_shift: S64 = when
+        first == 0 => 0
+        else => first.leading_zeros().to[S64]() - 1
+    second_shift: S64 = when
+        second == 0 => 0
+        else => second.leading_zeros().to[S64]() - 1
+    first_top: U256 = first << first_shift.to[U256]()
+    second_top: U256 = second << second_shift.to[U256]()
+    first_ex: S64 = pa.exponent + pb.exponent - first_shift
+    second_ex: S64 = pc.exponent + pd.exponent - second_shift
+    first_ahead: Bool = first_ex > second_ex or (first_ex == second_ex and first_top >= second_top)
+    first_larger: Bool = second == 0 or (first != 0 and first_ahead)
+    big: U256 = when
+        first_larger => first_top
+        else => second_top
+    small: U256 = when
+        first_larger => second_top
+        else => first_top
+    big_ex: S64 = when
+        first_larger => first_ex
+        else => second_ex
+    small_ex: S64 = when
+        first_larger => second_ex
+        else => first_ex
+    negative: Bool = when
+        first_larger => first_negative
+        else => second_negative
+    same_sign: Bool = first_negative == second_negative
+    gap: S64 = big_ex - small_ex
+    aligned: U256 = when
+        small == 0 or gap >= 256 => 0
+        else => small >> gap.to[U256]()
+    sticky: Bool = when
+        small == 0 => false
+        gap >= 256 => true
+        else => (aligned << gap.to[U256]()) != small
+    if same_sign
+        return b128_round_scaled(z: big + aligned, sticky, ex: big_ex, negative)
+    difference: U256 = big - aligned
+    if difference == 0 and not sticky
+        return (hi: (a *! b) +! (c *! d), lo: B128_ZERO)
+    z: U256 = when
+        sticky => difference - 1
+        else => difference
+    return b128_round_scaled(z, sticky, ex: big_ex, negative)
+
+### The sign of the exact sum of `count` finite values (at most 16): Shewchuk's Grow-Expansion adds them one at a
+### time into a nonoverlapping expansion, and the largest nonzero component of one has the sign of the whole.
+### :param terms: The first value.
+### :param count: How many values.
+### :returns: 1, 0, or -1.
+secret routine b128_sum_sign(terms: @B128, count: U64) -> S64
+    parts: &[B128] <- [B128_ZERO] * 16
+    each i: U64 in 0 til count
+        until j >= i with j: U64 = 0, q: B128 = terms.stride(i).peek()
+            t: B128Pair = b128_two_sum(q, parts[j])
+            parts.getslot(j).poke(t.lo)
+            continue with j: j + 1, q: t.hi
+        then
+            parts.getslot(i).poke(q)
+    until k == 0 or parts[k - 1] != B128_ZERO with k: U64 = count
+        continue with k: k - 1
+    then
+        if k == 0
+            return 0
+        if parts[k - 1] > B128_ZERO
+            return 1
+        return -1
+
+### The quotient numerator / denominator rounded once, given both rounded once with their remainders (from
+### b128_dot2). A double-word division gives the quotient to about twice B128's precision, which rounds it correctly
+### unless it lies within that error of a tie, or near the subnormal range: then exact sign tests decide
+### (b128_quotient_settle).
+### :param num: The numerator rounded once, with its remainder.
+### :param den: The denominator rounded once, with its remainder (positive and finite).
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: The quotient rounded once, an infinity past the range.
+secret routine b128_quotient(num: B128Pair, den: B128Pair, numerator: B128Dot,
+    denominator: B128Dot) -> B128
+    th: B128 = num.hi /! den.hi
+    if not th.is_finite()
+        return th
+    if num.hi == B128_ZERO
+        return b128_quotient_tiny(num, den, numerator, denominator)
+    tp: B128Pair = b128_two_prod(th, den.hi)
+    r: B128 = (((num.hi -! tp.hi) -! tp.lo) +! num.lo) -! (th *! den.lo)
+    tl: B128 = r /! den.hi
+    ts: B128Pair = b128_two_sum(th, tl)
+    y: B128 = ts.hi
+    if y.abs() < CX_B128_TINY
+        return b128_quotient_tiny(num, den, numerator, denominator)
+    if ts.lo == B128_ZERO
+        return y
+    toward: B128 = when
+        ts.lo > B128_ZERO => CX_B128_INF
+        else => -CX_B128_INF
+    neighbour: B128 = y.next_after(toward)
+    if not neighbour.is_finite()
+        return y
+    half: B128 = (neighbour -! y) *! CX_B128_HALF
+    if half.abs() -! ts.lo.abs() > y.abs() *! CX_B128_TOL
+        return y
+    return b128_quotient_settle(y, numerator, denominator)
+
+### b128_quotient for a quotient near the subnormal range, where the numerator rounded once has lost bits: the numerator
+### scaled up by 2^461 (exact) gives a candidate within a unit in the last place, which the exact tests settle.
+### A quotient that rounds to zero keeps the numerator's sign.
+### :param num: The numerator rounded once, with its remainder.
+### :param den: The denominator rounded once, with its remainder.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: The quotient rounded once.
+secret routine b128_quotient_tiny(num: B128Pair, den: B128Pair, numerator: B128Dot,
+    denominator: B128Dot) -> B128
+    up: B128Dot = b128_scale_products(numerator, scale: CX_B128_TINYSCALE)
+    if not (up.a.is_finite() and up.c.is_finite())
+        return num.hi /! den.hi
+    scaled: B128Pair = b128_dot2(a: up.a, b: up.b, c: up.c, d: up.d)
+    if scaled.hi == B128_ZERO
+        return num.hi /! den.hi
+    estimate: B128 = (scaled.hi /! den.hi) *! CX_B128_UNSCALE
+    q: B128 = b128_quotient_settle(y: estimate, numerator, denominator)
+    if q != B128_ZERO
+        return q
+    return b128_signed(B128_ZERO, negative: scaled.hi < B128_ZERO)
+
+### The quotient numerator / denominator rounded once, from a candidate y within two units in the last place of it:
+### the exact signs of numerator - m × denominator for the midpoints m on either side of y move y until the quotient
+### lies between them, and a quotient on a midpoint goes to the even one.
+### :param y: The candidate.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors (its value positive).
+### :returns: The quotient rounded once.
+secret routine b128_quotient_settle(y: B128, numerator: B128Dot, denominator: B128Dot) -> B128
+    until steps >= 4 with steps: U64 = 0, at: B128 = y
+        up: B128 = at.next_after(CX_B128_INF)
+        down: B128 = at.next_after(-CX_B128_INF)
+        above: S64 = when
+            up.is_finite() => b128_midpoint_sign(y: at, neighbour: up, numerator, denominator)
+            else => -1
+        if above > 0
+            continue with steps: steps + 1, at: up
+        below: S64 = when
+            down.is_finite() => b128_midpoint_sign(y: at, neighbour: down, numerator, denominator)
+            else => 1
+        if below < 0
+            continue with steps: steps + 1, at: down
+        if above == 0 and at.bits() & 1 == 1
+            return up
+        if below == 0 and at.bits() & 1 == 1
+            return down
+        return at
+    then
+        return at
+
+### The sign of the exact numerator - m × denominator, for m the midpoint of y and its neighbour: the sum of 16 values
+### (TwoProd's two for each product, m × each part of the denominator as y's TwoProd and an exact half step), whose sign
+### Grow-Expansion gives. Near the subnormal range the numerator and m are scaled up by 2^461 first, so
+### every value stays exact.
+### :param y: One end.
+### :param neighbour: The other end, next to y.
+### :param numerator: The numerator's factors.
+### :param denominator: The denominator's factors.
+### :returns: 1 when the quotient is above m, -1 below it, 0 on it.
+secret routine b128_midpoint_sign(y: B128, neighbour: B128, numerator: B128Dot,
+    denominator: B128Dot) -> S64
+    up: B128Dot = b128_scale_products(numerator, scale: CX_B128_TINYSCALE)
+    tiny: Bool = y.abs() < CX_B128_TINY and up.a.is_finite() and up.c.is_finite()
+    scale: B128 = when
+        tiny => CX_B128_TINYSCALE
+        else => B128_ONE
+    scaled: B128Dot = when
+        scale == B128_ONE => numerator
+        else => up
+    terms: &[B128] <- [B128_ZERO] * 16
+    p1: B128Pair = b128_two_prod(scaled.a, scaled.b)
+    p2: B128Pair = b128_two_prod(scaled.c, scaled.d)
+    cc: B128Pair = b128_two_prod(denominator.a, denominator.b)
+    dd: B128Pair = b128_two_prod(denominator.c, denominator.d)
+    mid: B128Pair = (hi: y *! scale, lo: (neighbour -! y) *! scale *! CX_B128_HALF)
+    terms.getslot(0).poke(p1.hi)
+    terms.getslot(1).poke(p1.lo)
+    terms.getslot(2).poke(p2.hi)
+    terms.getslot(3).poke(p2.lo)
+    put_product_terms_b128(terms, at: 4, mid, part: cc.hi)
+    put_product_terms_b128(terms, at: 7, mid, part: cc.lo)
+    put_product_terms_b128(terms, at: 10, mid, part: dd.hi)
+    put_product_terms_b128(terms, at: 13, mid, part: dd.lo)
+    return b128_sum_sign(terms: terms.to[@B128](), count: 16)
+
+### Both products of `numerator` times `scale` (a power of two), each by scaling its factor of smaller magnitude, so
+### a large factor does not leave the range: the result's `a` and `c` are the scaled factors.
+### :param numerator: The products' factors.
+### :param scale: The power of two.
+### :returns: The factors, the scaled one of each product first.
+@inline
+secret routine b128_scale_products(numerator: B128Dot, scale: B128) -> B128Dot
+    first: B128Dot = when
+        numerator.a.abs() <= numerator.b.abs() => (a: numerator.a *! scale, b: numerator.b, c: B128_ZERO, d: B128_ZERO)
+        else => (a: numerator.b *! scale, b: numerator.a, c: B128_ZERO, d: B128_ZERO)
+    second: B128Dot = when
+        numerator.c.abs() <= numerator.d.abs() => (a: numerator.c *! scale, b: numerator.d, c: B128_ZERO, d: B128_ZERO)
+        else => (a: numerator.d *! scale, b: numerator.c, c: B128_ZERO, d: B128_ZERO)
+    return (a: first.a, b: first.b, c: second.a, d: second.b)
+
+### Writes -(y + offset) × part as three exact values at `at`: TwoProd's two for y × part, and offset × part (offset is
+### a power of two).
+### :param terms: The values.
+### :param at: Where the three go.
+### :param mid: The candidate quotient y in `hi` and half the step to its neighbour, the offset, in `lo`.
+### :param part: One part of the denominator.
+secret routine put_product_terms_b128(terms: @[B128], at: U64, mid: B128Pair, part: B128) -> None
+    yp: B128Pair = b128_two_prod(mid.hi, part)
+    terms.getslot(at).poke(-yp.hi)
+    terms.getslot(at + 1).poke(-yp.lo)
+    terms.getslot(at + 2).poke(-(mid.lo *! part))
+    return
+
+### The exponent of a finite nonzero B128: floor(log2 |x|), subnormals included.
+### :param x: The value.
+### :returns: Its exponent.
+@inline
+secret routine b128_exponent(x: B128) -> S64
+    parts: B128Parts = b128_parts(x)
+    width: S64 = (128 - parts.significand.leading_zeros()).to[S64]()
+    return parts.exponent + width - 1
+
+### The quotient (a + b i) / (c + d i) rounded once part by part, for finite operands and a divisor that is not 0 + 0i.
+### Each part is (a c + b d) / (c² + d²) or (b c - a d) / (c² + d²), computed with all four values scaled by one power
+### of two (b128_quotient_shift), which leaves the quotient as it is and keeps its numerator and denominator inside the
+### range. Scaling down can drop bits of a value below the normal range, which can move a quotient in the subnormal
+### range by one unit in the last place. A part that rounds to zero takes the sign of its exact numerator.
+### :param operands: The dividend a + b i and the divisor c + d i.
+### :returns: The real part of the quotient in `hi` and the imaginary part in `lo`, each rounded once (an infinity past
+###     the range).
+secret routine b128_divide(operands: B128Dot) -> B128Pair
+    divisor: B128 = operands.c.abs().max(operands.d.abs())
+    dividend: B128 = operands.a.abs().max(operands.b.abs())
+    small: Bool = divisor < B128.from_bits(0x3FC40000000000000000000000000000)
+    large: Bool = divisor > CX_B128_BIG or dividend > CX_B128_BIG
+    if small or large
+        re: B128 = b128_divide_part(operands, imaginary: false)
+        im: B128 = b128_divide_part(operands, imaginary: true)
+        return (hi: re, lo: im)
+    # the divisor's larger part in [2^-59, 2^8189] and the dividend's below 2^8189: nothing to scale
+    den: B128Pair = b128_dot2(a: operands.c, b: operands.c, c: operands.d, d: operands.d)
+    divisor_factors: B128Dot = (a: operands.c, b: operands.c, c: operands.d, d: operands.d)
+    real_factors: B128Dot = (a: operands.a, b: operands.c, c: operands.b, d: operands.d)
+    imag_factors: B128Dot = (a: operands.b, b: operands.c, c: -operands.a, d: operands.d)
+    num_re: B128Pair = b128_dot2(a: real_factors.a, b: real_factors.b, c: real_factors.c,
+        d: real_factors.d)
+    num_im: B128Pair = b128_dot2(a: imag_factors.a, b: imag_factors.b, c: imag_factors.c,
+        d: imag_factors.d)
+    re: B128 = b128_quotient(num: num_re, den, numerator: real_factors,
+        denominator: divisor_factors)
+    im: B128 = b128_quotient(num: num_im, den, numerator: imag_factors,
+        denominator: divisor_factors)
+    return (hi: re, lo: im)
+
+### One part of b128_divide.
+### :param operands: The dividend a + b i and the divisor c + d i.
+### :param imaginary: False for (a c + b d) / (c² + d²), true for (b c - a d) / (c² + d²).
+### :returns: That part rounded once, an infinity past the range.
+secret routine b128_divide_part(operands: B128Dot, imaginary: Bool) -> B128
+    numerator: B128Dot = when
+        imaginary => (a: operands.b, b: operands.c, c: -operands.a, d: operands.d)
+        else => (a: operands.a, b: operands.c, c: operands.b, d: operands.d)
+    exact: B128Pair = b128_dot2(a: numerator.a, b: numerator.b, c: numerator.c, d: numerator.d)
+    if exact.hi == B128_ZERO and exact.lo == B128_ZERO
+        return exact.hi
+    shift: S64 = b128_quotient_shift(numerator, divisor: operands)
+    a: B128 = numerator.a.scalbn_unchecked(n: shift)
+    c: B128 = numerator.c.scalbn_unchecked(n: shift)
+    if not (a.is_finite() and c.is_finite())
+        return b128_signed(CX_B128_INF, negative: exact.hi < B128_ZERO)
+    scaled: B128Dot = (a: a, b: numerator.b.scalbn_unchecked(n: shift), c: c, d: numerator.d.scalbn_unchecked(n: shift))
+    x: B128 = operands.c.scalbn_unchecked(n: shift)
+    y: B128 = operands.d.scalbn_unchecked(n: shift)
+    den: B128Pair = b128_dot2(a: x, b: x, c: y, d: y)
+    num: B128Pair = b128_dot2(a: scaled.a, b: scaled.b, c: scaled.c, d: scaled.d)
+    q: B128 = b128_quotient(num, den, numerator: scaled, denominator: (a: x, b: x, c: y, d: y))
+    if q == B128_ZERO
+        return b128_signed(B128_ZERO,
+            negative: exact.hi < B128_ZERO or (exact.hi == B128_ZERO and exact.lo < B128_ZERO))
+    return q
+
+### The power of two b128_divide_part scales its four values by: 0 when the numerator and the denominator are well
+### inside the range, else the one that brings the larger of them to about 2^16375, and the denominator above
+### 2^-118.
+### :param numerator: The numerator's factors (n1 × n2 + n3 × n4).
+### :param divisor: The divisor in `c` and `d`.
+### :returns: The shift.
+secret routine b128_quotient_shift(numerator: B128Dot, divisor: B128Dot) -> S64
+    e_d: S64 = 2 * b128_exponent(divisor.c.abs().max(divisor.d.abs()))
+    e_n: S64 = b128_product_exponent(x: numerator.a,
+        y: numerator.b).max(b128_product_exponent(x: numerator.c, y: numerator.d))
+    top: S64 = e_n.max(e_d)
+    if top <= 16375 and e_d >= -118
+        return 0
+    if top > 16375
+        return (16375 - top) >> 1
+    up: S64 = (-118 - e_d + 1) >> 1
+    return up.min((16375 - top) >> 1)
+
+### The exponent of x × y (the sum of the two exponents), or a value far below every other one when a factor is 0.
+### :param x: One factor.
+### :param y: The other.
+### :returns: The exponent.
+@inline
+secret routine b128_product_exponent(x: B128, y: B128) -> S64
+    if x == B128_ZERO or y == B128_ZERO
+        return -100000
+    return b128_exponent(x.abs()) + b128_exponent(y.abs())
+
+# ── C64: rounded once, through B64 ───────────────────────────────────────────────
+
+### The tolerance under which a B64 quotient of exact B64 parts is left to the exact test: such a quotient is within
+### 2^-51 of the true one, relatively, and a B32 tie is 2^-25 away.
+secret preset C64_TIE_TOLERANCE: B64 = B64.from_bits(0x3CF0000000000000)
+
+### `t.hi` rounded to odd with `t.lo` (the exact value is hi + lo): hi itself when lo is 0 or hi's last bit is 1,
+### else its neighbour toward lo. A value rounded to odd at B64's 53 bits rounds correctly to B32's 24 in one more
+### rounding.
+### :param t: A sum and its exact error (TwoSum), hi finite and lo not 0 only when hi is not 0.
+### :returns: The sum rounded to odd.
+@inline
+secret routine b64_odd(t: B64Pair) -> B64
+    bits: U64 = t.hi.bits()
+    if t.lo == 0.0 or bits & 1 == 1
+        return t.hi
+    away: Bool = (t.lo < 0.0) == (bits >> 63 == 1)
+    if away
+        return B64.from_bits(bits + 1)
+    return B64.from_bits(bits - 1)
+
+### `a × b + c × d` rounded once to B32, for finite B32 operands: each product is exact in B64, the sum and its
+### exact error come from TwoSum, and the sum rounded to odd rounds once more to the right B32. A zero sum takes its
+### sign as IEEE addition gives it to the two products.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: The sum rounded once, an infinity past B32's range.
+@inline
+secret routine c64_dot2(a: B32, b: B32, c: B32, d: B32) -> B32
+    p: B64 = a.to[B64]() *! b.to[B64]()
+    q: B64 = c.to[B64]() *! d.to[B64]()
+    return b64_odd(b64_two_sum(p, q)).to_unchecked[B32]()
+
+### num / den rounded once to B32, for num and den exact in B64 as a value and its error (two products of B32 values
+### and TwoSum), den positive. The B64 quotient rounds to the right B32 unless it lies within 2^-48 of a midpoint
+### between two B32 values: then the exact sign of num - midpoint × den, six B64 values, decides.
+### :param num: The numerator and its error.
+### :param den: The denominator and its error.
+### :returns: The quotient rounded once, an infinity past B32's range.
+secret routine c64_quotient(num: B64Pair, den: B64Pair) -> B32
+    q: B64 = num.hi /! den.hi
+    y: B32 = q.to_unchecked[B32]()
+    if num.hi == 0.0 or not y.is_finite()
+        return y
+    # a B64 quotient in B32's normal range is far from a B32 tie when its 29 bits below B32's last one are far from
+    # half of it (it is within 4 units in B64's last place of the true quotient)
+    if q.abs() >= B64.from_bits(0x3810000000000000)
+        below: S64 = (q.bits() & 0x1FFFFFFF).to[S64]()
+        if (below - 0x10000000).abs() > 64
+            return y
+    y_wide: B64 = y.to[B64]()
+    if q == y_wide
+        return y
+    toward: B32 = when
+        q > y_wide => B32.from_bits(0x7F800000)
+        else => B32.from_bits(0xFF800000)
+    neighbour: B32 = y.next_after(toward)
+    if not neighbour.is_finite()
+        return y
+    mid: B64 = (y_wide +! neighbour.to[B64]()) *! 0.5
+    if (q -! mid).abs() > q.abs() *! C64_TIE_TOLERANCE
+        return y
+    high: B64Pair = b64_two_prod(mid, den.hi)
+    low: B64Pair = b64_two_prod(mid, den.lo)
+    terms: &[B64] <- [num.hi, num.lo, -high.hi, -high.lo, -low.hi, -low.lo]
+    sign: S64 = b64_sum_sign(terms: terms.to[@B64](), count: 6)
+    upper: B32 = when
+        neighbour > y => neighbour
+        else => y
+    lower: B32 = when
+        neighbour > y => y
+        else => neighbour
+    if sign > 0
+        return upper
+    if sign < 0
+        return lower
+    if y.bits() & 1 == 0
+        return y
+    return neighbour
+
+### A B32 part's bits for the hash, a zero as +0.
+### :param x: The part.
+### :returns: Its bits, zero-extended.
+@inline
+secret routine c64_hash_bits(x: B32) -> U64
+    if x == 0.0
+        return 0
+    return x.bits().to[U64]()
+
+# ── B128 constants of the rounded-once arithmetic ────────────────────────────────
+
+### 1/2.
+secret preset CX_B128_HALF: B128 = B128.from_bits(0x3FFE0000000000000000000000000000)
+### +infinity.
+secret preset CX_B128_INF: B128 = B128.from_bits(0x7FFF0000000000000000000000000000)
+### 2^-216, under which a double-word quotient's distance to a tie is left to the exact test.
+secret preset CX_B128_TOL: B128 = B128.from_bits(0x3F270000000000000000000000000000)
+
+### 2^-16033: below it a quotient is settled by exact tests with the numerator scaled up (b128_midpoint_sign).
+secret preset CX_B128_TINY: B128 = B128.from_bits(0x015E0000000000000000000000000000)
+
+### 2^461, that scale.
+secret preset CX_B128_TINYSCALE: B128 = B128.from_bits(0x41CC0000000000000000000000000000)
+### 1/4.
+secret preset CX_B128_QUARTER: B128 = B128.from_bits(0x3FFD0000000000000000000000000000)
+### 4.
+secret preset CX_B128_FOUR: B128 = B128.from_bits(0x40010000000000000000000000000000)
+### 2^8189: past it the inverse functions keep the textbook formulas (C256.is_moderate).
+secret preset CX_B128_BIG: B128 = B128.from_bits(0x5FFC0000000000000000000000000000)
+### 2^-16156: a modulus below it takes C256.sqrt through a scaled copy.
+secret preset CX_B128_SQRT_TINY: B128 = B128.from_bits(0x00E30000000000000000000000000000)
+### 2^115, that copy's scale for each factor (the number is scaled by its square).
+secret preset CX_B128_SQRT_UP: B128 = B128.from_bits(0x40720000000000000000000000000000)
+### 2^-115, the scale undone on the square root.
+secret preset CX_B128_SQRT_DOWN: B128 = B128.from_bits(0x3F8C0000000000000000000000000000)
+### 2^-461, the scale undone.
+secret preset CX_B128_UNSCALE: B128 = B128.from_bits(0x3E320000000000000000000000000000)
+
+# ── conversions between the complex types ────────────────────────────────────────
+
+### `x` rounded once to B32, crashing when a finite value is past B32's range.
+### :param x: The value.
+### :returns: The nearest B32.
+### :throws: Crashes with `NumericOverflowError` when `x` is finite and rounds past B32's range.
+@inline
+secret routine narrow_to_b32(x: B64) -> B32
+    r: B32 = x.to_unchecked[B32]()
+    if r.is_infinite() and x.is_finite()
+        throw ForeignError(kind: "NumericOverflowError",
+            description: "overflow: out of the B32 range")
+    return r
+
+### `x` rounded once to B32, crashing when a finite value is past B32's range.
+### :param x: The value.
+### :returns: The nearest B32.
+### :throws: Crashes with `NumericOverflowError` when `x` is finite and rounds past B32's range.
+@inline
+secret routine narrow_to_b32(x: B128) -> B32
+    r: B32 = x.to_unchecked[B32]()
+    if r.is_infinite() and x.is_finite()
+        throw ForeignError(kind: "NumericOverflowError",
+            description: "overflow: out of the B32 range")
+    return r
+
+### `x` rounded once to B64, crashing when a finite value is past B64's range.
+### :param x: The value.
+### :returns: The nearest B64.
+### :throws: Crashes with `NumericOverflowError` when `x` is finite and rounds past B64's range.
+@inline
+secret routine narrow_to_b64(x: B128) -> B64
+    r: B64 = x.to_unchecked[B64]()
+    if r.is_infinite() and x.is_finite()
+        throw ForeignError(kind: "NumericOverflowError",
+            description: "overflow: out of the B64 range")
+    return r
+
+### A C64 widened to C128, exactly, for C64.to[C128].
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The real part in w0, the imaginary part in w1, and zero in w2 and w3.
+@export("ingrid_c64_to_c128")
+@inline
+routine c64_to_c128(real: B32, imag: B32) -> Words
+    return Words.construct(a: real.to[B64](), b: imag.to[B64](), c: 0.0, d: 0.0)
+
+### A C64 widened to C256, exactly (through B64), for C64.to[C256].
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The C256.
+@export("ingrid_c64_to_c256")
+@inline
+routine c64_to_c256(real: B32, imag: B32) -> C256
+    return (real: real.to[B64]().to[B128](), imag: imag.to[B64]().to[B128]())
+
+### A C128 rounded to C64, each part rounded once, for C128.to[C64].
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `NumericOverflowError` when a finite part is past B32's range.
+@export("ingrid_c128_to_c64")
+@inline
+routine c128_to_c64(real: B64, imag: B64) -> U64
+    z: C64 = (real: narrow_to_b32(real), imag: narrow_to_b32(imag))
+    return z.bits()
+
+### A C128 widened to C256, exactly, for C128.to[C256].
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :returns: The C256.
+@export("ingrid_c128_to_c256")
+@inline
+routine c128_to_c256(real: B64, imag: B64) -> C256
+    return (real: real.to[B128](), imag: imag.to[B128]())
+
+### A C256 rounded to C64, each part rounded once, for C256.to[C64].
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The result's real part's bits in the low 32 bits, its imaginary part's in the high 32.
+### :throws: Crashes with `NumericOverflowError` when a finite part is past B32's range.
+@export("ingrid_c256_to_c64")
+@inline
+routine c256_to_c64(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> U64
+    w: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    z: C64 = (real: narrow_to_b32(w.real), imag: narrow_to_b32(w.imag))
+    return z.bits()
+
+### A C256 rounded to C128, each part rounded once, for C256.to[C128].
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :returns: The real part in w0, the imaginary part in w1, and zero in w2 and w3.
+### :throws: Crashes with `NumericOverflowError` when a finite part is past B64's range.
+@export("ingrid_c256_to_c128")
+@inline
+routine c256_to_c128(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64) -> Words
+    w: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    z: C128 = (real: narrow_to_b64(w.real), imag: narrow_to_b64(w.imag))
+    return z.words()
+
+# ── hashing ──────────────────────────────────────────────────────────────────────
+
+### SipHash-2-4 of a C64 under the key (k0, k1), for C64.hash.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_c64_hash")
+@inline
+routine c64_hash(real: B32, imag: B32, k0: U64, k1: U64) -> U64
+    z: C64 = (real: real, imag: imag)
+    return z.hash_keyed(k0, k1)
+
+### SipHash-2-4 of a C128 under the key (k0, k1), for C128.hash.
+### :param real: The real part.
+### :param imag: The imaginary part.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_c128_hash")
+@inline
+routine c128_hash(real: B64, imag: B64, k0: U64, k1: U64) -> U64
+    z: C128 = (real: real, imag: imag)
+    return z.hash_keyed(k0, k1)
+
+### SipHash-2-4 of a C256 under the key (k0, k1), for C256.hash.
+### :param real_low: The low 64 bits of the real part.
+### :param real_high: The high 64 bits of the real part.
+### :param imag_low: The low 64 bits of the imaginary part.
+### :param imag_high: The high 64 bits of the imaginary part.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_c256_hash")
+@inline
+routine c256_hash(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64, k0: U64,
+    k1: U64) -> U64
+    z: C256 = C256.from_halves(real_low, real_high, imag_low, imag_high)
+    return z.hash_keyed(k0, k1)
+
+# ── text ─────────────────────────────────────────────────────────────────────────
+
+### How a complex number's text is written: the parts' format (1 B32, 0 B64, 4 B128), the style (0 the shortest
+### decimals, 2 `digits` digits after the point, 3 the type name around the shortest), and the digits for style 2.
+secret record ComplexTextForm
+    format: U32
+    style: U32
+    digits: U64
+
+### The sign bit of a part in a format: 1 B32, 0 B64, 4 B128.
+### :param format: The format.
+### :returns: The sign bit, as a 128-bit mask.
+@inline
+secret routine complex_sign_bit(format: U32) -> U128
+    return when format
+        1 => 0x80000000
+        0 => 0x8000000000000000
+        else => 0x80000000000000000000000000000000
+
+### Whether a part's bits are a NaN, and whether a signaling one, in a format: 1 B32, 0 B64, 4 B128.
+### :param bits: The part's bits.
+### :param format: The format.
+### :param signaling: True to ask whether it is a signaling NaN, false whether it is any NaN.
+### :returns: The answer.
+secret routine complex_part_is_nan(bits: U128, format: U32, signaling: Bool) -> Bool
+    exponent: U128 = when format
+        1 => 0x7F800000
+        0 => 0x7FF0000000000000
+        else => 0x7FFF0000000000000000000000000000
+    quiet: U128 = when format
+        1 => 0x400000
+        0 => 0x8000000000000
+        else => 0x8000000000000000000000000000
+    fraction: U128 = (exponent | complex_sign_bit(format)).bitnot() & bits
+    if bits & exponent != exponent or fraction == 0
+        return false
+    return not signaling or fraction & quiet == 0
+
+### The complex type a format's parts make, for the `diagnose` text.
+### :param format: 1 B32, 0 B64, 4 B128.
+### :returns: C64, C128, or C256.
+secret routine complex_type_name(format: U32) -> @[Byte]
+    return when format
+        1 => "C64"
+        0 => "C128"
+        else => "C256"
+
+### Writes one part: the shortest decimal that reads back as it, `snan` for a signaling NaN (style 0), or exactly
+### `digits` digits after the point (style 2, a B32 widened to B64 first).
+### :param out: The writer.
+### :param bits: The part's bits.
+### :param form: The format, the style (0 or 2), and the digits.
+secret routine write_complex_part(out: @Utf32Writer, bits: U128, form: ComplexTextForm) -> None
+    if form.style == 2
+        if form.format == 1
+            wide: U64 = B32.from_bits(bits.to_wrap[U32]()).to[B64]().bits()
+            write_binary_fixed(out, bits: wide.to[U128](), format: float_format_of(0),
+                digits: form.digits)
+            return
+        write_binary_fixed(out, bits, format: float_format_of(form.format), digits: form.digits)
+        return
+    if complex_part_is_nan(bits, format: form.format, signaling: true)
+        write_str(out, text: "snan")
+        return
+    write_shortest(out, bits, format: form.format)
+    return
+
+### Writes a complex number: the real part, `-` when the imaginary part is below zero and `+` otherwise (-0 and NaN
+### included), the imaginary part's magnitude, and `i`: `1.5+2i`, `0-1i`. Style 3 puts the type name around it,
+### `C64(1.5+2i)`.
+### :param out: The writer.
+### :param real: The real part's bits.
+### :param imag: The imaginary part's bits.
+### :param form: The format, the style, and the digits.
+secret routine write_complex(out: @Utf32Writer, real: U128, imag: U128,
+    form: ComplexTextForm) -> None
+    if form.style == 3
+        write_str(out, text: complex_type_name(form.format))
+        out.put(40)
+        write_complex(out, real, imag, form: (format: form.format, style: 0, digits: form.digits))
+        out.put(41)
+        return
+    sign: U128 = complex_sign_bit(form.format)
+    magnitude: U128 = imag & sign.bitnot()
+    below_zero: Bool = imag & sign != 0 and magnitude != 0 and not complex_part_is_nan(
+        bits: magnitude, format: form.format, signaling: false)
+    write_complex_part(out, bits: real, form)
+    sign_char: U32 = when
+        below_zero => 45
+        else => 43
+    out.put(sign_char)
+    write_complex_part(out, bits: magnitude, form)
+    out.put(105)
+    return
+
+### The text of a complex number given its parts' bits, for the represent, fixed, and diagnose of C64, C128, and C256:
+### `1.5+2i`, each part as its own type writes it.
+### :param real_low: The low 64 bits of the real part's bits.
+### :param real_high: The high 64 bits of the real part's bits (0 below B128).
+### :param imag_low: The low 64 bits of the imaginary part's bits.
+### :param imag_high: The high 64 bits of the imaginary part's bits (0 below B128).
+### :param format: 1 B32 parts (C64), 0 B64 (C128), 4 B128 (C256).
+### :param style: 0 the shortest decimals (`represent`), 2 `digits` digits after the point (`fixed`), 3 the type name
+###     around the shortest (`diagnose`).
+### :param digits: The digits after the point, for style 2.
+### :param out: Where the code points go.
+### :param out_count: How many code points `out` has room for.
+### :returns: How many code points the text has: more than `out_count` when it didn't fit, and only that much was
+###     written.
+@export("ingrid_complex_text_utf32")
+routine complex_text_utf32(real_low: U64, real_high: U64, imag_low: U64, imag_high: U64,
+    format: U32, style: U32, digits: U64, out: @U32, out_count: U64) -> U64
+    writer: &Utf32Writer <- .construct(data: out, capacity: out_count)
+    real: U128 = (real_high.to[U128]() << 64) | real_low.to[U128]()
+    imag: U128 = (imag_high.to[U128]() << 64) | imag_low.to[U128]()
+    write_complex(out: writer, real, imag, form: (format: format, style: style, digits: digits))
+    return writer.written()
+
+### Whether a code point is one of the spaces RazorForge's `Char.is_whitespace` names: space, tab, line feed,
+### carriage return, form feed, no-break space, and U+2000 to U+2003.
+### :param c: The code point.
+### :returns: True for a space.
+@inline
+secret routine complex_is_space(c: U32) -> Bool
+    return c == 32 or c == 9 or c == 10 or c == 13 or c == 12 or c == 0xA0 or (0x2000 <= c and c <= 0x2003)
+
+### Where the text's imaginary part starts: the last `+` or `-` that is not the first code point and not an exponent's
+### sign (one after `e` or `E`).
+### :param chars: The text without its final `i`.
+### :param count: How many code points.
+### :returns: Its index, or 0 when there is none.
+secret routine complex_split(chars: @U32, count: U64) -> U64
+    until k <= 1 with k: U64 = count
+        at: U64 = k - 1
+        c: U32 = chars.stride(at).peek()
+        before: U32 = chars.stride(at - 1).peek()
+        if (c == 43 or c == 45) and before != 101 and before != 69
+            return at
+        continue with k: at
+    then
+        return 0
+
+### A part's bits read from text: an optional sign, then the part's own number syntax, any NaN read as the type's
+### quiet NaN (as RazorForge's `Text.to[B32]` gives `nan`).
+### :param chars: The part's first code point.
+### :param count: How many code points.
+### :param format: 1 B32, 0 B64, 4 B128.
+### :returns: 0 and the bits in w1 (low) and w2 (high), or 3 in w0 when the text is not a number.
+secret routine complex_parse_part(chars: @U32, count: U64, format: U32) -> Words
+    w: Words = float_parse_utf32(chars, count, format)
+    if w.w0 == 3
+        return w
+    if w.w0 == 1
+        quiet_nan: Words = when format
+            1 => (w0: 0, w1: 0x7FC00000, w2: 0, w3: 0)
+            0 => (w0: 0, w1: 0x7FF8000000000000, w2: 0, w3: 0)
+            else => (w0: 0, w1: 0, w2: 0x7FFF800000000000, w3: 0)
+        return quiet_nan
+    return (w0: 0, w1: w.w1, w2: w.w2, w3: 0)
+
+### The bits of 1 or -1 in a format, for a bare `i`.
+### :param format: 1 B32, 0 B64, 4 B128.
+### :param negative: True for -1.
+### :returns: The bits in w1 (low) and w2 (high).
+secret routine complex_unit(format: U32, negative: Bool) -> Words
+    one: Words = when format
+        1 => (w0: 0, w1: 0x3F800000, w2: 0, w3: 0)
+        0 => (w0: 0, w1: 0x3FF0000000000000, w2: 0, w3: 0)
+        else => (w0: 0, w1: 0, w2: 0x3FFF000000000000, w3: 0)
+    if not negative
+        return one
+    return when format
+        1 => (w0: 0, w1: 0xBF800000, w2: 0, w3: 0)
+        0 => (w0: 0, w1: 0xBFF0000000000000, w2: 0, w3: 0)
+        else => (w0: 0, w1: 0, w2: 0xBFFF000000000000, w3: 0)
+
+### Reads a complex number's text: `a`, `bi`, `a+bi`, or `a-bi`, the form `represent` writes, with spaces around it,
+### each part in its own type's number syntax. A bare `i` or `-i` is a unit imaginary part, a missing part is +0.
+### :param chars: The text's first code point.
+### :param count: How many code points.
+### :param format: 1 B32 parts (C64), 0 B64 (C128), 4 B128 (C256).
+### :param out: Where the parts' bits go: for B32 and B64 parts the real part's in w0 and the imaginary part's in w1,
+###     for B128 parts the real part's low and high 64 bits in w0 and w1 and the imaginary part's in w2 and w3.
+### :returns: 0 for a complex number, 1 for text that is not one (`out` is left alone).
+@export("ingrid_complex_parse_utf32")
+routine complex_parse_utf32(chars: @U32, count: U64, format: U32, out: @Words) -> U64
+    until start >= count or not complex_is_space(chars.stride(start).peek()) with start: U64 = 0
+        continue with start: start + 1
+    then
+        until stop <= start or not complex_is_space(chars.stride(stop - 1).peek()) with stop: U64 = count
+            continue with stop: stop - 1
+        then
+            return complex_parse_trimmed(chars: chars.stride(start), count: stop - start, format,
+                out)
+
+### complex_parse_utf32 on text without spaces around it.
+### :param chars: The text's first code point.
+### :param count: How many code points.
+### :param format: 1 B32, 0 B64, 4 B128.
+### :param out: Where the parts' bits go (see complex_parse_utf32).
+### :returns: 0 for a complex number, 1 otherwise.
+secret routine complex_parse_trimmed(chars: @U32, count: U64, format: U32, out: @Words) -> U64
+    if count == 0
+        return 1
+    zero: Words = (w0: 0, w1: 0, w2: 0, w3: 0)
+    if chars.stride(count - 1).peek() != 105
+        real_only: Words = complex_parse_part(chars, count, format)
+        if real_only.w0 != 0
+            return 1
+        complex_put(out, real: real_only, imag: zero, format)
+        return 0
+    body: U64 = count - 1
+    split: U64 = complex_split(chars, count: body)
+    # the real part, without a `+` in front unless it is all there is
+    real_start: U64 = when
+        split > 1 and chars.peek() == 43 => 1
+        else => 0
+    real: Words = when
+        split == 0 => zero
+        else => complex_parse_part(chars: chars.stride(real_start), count: split - real_start,
+            format)
+    if real.w0 != 0
+        return 1
+    imag_from: U64 = when
+        split < body and chars.stride(split).peek() == 43 => split + 1
+        else => split
+    imag_count: U64 = body - imag_from
+    lone_minus: Bool = imag_count == 1 and chars.stride(imag_from).peek() == 45
+    imag: Words = when
+        imag_count == 0 => complex_unit(format, negative: false)
+        lone_minus => complex_unit(format, negative: true)
+        else => complex_parse_part(chars: chars.stride(imag_from), count: imag_count, format)
+    if imag.w0 != 0
+        return 1
+    complex_put(out, real, imag, format)
+    return 0
+
+### Writes two parts' bits into `out` the way complex_parse_utf32 hands them back.
+### :param out: Where they go.
+### :param real: The real part's bits in w1 (low) and w2 (high).
+### :param imag: The imaginary part's bits in w1 (low) and w2 (high).
+### :param format: 1 B32, 0 B64, 4 B128.
+secret routine complex_put(out: @Words, real: Words, imag: Words, format: U32) -> None
+    if format == 4
+        out.poke((w0: real.w1, w1: real.w2, w2: imag.w1, w3: imag.w2))
+        return
+    out.poke((w0: real.w1, w1: imag.w1, w2: 0, w3: 0))
+    return

@@ -1,0 +1,135 @@
+# The exports behind C64, C128, and C256's sums, scalings, sign changes, equality, kinds, hashes, conversions, and text,
+# each line a result's bits in decimal (the real part first) or its text.
+
+import Hosted
+import Ingrid/Abi
+
+### Writes a C64 result: the real part's bits, then the imaginary part's.
+### :param label: What the line shows.
+### :param bits: The packed result.
+routine show_c64(label: @[Byte], bits: U64) -> None
+    re: U32 = bits.to_wrap[U32]()
+    im: U32 = (bits >> 32).to_wrap[U32]()
+    Console.show("{label} {re} {im}")
+    return
+
+### Writes the first two words of a result.
+### :param label: What the line shows.
+### :param w: The result.
+routine show_words(label: @[Byte], w: Words) -> None
+    Console.show("{label} {w.w0} {w.w1}")
+    return
+
+### Writes a C256 result.
+### :param label: What the line shows.
+### :param z: The result.
+routine show_c256(label: @[Byte], z: C256) -> None
+    re: U128 = z.real.bits()
+    im: U128 = z.imag.bits()
+    Console.show("{label} {re} {im}")
+    return
+
+### Writes a complex number's text as ingrid_complex_text_utf32 gives it, through a buffer that is too small at first.
+### :param z: The parts' bits as the export takes them.
+### :param form: The format, the style, and the digits.
+routine show_text(z: Words, form: ComplexTextForm) -> None
+    small: &Array[U32, 4] <- .hollow()
+    count: U64 = complex_text_utf32(real_low: z.w0, real_high: z.w1, imag_low: z.w2,
+        imag_high: z.w3, format: form.format, style: form.style, digits: form.digits,
+        out: small.to[@U32](), out_count: 4)
+    big: &Array[U32, 96] <- .hollow()
+    again: U64 = complex_text_utf32(real_low: z.w0, real_high: z.w1, imag_low: z.w2,
+        imag_high: z.w3, format: form.format, style: form.style, digits: form.digits,
+        out: big.to[@U32](), out_count: 96)
+    bytes: &Array[Byte, 96] <- .hollow()
+    first: @Byte = bytes.to[@Byte]()
+    each i: U64 in 0 til again
+        c: U32 = big.to[@U32]().stride(i).peek()
+        c.to_wrap[U8]().bits().poke_into(first.stride(i))
+    text: @[Byte] = .construct(data: first, count: again)
+    Console.show("text {count} {again} {text}")
+    return
+
+### Reads ASCII text as a complex number of `format` and writes what ingrid_complex_parse_utf32 gives.
+### :param text: The text.
+### :param format: 1 B32 parts, 0 B64, 4 B128.
+routine show_parse(text: @[Byte], format: U32) -> None
+    chars: &Array[U32, 64] <- .hollow()
+    each i: U64 in 0 til text.count
+        chars.to[@U32]().stride(i).poke(text.getitem(i).to[U8]().to[U32]())
+    out: &Words <- (w0: 7, w1: 7, w2: 7, w3: 7)
+    status: U64 = complex_parse_utf32(chars: chars.to[@U32](), count: text.count, format,
+        out: out.getview())
+    w: Words = out.load()
+    Console.show("parse '{text}' {status} {w.w0} {w.w1} {w.w2} {w.w3}")
+    return
+
+### Runs the checks.
+routine start() -> None
+    one: B32 = 1.0
+    half: B32 = 0.5
+    neg_zero: B32 = B32.from_bits(0x80000000)
+    show_c64(label: "c64 add",
+        bits: c64_add(real: one, imag: neg_zero, other_real: half, other_imag: 0.0))
+    show_c64(label: "c64 sub",
+        bits: c64_sub(real: one, imag: neg_zero, other_real: half, other_imag: 0.0))
+    show_c64(label: "c64 mul_real", bits: c64_mul_real(real: one, imag: half, factor: -2.0))
+    show_c64(label: "c64 div_real", bits: c64_div_real(real: one, imag: half, divisor: 4.0))
+    show_c64(label: "c64 neg", bits: c64_neg(real: one, imag: neg_zero))
+    show_c64(label: "c64 conjugate", bits: c64_conjugate(real: one, imag: neg_zero))
+    Console.show("c64 eq {c64_eq(real: 0.0, imag: 0.0, other_real: neg_zero, other_imag: neg_zero)}")
+    quiet: B32 = B32.from_bits(0x7FC00000)
+    Console.show("c64 eq nan {c64_eq(real: quiet, imag: 0.0, other_real: quiet, other_imag: 0.0)}")
+    Console.show("c64 class {c64_class(real: 0.0, imag: neg_zero)} {c64_class(real: one, imag: 0.0)} {c64_class(real: 0.0, imag: one)} {c64_class(real: quiet, imag: one)} {c64_class(real: B32.from_bits(0x7F800000), imag: one)} {c64_class(real: one, imag: one)}")
+    same: Bool = c64_hash(real: 0.0, imag: 0.0, k0: 1,
+        k1: 2) == c64_hash(real: neg_zero, imag: neg_zero, k0: 1, k1: 2)
+    differ: Bool = c64_hash(real: one, imag: 0.0, k0: 1,
+        k1: 2) != c64_hash(real: 0.0, imag: one, k0: 1, k1: 2)
+    Console.show("c64 hash {same} {differ}")
+    show_c64(label: "c64 polar", bits: c64_polar(real: 3.0, imag: 4.0))
+    show_words(label: "c64 to c128", w: c64_to_c128(real: half, imag: neg_zero))
+    show_c256(label: "c64 to c256", z: c64_to_c256(real: half, imag: neg_zero))
+    show_c64(label: "c128 to c64", bits: c128_to_c64(real: 0.1, imag: -2.5))
+    show_c256(label: "c128 to c256", z: c128_to_c256(real: 0.1, imag: -2.5))
+    # 1 + 2^-24 + 2^-112: just above a B32 tie, which going through B64 would round to the even side of
+    show_c64(label: "c256 to c64",
+        bits: c256_to_c64(real_low: 1, real_high: 0x3FFF000001000000, imag_low: 0, imag_high: 0))
+    show_words(label: "c256 to c128",
+        w: c256_to_c128(real_low: 1, real_high: 0x3FFF000001000000, imag_low: 0, imag_high: 0))
+    show_words(label: "c128 add",
+        w: c128_add(real: 1.0, imag: 2.0, other_real: 0.5, other_imag: -2.0))
+    show_words(label: "c128 mul_real", w: c128_mul_real(real: 1.0, imag: 2.0, factor: 0.25))
+    show_words(label: "c128 polar", w: c128_polar(real: -1.0, imag: 0.0))
+    Console.show("c128 class {c128_class(real: 0.0, imag: 0.0)} {c128_class(real: 1.0, imag: 0.0)}")
+    show_c256(label: "c256 add",
+        z: c256_add(real_low: 0, real_high: 0x3FFF000000000000, imag_low: 0, imag_high: 0, other_real_low: 0, other_real_high: 0x3FFF000000000000, other_imag_low: 0, other_imag_high: 0x8000000000000000))
+    show_c256(label: "c256 neg",
+        z: c256_neg(real_low: 0, real_high: 0x3FFF000000000000, imag_low: 0, imag_high: 0))
+    Console.show("c256 eq {c256_eq(real_low: 0, real_high: 0, imag_low: 0, imag_high: 0, other_real_low: 0, other_real_high: 0x8000000000000000, other_imag_low: 0, other_imag_high: 0)}")
+    Console.show("c256 hash {c256_hash(real_low: 0, real_high: 0, imag_low: 0, imag_high: 0, k0: 5, k1: 6) == c256_hash(real_low: 0, real_high: 0x8000000000000000, imag_low: 0, imag_high: 0, k0: 5, k1: 6)}")
+    show_text(z: (w0: 0x3FC00000, w1: 0, w2: 0xBE800000, w3: 0),
+        form: (format: 1, style: 0, digits: 0))
+    show_text(z: (w0: 0x3FC00000, w1: 0, w2: 0xBE800000, w3: 0),
+        form: (format: 1, style: 2, digits: 3))
+    show_text(z: (w0: 0x3FC00000, w1: 0, w2: 0xBE800000, w3: 0),
+        form: (format: 1, style: 3, digits: 0))
+    show_text(z: (w0: 0x80000000, w1: 0, w2: 0x80000000, w3: 0),
+        form: (format: 1, style: 0, digits: 0))
+    show_text(z: (w0: 0x7FA00000, w1: 0, w2: 0xFFC00000, w3: 0),
+        form: (format: 1, style: 0, digits: 0))
+    show_text(z: (w0: 0x3FB999999999999A, w1: 0, w2: 0xC004000000000000, w3: 0),
+        form: (format: 0, style: 0, digits: 0))
+    show_text(z: (w0: 0, w1: 0x3FFF000000000000, w2: 0, w3: 0x3FFB999999999999),
+        form: (format: 4, style: 3, digits: 0))
+    show_parse(text: "1.5-2i", format: 1)
+    show_parse(text: "  -i ", format: 1)
+    show_parse(text: "+i", format: 0)
+    show_parse(text: "2e3i", format: 0)
+    show_parse(text: "1e-3+2.5i", format: 0)
+    show_parse(text: "-nan+infi", format: 1)
+    show_parse(text: "3", format: 4)
+    show_parse(text: "1-1i", format: 4)
+    show_parse(text: "1+", format: 1)
+    show_parse(text: "1+-2i", format: 1)
+    show_parse(text: "", format: 1)
+    return
