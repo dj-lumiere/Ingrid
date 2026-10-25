@@ -1,12 +1,13 @@
-# RazorForge's 4x4 matrix Matrix4R4C (B32, Tessera's B32, column-major): the bodies of its determinant, inverse, and
-# rotation-from-quaternion, moved here from RazorForge's Math3D/Matrix4R4C.rf. RazorForge keeps the type, the SIMD
-# column arithmetic (sum, product, transpose, and the rest are vector operations it lowers itself), and thin
-# routines that call the ingrid_ exports below.
+# RazorForge's matrices Matrix2R2C, Matrix3R3C and Matrix4R4C (B32, Tessera's B32, column-major): their
+# determinants, inverses, the solution of A x = b, and the 4x4 rotation from a quaternion. RazorForge keeps the
+# types, the SIMD column arithmetic (sum, product, transpose, and the rest are vector operations it lowers itself),
+# and thin routines that call the ingrid_ exports below.
 #
-# The formulas are RazorForge's own, unchanged, so every result has the same bits as before, and each `+ - * /` is
-# the checked one (finite.te), which crashes where RazorForge's B32 operators do. The exports take the sixteen
-# elements as m{row}{column}, and hand a matrix back as Matrix4: 64 bytes in RazorForge's column-major order, which
-# every target returns through a hidden pointer, as it does RazorForge's Matrix4R4C.
+# The determinants and the rotation are RazorForge's own formulas. The inverse and the solve are one Gaussian
+# elimination with partial pivoting for all three sizes (below). Each `+ - * /` of a checked export is the checked
+# one (finite.te), which crashes where RazorForge's B32 operators do. The exports take the elements as
+# m{row}{column}, and hand a matrix back as Matrix4 or MatrixResult: 64 or 68 bytes in RazorForge's column-major
+# order, which every target returns through a hidden pointer.
 
 ### A 4x4 B32 matrix laid out as RazorForge's Matrix4R4C: column after column, m{row}{column}.
 record Matrix4
@@ -56,20 +57,6 @@ routine cofactor(row: Vector3D[B32], minors: Vector3D[B32]) -> B32
     cr: B32 = row.z.mul_finite(minors.z)
     return d.add_finite(cr)
 
-### -row.x × minors.x + row.y × minors.y - row.z × minors.z: the cofactor with the opposite sign.
-### :param row: The row's three elements.
-### :param minors: The three 2x2 determinants, in the same order.
-### :returns: The sum.
-### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
-###     infinite.
-@inline
-routine negated_cofactor(row: Vector3D[B32], minors: Vector3D[B32]) -> B32
-    ap: B32 = (-row.x).mul_finite(minors.x)
-    bq: B32 = row.y.mul_finite(minors.y)
-    d: B32 = ap.add_finite(bq)
-    cr: B32 = row.z.mul_finite(minors.z)
-    return d.sub_finite(cr)
-
 ### The determinant, by cofactor expansion along the top row with the bottom two rows' 2x2 determinants.
 ### :param m00: The element in row 0, column 0.
 ### :param m01: The element in row 0, column 1.
@@ -111,8 +98,411 @@ routine m4_determinant(m00: B32, m01: B32, m02: B32, m03: B32, m10: B32, m11: B3
     e: B32 = d0.sub_finite(d1).add_finite(d2)
     return e.sub_finite(d3)
 
-### The inverse: the adjugate (the transposed cofactors, from the 2x2 determinants of rows 0-1 and rows 2-3) over the
-### determinant. A singular matrix (determinant 0) gives the zero matrix.
+### The 2x2 determinant m00 × m11 - m01 × m10.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :returns: The determinant.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m2_determinant")
+@inline
+routine m2_determinant(m00: B32, m01: B32, m10: B32, m11: B32) -> B32
+    return cross_difference(a: m00, b: m11, c: m01, d: m10)
+
+### The 3x3 determinant, by cofactor expansion along the top row.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :returns: The determinant.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m3_determinant")
+@inline
+routine m3_determinant(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32,
+    m21: B32, m22: B32) -> B32
+    s0: B32 = cross_difference(a: m11, b: m22, c: m12, d: m21)
+    s1: B32 = cross_difference(a: m10, b: m22, c: m12, d: m20)
+    s2: B32 = cross_difference(a: m10, b: m21, c: m11, d: m20)
+    return cofactor(row: Vector3D[B32](x: m00, y: m01, z: m02),
+        minors: Vector3D[B32](x: s0, y: s1, z: s2))
+
+# ── inverse and solve: Gaussian elimination with partial pivoting ─────────────────────────────────
+#
+# One elimination serves the 2x2, 3x3 and 4x4 matrices, for the inverse (the right-hand side is the identity) and for
+# Ax = b (the right-hand side is b). The matrix and its right-hand side sit side by side in one buffer, row after
+# row, ELIMINATION_STRIDE values to a row. Column by column, the row with the largest magnitude at or below the
+# diagonal (the first one on a tie) is swapped up, and its multiples are subtracted from the rows below it. Back
+# substitution then gives the solution, bottom row first. A pivot that is exactly 0 means the matrix is singular:
+# the checked routines report it, and the unchecked ones divide by it and hand back what IEEE 754 gives. Each step
+# of a checked routine is the checked `+ - * /` (finite.te), so an infinity or NaN that comes up stops the program.
+
+### How many values one row of the elimination buffer holds: a 4x4 matrix and four right-hand columns.
+secret preset ELIMINATION_STRIDE: U64 = 8
+
+### What an inverse or a solve hands back: whether elimination met a pivot that is exactly 0, and the values,
+### column after column as Matrix4 holds them. A 2x2 or 3x3 inverse fills the top left corner, a solution of Ax = b
+### fills column 0, and the rest is 0. It is 68 bytes, which every target returns through a hidden pointer, as it
+### does RazorForge's IngridMatrixResult.
+record MatrixResult
+    singular: U32
+    m00: B32
+    m10: B32
+    m20: B32
+    m30: B32
+    m01: B32
+    m11: B32
+    m21: B32
+    m31: B32
+    m02: B32
+    m12: B32
+    m22: B32
+    m32: B32
+    m03: B32
+    m13: B32
+    m23: B32
+    m33: B32
+
+### a - b, checked or raw.
+### :param a: The value to subtract from.
+### :param b: The value to subtract.
+### :param checked: True for the checked subtraction, false for the raw IEEE 754 one.
+### :returns: The difference.
+### :throws: Crashes with `NumericDomainError` when a checked difference is NaN, or `NumericOverflowError` when it
+###     is infinite.
+@inline
+@track_caller
+routine elimination_sub(a: B32, b: B32, checked: Bool) -> B32
+    if checked
+        return a.sub_finite(b)
+    return a -! b
+
+### a × b, checked or raw.
+### :param a: The first factor.
+### :param b: The second factor.
+### :param checked: True for the checked product, false for the raw IEEE 754 one.
+### :returns: The product.
+### :throws: Crashes with `NumericDomainError` when a checked product is NaN, or `NumericOverflowError` when it is
+###     infinite.
+@inline
+@track_caller
+routine elimination_mul(a: B32, b: B32, checked: Bool) -> B32
+    if checked
+        return a.mul_finite(b)
+    return a *! b
+
+### a / b, checked or raw.
+### :param a: The dividend.
+### :param b: The divisor.
+### :param checked: True for the checked quotient, false for the raw IEEE 754 one.
+### :returns: The quotient.
+### :throws: Crashes with `DivisionByZeroError`, `NumericDomainError`, or `NumericOverflowError` when a checked
+###     quotient is not finite.
+@inline
+@track_caller
+routine elimination_div(a: B32, b: B32, checked: Bool) -> B32
+    if checked
+        return a.truediv_finite(b)
+    return a /! b
+
+### The place of the value in row `row`, column `col` of an elimination buffer.
+### :param a: The buffer's first value.
+### :param row: The row.
+### :param col: The column, the right-hand side's columns after the matrix's.
+### :returns: The value's place.
+@inline
+routine elimination_place(a: @B32, row: U64, col: U64) -> @B32
+    return a.stride(row * ELIMINATION_STRIDE + col)
+
+### Solves A X = B in place: Gaussian elimination with partial pivoting, then back substitution. On return the
+### right-hand columns hold X (the matrix's columns hold what elimination left there).
+### :param a: The buffer: n rows of A followed by B, ELIMINATION_STRIDE values to a row.
+### :param n: The size of A, 2 to 4.
+### :param k: How many right-hand columns B has, 1 to 4.
+### :param checked: True to stop at a pivot that is exactly 0 and to use the checked arithmetic, false for the raw
+###     IEEE 754 result throughout.
+### :returns: False when a checked elimination met a pivot that is exactly 0 (A is singular), else true.
+### :throws: Crashes with `NumericDomainError`, `NumericOverflowError`, or `DivisionByZeroError` when a checked step
+###     is not finite.
+secret routine eliminate(a: @B32, n: U64, k: U64, checked: Bool) -> Bool
+    width: U64 = n + k
+
+    each col in 0 til n
+        best: &U64 <- col
+
+        each r in col + 1 til n
+            candidate: B32 = elimination_place(a, row: r, col).peek().abs()
+            held: B32 = elimination_place(a, row: best.load(), col).peek().abs()
+            if candidate > held
+                r.store_into(best)
+        p: U64 = best.load()
+        pivot: B32 = elimination_place(a, row: p, col).peek()
+        if checked and pivot == 0.0
+            return false
+        if p != col
+            each c in col til width
+                top: B32 = elimination_place(a, row: col, col: c).peek()
+                low: B32 = elimination_place(a, row: p, col: c).peek()
+                low.poke_into(elimination_place(a, row: col, col: c))
+                top.poke_into(elimination_place(a, row: p, col: c))
+        each r in col + 1 til n
+            factor: B32 = elimination_div(a: elimination_place(a, row: r, col).peek(), b: pivot,
+                checked)
+
+            each c in col + 1 til width
+                below: @B32 = elimination_place(a, row: r, col: c)
+                step: B32 = elimination_mul(a: factor,
+                    b: elimination_place(a, row: col, col: c).peek(), checked)
+                elimination_sub(a: below.peek(), b: step, checked).poke_into(below)
+    each i in 0 til n
+        r: U64 = n - 1 - i
+
+        each c in n til width
+            sum: &B32 <- elimination_place(a, row: r, col: c).peek()
+
+            each j in r + 1 til n
+                step: B32 = elimination_mul(a: elimination_place(a, row: r, col: j).peek(),
+                    b: elimination_place(a, row: j, col: c).peek(), checked)
+                elimination_sub(a: sum.load(), b: step, checked).store_into(sum)
+            x: B32 = elimination_div(a: sum.load(), b: elimination_place(a, row: r, col: r).peek(),
+                checked)
+            x.poke_into(elimination_place(a, row: r, col: c))
+    return true
+
+### Puts the identity beside an n x n matrix in an elimination buffer, for the inverse.
+### :param a: The buffer, all zeros right of the matrix.
+### :param n: The size of the matrix.
+@inline
+routine eliminate_beside_identity(a: @B32, n: U64) -> None
+    one: B32 = 1.0
+
+    each i in 0 til n
+        one.poke_into(elimination_place(a, row: i, col: n + i))
+    return
+
+### What elimination left in the right-hand columns, as a MatrixResult.
+### :param a: The buffer after `eliminate`.
+### :param n: The size of the matrix.
+### :param k: How many right-hand columns there are.
+### :param solved: What `eliminate` returned: false marks the result singular and leaves its values 0.
+### :returns: The result, the right-hand columns in its columns.
+@inline
+routine elimination_result(a: @B32, n: U64, k: U64, solved: Bool) -> MatrixResult
+    r: &MatrixResult <- .hollow()
+    out: @B32 = r.m00.to[@B32]()
+
+    if not solved
+        1.poke_into(r.singular)
+        return r.load()
+    each row in 0 til n
+        each col in 0 til k
+            elimination_place(a, row, col: n + col).peek().poke_into(out.stride(col * 4 + row))
+    return r.load()
+
+### The inverse of the n x n matrix in an elimination buffer.
+### :param a: The buffer, the matrix in its first n columns and zeros right of it.
+### :param n: The size of the matrix.
+### :param checked: True for the checked elimination, false for the raw one.
+### :returns: The inverse in the result's top left corner, or a result marked singular.
+### :throws: Crashes with `NumericDomainError`, `NumericOverflowError`, or `DivisionByZeroError` when a checked step
+###     is not finite.
+@inline
+routine elimination_inverse(a: @B32, n: U64, checked: Bool) -> MatrixResult
+    eliminate_beside_identity(a, n)
+    solved: Bool = eliminate(a, n, k: n, checked)
+    return elimination_result(a, n, k: n, solved)
+
+### Writes a 3x3 matrix's rows into an elimination buffer.
+### :param a: The buffer.
+### :param r0: Row 0.
+### :param r1: Row 1.
+### :param r2: Row 2.
+@inline
+routine m3_fill(a: @B32, r0: Vector3D[B32], r1: Vector3D[B32], r2: Vector3D[B32]) -> None
+    r0.x.poke_into(a.stride(0))
+    r0.y.poke_into(a.stride(1))
+    r0.z.poke_into(a.stride(2))
+    r1.x.poke_into(a.stride(8))
+    r1.y.poke_into(a.stride(9))
+    r1.z.poke_into(a.stride(10))
+    r2.x.poke_into(a.stride(16))
+    r2.y.poke_into(a.stride(17))
+    r2.z.poke_into(a.stride(18))
+    return
+
+### Writes a 4x4 matrix's rows into an elimination buffer.
+### :param a: The buffer.
+### :param m: The matrix.
+@inline
+routine m4_fill(a: @B32, m: Matrix4) -> None
+    m.m00.poke_into(a.stride(0))
+    m.m01.poke_into(a.stride(1))
+    m.m02.poke_into(a.stride(2))
+    m.m03.poke_into(a.stride(3))
+    m.m10.poke_into(a.stride(8))
+    m.m11.poke_into(a.stride(9))
+    m.m12.poke_into(a.stride(10))
+    m.m13.poke_into(a.stride(11))
+    m.m20.poke_into(a.stride(16))
+    m.m21.poke_into(a.stride(17))
+    m.m22.poke_into(a.stride(18))
+    m.m23.poke_into(a.stride(19))
+    m.m30.poke_into(a.stride(24))
+    m.m31.poke_into(a.stride(25))
+    m.m32.poke_into(a.stride(26))
+    m.m33.poke_into(a.stride(27))
+    return
+
+### The inverse of a 2x2 matrix, for Matrix2R2C.inverse.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :returns: The inverse in the result's top left corner, or a result marked singular when a pivot is exactly 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m2_inverse")
+@inline
+routine m2_inverse(m00: B32, m01: B32, m10: B32, m11: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m00.poke_into(a.stride(0))
+    m01.poke_into(a.stride(1))
+    m10.poke_into(a.stride(8))
+    m11.poke_into(a.stride(9))
+    return elimination_inverse(a, n: 2, checked: true)
+
+### The inverse of a 2x2 matrix in raw IEEE 754 arithmetic, for Matrix2R2C.inverse_unchecked: a singular matrix
+### gives infinities or NaN.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :returns: The inverse in the result's top left corner, never marked singular.
+@export("ingrid_m2_inverse_unchecked")
+@inline
+routine m2_inverse_unchecked(m00: B32, m01: B32, m10: B32, m11: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m00.poke_into(a.stride(0))
+    m01.poke_into(a.stride(1))
+    m10.poke_into(a.stride(8))
+    m11.poke_into(a.stride(9))
+    return elimination_inverse(a, n: 2, checked: false)
+
+### The solution x of A x = b for a 2x2 A, for Matrix2R2C.solve.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param b0: Row 0 of b.
+### :param b1: Row 1 of b.
+### :returns: x in the result's column 0, or a result marked singular when a pivot is exactly 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m2_solve")
+@inline
+routine m2_solve(m00: B32, m01: B32, m10: B32, m11: B32, b0: B32, b1: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m00.poke_into(a.stride(0))
+    m01.poke_into(a.stride(1))
+    b0.poke_into(a.stride(2))
+    m10.poke_into(a.stride(8))
+    m11.poke_into(a.stride(9))
+    b1.poke_into(a.stride(10))
+    solved: Bool = eliminate(a, n: 2, k: 1, checked: true)
+    return elimination_result(a, n: 2, k: 1, solved)
+
+### The inverse of a 3x3 matrix, for Matrix3R3C.inverse.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :returns: The inverse in the result's top left corner, or a result marked singular when a pivot is exactly 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m3_inverse")
+@inline
+routine m3_inverse(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32, m21: B32,
+    m22: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m3_fill(a, r0: Vector3D[B32](x: m00, y: m01, z: m02), r1: Vector3D[B32](x: m10, y: m11, z: m12),
+        r2: Vector3D[B32](x: m20, y: m21, z: m22))
+    return elimination_inverse(a, n: 3, checked: true)
+
+### The inverse of a 3x3 matrix in raw IEEE 754 arithmetic, for Matrix3R3C.inverse_unchecked: a singular matrix
+### gives infinities or NaN.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :returns: The inverse in the result's top left corner, never marked singular.
+@export("ingrid_m3_inverse_unchecked")
+@inline
+routine m3_inverse_unchecked(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32,
+    m21: B32, m22: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m3_fill(a, r0: Vector3D[B32](x: m00, y: m01, z: m02), r1: Vector3D[B32](x: m10, y: m11, z: m12),
+        r2: Vector3D[B32](x: m20, y: m21, z: m22))
+    return elimination_inverse(a, n: 3, checked: false)
+
+### The solution x of A x = b for a 3x3 A, for Matrix3R3C.solve.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :param b0: Row 0 of b.
+### :param b1: Row 1 of b.
+### :param b2: Row 2 of b.
+### :returns: x in the result's column 0, or a result marked singular when a pivot is exactly 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m3_solve")
+@inline
+routine m3_solve(m00: B32, m01: B32, m02: B32, m10: B32, m11: B32, m12: B32, m20: B32, m21: B32,
+    m22: B32, b0: B32, b1: B32, b2: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m3_fill(a, r0: Vector3D[B32](x: m00, y: m01, z: m02), r1: Vector3D[B32](x: m10, y: m11, z: m12),
+        r2: Vector3D[B32](x: m20, y: m21, z: m22))
+    b0.poke_into(a.stride(3))
+    b1.poke_into(a.stride(11))
+    b2.poke_into(a.stride(19))
+    solved: Bool = eliminate(a, n: 3, k: 1, checked: true)
+    return elimination_result(a, n: 3, k: 1, solved)
+
+### The inverse of a 4x4 matrix, for Matrix4R4C.inverse.
 ### :param m00: The element in row 0, column 0.
 ### :param m01: The element in row 0, column 1.
 ### :param m02: The element in row 0, column 2.
@@ -129,73 +519,91 @@ routine m4_determinant(m00: B32, m01: B32, m02: B32, m03: B32, m10: B32, m11: B3
 ### :param m31: The element in row 3, column 1.
 ### :param m32: The element in row 3, column 2.
 ### :param m33: The element in row 3, column 3.
-### :returns: The inverse, or the zero matrix.
+### :returns: The inverse, or a result marked singular when a pivot is exactly 0.
 ### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
 ###     infinite.
 @export("ingrid_m4_inverse")
 @inline
 routine m4_inverse(m00: B32, m01: B32, m02: B32, m03: B32, m10: B32, m11: B32, m12: B32, m13: B32,
-    m20: B32, m21: B32, m22: B32, m23: B32, m30: B32, m31: B32, m32: B32, m33: B32) -> Matrix4
-    a0: B32 = cross_difference(a: m00, b: m11, c: m01, d: m10)
-    a1: B32 = cross_difference(a: m00, b: m12, c: m02, d: m10)
-    a2: B32 = cross_difference(a: m00, b: m13, c: m03, d: m10)
-    a3: B32 = cross_difference(a: m01, b: m12, c: m02, d: m11)
-    a4: B32 = cross_difference(a: m01, b: m13, c: m03, d: m11)
-    a5: B32 = cross_difference(a: m02, b: m13, c: m03, d: m12)
-    b0: B32 = cross_difference(a: m20, b: m31, c: m21, d: m30)
-    b1: B32 = cross_difference(a: m20, b: m32, c: m22, d: m30)
-    b2: B32 = cross_difference(a: m20, b: m33, c: m23, d: m30)
-    b3: B32 = cross_difference(a: m21, b: m32, c: m22, d: m31)
-    b4: B32 = cross_difference(a: m21, b: m33, c: m23, d: m31)
-    b5: B32 = cross_difference(a: m22, b: m33, c: m23, d: m32)
+    m20: B32, m21: B32, m22: B32, m23: B32, m30: B32, m31: B32, m32: B32, m33: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
 
-    t0: B32 = cross_difference(a: a0, b: b5, c: a1, d: b4)
-    t1: B32 = t0.add_finite(a2.mul_finite(b3))
-    t2: B32 = t1.add_finite(a3.mul_finite(b2))
-    t3: B32 = t2.sub_finite(a4.mul_finite(b1))
-    det: B32 = t3.add_finite(a5.mul_finite(b0))
-    if det == 0.0
-        return m4_zero()
-    inv: B32 = B32.truediv_finite(1.0, det)
-    r00: B32 = cofactor(row: Vector3D[B32](x: m11, y: m12, z: m13),
-        minors: Vector3D[B32](x: b5, y: b4, z: b3)).mul_finite(inv)
-    r01: B32 = negated_cofactor(row: Vector3D[B32](x: m01, y: m02, z: m03),
-        minors: Vector3D[B32](x: b5, y: b4, z: b3)).mul_finite(inv)
-    r02: B32 = cofactor(row: Vector3D[B32](x: m31, y: m32, z: m33),
-        minors: Vector3D[B32](x: a5, y: a4, z: a3)).mul_finite(inv)
-    r03: B32 = negated_cofactor(row: Vector3D[B32](x: m21, y: m22, z: m23),
-        minors: Vector3D[B32](x: a5, y: a4, z: a3)).mul_finite(inv)
-    r10: B32 = negated_cofactor(row: Vector3D[B32](x: m10, y: m12, z: m13),
-        minors: Vector3D[B32](x: b5, y: b2, z: b1)).mul_finite(inv)
-    r11: B32 = cofactor(row: Vector3D[B32](x: m00, y: m02, z: m03),
-        minors: Vector3D[B32](x: b5, y: b2, z: b1)).mul_finite(inv)
-    r12: B32 = negated_cofactor(row: Vector3D[B32](x: m30, y: m32, z: m33),
-        minors: Vector3D[B32](x: a5, y: a2, z: a1)).mul_finite(inv)
-    r13: B32 = cofactor(row: Vector3D[B32](x: m20, y: m22, z: m23),
-        minors: Vector3D[B32](x: a5, y: a2, z: a1)).mul_finite(inv)
-    r20: B32 = cofactor(row: Vector3D[B32](x: m10, y: m11, z: m13),
-        minors: Vector3D[B32](x: b4, y: b2, z: b0)).mul_finite(inv)
-    r21: B32 = negated_cofactor(row: Vector3D[B32](x: m00, y: m01, z: m03),
-        minors: Vector3D[B32](x: b4, y: b2, z: b0)).mul_finite(inv)
-    r22: B32 = cofactor(row: Vector3D[B32](x: m30, y: m31, z: m33),
-        minors: Vector3D[B32](x: a4, y: a2, z: a0)).mul_finite(inv)
-    r23: B32 = negated_cofactor(row: Vector3D[B32](x: m20, y: m21, z: m23),
-        minors: Vector3D[B32](x: a4, y: a2, z: a0)).mul_finite(inv)
-    r30: B32 = negated_cofactor(row: Vector3D[B32](x: m10, y: m11, z: m12),
-        minors: Vector3D[B32](x: b3, y: b1, z: b0)).mul_finite(inv)
-    r31: B32 = cofactor(row: Vector3D[B32](x: m00, y: m01, z: m02),
-        minors: Vector3D[B32](x: b3, y: b1, z: b0)).mul_finite(inv)
-    r32: B32 = negated_cofactor(row: Vector3D[B32](x: m30, y: m31, z: m32),
-        minors: Vector3D[B32](x: a3, y: a1, z: a0)).mul_finite(inv)
-    r33: B32 = cofactor(row: Vector3D[B32](x: m20, y: m21, z: m22),
-        minors: Vector3D[B32](x: a3, y: a1, z: a0)).mul_finite(inv)
-    return (m00: r00, m10: r10, m20: r20, m30: r30, m01: r01, m11: r11, m21: r21, m31: r31, m02: r02, m12: r12, m22: r22, m32: r32, m03: r03, m13: r13, m23: r23, m33: r33)
+    m4_fill(a,
+        m: (m00: m00, m10: m10, m20: m20, m30: m30, m01: m01, m11: m11, m21: m21, m31: m31, m02: m02, m12: m12, m22: m22, m32: m32, m03: m03, m13: m13, m23: m23, m33: m33))
+    return elimination_inverse(a, n: 4, checked: true)
 
-### The zero matrix.
-### :returns: A matrix of sixteen zeros.
+### The inverse of a 4x4 matrix in raw IEEE 754 arithmetic, for Matrix4R4C.inverse_unchecked: a singular matrix
+### gives infinities or NaN.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m03: The element in row 0, column 3.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m13: The element in row 1, column 3.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :param m23: The element in row 2, column 3.
+### :param m30: The element in row 3, column 0.
+### :param m31: The element in row 3, column 1.
+### :param m32: The element in row 3, column 2.
+### :param m33: The element in row 3, column 3.
+### :returns: The inverse, never marked singular.
+@export("ingrid_m4_inverse_unchecked")
 @inline
-routine m4_zero() -> Matrix4
-    return (m00: 0.0, m10: 0.0, m20: 0.0, m30: 0.0, m01: 0.0, m11: 0.0, m21: 0.0, m31: 0.0, m02: 0.0, m12: 0.0, m22: 0.0, m32: 0.0, m03: 0.0, m13: 0.0, m23: 0.0, m33: 0.0)
+routine m4_inverse_unchecked(m00: B32, m01: B32, m02: B32, m03: B32, m10: B32, m11: B32, m12: B32,
+    m13: B32, m20: B32, m21: B32, m22: B32, m23: B32, m30: B32, m31: B32, m32: B32,
+    m33: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m4_fill(a,
+        m: (m00: m00, m10: m10, m20: m20, m30: m30, m01: m01, m11: m11, m21: m21, m31: m31, m02: m02, m12: m12, m22: m22, m32: m32, m03: m03, m13: m13, m23: m23, m33: m33))
+    return elimination_inverse(a, n: 4, checked: false)
+
+### The solution x of A x = b for a 4x4 A, for Matrix4R4C.solve.
+### :param m00: The element in row 0, column 0.
+### :param m01: The element in row 0, column 1.
+### :param m02: The element in row 0, column 2.
+### :param m03: The element in row 0, column 3.
+### :param m10: The element in row 1, column 0.
+### :param m11: The element in row 1, column 1.
+### :param m12: The element in row 1, column 2.
+### :param m13: The element in row 1, column 3.
+### :param m20: The element in row 2, column 0.
+### :param m21: The element in row 2, column 1.
+### :param m22: The element in row 2, column 2.
+### :param m23: The element in row 2, column 3.
+### :param m30: The element in row 3, column 0.
+### :param m31: The element in row 3, column 1.
+### :param m32: The element in row 3, column 2.
+### :param m33: The element in row 3, column 3.
+### :param b0: Row 0 of b.
+### :param b1: Row 1 of b.
+### :param b2: Row 2 of b.
+### :param b3: Row 3 of b.
+### :returns: x in the result's column 0, or a result marked singular when a pivot is exactly 0.
+### :throws: Crashes with `NumericDomainError` when a step gives NaN, or `NumericOverflowError` when one is
+###     infinite.
+@export("ingrid_m4_solve")
+@inline
+routine m4_solve(m00: B32, m01: B32, m02: B32, m03: B32, m10: B32, m11: B32, m12: B32, m13: B32,
+    m20: B32, m21: B32, m22: B32, m23: B32, m30: B32, m31: B32, m32: B32, m33: B32, b0: B32,
+    b1: B32, b2: B32, b3: B32) -> MatrixResult
+    buf: &Array[B32, 32] <- .hollow()
+    a: @B32 = buf.to[@B32]()
+
+    m4_fill(a,
+        m: (m00: m00, m10: m10, m20: m20, m30: m30, m01: m01, m11: m11, m21: m21, m31: m31, m02: m02, m12: m12, m22: m22, m32: m32, m03: m03, m13: m13, m23: m23, m33: m33))
+    b0.poke_into(a.stride(4))
+    b1.poke_into(a.stride(12))
+    b2.poke_into(a.stride(20))
+    b3.poke_into(a.stride(28))
+    solved: Bool = eliminate(a, n: 4, k: 1, checked: true)
+    return elimination_result(a, n: 4, k: 1, solved)
 
 ### The rotation matrix of the unit quaternion w + xi + yj + zk.
 ### :param w: The real part.

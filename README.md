@@ -24,7 +24,7 @@ Roamed entity runtime and its cycle collector, the crash handler, SipHash, the x
 splitmix64 seeding, JSON string escaping, the text pattern engine (Tessera's `Text/Patterns`, which compiles a
 pattern and searches text in time that grows with the text's length), the library functions of the binary floats B16, B32, B64, and B128 (Tessera's correctly rounded routines), the B128
 arithmetic and the text of the binary floats and decimals (writing and reading), the math of the complex
-numbers, quaternions, and 4x4 matrices, and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
+numbers, quaternions, and the 2x2, 3x3, and 4x4 matrices (their inverses and A x = b by Gaussian elimination with partial pivoting), and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
 widths), and the arbitrary-precision Integer (`tessera/generated/numerics.te`, with the scratch arena
 the engine takes its temporaries from in `tessera/scratch.te`). More
@@ -74,7 +74,8 @@ the reference test vectors, splitmix64, xoshiro256** and the JSON escaping again
 text, the binary-float exports against correctly rounded results from mpmath, the float and decimal text against
 what RazorForge's own text routines printed,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
-before they moved here (and the crashes their checked arithmetic reports), the D32, D64, and D128 arithmetic
+before they moved here (and the crashes their checked arithmetic reports), the matrix inverses and solutions of
+A x = b against a Python model of the same elimination in B32, the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
 D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal
 transcendentals against mpmath, Integer through its C calls (and the scratch and result-buffer retries)
