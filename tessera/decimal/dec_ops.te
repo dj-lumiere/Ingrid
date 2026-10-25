@@ -138,6 +138,45 @@ secret routine dec_sqrt(x: Dec, f: DecFormat) -> Dec
         x.is_zero() => return x
         else => return dec_sqrt_positive(x, f)
 
+### 1 / sqrt(c × 10^q) of a finite positive x, correctly rounded to f's p digits and reduced. With C = c × 10^t (t 0
+### or 1, q - t even) of d digits and s = p + ceil(d / 2), the value is 10^(-(q - t) / 2 - s) × sqrt(N) with
+### N = 10^(2s) / C, and sqrt(N) lies in [10^p, 10^(p + 1)]. R = isqrt(floor(N)) = floor(sqrt(N)) is exact, and
+### sqrt(N) = R only when N is an integer and R^2: R × 10 plus a sticky digit for anything below then has the digits
+### that round once, ties included (1 / sqrt(0.04194304) is 4.8828125 exactly). floor(N) comes from two divisions
+### whose dividends fit 256 bits: 10^(2s - j) / C, then the remainder times 10^j over C, with 2s - j at most 76.
+### :param x: The operand.
+### :param f: The format the result rounds to.
+### :returns: 1 / sqrt(x) of a finite positive x, correctly rounded to f's p digits and reduced.
+secret routine dec_rsqrt_positive(x: Dec, f: DecFormat) -> Dec
+    t: S64 = x.exp & 1
+    cc: U256 = x.coeff.to[U256]() * dec_p10(t)
+    half_exp: S64 = (x.exp - t) >> 1
+    s: S64 = f.digits + (dec_digits256(cc) + 1 >> 1)
+    two_s: S64 = s * 2
+    j: S64 = (two_s - 76).max(0)
+    first: U256DivRem = wide_divrem(u: dec_p10(two_s - j), d: cc)
+    second: U256DivRem = wide_divrem(u: first.remainder * dec_p10(j), d: cc)
+    n: U256 = first.quotient * dec_p10(j) + second.quotient
+    r: U256 = n.isqrt()
+    exact: Bool = second.remainder == 0 and r * r == n
+    sticky: U256 = (not exact).to[U64]().to[U256]()
+    return dec_finish(
+        value: DecExact(neg: false, coeff: r * 10 + sticky, exp: -half_exp - s - 1, pref: f.qmax),
+        f)
+
+### 1 / sqrt(x) rounded to f: a NaN or a value below zero (-infinity included) gives a NaN, +0 gives +infinity, -0
+### gives -infinity, and +infinity gives +0.
+### :param x: The operand.
+### :param f: The format the result rounds to.
+### :returns: 1 / sqrt(x) rounded to f.
+secret routine dec_rsqrt(x: Dec, f: DecFormat) -> Dec
+    when
+        x.is_nan() => return dec_nan()
+        x.is_zero() => return dec_inf(x.neg)
+        x.neg => return dec_nan()
+        x.is_inf() => return dec_num(neg: false, coeff: 0, exp: 0)
+        else => return dec_rsqrt_positive(x, f)
+
 ### sqrt(x^2 + y^2 + z^2) of finite values rounded to f and reduced (like every function result): the squares
 ### c^2 10^(2q) scaled to a common even exponent B where the largest has 2p + 2 or 2p + 3 digits (the smaller ones
 ### floored, a sticky digit for what drops), the integer square root s of their sum (its remainder into the sticky
