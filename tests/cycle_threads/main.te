@@ -72,7 +72,7 @@ routine new_entity() -> @RoamHeader
     node.child.poke(.hollow())
     header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
         holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace_node.addr(),
-        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0))
+        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0, kept: .hollow()))
     return header
 
 ### Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
@@ -103,22 +103,16 @@ routine worker(unused: @U64) -> None
         before: U64 = DONE.unbroken_fetch_add(1)
         return
 
-### Starts `left` more workers, runs passes until they have all finished, and waits for them.
-### :param left: How many workers are still to start.
-routine run_workers(left: U64) -> None
-    if left == 0
-        until DONE.peek_unbroken() == WORKERS
-            freed: U64 = collect()
-        then
-            return
-    else
-        unused: &U64 <- 0
-        thread: Thread[None] <- get_thread[None]()
-        work_thread: Work[None] = worker.to[Work](unused: unused)
-        thread.put_work(work_thread)
-        run_workers(left - 1)
-        thread.retrieve()
-        drop thread
+### Starts the workers on threads of their own, as the RazorForge runtime's worker threads that reach the collector
+### through its C calls, and runs passes until they have all finished. The workers lock the roots buffer with the
+### collector's own lock, which a ticket's work could not show the build, so they are not a ticket's work.
+routine run_workers() -> None
+    unused: &U64 <- 0
+    each i in 0 til WORKERS
+        DEFAULT_THREADS.launch_unwatched(entry: worker.to[Callable](), arg: unused)
+    until DONE.peek_unbroken() == WORKERS
+        freed: U64 = collect()
+    then
         return
 
 ### Runs passes until one frees nothing.
@@ -129,7 +123,7 @@ routine collect_the_rest() -> None
         return
 
 routine start() -> None
-    run_workers(WORKERS)
+    run_workers()
     collect_the_rest()
     freed: U64 = FREED.peek_unbroken()
     expected: U64 = WORKERS.mul(ROUNDS) * 2
