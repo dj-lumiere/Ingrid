@@ -85,6 +85,32 @@ secret routine dec_normalized(d: Dec) -> Dec
             continue with c: q1, e: e + 1
         return dec_num(neg: d.neg, coeff: c, exp: e)
 
+### The hash of a decimal's value, the same for equal values whatever their digits: `1.0`, `1.00`, and `1E+0` hash
+### the same, a D64 and a D128 of one value too, `+0` and `-0` (equal) hash as one zero, and every NaN hashes the
+### same. The coefficient goes without its trailing zeros (no limit on the exponent, which only names the value
+### here), into one U128 with the exponent and the sign above its 113 bits.
+### :param d: The decimal.
+### :returns: SipHash-2-4 of that U128 under the process key.
+secret routine dec_value_hash(d: Dec) -> U64
+    # 16383 in the exponent bits is past every finite exponent (at most 6111 + 34 + 6176): it marks a NaN
+    # (coefficient 0) or an infinity (coefficient 1), the sign telling the infinities apart.
+    special: U128 = 0x3FFF
+    zero: U128 = 0
+    when
+        d.is_nan() => return (special << 113).hash()
+        d.is_inf() => return ((special << 113) | 1 | (d.neg.to[U128]() << 127)).hash()
+        d.coeff == 0 => return zero.hash()
+        else => nothing
+    loop with c: U128 = d.coeff, e: S64 = d.exp
+        q4, by4 = dec_exact_tens(c, k: 4)
+        if by4
+            continue with c: q4, e: e + 4
+        q1, by1 = dec_exact_tens(c, k: 1)
+        if by1
+            continue with c: q1, e: e + 1
+        biased: U128 = (e + 6176).to[U128]()
+        return (c | (biased << 113) | (d.neg.to[U128]() << 127)).hash()
+
 ### How many places `round` and `divide` keep: `places`, at most as many as the format's smallest exponent allows.
 ### :param places: The digits after the point asked for.
 ### :param f: The format.
