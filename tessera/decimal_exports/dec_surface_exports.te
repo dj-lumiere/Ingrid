@@ -1,0 +1,745 @@
+# The decimal routines of RazorForge and Suflae that sit next to the arithmetic (dec_surface.te): the class of a value,
+# its special values, the sign operations, the hash of a value under the caller's key, IEEE 754's total order and
+# sameQuantum, min, max, minimum, maximum, and clamp, signum, fdim, the fractional part, the integer power and the
+# midpoint (each rounded once), integers to decimals and the integer part of a D128, and the text of a decimal and a
+# decimal read from text given its bits.
+#
+# The values cross the C ABI as in dec_exports.te: a D32 in a U32, a D64 in a U64, a D128 or a Decimal as its low and
+# high 64 bits going in and in Words coming back. A Decimal result is in Decimal's one form (dec_normalized).
+
+module Ingrid/Decimal/Exports
+
+import Ingrid/Abi
+import Ingrid/Decimal
+
+### The decimal of `width` (32, 64, 128, or 0 for Decimal) whose BID bits are high x 2^64 + low (`high` 0 below 128).
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :param width: 32, 64, 128, or 0 for Decimal.
+### :returns: The decimal.
+@inline
+routine dec_of_width(low: U64, high: U64, width: U32) -> Dec
+    when width
+        32 => return dec_from32(low.to_wrap[U32]())
+        64 => return dec_from64(low)
+        else => return dec_halves(low, high)
+
+### The format of `width` (32, 64, 128, or 0 for Decimal).
+### :param width: 32, 64, 128, or 0 for Decimal.
+### :returns: The format.
+@inline
+routine dec_format_of_width(width: U32) -> DecFormat
+    when width
+        32 => return dec_format32()
+        64 => return dec_format64()
+        128 => return dec_format128()
+        else => return decimal_format()
+
+### `d`'s BID bits at `width` in Words: the low 64 bits in w0, the high ones in w1 (a Decimal in its one form).
+### :param d: The decimal, rounded to the format of `width`.
+### :param width: 32, 64, 128, or 0 for Decimal.
+### :returns: The bits.
+@inline
+routine dec_width_words(d: Dec, width: U32) -> Words
+    when width
+        32 => return (w0: d.to32().to[U64](), w1: 0, w2: 0, w3: 0)
+        64 => return (w0: d.to64(), w1: 0, w2: 0, w3: 0)
+        128 => return d.words()
+        else => return dec_normalized(d).words()
+
+### SipHash-2-4 of a decimal's value (dec_value_key) under the key (k0, k1).
+### :param d: The decimal.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@inline
+routine dec_keyed_hash(d: Dec, k0: U64, k1: U64) -> U64
+    v: U128 = dec_value_key(d)
+    key: SipKey = (k0: k0, k1: k1)
+    return siphash24(low: v.to_wrap[U64](), high: (v >> 64).to_wrap[U64](), key)
+
+### The special value `kind` (1 an infinity, 2 a quiet NaN, 3 a signaling NaN) with the sign `neg`.
+### :param kind: 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
+### :param neg: 1 for the negative sign, else 0.
+### :returns: The value.
+@inline
+routine dec_special(kind: U32, neg: U32) -> Dec
+    k: U8 = kind.to_wrap[U8]()
+    return (neg: neg == 1, kind: k, exp: 0, coeff: 0)
+
+# -- D32 -----------------------------------------------------------------------------------------------------------
+
+### The class of x as flags: 1 the sign bit is set, then 2 finite, 4 an infinity, or 8 a NaN (16 more for a
+### signaling one), and for a finite value 32 a zero or 64 a subnormal.
+### :param x: The operand.
+### :returns: The flags.
+@export("ingrid_d32_class")
+@inline
+routine ingrid_d32_class(x: U32) -> U32
+    return dec_class(d: dec_from32(x), f: dec_format32())
+
+### The special value `kind` (1 an infinity, 2 a quiet NaN, 3 a signaling NaN) with the sign `neg`.
+### :param kind: 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
+### :param neg: 1 for the negative sign, else 0.
+### :returns: The value.
+@export("ingrid_d32_special")
+@inline
+routine ingrid_d32_special(kind: U32, neg: U32) -> U32
+    return dec_special(kind, neg).to32()
+
+### x with its sign bit cleared (a NaN keeps its payload).
+### :param x: The operand.
+### :returns: |x|.
+@export("ingrid_d32_abs")
+@inline
+routine ingrid_d32_abs(x: U32) -> U32
+    return x & 0x7FFFFFFF
+
+### x with its sign bit flipped (a NaN keeps its payload).
+### :param x: The operand.
+### :returns: -x.
+@export("ingrid_d32_neg")
+@inline
+routine ingrid_d32_neg(x: U32) -> U32
+    return x ^ 0x80000000
+
+### x with the sign bit of y.
+### :param x: The value whose magnitude is kept.
+### :param y: The value whose sign is taken.
+### :returns: x with y's sign.
+@export("ingrid_d32_copysign")
+@inline
+routine ingrid_d32_copysign(x: U32, y: U32) -> U32
+    return (x & 0x7FFFFFFF) | (y & 0x80000000)
+
+### SipHash-2-4 of x's value under the key (k0, k1): equal values hash the same whatever their digits (`1.0` and
+### `1.00`, `+0` and `-0`), and every NaN hashes the same.
+### :param x: The operand.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_d32_hash")
+routine ingrid_d32_hash(x: U32, k0: U64, k1: U64) -> U64
+    return dec_keyed_hash(d: dec_from32(x), k0, k1)
+
+### IEEE 754 totalOrder (`mag` 0) or totalOrderMag (`mag` 1): 1 when a comes before b or is b in the order of every
+### value (signed zeros, cohorts, and NaNs included), else 0.
+### :param a: The first operand.
+### :param b: The second operand.
+### :param mag: 1 to order the magnitudes, else 0.
+### :returns: 1 or 0.
+@export("ingrid_d32_total_order")
+routine ingrid_d32_total_order(a: U32, b: U32, mag: U32) -> U32
+    x: Dec = dec_from32(a)
+    y: Dec = dec_from32(b)
+    if mag == 1
+        return dec_total_order(a: (neg: false, kind: x.kind, exp: x.exp, coeff: x.coeff),
+            b: (neg: false, kind: y.kind, exp: y.exp, coeff: y.coeff)).to[U32]()
+    return dec_total_order(a: x, b: y).to[U32]()
+
+### IEEE 754 sameQuantum: 1 when a and b have one exponent, or are both infinities, or both NaNs, else 0.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: 1 or 0.
+@export("ingrid_d32_same_quantum")
+routine ingrid_d32_same_quantum(a: U32, b: U32) -> U32
+    return dec_same_quantum(a: dec_from32(a), b: dec_from32(b)).to[U32]()
+
+### a or b as a selection keeps one, bit for bit: `which` 0 min and 1 max (a NaN counts as missing, a tie keeps a),
+### 2 minimum and 3 maximum (IEEE 754-2019: a NaN is the result, -0 is below +0).
+### :param a: The first operand.
+### :param b: The second operand.
+### :param which: 0 min, 1 max, 2 minimum, 3 maximum.
+### :returns: The operand kept.
+@export("ingrid_d32_select")
+routine ingrid_d32_select(a: U32, b: U32, which: U32) -> U32
+    if dec_select_second(a: dec_from32(a), b: dec_from32(b), which)
+        return b
+    return a
+
+### x kept inside [lo, hi]: min(x, hi), then the max of that and lo (a NaN x gives hi, then lo's max with it).
+### :param x: The value.
+### :param lo: The lower bound.
+### :param hi: The upper bound.
+### :returns: The clamped value, one of the three bit for bit.
+@export("ingrid_d32_clamp")
+routine ingrid_d32_clamp(x: U32, lo: U32, hi: U32) -> U32
+    upper: Bool = dec_select_second(a: dec_from32(x), b: dec_from32(hi), which: 0)
+    m: U32 = when
+        upper => hi
+        else => x
+    if dec_select_second(a: dec_from32(m), b: dec_from32(lo), which: 1)
+        return lo
+    return m
+
+### -1, 0, or 1 with x's sign (exponent 0): a zero gives +0 and a NaN the quiet NaN.
+### :param x: The operand.
+### :returns: The sign.
+@export("ingrid_d32_signum")
+routine ingrid_d32_signum(x: U32) -> U32
+    return dec_signum(d: dec_from32(x)).to32()
+
+### C99 fdim: a - b rounded once when it is above zero, else +0, and a NaN when either is a NaN.
+### :param a: The first operand.
+### :param b: The operand taken away.
+### :returns: The positive difference.
+@export("ingrid_d32_fdim")
+routine ingrid_d32_fdim(a: U32, b: U32) -> U32
+    r: Dec = dec_fdim(a: dec_from32(a), b: dec_from32(b), f: dec_format32())
+    return r.to32()
+
+### The fractional part x - trunc(x), exact, with x's sign: a NaN as it is, an infinity a zero of its sign.
+### :param x: The operand.
+### :returns: The fractional part.
+@export("ingrid_d32_fract")
+routine ingrid_d32_fract(x: U32) -> U32
+    r: Dec = dec_fract(d: dec_from32(x), f: dec_format32())
+    return r.to32()
+
+### x^n rounded once, a tie to the even one, with IEEE 754 pown's special cases (x^0 is 1 for every x).
+### :param x: The base.
+### :param n: The exponent.
+### :returns: The power.
+@export("ingrid_d32_powi")
+routine ingrid_d32_powi(x: U32, n: S64) -> U32
+    r: Dec = dec_powi(x: dec_from32(x), n, f: dec_format32())
+    return r.to32()
+
+### (a + b) / 2 rounded once, a tie to the even one (the sum is not rounded on its own, so it can't overflow).
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The midpoint.
+@export("ingrid_d32_midpoint")
+routine ingrid_d32_midpoint(a: U32, b: U32) -> U32
+    r: Dec = dec_midpoint(a: dec_from32(a), b: dec_from32(b), f: dec_format32())
+    return r.to32()
+
+### The integer n with exponent 0, rounded half to even when it has more digits than the format.
+### :param n: The integer.
+### :returns: The decimal.
+@export("ingrid_d32_from_s64")
+routine ingrid_d32_from_s64(n: S64) -> U32
+    r: Dec = dec_from_s64(n, f: dec_format32())
+    return r.to32()
+
+### The integer whose 256-bit two's complement is m3 m2 m1 m0 (64 bits each, m0 lowest), exponent 0 when it fits,
+### rounded half to even when it has more digits than the format.
+### :param m0: The lowest 64 bits.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits, the sign in its top bit.
+### :returns: The decimal.
+@export("ingrid_d32_from_s256")
+routine ingrid_d32_from_s256(m0: U64, m1: U64, m2: U64, m3: U64) -> U32
+    r: Dec = dec_of_signed(bits: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3), f: dec_format32())
+    return r.to32()
+
+# -- D64 -----------------------------------------------------------------------------------------------------------
+
+### The class of x as flags: 1 the sign bit is set, then 2 finite, 4 an infinity, or 8 a NaN (16 more for a
+### signaling one), and for a finite value 32 a zero or 64 a subnormal.
+### :param x: The operand.
+### :returns: The flags.
+@export("ingrid_d64_class")
+@inline
+routine ingrid_d64_class(x: U64) -> U32
+    return dec_class(d: dec_from64(x), f: dec_format64())
+
+### The special value `kind` (1 an infinity, 2 a quiet NaN, 3 a signaling NaN) with the sign `neg`.
+### :param kind: 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
+### :param neg: 1 for the negative sign, else 0.
+### :returns: The value.
+@export("ingrid_d64_special")
+@inline
+routine ingrid_d64_special(kind: U32, neg: U32) -> U64
+    return dec_special(kind, neg).to64()
+
+### x with its sign bit cleared (a NaN keeps its payload).
+### :param x: The operand.
+### :returns: |x|.
+@export("ingrid_d64_abs")
+@inline
+routine ingrid_d64_abs(x: U64) -> U64
+    return x & 0x7FFFFFFFFFFFFFFF
+
+### x with its sign bit flipped (a NaN keeps its payload).
+### :param x: The operand.
+### :returns: -x.
+@export("ingrid_d64_neg")
+@inline
+routine ingrid_d64_neg(x: U64) -> U64
+    return x ^ 0x8000000000000000
+
+### x with the sign bit of y.
+### :param x: The value whose magnitude is kept.
+### :param y: The value whose sign is taken.
+### :returns: x with y's sign.
+@export("ingrid_d64_copysign")
+@inline
+routine ingrid_d64_copysign(x: U64, y: U64) -> U64
+    return (x & 0x7FFFFFFFFFFFFFFF) | (y & 0x8000000000000000)
+
+### SipHash-2-4 of x's value under the key (k0, k1): equal values hash the same whatever their digits (`1.0` and
+### `1.00`, `+0` and `-0`), and every NaN hashes the same.
+### :param x: The operand.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_d64_hash")
+routine ingrid_d64_hash(x: U64, k0: U64, k1: U64) -> U64
+    return dec_keyed_hash(d: dec_from64(x), k0, k1)
+
+### IEEE 754 totalOrder (`mag` 0) or totalOrderMag (`mag` 1): 1 when a comes before b or is b in the order of every
+### value (signed zeros, cohorts, and NaNs included), else 0.
+### :param a: The first operand.
+### :param b: The second operand.
+### :param mag: 1 to order the magnitudes, else 0.
+### :returns: 1 or 0.
+@export("ingrid_d64_total_order")
+routine ingrid_d64_total_order(a: U64, b: U64, mag: U32) -> U32
+    x: Dec = dec_from64(a)
+    y: Dec = dec_from64(b)
+    if mag == 1
+        return dec_total_order(a: (neg: false, kind: x.kind, exp: x.exp, coeff: x.coeff),
+            b: (neg: false, kind: y.kind, exp: y.exp, coeff: y.coeff)).to[U32]()
+    return dec_total_order(a: x, b: y).to[U32]()
+
+### IEEE 754 sameQuantum: 1 when a and b have one exponent, or are both infinities, or both NaNs, else 0.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: 1 or 0.
+@export("ingrid_d64_same_quantum")
+routine ingrid_d64_same_quantum(a: U64, b: U64) -> U32
+    return dec_same_quantum(a: dec_from64(a), b: dec_from64(b)).to[U32]()
+
+### a or b as a selection keeps one, bit for bit: `which` 0 min and 1 max (a NaN counts as missing, a tie keeps a),
+### 2 minimum and 3 maximum (IEEE 754-2019: a NaN is the result, -0 is below +0).
+### :param a: The first operand.
+### :param b: The second operand.
+### :param which: 0 min, 1 max, 2 minimum, 3 maximum.
+### :returns: The operand kept.
+@export("ingrid_d64_select")
+routine ingrid_d64_select(a: U64, b: U64, which: U32) -> U64
+    if dec_select_second(a: dec_from64(a), b: dec_from64(b), which)
+        return b
+    return a
+
+### x kept inside [lo, hi]: min(x, hi), then the max of that and lo (a NaN x gives hi, then lo's max with it).
+### :param x: The value.
+### :param lo: The lower bound.
+### :param hi: The upper bound.
+### :returns: The clamped value, one of the three bit for bit.
+@export("ingrid_d64_clamp")
+routine ingrid_d64_clamp(x: U64, lo: U64, hi: U64) -> U64
+    upper: Bool = dec_select_second(a: dec_from64(x), b: dec_from64(hi), which: 0)
+    m: U64 = when
+        upper => hi
+        else => x
+    if dec_select_second(a: dec_from64(m), b: dec_from64(lo), which: 1)
+        return lo
+    return m
+
+### -1, 0, or 1 with x's sign (exponent 0): a zero gives +0 and a NaN the quiet NaN.
+### :param x: The operand.
+### :returns: The sign.
+@export("ingrid_d64_signum")
+routine ingrid_d64_signum(x: U64) -> U64
+    return dec_signum(d: dec_from64(x)).to64()
+
+### C99 fdim: a - b rounded once when it is above zero, else +0, and a NaN when either is a NaN.
+### :param a: The first operand.
+### :param b: The operand taken away.
+### :returns: The positive difference.
+@export("ingrid_d64_fdim")
+routine ingrid_d64_fdim(a: U64, b: U64) -> U64
+    r: Dec = dec_fdim(a: dec_from64(a), b: dec_from64(b), f: dec_format64())
+    return r.to64()
+
+### The fractional part x - trunc(x), exact, with x's sign: a NaN as it is, an infinity a zero of its sign.
+### :param x: The operand.
+### :returns: The fractional part.
+@export("ingrid_d64_fract")
+routine ingrid_d64_fract(x: U64) -> U64
+    r: Dec = dec_fract(d: dec_from64(x), f: dec_format64())
+    return r.to64()
+
+### x^n rounded once, a tie to the even one, with IEEE 754 pown's special cases (x^0 is 1 for every x).
+### :param x: The base.
+### :param n: The exponent.
+### :returns: The power.
+@export("ingrid_d64_powi")
+routine ingrid_d64_powi(x: U64, n: S64) -> U64
+    r: Dec = dec_powi(x: dec_from64(x), n, f: dec_format64())
+    return r.to64()
+
+### (a + b) / 2 rounded once, a tie to the even one (the sum is not rounded on its own, so it can't overflow).
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The midpoint.
+@export("ingrid_d64_midpoint")
+routine ingrid_d64_midpoint(a: U64, b: U64) -> U64
+    r: Dec = dec_midpoint(a: dec_from64(a), b: dec_from64(b), f: dec_format64())
+    return r.to64()
+
+### The integer n with exponent 0, rounded half to even when it has more digits than the format.
+### :param n: The integer.
+### :returns: The decimal.
+@export("ingrid_d64_from_s64")
+routine ingrid_d64_from_s64(n: S64) -> U64
+    r: Dec = dec_from_s64(n, f: dec_format64())
+    return r.to64()
+
+### The integer whose 256-bit two's complement is m3 m2 m1 m0 (64 bits each, m0 lowest), exponent 0 when it fits,
+### rounded half to even when it has more digits than the format.
+### :param m0: The lowest 64 bits.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits, the sign in its top bit.
+### :returns: The decimal.
+@export("ingrid_d64_from_s256")
+routine ingrid_d64_from_s256(m0: U64, m1: U64, m2: U64, m3: U64) -> U64
+    r: Dec = dec_of_signed(bits: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3), f: dec_format64())
+    return r.to64()
+
+# -- D128 ----------------------------------------------------------------------------------------------------------
+
+### The class of x as flags: 1 the sign bit is set, then 2 finite, 4 an infinity, or 8 a NaN (16 more for a
+### signaling one), and for a finite value 32 a zero or 64 a subnormal.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The flags.
+@export("ingrid_d128_class")
+@inline
+routine ingrid_d128_class(x_low: U64, x_high: U64) -> U32
+    return dec_class(d: dec_halves(low: x_low, high: x_high), f: dec_format128())
+
+### The special value `kind` (1 an infinity, 2 a quiet NaN, 3 a signaling NaN) with the sign `neg`.
+### :param kind: 1 an infinity, 2 a quiet NaN, 3 a signaling NaN.
+### :param neg: 1 for the negative sign, else 0.
+### :returns: The value.
+@export("ingrid_d128_special")
+@inline
+routine ingrid_d128_special(kind: U32, neg: U32) -> Words
+    return dec_special(kind, neg).words()
+
+### x with its sign bit cleared (a NaN keeps its payload).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: |x|.
+@export("ingrid_d128_abs")
+@inline
+routine ingrid_d128_abs(x_low: U64, x_high: U64) -> Words
+    return dec_same_words(low: x_low, high: x_high & 0x7FFFFFFFFFFFFFFF)
+
+### x with its sign bit flipped (a NaN keeps its payload).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: -x.
+@export("ingrid_d128_neg")
+@inline
+routine ingrid_d128_neg(x_low: U64, x_high: U64) -> Words
+    return dec_same_words(low: x_low, high: x_high ^ 0x8000000000000000)
+
+### x with the sign bit of y.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param y_high: The high 64 bits of y (its sign bit is taken).
+### :returns: x with y's sign.
+@export("ingrid_d128_copysign")
+@inline
+routine ingrid_d128_copysign(x_low: U64, x_high: U64, y_high: U64) -> Words
+    return dec_same_words(low: x_low,
+        high: (x_high & 0x7FFFFFFFFFFFFFFF) | (y_high & 0x8000000000000000))
+
+### SipHash-2-4 of x's value under the key (k0, k1): equal values hash the same whatever their digits (`1.0` and
+### `1.00`, `+0` and `-0`), and every NaN hashes the same.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param k0: The key's first 64-bit word.
+### :param k1: The key's second 64-bit word.
+### :returns: The 64-bit hash.
+@export("ingrid_d128_hash")
+routine ingrid_d128_hash(x_low: U64, x_high: U64, k0: U64, k1: U64) -> U64
+    return dec_keyed_hash(d: dec_halves(low: x_low, high: x_high), k0, k1)
+
+### IEEE 754 totalOrder (`mag` 0) or totalOrderMag (`mag` 1): 1 when a comes before b or is b in the order of every
+### value (signed zeros, cohorts, and NaNs included), else 0.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :param mag: 1 to order the magnitudes, else 0.
+### :returns: 1 or 0.
+@export("ingrid_d128_total_order")
+routine ingrid_d128_total_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64, mag: U32) -> U32
+    x: Dec = dec_halves(low: a_low, high: a_high)
+    y: Dec = dec_halves(low: b_low, high: b_high)
+    if mag == 1
+        return dec_total_order(a: (neg: false, kind: x.kind, exp: x.exp, coeff: x.coeff),
+            b: (neg: false, kind: y.kind, exp: y.exp, coeff: y.coeff)).to[U32]()
+    return dec_total_order(a: x, b: y).to[U32]()
+
+### IEEE 754 sameQuantum: 1 when a and b have one exponent, or are both infinities, or both NaNs, else 0.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: 1 or 0.
+@export("ingrid_d128_same_quantum")
+routine ingrid_d128_same_quantum(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> U32
+    return dec_same_quantum(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high)).to[U32]()
+
+### a or b as a selection keeps one, bit for bit: `which` 0 min and 1 max (a NaN counts as missing, a tie keeps a),
+### 2 minimum and 3 maximum (IEEE 754-2019: a NaN is the result, -0 is below +0).
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :param which: 0 min, 1 max, 2 minimum, 3 maximum.
+### :returns: The operand kept.
+@export("ingrid_d128_select")
+routine ingrid_d128_select(a_low: U64, a_high: U64, b_low: U64, b_high: U64, which: U32) -> Words
+    if dec_select_second(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), which)
+        return dec_same_words(low: b_low, high: b_high)
+    return dec_same_words(low: a_low, high: a_high)
+
+### x kept inside [lo, hi]: min(x, hi), then the max of that and lo (a NaN x gives hi, then lo's max with it).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param lo_low: The low 64 bits of lo.
+### :param lo_high: The high 64 bits of lo.
+### :param hi_low: The low 64 bits of hi.
+### :param hi_high: The high 64 bits of hi.
+### :returns: The clamped value, one of the three bit for bit.
+@export("ingrid_d128_clamp")
+routine ingrid_d128_clamp(x_low: U64, x_high: U64, lo_low: U64, lo_high: U64, hi_low: U64,
+    hi_high: U64) -> Words
+    upper: Bool = dec_select_second(a: dec_halves(low: x_low, high: x_high),
+        b: dec_halves(low: hi_low, high: hi_high), which: 0)
+    m_low: U64 = when
+        upper => hi_low
+        else => x_low
+    m_high: U64 = when
+        upper => hi_high
+        else => x_high
+    if dec_select_second(a: dec_halves(low: m_low, high: m_high),
+        b: dec_halves(low: lo_low, high: lo_high), which: 1)
+        return dec_same_words(low: lo_low, high: lo_high)
+    return dec_same_words(low: m_low, high: m_high)
+
+### -1, 0, or 1 with x's sign (exponent 0): a zero gives +0 and a NaN the quiet NaN.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The sign.
+@export("ingrid_d128_signum")
+routine ingrid_d128_signum(x_low: U64, x_high: U64) -> Words
+    return dec_signum(d: dec_halves(low: x_low, high: x_high)).words()
+
+### C99 fdim: a - b rounded once when it is above zero, else +0, and a NaN when either is a NaN.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The positive difference.
+@export("ingrid_d128_fdim")
+routine ingrid_d128_fdim(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_fdim(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: dec_format128())
+    return r.words()
+
+### The fractional part x - trunc(x), exact, with x's sign: a NaN as it is, an infinity a zero of its sign.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The fractional part.
+@export("ingrid_d128_fract")
+routine ingrid_d128_fract(x_low: U64, x_high: U64) -> Words
+    r: Dec = dec_fract(d: dec_halves(low: x_low, high: x_high), f: dec_format128())
+    return r.words()
+
+### x^n rounded once, a tie to the even one, with IEEE 754 pown's special cases (x^0 is 1 for every x).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param n: The exponent.
+### :returns: The power.
+@export("ingrid_d128_powi")
+routine ingrid_d128_powi(x_low: U64, x_high: U64, n: S64) -> Words
+    r: Dec = dec_powi(x: dec_halves(low: x_low, high: x_high), n, f: dec_format128())
+    return r.words()
+
+### (a + b) / 2 rounded once, a tie to the even one (the sum is not rounded on its own, so it can't overflow).
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The midpoint.
+@export("ingrid_d128_midpoint")
+routine ingrid_d128_midpoint(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_midpoint(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: dec_format128())
+    return r.words()
+
+### The integer n with exponent 0, rounded half to even when it has more digits than the format.
+### :param n: The integer.
+### :returns: The decimal.
+@export("ingrid_d128_from_s64")
+routine ingrid_d128_from_s64(n: S64) -> Words
+    r: Dec = dec_from_s64(n, f: dec_format128())
+    return r.words()
+
+### The integer whose 256-bit two's complement is m3 m2 m1 m0 (64 bits each, m0 lowest), exponent 0 when it fits,
+### rounded half to even when it has more digits than the format.
+### :param m0: The lowest 64 bits.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits, the sign in its top bit.
+### :returns: The decimal.
+@export("ingrid_d128_from_s256")
+routine ingrid_d128_from_s256(m0: U64, m1: U64, m2: U64, m3: U64) -> Words
+    r: Dec = dec_of_signed(bits: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3), f: dec_format128())
+    return r.words()
+
+### Whether the integer part of x (toward zero) fits an integer of `bits` bits: 0 it fits, 1 x is an infinity or a NaN,
+### 2 x is below zero (a nonzero one) and the integer unsigned, 3 the magnitude needs more than `bits` bits, 4 it fits
+### that many bits but not the signed range.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param signed: 1 for a signed integer, else 0.
+### :param bits: 128 or 256.
+### :returns: The status.
+@export("ingrid_d128_integer_status")
+routine ingrid_d128_integer_status(x_low: U64, x_high: U64, signed: U32, bits: U32) -> U32
+    return dec_int_status(d: dec_halves(low: x_low, high: x_high), signed: signed == 1, bits)
+
+### The integer part of x (toward zero) as a 256-bit two's complement value, m0 (lowest) in w0 to m3 in w3: what
+### ingrid_d128_integer_status says fits.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The integer's bits.
+@export("ingrid_d128_to_integer")
+routine ingrid_d128_to_integer(x_low: U64, x_high: U64) -> Words
+    v: U256 = dec_int_bits(d: dec_halves(low: x_low, high: x_high))
+    return (w0: v.to_wrap[U64](), w1: (v >> 64).to_wrap[U64](), w2: (v >> 128).to_wrap[U64](), w3: (v >> 192).to_wrap[U64]())
+
+# -- Decimal ----------------------------------------------------------------------------------------------------
+
+### x^n rounded once to 34 digits, a tie half up, in Decimal's one form (x^0 is 1, a zero to a negative power an
+### infinity).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param n: The exponent.
+### :returns: The power, in Words.
+@export("ingrid_decimal_powi")
+routine ingrid_decimal_powi(x_low: U64, x_high: U64, n: S64) -> Words
+    r: Dec = dec_powi(x: dec_halves(low: x_low, high: x_high), n, f: decimal_format())
+    return dec_normalized(r).words()
+
+### (a + b) / 2 rounded once to 34 digits, a tie half up, in Decimal's one form.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The midpoint, in Words.
+@export("ingrid_decimal_midpoint")
+routine ingrid_decimal_midpoint(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_midpoint(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return dec_normalized(r).words()
+
+### The integer n as a Decimal, in its one form.
+### :param n: The integer.
+### :returns: The decimal, in Words.
+@export("ingrid_decimal_from_s64")
+routine ingrid_decimal_from_s64(n: S64) -> Words
+    return dec_normalized(dec_from_s64(n, f: decimal_format())).words()
+
+### The integer whose 256-bit two's complement is m3 m2 m1 m0 (m0 lowest), rounded half up to 34 digits, in Decimal's
+### one form.
+### :param m0: The lowest 64 bits.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits, the sign in its top bit.
+### :returns: The decimal, in Words.
+@export("ingrid_decimal_from_s256")
+routine ingrid_decimal_from_s256(m0: U64, m1: U64, m2: U64, m3: U64) -> Words
+    r: Dec = dec_of_signed(bits: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3), f: decimal_format())
+    return dec_normalized(r).words()
+
+### -x for a Decimal: a zero stays +0, any other value has its sign flipped.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: -x, in Words.
+@export("ingrid_decimal_neg")
+@inline
+routine ingrid_decimal_neg(x_low: U64, x_high: U64) -> Words
+    if dec_halves(low: x_low, high: x_high).is_zero()
+        return dec_same_words(low: x_low, high: x_high)
+    return dec_same_words(low: x_low, high: x_high ^ 0x8000000000000000)
+
+### x's magnitude with y's sign for a Decimal: a zero stays +0.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param y_high: The high 64 bits of y (its sign bit is taken).
+### :returns: The value, in Words.
+@export("ingrid_decimal_copysign")
+@inline
+routine ingrid_decimal_copysign(x_low: U64, x_high: U64, y_high: U64) -> Words
+    if dec_halves(low: x_low, high: x_high).is_zero()
+        return dec_same_words(low: x_low, high: x_high)
+    return dec_same_words(low: x_low,
+        high: (x_high & 0x7FFFFFFFFFFFFFFF) | (y_high & 0x8000000000000000))
+
+# -- text -------------------------------------------------------------------------------------------------------
+
+### The text of a decimal given its BID bits, in one of the styles of `write_decimal_text`: 0 scientific (D32, D64, and
+### D128), 1 Decimal's (no fractional trailing zeros, integers in full), 2 exactly `places` digits after the point,
+### 3 the `diagnose` text, 4 Decimal's digits after the point. For styles 2 and 4 the value is first rounded to `places`
+### digits by `mode` when that is not the type's own rule (4 to even for D32, D64, and D128, 5 half up for Decimal),
+### which the text then writes as it is.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits (0 below D128).
+### :param width: 32, 64, 128, or 0 for Decimal.
+### :param style: 0 scientific, 1 Decimal's, 2 digits after the point, 3 `diagnose`, 4 Decimal's digits after the point.
+### :param places: The digits after the point, for styles 2 and 4.
+### :param mode: The rounding for styles 2 and 4 (5 half up, 4 to even, 3 away from zero, 1 down, 2 up, 0 toward zero).
+### :param out: Where the code points go.
+### :param out_count: How many code points `out` has room for.
+### :returns: How many code points the text has: more than `out_count` when it didn't fit, and only that much was
+###     written.
+@export("ingrid_decimal_bits_text_utf32")
+routine decimal_bits_text_utf32(low: U64, high: U64, width: U32, style: U32, places: U64, mode: U32,
+    out: @U32, out_count: U64) -> U64
+    writer: &Utf32Writer <- .construct(data: out, capacity: out_count)
+
+    d: Dec = dec_of_width(low, high, width)
+    own: U32 = when
+        width == 0 => 5
+        else => 4
+    fixed: Bool = (style == 2 or style == 4) and mode != own
+    rounded: Dec = when
+        fixed => dec_round_places(d, places, mode, f: dec_format_of_width(width))
+        else => d
+    shown: U64 = when
+        style == 3 => width.to[U64]()
+        else => places
+    write_decimal_text(out: writer, fields: dec_fields(rounded), style, places: shown)
+    return writer.written()
+
+### Reads decimal text as a decimal of `width`, rounded once to it (a tie to the even one, half up for a Decimal).
+### :param chars: The text's first code point (anything when `count` is 0).
+### :param count: How many code points.
+### :param width: 32, 64, 128, or 0 for Decimal.
+### :returns: In w0 0 for a value, 1 when the text is not a number (or for a Decimal an infinity or a NaN), 2 when a
+###     Decimal is out of range. The value's low 64 bits in w1, its high 64 in w2.
+@export("ingrid_decimal_bits_parse_utf32")
+routine decimal_bits_parse_utf32(chars: @U32, count: U64, width: U32) -> Words
+    scanned: DecScanned = dec_scan(chars: DecPoints(data: chars, count))
+
+    if scanned.bad or (width == 0 and scanned.special != 0)
+        return (w0: 1, w1: 0, w2: 0, w3: 0)
+    d: Dec = dec_from_scan(scanned, f: dec_format_of_width(width))
+    if width == 0 and not d.is_finite()
+        return (w0: 2, w1: 0, w2: 0, w3: 0)
+    w: Words = dec_width_words(d, width)
+    return (w0: 0, w1: w.w0, w2: w.w1, w3: 0)

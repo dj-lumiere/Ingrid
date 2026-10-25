@@ -1,0 +1,307 @@
+# The routines of the decimals that sit next to the arithmetic: the class of a value, IEEE 754's total order and
+# sameQuantum, the selections min, max, minimum, and maximum, signum, fdim, the fractional part, the integer power
+# and the midpoint (each rounded once), and the integer part as a fixed-width integer. D32, D64, D128, and Decimal run
+# them at their own format, and RazorForge and Suflae reach them through the exports.
+
+module Ingrid/Decimal
+
+### dec_class: the sign bit is set.
+secret preset DEC_CLASS_NEGATIVE: U32 = 1
+
+### dec_class: a finite value.
+secret preset DEC_CLASS_FINITE: U32 = 2
+
+### dec_class: an infinity.
+secret preset DEC_CLASS_INFINITE: U32 = 4
+
+### dec_class: a NaN, quiet or signaling.
+secret preset DEC_CLASS_NAN: U32 = 8
+
+### dec_class: a signaling NaN.
+secret preset DEC_CLASS_SIGNALING: U32 = 16
+
+### dec_class: a zero, of either sign and any exponent.
+secret preset DEC_CLASS_ZERO: U32 = 32
+
+### dec_class: a finite nonzero value below the smallest normal one (10^emin, emin = qmin + digits - 1).
+secret preset DEC_CLASS_SUBNORMAL: U32 = 64
+
+### The class of `d` as flags: DEC_CLASS_NEGATIVE for a set sign bit, then one of DEC_CLASS_FINITE,
+### DEC_CLASS_INFINITE, or DEC_CLASS_NAN (with DEC_CLASS_SIGNALING for a signaling one), and for a finite value
+### DEC_CLASS_ZERO or DEC_CLASS_SUBNORMAL when it is one.
+### :param d: The decimal.
+### :param f: The format of `d`.
+### :returns: The flags.
+@inline
+secret routine dec_class(d: Dec, f: DecFormat) -> U32
+    sign: U32 = d.neg.to[U32]()
+    when d.kind
+        1 => return sign | DEC_CLASS_INFINITE
+        2 => return sign | DEC_CLASS_NAN
+        3 => return sign | DEC_CLASS_NAN | DEC_CLASS_SIGNALING
+        else => nothing
+    if d.coeff == 0
+        return sign | DEC_CLASS_FINITE | DEC_CLASS_ZERO
+    adjusted: S64 = d.exp + dec_digits(d.coeff) - 1
+    if adjusted < f.qmin + f.digits - 1
+        return sign | DEC_CLASS_FINITE | DEC_CLASS_SUBNORMAL
+    return sign | DEC_CLASS_FINITE
+
+### Where a value's class sits in IEEE 754's totalOrder: -qNaN, -sNaN, -inf, a negative finite value, a positive one,
+### +inf, +sNaN, +qNaN, in that order.
+### :param d: The decimal.
+### :returns: The rank, -4 to 4 (never 0).
+secret routine dec_order_band(d: Dec) -> S64
+    rank: S64 = when d.kind
+        1 => 1
+        3 => 2
+        2 => 3
+        else => 0
+    if d.neg
+        return -1 - rank
+    return 1 + rank
+
+### IEEE 754 totalOrder: whether `a` comes before `b` or is `b` in the order of every value, the signed zeros and the
+### members of a cohort included. Equal values of one sign put the smaller exponent first when positive and the larger
+### one first when negative, and -0 comes before +0.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: `true` when `a` comes first or they are the same.
+secret routine dec_total_order(a: Dec, b: Dec) -> Bool
+    if a.is_nan() or b.is_nan()
+        return dec_order_band(a) <= dec_order_band(b)
+    o: S64 = dec_order(a, b)
+    when
+        o != 0 => return o < 0
+        a.neg != b.neg => return a.neg
+        a.neg => return a.exp >= b.exp
+        else => return a.exp <= b.exp
+
+### IEEE 754 sameQuantum: both values have one exponent, or both are infinities, or both are NaNs.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: Whether they share a quantum.
+secret routine dec_same_quantum(a: Dec, b: Dec) -> Bool
+    when
+        a.is_nan() or b.is_nan() => return a.is_nan() and b.is_nan()
+        a.is_inf() or b.is_inf() => return a.is_inf() and b.is_inf()
+        else => return a.exp == b.exp
+
+### Which of `a` and `b` a selection keeps: `which` 0 is min (a NaN counts as missing, a tie keeps `a`), 1 max (the
+### same), 2 IEEE 754 minimum (a NaN is the result, -0 is below +0), 3 IEEE 754 maximum (the same, +0 above -0).
+### :param a: The first value.
+### :param b: The second value.
+### :param which: 0 min, 1 max, 2 minimum, 3 maximum.
+### :returns: `true` to keep `b`, `false` to keep `a`.
+secret routine dec_select_second(a: Dec, b: Dec, which: U32) -> Bool
+    if which < 2
+        when
+            a.is_nan() => return true
+            b.is_nan() => return false
+            which == 0 => return dec_order(a, b) == 1
+            else => return dec_order(a, b) == -1
+    if a.is_nan()
+        return false
+    if b.is_nan()
+        return true
+    o: S64 = dec_order(a, b)
+    when
+        which == 2 and o != 0 => return o == 1
+        o != 0 => return o == -1
+        not a.is_zero() => return false
+        which == 2 => return not a.neg
+        else => return a.neg
+
+### -1, 0, or 1 with the sign of `d` (exponent 0): a zero of either sign gives +0, and a NaN gives the quiet NaN.
+### :param d: The decimal.
+### :returns: The sign as a decimal.
+secret routine dec_signum(d: Dec) -> Dec
+    if d.is_nan()
+        return dec_nan()
+    if d.is_zero()
+        return dec_num(neg: false, coeff: 0, exp: 0)
+    return dec_num(neg: d.neg, coeff: 1, exp: 0)
+
+### C99 fdim: `a - b` rounded once to f when it is above zero, else +0, and a NaN when either is a NaN.
+### :param a: The first value.
+### :param b: The value taken away.
+### :param f: The format the result rounds to.
+### :returns: The positive difference.
+secret routine dec_fdim(a: Dec, b: Dec, f: DecFormat) -> Dec
+    if a.is_nan() or b.is_nan()
+        return dec_nan()
+    d: Dec = dec_add(a, b: b.negate(), f)
+    if d.neg
+        return dec_num(neg: false, coeff: 0, exp: 0)
+    return d
+
+### `d` toward zero to an integral value (a special, a zero, or an integral value as it is).
+### :param d: The decimal.
+### :param f: The format of `d`.
+### :returns: The integral value.
+secret routine dec_trunc(d: Dec, f: DecFormat) -> Dec
+    if dec_is_integral_as_is(d)
+        return d
+    return dec_round_int(x: d, mode: 0, f)
+
+### The fractional part `d - trunc(d)`, exact, with the sign of `d` where it is not zero: a NaN as it is, an infinity
+### a zero of its sign.
+### :param d: The decimal.
+### :param f: The format of `d`.
+### :returns: The fractional part.
+secret routine dec_fract(d: Dec, f: DecFormat) -> Dec
+    if d.is_nan()
+        return d
+    if d.is_inf()
+        return dec_num(neg: d.neg, coeff: 0, exp: 0)
+    return dec_add(a: d, b: dec_trunc(d, f).negate(), f)
+
+### `(a + b) / 2` rounded once to f: the exact sum halved (five times it at one exponent lower), so neither the sum
+### nor the halving rounds on its own and a sum past the range still has a midpoint inside it. The preferred exponent
+### is the sum's, the smaller of the two.
+### :param a: The first value.
+### :param b: The second value.
+### :param f: The format the result rounds to.
+### :returns: The midpoint.
+secret routine dec_midpoint(a: Dec, b: Dec, f: DecFormat) -> Dec
+    if not (a.is_finite() and b.is_finite())
+        return dec_add_special(a, b)
+    s: DecExact = dec_sum(a, b)
+    half: DecExact = (neg: s.neg, coeff: s.coeff * 5, exp: s.exp - 1, pref: s.pref)
+    return dec_finish(value: half, f)
+
+### c^k by squaring, while a product can't pass `limit` digits (one of d1 and d2 digits has at most d1 + d2).
+### :param c: The base.
+### :param k: The exponent.
+### :param limit: The most digits the power may have.
+### :returns: The power, and whether it was computed (false when it could pass `limit` digits).
+secret routine dec_power_coefficient(c: U128, k: U64, limit: S64) -> (U256, Bool)
+    loop with acc: U256 = 1, base: U256 = c.to[U256](), left: U64 = k
+        odd: Bool = left & 1 == 1
+        if odd and dec_digits256(acc) + dec_digits256(base) > limit
+            return (0, false)
+        power: U256 = when
+            odd => acc * base
+            else => acc
+        rest: U64 = left >> 1
+        if rest == 0
+            return (power, true)
+        if dec_digits256(base) * 2 > limit
+            return (0, false)
+        continue with acc: power, base: base * base, left: rest
+
+### `x^n` for a finite nonzero x computed exactly when the power's coefficient is small enough, then rounded once to
+### f: the coefficient without its trailing zeros raised by squaring (below 10^77 for n > 0, below 10^38 for n < 0,
+### where 1 / c^|n| is 10^k / c^|n| with a sticky last digit). Not ok past those sizes, where the power has more digits
+### than any format keeps. The preferred exponent is n times the exponent of x.
+### :param x: The base (finite, nonzero).
+### :param n: The exponent (nonzero).
+### :param f: The format the result rounds to.
+### :returns: The power, or not ok.
+secret routine dec_powi_exact(x: Dec, n: S64, f: DecFormat) -> DecTry
+    zeros: S64 = dec_trailing_zeros(c: x.coeff, cap: 38)
+    c: U128 = dec_div_p10(x: x.coeff, k: zeros)
+    e: S64 = x.exp + zeros
+    k: U64 = n.abs_diff(0)
+    limit: S64 = when
+        n > 0 => 77
+        else => 38
+    power, done = dec_power_coefficient(c, k, limit)
+    if not done
+        return (ok: false, d: dec_nan())
+    neg: Bool = x.neg and k & 1 == 1
+    scale: S64 = k.to_wrap[S64]()
+    if n > 0
+        return (ok: true, d: dec_finish(value: DecExact(neg: neg, coeff: power, exp: e * scale, pref: x.exp * scale), f))
+    # 1 / power: a quotient of f.digits + 2 digits or more, its last bit sticky
+    shift: S64 = dec_digits256(power) + f.digits + 2
+    qr: U256DivRem = wide_divrem(u: dec_p10(shift), d: power)
+    sticky: U256 = (qr.remainder != 0).to[U64]().to[U256]()
+    return (ok: true, d: dec_finish(value: DecExact(neg: neg, coeff: qr.quotient | sticky, exp: 0 - shift - e * scale, pref: 0 - x.exp * scale), f))
+
+### `x^n` rounded once to f, with IEEE 754 pown's special cases: x^0 is 1 for every x (a NaN too), a zero to a
+### negative power is an infinity (signed for an odd n), and a negative x keeps its sign for an odd n. An exact power
+### takes the exponent n times x's when its digits allow (`2.0^2` is `4.00`, `10^3` is `1000`).
+### :param x: The base.
+### :param n: The exponent.
+### :param f: The format the result rounds to.
+### :returns: The power.
+secret routine dec_powi(x: Dec, n: S64, f: DecFormat) -> Dec
+    if n == 0
+        return dec_num(neg: false, coeff: 1, exp: 0)
+    if x.is_finite() and x.coeff != 0
+        exact: DecTry = dec_powi_exact(x, n, f)
+        if exact.ok
+            return exact.d
+    y: Dec = dec_num(neg: n < 0, coeff: n.abs_diff(0).to[U128](), exp: 0)
+    return dec_pow(x, y, f)
+
+### The magnitude of a finite decimal's integer part (toward zero), and whether it fits in 256 bits.
+### :param d: The decimal (finite).
+### :returns: The magnitude, and whether it fits.
+secret routine dec_int_magnitude(d: Dec) -> (U256, Bool)
+    if d.coeff == 0
+        return (0, true)
+    if d.exp < 0
+        kept: U128 = dec_div_p10(x: d.coeff, k: 0 - d.exp)
+        return (kept.to[U256](), true)
+    digits: S64 = dec_digits(d.coeff) + d.exp
+    if digits <= 77
+        return (d.coeff.to[U256]() * dec_p10(d.exp), true)
+    if digits > 78
+        return (0, false)
+    # 78 digits: below 10^78, and in U256 when a tenth of it is at most (2^256 - 1) / 10
+    tenth: U256 = d.coeff.to[U256]() * dec_p10(d.exp - 1)
+    if tenth > 0x1999999999999999999999999999999999999999999999999999999999999999
+        return (0, false)
+    return (tenth * 10, true)
+
+### Whether the integer part of `d` (toward zero) fits an integer of `bits` bits, signed or not: 0 it fits, 1 `d` is
+### an infinity or a NaN, 2 `d` is below zero (a nonzero one) and the integer unsigned, 3 the magnitude needs more than
+### `bits` bits, 4 it fits that many bits but not the signed range.
+### :param d: The decimal.
+### :param signed: Whether the integer is signed.
+### :param bits: 128 or 256.
+### :returns: The status.
+secret routine dec_int_status(d: Dec, signed: Bool, bits: U32) -> U32
+    if not d.is_finite()
+        return 1
+    if not signed and d.neg and d.coeff != 0
+        return 2
+    magnitude, fits = dec_int_magnitude(d)
+    if not fits
+        return 3
+    if bits == 128 and magnitude >> 128 != 0
+        return 3
+    if not signed
+        return 0
+    top: U256 = U256.shift_left(1, (bits - 1).to[U256]())
+    when
+        d.neg and magnitude > top => return 4
+        not d.neg and magnitude >= top => return 4
+        else => return 0
+
+### The integer part of a finite decimal (toward zero) as a 256-bit two's complement value: the magnitude, negated
+### for a negative decimal. Meaningful when dec_int_status gives 0.
+### :param d: The decimal.
+### :returns: The value's 256 bits.
+secret routine dec_int_bits(d: Dec) -> U256
+    if not d.is_finite()
+        return 0
+    magnitude, fits = dec_int_magnitude(d)
+    if not fits
+        return 0
+    if d.neg
+        return 0 -% magnitude
+    return magnitude
+
+### The integer whose 256-bit two's complement is `bits`, rounded to f with exponent 0 when it fits.
+### :param bits: The integer's bits, the sign in the top one.
+### :param f: The format the result rounds to.
+### :returns: The decimal.
+secret routine dec_of_signed(bits: U256, f: DecFormat) -> Dec
+    neg: Bool = bits >> 255 == 1
+    magnitude: U256 = when
+        neg => 0 -% bits
+        else => bits
+    return dec_of_integer(neg, magnitude, f)

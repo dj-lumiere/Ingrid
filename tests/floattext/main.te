@@ -1,5 +1,5 @@
 # The text exports on a few values each: the shortest decimal of every binary float format, significant digits,
-# digits after the point, the diagnose text, reading text back, the decimal texts and the decimal scanner, a buffer
+# digits after the point, the diagnose text, reading text back, the decimal texts and decimal text read back, a buffer
 # too small for the text, and the B128 arithmetic exports. floattext.expected holds what RazorForge's own text
 # routines printed for the same values before the text moved here.
 
@@ -65,19 +65,28 @@ routine parse_line(text: @[Byte], format: U32) -> None
     Console.show("parse {text} as {format}: kind {w.w0} bits {Hex[U64](value: w.w2)} {Hex[U64](value: w.w1)}")
     return
 
-### Writes a decimal's text in one style.
+### Writes a decimal's text in one style, from the bits of the D128 (or the Decimal, for the diagnose text that
+### `places` 0 asks for) that is the value.
 ### :param label: The label.
 ### :param ask: The value, the style, and the places.
 routine decimal_line(label: @[Byte], ask: DecimalAsk) -> None
     buf: &Array[U32, 256] <- .hollow()
 
     first: @U32 = buf.to[@U32]()
-    count: U64 = decimal_text_utf32(sign: 1, special: 0, exp: ask.exp, c_low: ask.coeff, c_high: 0,
-        style: ask.style, places: ask.places, out: first, out_count: 256)
+    biased: U64 = (ask.exp + 6176).to_wrap[U64]()
+    high: U64 = 0x8000000000000000 | (biased << 49)
+    width: U32 = when
+        ask.style == 3 and ask.places == 0 => 0
+        else => 128
+    mode: U32 = when
+        width == 0 => 5
+        else => 4
+    count: U64 = decimal_bits_text_utf32(low: ask.coeff, high, width, style: ask.style,
+        places: ask.places, mode, out: first, out_count: 256)
     show_text(label, buf: first, count)
     return
 
-### Writes the scanned fields of decimal text.
+### Writes decimal text read as a D128: the status and the bits.
 ### :param text: The text.
 routine scan_line(text: @[Byte]) -> None
     buf: &Array[U32, 64] <- .hollow()
@@ -86,9 +95,8 @@ routine scan_line(text: @[Byte]) -> None
     each i: U64 in 0 til text.count
         b: Byte = text.getitem(i)
         first.stride(i).poke(b.to[U8]().to[U32]())
-    w: Words = decimal_scan_utf32(chars: first, count: text.count)
-    exp: S64 = w.w3.to_wrap[S64]()
-    Console.show("scan {text}: flags {Hex[U64](value: w.w0)} coeff {w.w1} exp {exp}")
+    w: Words = decimal_bits_parse_utf32(chars: first, count: text.count, width: 128)
+    Console.show("read {text}: status {w.w0} bits {Hex[U64](value: w.w2)} {Hex[U64](value: w.w1)}")
     return
 
 ### Writes a B128 result's bits.
