@@ -75,18 +75,24 @@ routine @Channel.cast_all(list: @ChannelWaiter) -> None
 
 ### Creates a channel with one producer handle and one consumer handle.
 ### :param capacity: The items it buffers, 0 for a rendezvous.
-### :returns: The new channel.
-### :throws: Crashes with `OutOfMemoryError` when the buffer is too large to allocate or an allocation fails.
+### :returns: The new channel, or a hollow one when the buffer is too large to count in bytes or an allocation fails
+###     (the caller reports `OutOfMemoryError`).
 @export("rf_channel_create")
 routine rf_channel_create(capacity: U64) -> @Channel
     slot_cap: U64 = when
         capacity == 0 => 1
         else => capacity
     if slot_cap > U64.MAX.to[U64]() // sizeof[Addr]().to[U64]()
-        rf_throw(error_type: "OutOfMemoryError", message: "channel capacity too large to allocate")
-    chan: @Channel = zeroed[Channel](count: 1, what: "failed to allocate channel")
-    chan.slots.poke(zeroed[Addr](count: slot_cap.to[U64](),
-        what: "failed to allocate channel buffer"))
+        return .hollow()
+    cell: Addr = c_calloc(1, sizeof[Channel]().to[CSize]())
+    if cell.is_hollow()
+        return .hollow()
+    chan: @Channel = cell.to[@Channel]()
+    slots: Addr = c_calloc(slot_cap.to[CSize](), sizeof[Addr]().to[CSize]())
+    if slots.is_hollow()
+        c_free(cell)
+        return .hollow()
+    chan.slots.poke(slots.to[@Addr]())
     chan.capacity.poke(capacity)
     chan.slot_cap.poke(slot_cap)
     chan.producer_refs.poke(1)
