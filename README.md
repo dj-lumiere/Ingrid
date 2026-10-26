@@ -26,13 +26,13 @@ pattern and searches text in time that grows with the text's length), the librar
 arithmetic and the text of the binary floats and decimals (writing and reading), the math of the complex
 numbers, quaternions, and the 2x2, 3x3, and 4x4 matrices (their inverses and A x = b by Gaussian elimination with partial pivoting), and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
-widths), and the arbitrary-precision Integer (`tessera/generated/numerics.te`, with the scratch arena
+widths), and the arbitrary-precision Int (`tessera/generated/numerics.te`, with the scratch arena
 the engine takes its temporaries from in `tessera/scratch.te`). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
 It is written in Tessera here, except the big numeric engine whose source stays RazorForge (the arbitrary-precision
-Integer), which is written into `tessera/generated/` by RazorForge's Tessera backend: `RazorForge export-ingrid`
+Int), which is written into `tessera/generated/` by RazorForge's Tessera backend: `RazorForge export-ingrid`
 builds each export file of RazorForge's `IngridExport/` and writes its `ingrid_*` routines, with everything they
 reach, as one Tessera file, committed and shipped like the rest.
 
@@ -44,7 +44,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
 ├── decimal/      # The decimal floats D32, D64, and D128
-└── generated/    # Written by `RazorForge export-ingrid`: Integer (numerics.te)
+└── generated/    # Written by `RazorForge export-ingrid`: Int (numerics.te)
 tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt
@@ -79,7 +79,7 @@ quotients against the exact paths they fall back to, the matrix inverses and sol
 A x = b against a Python model of the same elimination in B32, the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
 D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal
-transcendentals against mpmath, Integer through its C calls (and the scratch and result-buffer retries)
+transcendentals against mpmath, Int through its C calls (and the scratch and result-buffer retries)
 against what RazorForge's engines computed, the word division on its edge cases, the text patterns through their C calls (compiling a pattern, searching, the
 capture slots and the messages of patterns that don't compile), the Roamed counts and lock, the cycle
 collector, the heap calls, and the crash report, and from

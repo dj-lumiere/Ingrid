@@ -56,7 +56,7 @@ DEALINGS IN THE SOFTWARE.
 
 ## LibBF — tiny arbitrary-precision floating-point library
 
-Used by the RazorForge arbitrary-precision **`Integer`** engine (`IntegerEngine`, built on the limb
+Used by the RazorForge arbitrary-precision **`Int`** engine (`IntEngine`, built on the limb
 layer in `LimbEngine`). The limb primitives, the NTT multiplication over five ~2^62 primes, and
 Newton-reciprocal division and square root are ports of LibBF (64-bit limb configuration). The engine runs in Ingrid: `tessera/generated/numerics.te` is written from it by
 `RazorForge export-ingrid`, so it is a derivative of LibBF too.
@@ -91,7 +91,7 @@ THE SOFTWARE.
 
 ## LibTomMath — multiple-precision integer library
 
-Used by the RazorForge **`Integer`** engine (`IntegerEngine`, `Integer`). The engine replaced the
+Used by the RazorForge **`Int`** engine (`IntEngine`, `Int`). The engine replaced the
 LibTomMath-backed runtime and follows its integer semantics and algorithms: sign-magnitude values,
 Euclidean division, binary GCD, two's-complement bitwise operations on negative values, and the radix
 text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36). The engine runs in Ingrid as
@@ -177,7 +177,7 @@ SOFTWARE.
 
 Used by the RazorForge IEEE 754-2008 decimal engines: **`Decimal`** (decimal256)
 and **`D32` / `D64` / `D128`** (decimal32 / 64 / 128), including their `*Trans`
-transcendental files. The Binary-Integer-Decimal (BID) encoding/decoding, the
+transcendental files. The Binary-Int-Decimal (BID) encoding/decoding, the
 rounding (round-half-to-even) and exponent-clamping rules, and the
 reciprocal/power-of-ten table approach are based on Intel's BID library.
 
