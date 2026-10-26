@@ -20,7 +20,7 @@ preset CYCLE_MAX_PERIOD: S32 = 12
 
 ### One frame of the crash trace, laid out as the builder keeps it: the routine's name and the source file as C
 ### strings, and the line and column the routine has reached.
-secret record TraceFrame
+secret record RingFrame
     routine_name: Addr
     file: Addr
     line: S32
@@ -47,7 +47,7 @@ secret routine trace_depth() -> S32
 ### :returns: The address of the first of the 32 frames.
 @external("c")
 @symbol("_rf_trace_get_frames_shared")
-secret routine trace_frames() -> @TraceFrame
+secret routine trace_frames() -> @RingFrame
 
 ### Sets the standard library's folder and puts crash_handler in the Crash service's slot. The program's entry calls it
 ### at startup.
@@ -103,7 +103,7 @@ routine write_program_position() -> None
     shown: S32 = depth.min(32)
 
     each k in 0 til shown
-        frame: @TraceFrame = recent_frame(depth, k)
+        frame: @RingFrame = recent_frame(depth, k)
         line: S32 = frame.line.peek()
         file_ptr: @CChar = frame.file.peek().to[@CChar]()
         file: @[Byte] = file_ptr.to[CStrView]().getview()
@@ -250,17 +250,17 @@ routine write_deep_calls() -> None
 ### :param depth: The trace's depth.
 ### :param k: How far back the frame is.
 ### :returns: The frame.
-routine recent_frame(depth: S32, k: S32) -> @TraceFrame
+routine recent_frame(depth: S32, k: S32) -> @RingFrame
     back: S32 = depth -% 1 -% k
     slot: U64 = (back & 31).to[U64]()
-    at: @TraceFrame = trace_frames().stride(slot)
+    at: @RingFrame = trace_frames().stride(slot)
     return at
 
 ### Whether two frames are the same call: the same routine, stopped at the same line.
 ### :param a: One frame.
 ### :param b: The other.
 ### :returns: True for the same call.
-routine same_call(a: @TraceFrame, b: @TraceFrame) -> Bool
+routine same_call(a: @RingFrame, b: @RingFrame) -> Bool
     a_routine: U64 = ptrtoint[Addr, U64](a.routine_name.peek())
     b_routine: U64 = ptrtoint[Addr, U64](b.routine_name.peek())
     same_routine: Bool = a_routine == b_routine
@@ -339,7 +339,7 @@ routine write_trace() -> None
         return
     Console.alert("Stack trace:")
     each i in 0 til shown
-        at: @TraceFrame = recent_frame(depth, k: i)
+        at: @RingFrame = recent_frame(depth, k: i)
         line: S32 = at.line.peek()
         # A frame with no line is a library frame named by the library, not by its file (Suflae). Of the library
         # frames in a row only the oldest is written: the routine the program called, not the ones it called.

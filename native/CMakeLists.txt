@@ -33,10 +33,12 @@ set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
 set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
 # The standard library's exports come along: the B16 and BF16 conversions LLVM calls on Windows, which the
 # JIT resolves from this library. Its default crash handler gives way to the runtime's own. Tessera's crash trace
-# stays out (--no-trace): RazorForge keeps its own, which the runtime's crash handler reads.
+# stays out (--no-trace): RazorForge keeps its own, which the runtime's crash handler reads. Every routine keeps a frame
+# record (--frame-pointers): a program that reads its crash trace from the stack walks through the runtime's frames
+# when the runtime calls it back (a Work, a crash the runtime raises).
 add_custom_command(
     OUTPUT "${INGRID_RUNTIME_LL}"
-    COMMAND dotnet "${TESSERA_DLL}" build --emit-llvm --mode release --no-trace
+    COMMAND dotnet "${TESSERA_DLL}" build --emit-llvm --mode release --no-trace --frame-pointers
             ${INGRID_RUNTIME_TESSERA} -o "${INGRID_RUNTIME_LL}"
     DEPENDS ${INGRID_RUNTIME_TESSERA} ${TESSERA_STDLIB} "${TESSERA_DLL}"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."

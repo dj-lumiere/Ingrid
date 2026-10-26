@@ -59,6 +59,59 @@ routine rf_set_trace_mode(mode: CInt) -> None
     install_fault_handlers()
     return
 
+### The frame pointer a fault interrupted on the calling thread, hollow when none was noted: a program that reads its
+### crash trace from the stack starts there when it reports the fault (a stack overflow), since the report runs on
+### the thread's fault stack.
+### :returns: The frame pointer.
+@export("rf_fault_frame")
+routine rf_fault_frame() -> Addr
+    return fault_frame_pointer()
+
+### The instruction a fault interrupted on the calling thread, hollow when none was noted.
+### :returns: Its address.
+@export("rf_fault_pc")
+routine rf_fault_pc() -> Addr
+    return fault_pc()
+
+### Linux's `dladdr`: the shared object an address is in.
+### :param address: The address.
+### :param info: The `Dl_info` written: the object's file name, its base, the nearest symbol and its address.
+### :returns: Nonzero when the address is in a loaded object.
+@external("c")
+@symbol("dladdr")
+@target(os: "linux")
+routine c_dladdr(address: Addr, info: @Byte) -> CInt
+
+### Writes where this library's code is: the executable segment it is loaded at. A program that reads its crash trace
+### from the stack walks on through the library's frames (they keep frame records) when the library calls it back.
+### Writes nothing when the library can't find itself.
+### :param low: Where the code's first address goes.
+### :param high: Where the address after its last goes.
+@export("rf_runtime_code")
+@target(os: "linux")
+routine rf_runtime_code(low: @Addr, high: @Addr) -> None
+    info: &Array[U64, 4] <- .hollow()
+    here: Addr = rf_runtime_code.to[Callable]().addr()
+
+    if c_dladdr(here, info.to[@Byte]()) == 0
+        return
+    base: U64 = info.to[@U64]().stride(1).peek()
+    headers: U64 = base + inttoptr[U64, @U64](base + 32).peek()
+    size: U64 = inttoptr[U64, @U16](base + 54).peek().to[U64]()
+    count: U64 = inttoptr[U64, @U16](base + 56).peek().to[U64]()
+    each i in 0 til count
+        header: U64 = headers + i * size
+        kind: U32 = inttoptr[U64, @U32](header).peek()
+        flags: U32 = inttoptr[U64, @U32](header + 4).peek()
+        # PT_LOAD with PF_X: the code
+        if kind == 1 and (flags & 1) != 0
+            start: U64 = base + inttoptr[U64, @U64](header + 16).peek()
+            low.poke(inttoptr[U64, Addr](start))
+            high.poke(inttoptr[U64, Addr](start + inttoptr[U64, @U64](header + 40).peek()))
+            return
+    then
+        return
+
 ### Sets the routine that reports a crash raised here in the shadow trace mode: the program's crash report, which
 ### writes where the program was and its crash trace, then exits with status 82. The program's entry calls this at
 ### startup.

@@ -1,0 +1,85 @@
+# RazorForge's and Suflae's crash trace read from the stack: in a build that does (Tessera's TraceTable, Linux on
+# x86-64), the program keeps no shadow stack, and each read of the trace walks the calling flow's frames with the
+# standard library's trace_walk. The program's trace helpers call tessera_trace_fill_ring and read its ring the way
+# they read a shadow stack's. A fault is reported on a stack of the runtime library's own, so the walk starts at the
+# frame the fault interrupted, which the runtime library noted.
+
+import Hosted
+
+### The frame pointer a fault interrupted on this thread, hollow when none was noted (the runtime library's).
+### :returns: The frame pointer.
+@external("c")
+@symbol("rf_fault_frame")
+secret routine rf_fault_frame() -> Addr
+
+### The instruction a fault interrupted on this thread, hollow when none was noted (the runtime library's).
+### :returns: Its address.
+@external("c")
+@symbol("rf_fault_pc")
+secret routine rf_fault_pc() -> Addr
+
+### Where the runtime library's code is (its own), for the walk to go on through its frames.
+### :param low: Where the code's first address goes.
+### :param high: Where the address after its last goes.
+@external("c")
+@symbol("rf_runtime_code")
+secret routine rf_runtime_code(low: @Addr, high: @Addr) -> None
+
+### 1 once the walk knows where the runtime library's code is.
+secret global RUNTIME_CODE_KNOWN: &U32
+
+### Tells the walk where the runtime library's code is, the first time: a Work's body and a crash the runtime raises
+### are called from it, so the program's frames go on below its frames.
+secret routine know_runtime_code() -> None
+    if RUNTIME_CODE_KNOWN.peek() == 1
+        return
+    low: &Addr <- .hollow()
+    high: &Addr <- .hollow()
+
+    rf_runtime_code(low, high)
+    trace_walk_through(low.load(), high.load())
+    RUNTIME_CODE_KNOWN.poke(1)
+    return
+
+### The frames a ring holds: the program's trace helpers keep the 32 most recent.
+secret preset RING_FRAMES: U64 = 32
+
+### Walks the calling flow's frames and writes them into `ring` the way a shadow stack of that depth holds them:
+### frame `i` from the innermost at `(depth - 1 - i) mod 32`, for the 32 innermost. Never inlined: the walk starts at
+### its own frame.
+### :param ring: The 32 frames.
+### :returns: The trace's depth.
+@export("tessera_trace_fill_ring")
+@noinline
+routine trace_fill_ring(ring: @TraceFrame) -> S32
+    frames: &Array[TraceFrame, RING_FRAMES] <- .hollow()
+
+    know_runtime_code()
+    fault: Addr = rf_fault_frame()
+    start: Addr = when
+        fault.is_not_hollow() => fault
+        else => frame_address()
+    fault_pc: Addr = when
+        fault.is_not_hollow() => rf_fault_pc()
+        else => .hollow()
+    depth: U64 = trace_walk(start, fault_pc, skip: 0, want: RING_FRAMES, out: frames.to[@TraceFrame](), early: false)
+
+    each i in 0 til depth.min(RING_FRAMES)
+        slot: U64 = (depth - 1 - i) & (RING_FRAMES - 1)
+        ring.stride(slot).poke(frames.to[@TraceFrame]().stride(i).peek())
+    then
+        return depth.min(0x7FFFFFFF).to[S32]()
+
+### Writes the innermost frame of the calling flow's trace into `out`, read from the stack: the walk stops there. The
+### AccessManager asks for it at each access it checks. Never inlined: the walk starts at its own frame.
+### :param out: Where the frame goes.
+### :returns: 1 when there is one, 0 for none.
+@export("tessera_trace_innermost")
+@noinline
+routine trace_innermost(out: @TraceFrame) -> S32
+    know_runtime_code()
+    found: U64 = trace_walk(start: frame_address(), fault_pc: .hollow(), skip: 0, want: 1, out, early: true)
+
+    return when
+        found == 0 => 0
+        else => 1
