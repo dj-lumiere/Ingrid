@@ -6,6 +6,13 @@ echo "Building RazorForge Native Libraries..."
 mkdir -p build
 cd build
 
+# One build in this tree at a time: a builder building a program in a checkout (NativeToolchain) runs cmake here
+# too and holds the same lock, so two test suites side by side don't configure it under each other.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>".build.lock"
+    flock 9
+fi
+
 echo "Configuring with CMake..."
 # TESSERA_DLL (set by the RazorForge build) is the Tessera builder that compiles ../runtime-tessera; without it CMake
 # looks for the checkout's own Tessera build.
