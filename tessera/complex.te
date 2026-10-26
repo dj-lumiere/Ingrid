@@ -4,7 +4,8 @@
 #
 # The product, quotient, reciprocal, squared modulus, and modulus are rounded once in each part. The products are
 # exact integers (b64_dot2, b128_dot2), C64's whole computation is exact in B64, and a quotient is settled by exact
-# sign tests next to a tie. The elementary functions take their principal branches (Kahan's formulas for the square
+# sign tests next to a tie. C128's go first through error-free transforms with a proven error bound (b64_dot2_round,
+# b64_divide_fast), which give the same bits and leave only the cases next to a rounding boundary to the exact paths. The elementary functions take their principal branches (Kahan's formulas for the square
 # root and the inverse functions), with a zero part's sign picking the side of a branch cut as C99's Annex G does, and
 # use the standard library's correctly rounded real functions (CORE-MATH ports). Each `+ - * /` of a part is the
 # checked one (finite.te), which crashes on a result that is not finite where RazorForge's B32, B64, and B128 operators
@@ -1567,7 +1568,8 @@ secret routine C128.reciprocal_textbook() -> Me
     im: B64 = (-me.imag).truediv_finite(d)
     return (real: re, imag: im)
 
-### The product (ac - bd) + (ad + bc)i, each part rounded once (b64_dot2: the products are exact integers).
+### The product (ac - bd) + (ad + bc)i, each part rounded once (b64_dot2_round: error-free transforms, and the exact
+### integer b64_dot2 next to a rounding boundary).
 ### :param other: The number to multiply by.
 ### :returns: The product.
 ### :throws: Crashes with `NumericOverflowError` when a part is past B64's range. With an operand that is not finite
@@ -1575,11 +1577,12 @@ secret routine C128.reciprocal_textbook() -> Me
 routine C128.mul(other: Me) -> Me
     if not (me.is_finite() and other.is_finite())
         return me.mul_textbook(other)
-    re: B64 = b64_dot2_fast(a: me.real, b: other.real, c: -me.imag, d: other.imag).hi
-    im: B64 = b64_dot2_fast(a: me.real, b: other.imag, c: me.imag, d: other.real).hi
+    re: B64 = b64_dot2_round(a: me.real, b: other.real, c: -me.imag, d: other.imag)
+    im: B64 = b64_dot2_round(a: me.real, b: other.imag, c: me.imag, d: other.real)
     return c128_finite(re, im)
 
-### The quotient (ac + bd)/(c² + d²) + (bc - ad)/(c² + d²) i, each part rounded once (b64_divide).
+### The quotient (ac + bd)/(c² + d²) + (bc - ad)/(c² + d²) i, each part rounded once (b64_divide_fast, and b64_divide
+### next to a tie or at the ends of the range).
 ### :param other: The divisor.
 ### :returns: The quotient.
 ### :throws: Crashes with `DivisionByZeroError` when dividing by 0 + 0i, with `NumericDomainError` for 0 / (0 + 0i), and
@@ -1590,7 +1593,7 @@ routine C128.truediv(other: Me) -> Me
         crash_zero_divisor(me.is_zero())
     if not (me.is_finite() and other.is_finite())
         return me.truediv_textbook(other)
-    q: B64Pair = b64_divide(operands: (a: me.real, b: me.imag, c: other.real, d: other.imag))
+    q: B64Pair = b64_divide_fast(operands: (a: me.real, b: me.imag, c: other.real, d: other.imag))
     return c128_finite(re: q.hi, im: q.lo)
 
 ### The squared modulus real² + imag², rounded once.
@@ -1600,7 +1603,7 @@ routine C128.truediv(other: Me) -> Me
 routine C128.norm() -> B64
     if not me.is_finite()
         return me.norm_textbook()
-    n: B64 = b64_dot2_fast(a: me.real, b: me.real, c: me.imag, d: me.imag).hi
+    n: B64 = b64_dot2_round(a: me.real, b: me.real, c: me.imag, d: me.imag)
     if n.is_finite()
         return n
     crash_not_finite(false)
@@ -1629,7 +1632,7 @@ routine C128.reciprocal() -> Me
         throw DivisionByZeroError()
     if not me.is_finite()
         return me.reciprocal_textbook()
-    q: B64Pair = b64_divide(operands: (a: 1.0, b: 0.0, c: me.real, d: me.imag))
+    q: B64Pair = b64_divide_fast(operands: (a: 1.0, b: 0.0, c: me.real, d: me.imag))
     re: B64 = when
         me.real == 0.0 => me.real
         else => q.hi
@@ -3770,6 +3773,13 @@ record B64Pair
     hi: B64
     lo: B64
 
+### a × b + c × d as the unevaluated sum s + t, with m = |a × b| + |c × d| rounded for the error bound, or -1 when a
+### product is outside the range the bound covers (b64_dot2_terms).
+secret record B64Terms
+    s: B64
+    t: B64
+    m: B64
+
 ### Four B64s: the factors of a sum of two products, a × b + c × d, or a quotient (a + b i) / (c + d i).
 record B64Dot
     a: B64
@@ -3794,14 +3804,16 @@ routine b64_two_sum(a: B64, b: B64) -> B64Pair
     err: B64 = (a -! (s -! bb)) +! (b -! bb)
     return (hi: s, lo: err)
 
-### `a × b` and its error, from one fused multiply-add: the error is exact unless it falls below the subnormal range.
+### `a × b` and its error (TwoProd): the error is the value one fused multiply-add gives, a × b - hi rounded once,
+### which is exact unless it falls below the subnormal range. b64_mul_error computes it with the FMA instruction, or
+### on a target without one with Dekker's product (the same bits).
 ### :param a: One factor.
 ### :param b: The other factor.
 ### :returns: The product rounded to nearest in `hi`, and `a × b - hi` in `lo`.
 @inline
 routine b64_two_prod(a: B64, b: B64) -> B64Pair
     h: B64 = a *! b
-    err: B64 = a.mul_add_unchecked(a: b, b: -h)
+    err: B64 = b64_mul_error(x: a, y: b, p: h)
     return (hi: h, lo: err)
 
 ### The parts of a finite B64.
@@ -4022,6 +4034,130 @@ secret routine b64_dot2_fast(a: B64, b: B64, c: B64, d: B64) -> B64Pair
     if up != down
         return b64_dot2(a, b, c, d)
     return (hi: up, lo: (r.hi -! up) +! tail)
+
+### a × b + c × d as s + t, from error-free transforms, for b64_dot2_round and b64_quotient_fast. With p and q the two
+### products rounded, ep and eq their errors (TwoProd), and s + es = p + q (TwoSum), the sum is exactly
+### s + (ep + eq + es), and t is ep + eq + es with two roundings. `m` is |p| + |q| rounded, or -1 when a nonzero
+### product lies outside [2^-900, 2^1000], where an error may not be exact or a later step may leave the range.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: s, t, and m.
+@inline
+secret routine b64_dot2_terms(a: B64, b: B64, c: B64, d: B64) -> B64Terms
+    p: B64 = a *! b
+    q: B64 = c *! d
+    # |p| in [2^-900, 2^1000] (an unsigned range test on its bits), or a zero factor
+    in_p: U64 = ((p.bits() & 0x7FFFFFFFFFFFFFFF) -% 0x07B0000000000000 <= 0x76C0000000000000).to[U64]()
+    in_q: U64 = ((q.bits() & 0x7FFFFFFFFFFFFFFF) -% 0x07B0000000000000 <= 0x76C0000000000000).to[U64]()
+    zero_p: U64 = ((a.bits() << 1) == 0).to[U64]() | ((b.bits() << 1) == 0).to[U64]()
+    zero_q: U64 = ((c.bits() << 1) == 0).to[U64]() | ((d.bits() << 1) == 0).to[U64]()
+    if ((in_p | zero_p) & (in_q | zero_q)) == 0
+        return (s: 0.0, t: 0.0, m: -1.0)
+    sum: B64Pair = b64_two_sum(p, q)
+    t: B64 = (b64_mul_error(x: a, y: b, p) +! b64_mul_error(x: c, y: d, p: q)) +! sum.lo
+    return (s: sum.hi, t: t, m: p.abs() +! q.abs())
+
+### `a × b + c × d` rounded once (to nearest, ties to even), for finite operands: the value b64_dot2 gives, mostly
+### without its integer arithmetic.
+###
+### Inside the range of b64_dot2_terms the exact sum is S = s + T with T = ep + eq + es, and t is T with two roundings.
+### Write u = 2^-53 and M = |p| + |q|. Then |ep| <= u |p|, |eq| <= u |q|, and |es| <= u |p + q| <= u M, so rounding
+### ep + eq is off by at most u² M, and rounding that plus es by at most (2 + u) u² M: |t - T| <= (3 + u) u² M. The
+### slack D = m × 2^-103 = 8 u² m is at least 8 (1 - u) u² M, and t + D rounded loses at most u |t + D|, about
+### 2 u² M, so it is above T, and likewise t - D rounded is below T. Rounding is monotone and s + T is S, so S rounded
+### lies between s + (t - D) rounded and s + (t + D) rounded, and when those two are the same B64 it is S rounded. A
+### tie lies strictly between them, so they differ there, and so they do for an exact zero sum of nonzero products.
+### Two products that are exactly zero leave m = 0, and the sum is s, the IEEE sum b64_dot2 gives too. The products
+### are inside [2^-900, 2^1000] (or zero), so their errors are exact, D is normal, and nothing overflows. Outside
+### that range, or when the two differ (S within about 16 u² M of a rounding boundary), the exact b64_dot2 decides.
+### :param a: The first product's first factor.
+### :param b: The first product's second factor.
+### :param c: The second product's first factor.
+### :param d: The second product's second factor.
+### :returns: The rounded sum.
+@inline
+secret routine b64_dot2_round(a: B64, b: B64, c: B64, d: B64) -> B64
+    w: B64Terms = b64_dot2_terms(a, b, c, d)
+    if w.m == 0.0
+        return w.s
+    if w.m > 0.0
+        slack: B64 = w.m *! B64.from_bits(0x3980000000000000)
+        up: B64 = w.s +! (w.t +! slack)
+        down: B64 = w.s +! (w.t -! slack)
+        if up == down
+            return up
+    return b64_dot2(a, b, c, d).hi
+
+### The quotient (a + b i) / (c + d i) rounded once part by part, the value b64_divide gives, which it calls when a
+### product leaves the range of b64_dot2_terms, when the divisor's squared modulus reaches 2^995, when a part's
+### quotient is outside [2^-900, 2^995], and next to a tie (b64_quotient_fast). A part whose two products are exactly zero is their IEEE sum, ±0, as in b64_divide.
+### :param operands: The dividend a + b i and the divisor c + d i (finite, not 0 + 0i).
+### :returns: The real part of the quotient in `hi` and the imaginary part in `lo`, each rounded once.
+@inline
+secret routine b64_divide_fast(operands: B64Dot) -> B64Pair
+    den: B64Terms = b64_dot2_terms(a: operands.c, b: operands.c, c: operands.d, d: operands.d)
+    num_re: B64Terms = b64_dot2_terms(a: operands.a, b: operands.c, c: operands.b, d: operands.d)
+    num_im: B64Terms = b64_dot2_terms(a: operands.b, b: operands.c, c: -operands.a, d: operands.d)
+    # den.s below 2^995 keeps it in b64_mul_error_in_range's range (b64_quotient_fast)
+    if den.m > 0.0 and num_re.m >= 0.0 and num_im.m >= 0.0 and den.s < B64.from_bits(0x7E20000000000000)
+        dd: B64Pair = (hi: den.s, lo: den.t)
+        inv: B64 = 1.0 /! den.s
+        re: B64 = b64_quotient_fast(num: num_re, den: dd, inv)
+        im: B64 = b64_quotient_fast(num: num_im, den: dd, inv)
+        if re.is_finite() and im.is_finite()
+            return (hi: re, lo: im)
+    return b64_divide(operands)
+
+### N / D rounded once, from N = num.s + T and D = dh + T' as b64_dot2_terms gives them (dh = D's s, dl = D's t), and
+### v = 1 / dh rounded, or NaN when this estimate cannot decide. A numerator whose two products are exactly zero gives
+### num.s.
+###
+### Write u = 2^-53 and M for N's |p| + |q|. N is nh + nl (TwoSum of s and t) within (3 + u) u² M, with |nl| <= u |nh|.
+### D's products are positive, so D is dh + dl within (3 + u) (1 + u) u² D, with |dl| <= 2.02 u dh. y = nh v rounded
+### is nh / dh within 2.01 u. With ph + pl = y dh (TwoProd), nh - ph is exact (Sterbenz's lemma: ph is within 3.1 u of
+### nh). The four roundings left in r = ((nh - ph) - pl) + nl - y dl act on values below 2.1 u |nh|, 3.1 u |nh|,
+### 2.1 u |nh|, and 5.1 u |nh|, so r is within 12.3 u² |nh| of nh + nl - y (dh + dl), which is below 5.1 u |nh|.
+### tl = r v rounded is r / dh within 2.01 u, which adds 10.3 u² |nh| / dh, using dh in place of dh + dl adds another
+### 10.4 u² |nh| / dh, and z + zl = y + tl exactly (Fast2Sum, as |tl| <= 5.2 u |y|): y + tl is within 33 u² |y| of
+### (nh + nl) / (dh + dl). With the errors of N and D, |N / D - (z + zl)| < 36.1 u² |y| + 3.1 u² M / dh, and
+### B = (64 |y| + 4 m v) × 2^-106 stays above that after its own roundings. With h half the gap from z to its nearer
+### neighbour (half a unit in the last place, a quarter when z is a power of two), |zl| + B < h puts N / D strictly
+### inside the interval that rounds to z, so z is N / D rounded once, and a tie never passes. The sum |zl| + B rounded
+### is below the power of two h only when the exact sum is. |nh| at least 2^-900, and dh and |y| in [2^-900, 2^995],
+### keep TwoProd exact (y and dh in b64_mul_error_in_range's range), B and h normal, and every underflow far below B.
+### :param num: The numerator's terms.
+### :param den: The denominator's s and t, positive.
+### :param inv: 1 / den.hi rounded.
+### :returns: The quotient rounded once, or NaN to leave it to b64_divide.
+@inline
+secret routine b64_quotient_fast(num: B64Terms, den: B64Pair, inv: B64) -> B64
+    if num.m == 0.0
+        return num.s
+    n: B64Pair = b64_two_sum(num.s, num.t)
+    y: B64 = n.hi *! inv
+    # |nh| at least 2^-900 and |y| in [2^-900, 2^995], as unsigned tests on the bits
+    in_n: U64 = ((n.hi.bits() & 0x7FFFFFFFFFFFFFFF) >= 0x07B0000000000000).to[U64]()
+    in_y: U64 = ((y.bits() & 0x7FFFFFFFFFFFFFFF) -% 0x07B0000000000000 <= 0x7670000000000000).to[U64]()
+    if (in_n & in_y) == 0
+        return nan
+    ph: B64 = y *! den.hi
+    pl: B64 = b64_mul_error_in_range(x: y, y: den.hi, p: ph)
+    r: B64 = (((n.hi -! ph) -! pl) +! n.lo) -! y *! den.lo
+    tl: B64 = r *! inv
+    z: B64 = y +! tl
+    zl: B64 = tl -! (z -! y)
+    bound: B64 = (y.abs() *! 64.0 +! (num.m *! inv) *! 4.0) *! B64.from_bits(0x3950000000000000)
+    bits: U64 = z.bits()
+    field: U64 = (bits >> 52) & 0x7FF
+    below: U64 = when
+        bits & 0xFFFFFFFFFFFFF == 0 => 54
+        else => 53
+    half: B64 = B64.from_bits((field - below) << 52)
+    if zl.abs() +! bound < half
+        return z
+    return nan
 
 ### The sign of the exact sum of `count` finite values (at most 16): Shewchuk's Grow-Expansion adds them one at a
 ### time into a nonoverlapping expansion, and the largest nonzero component of one has the sign of the whole.

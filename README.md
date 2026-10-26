@@ -74,7 +74,8 @@ the reference test vectors, splitmix64, xoshiro256** and the JSON escaping again
 text, the binary-float exports against correctly rounded results from mpmath, the float and decimal text against
 what RazorForge's own text routines printed,
 the complex numbers, quaternions, and matrices against RazorForge's bodies
-before they moved here (and the crashes their checked arithmetic reports), the matrix inverses and solutions of
+before they moved here (and the crashes their checked arithmetic reports), the fast paths of C128's products and
+quotients against the exact paths they fall back to, the matrix inverses and solutions of
 A x = b against a Python model of the same elimination in B32, the D32, D64, and D128 arithmetic
 against RazorForge's engines and the other decimal operations against exact references, rounding once at D32 and
 D64 against rounding through D128 (why the narrow formats don't borrow D128's results), the decimal

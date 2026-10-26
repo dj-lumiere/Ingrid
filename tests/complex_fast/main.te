@@ -1,0 +1,304 @@
+# The fast paths of C128's product, squared modulus, quotient, and reciprocal (Ingrid/tessera/complex.te) against the
+# exact paths they fall back to. For every case the sum of two products rounded once by b64_dot2_round is compared
+# bit for bit with the exact integer b64_dot2, and the quotient of b64_divide_fast with b64_divide and with
+# b64_divide_part's exact numerators. Random operands, products and quotients that cancel, exact ties (products of
+# 27-bit integers, and quotients by c + c i whose numerators carry into a 54th bit), operands near the ends of the
+# fast range and of B64's range, subnormals, and signed zeros. Each line counts the cases, the parts the fast path
+# left to the exact one, and the mismatches.
+
+import Hosted
+
+### How many cases each kind gets.
+preset CASES: U64 = 5000
+
+### The splitmix64 finalizer.
+### :param x: The word to mix.
+### :returns: The mixed word.
+routine mix(x: U64) -> U64
+    z: U64 = (x ^ (x >> 30)) *% 0xBF58476D1CE4E5B9
+    y: U64 = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    return y ^ (y >> 31)
+
+### Random word `j` of case `i` of kind `kind`.
+### :param kind: The kind of case.
+### :param i: The case.
+### :param j: Which word of it.
+### :returns: The word.
+routine word(kind: U64, i: U64, j: U64) -> U64
+    return mix((i *% 0x9E3779B97F4A7C15) ^ (j *% 0xD1B54A32D192ED03) ^ (kind *% 0x632BE59BD9B4E019))
+
+### A random value: the sign and the 52 fraction bits from `w`, times 2^e (a subnormal or zero below the normal range).
+### :param w: The random word.
+### :param e: The power of two.
+### :returns: The value.
+routine value(w: U64, e: S64) -> B64
+    m: B64 = B64.from_bits(0x3FF0000000000000 | (w & 0xFFFFFFFFFFFFF))
+    s: B64 = when
+        w >> 63 == 1 => -m
+        else => m
+    return s.scalbn_unchecked(n: e)
+
+### A random power of two in [lo, lo + span).
+### :param w: The random word.
+### :param lo: The smallest exponent.
+### :param span: How many exponents.
+### :returns: The exponent.
+routine exponent(w: U64, lo: S64, span: U64) -> S64
+    return lo + ((w >> 20) % span).to[S64]()
+
+### `x` moved by k units in the last place (k in -3..3 from `w`), staying finite.
+### :param x: The value.
+### :param w: The random word.
+### :returns: The moved value.
+routine nudge(x: B64, w: U64) -> B64
+    k: U64 = w % 7
+    bits: U64 = x.bits()
+    moved: B64 = B64.from_bits(bits +% k -% 3)
+    if moved.is_finite()
+        return moved
+    return x
+
+### `x` times 1 + f 2^-k, for a random f in [-1, 1) and k in [1, 52] from `w`: a product that cancels against x's
+### leaves anything from half of it down to a few units in its last place.
+### :param x: The value.
+### :param w: The random word.
+### :returns: The scaled value.
+routine graded(x: B64, w: U64) -> B64
+    k: S64 = ((w >> 8) % 52).to[S64]() + 1
+    f: B64 = value(w, e: 0) *! 0.5
+    return x *! (1.0 +! f.scalbn_unchecked(n: 0 - k))
+
+### A random value with a 27-bit integer significand times 2^e, so products of two are exact in 54 bits.
+### :param w: The random word.
+### :param e: The power of two.
+### :returns: The value.
+routine short_value(w: U64, e: S64) -> B64
+    n: U64 = (w >> 37) | 0x4000000
+    m: B64 = n.to[B64]()
+    s: B64 = when
+        w & 1 == 1 => -m
+        else => m
+    return s.scalbn_unchecked(n: e)
+
+### The four factors of case `i` of a sum of two products, of kind `kind`.
+### :param kind: 0 random, 1 cancelling by any amount, 2 exact ties, 3 the ends of the range, 4 zeros, 5 one factor
+###     apart.
+### :param i: The case.
+### :returns: a, b, c, d for a × b + c × d.
+routine dot_case(kind: U64, i: U64) -> B64Dot
+    w0: U64 = word(kind, i, j: 0)
+    w1: U64 = word(kind, i, j: 1)
+    w2: U64 = word(kind, i, j: 2)
+    w3: U64 = word(kind, i, j: 3)
+    w4: U64 = word(kind, i, j: 4)
+    when
+        kind == 0 =>
+            a: B64 = value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            c: B64 = value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = value(w3, e: exponent(w: w3, lo: -40, span: 80))
+            return (a: a, b: b, c: c, d: d)
+        kind == 1 =>
+            a: B64 = value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            c: B64 = value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = nudge(x: graded(x: -(a *! b) /! c, w: w4), w: w3)
+            return (a: a, b: b, c: c, d: d)
+        kind == 2 =>
+            e: S64 = exponent(w: w4, lo: -30, span: 60)
+            return (a: short_value(w0, e), b: short_value(w1, e), c: short_value(w2, e), d: short_value(w3, e))
+        kind == 3 =>
+            # products near 2^-1074, 2^-900, 2^1000, and the top of the range, from factors of any size
+            target: S64 = when
+                w4 & 3 == 0 => exponent(w: w4, lo: -1090, span: 120)
+                w4 & 3 == 1 => exponent(w: w4, lo: -920, span: 40)
+                w4 & 3 == 2 => exponent(w: w4, lo: 980, span: 40)
+                else => exponent(w: w4, lo: -60, span: 120)
+            ea: S64 = exponent(w: w0, lo: -540, span: 1080)
+            ec: S64 = exponent(w: w2, lo: -540, span: 1080)
+            eb: S64 = (target - ea).max(-1074).min(1020)
+            ed: S64 = (target - ec + ((w3 >> 40) % 9).to[S64]() - 4).max(-1074).min(1020)
+            return (a: value(w0, e: ea), b: value(w1, e: eb), c: value(w2, e: ec), d: value(w3, e: ed))
+        kind == 4 =>
+            a: B64 = when
+                w4 % 3 == 0 => B64.from_bits(w0 & 0x8000000000000000)
+                else => value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = when
+                (w4 >> 8) % 3 == 0 => B64.from_bits(w1 & 0x8000000000000000)
+                else => value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            c: B64 = when
+                (w4 >> 16) % 3 == 0 => B64.from_bits(w2 & 0x8000000000000000)
+                else => value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = when
+                (w4 >> 24) % 3 == 0 => B64.from_bits(w3 & 0x8000000000000000)
+                else => value(w3, e: exponent(w: w3, lo: -40, span: 80))
+            return (a: a, b: b, c: c, d: d)
+        else =>
+            # a × b - a × (b moved a few units): the exact result is a times a few units of b
+            a: B64 = value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            return (a: a, b: b, c: -a, d: nudge(x: b, w: w4))
+
+### The operands of case `i` of a quotient (a + b i) / (c + d i), of kind `kind`.
+### :param kind: 0 random, 1 exact ties, 2 numerators cancelling by any amount, 3 the ends of the range, 4 zeros, 5
+###     reciprocals.
+### :param i: The case.
+### :returns: a, b, c, d.
+routine divide_case(kind: U64, i: U64) -> B64Dot
+    w0: U64 = word(kind: kind + 10, i, j: 0)
+    w1: U64 = word(kind: kind + 10, i, j: 1)
+    w2: U64 = word(kind: kind + 10, i, j: 2)
+    w3: U64 = word(kind: kind + 10, i, j: 3)
+    w4: U64 = word(kind: kind + 10, i, j: 4)
+    when
+        kind == 0 =>
+            a: B64 = value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            c: B64 = value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = value(w3, e: exponent(w: w3, lo: -40, span: 80))
+            return (a: a, b: b, c: c, d: d)
+        kind == 1 =>
+            # (a + b i) / (c + c i) with a and b in one binade: a + b often needs a 54th bit, a tie
+            e: S64 = exponent(w: w0, lo: -30, span: 60)
+            a: B64 = value(w0 & 0x7FFFFFFFFFFFFFFF, e)
+            b: B64 = value(w1 & 0x7FFFFFFFFFFFFFFF, e)
+            c: B64 = value(w2 & 0x8000000000000000, e: exponent(w: w2, lo: -20, span: 40))
+            d: B64 = when
+                w3 & 1 == 1 => -c
+                else => c
+            return (a: nudge(x: a, w: w4 & 0xFF0), b: b, c: c, d: d)
+        kind == 2 =>
+            a: B64 = value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            c: B64 = value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = value(w3, e: exponent(w: w3, lo: -40, span: 80))
+            b: B64 = nudge(x: graded(x: -(a *! c) /! d, w: w4), w: w1)
+            return (a: a, b: b, c: c, d: d)
+        kind == 3 =>
+            ec: S64 = when
+                w4 & 3 == 0 => exponent(w: w4, lo: -620, span: 600)
+                w4 & 3 == 1 => exponent(w: w4, lo: 470, span: 60)
+                else => exponent(w: w4, lo: -40, span: 80)
+            ea: S64 = when
+                (w4 >> 8) & 3 == 0 => exponent(w: w0, lo: -1080, span: 200)
+                (w4 >> 8) & 3 == 1 => exponent(w: w0, lo: 450, span: 570)
+                else => ec + exponent(w: w0, lo: -960, span: 1980)
+            eb: S64 = ea + ((w1 >> 40) % 61).to[S64]() - 30
+            ed: S64 = ec + ((w3 >> 40) % 61).to[S64]() - 30
+            a: B64 = value(w0, e: ea.max(-1074).min(1020))
+            b: B64 = value(w1, e: eb.max(-1074).min(1020))
+            c: B64 = value(w2, e: ec.max(-1074).min(1020))
+            d: B64 = value(w3, e: ed.max(-1074).min(1020))
+            return (a: a, b: b, c: c, d: d)
+        kind == 4 =>
+            a: B64 = when
+                w4 % 3 == 0 => B64.from_bits(w0 & 0x8000000000000000)
+                else => value(w0, e: exponent(w: w0, lo: -40, span: 80))
+            b: B64 = when
+                (w4 >> 8) % 3 == 0 => B64.from_bits(w1 & 0x8000000000000000)
+                else => value(w1, e: exponent(w: w1, lo: -40, span: 80))
+            zero_c: Bool = (w4 >> 16) % 2 == 0
+            c: B64 = when
+                zero_c => B64.from_bits(w2 & 0x8000000000000000)
+                else => value(w2, e: exponent(w: w2, lo: -40, span: 80))
+            d: B64 = when
+                not zero_c and (w4 >> 24) % 2 == 0 => B64.from_bits(w3 & 0x8000000000000000)
+                else => value(w3, e: exponent(w: w3, lo: -40, span: 80))
+            return (a: a, b: b, c: c, d: d)
+        else =>
+            c: B64 = when
+                w4 % 5 == 0 => B64.from_bits(w2 & 0x8000000000000000)
+                else => value(w2, e: exponent(w: w2, lo: -600, span: 1200))
+            d: B64 = when
+                w4 % 5 == 1 => B64.from_bits(w3 & 0x8000000000000000)
+                else => value(w3, e: exponent(w: w3, lo: -600, span: 1200))
+            return (a: 1.0, b: 0.0, c: c, d: d)
+
+### Whether the fast path settles a × b + c × d itself, as b64_dot2_round decides it.
+### :param x: The factors.
+### :returns: True unless it calls b64_dot2.
+routine dot_decided(x: B64Dot) -> Bool
+    w: B64Terms = b64_dot2_terms(a: x.a, b: x.b, c: x.c, d: x.d)
+    if w.m == 0.0
+        return true
+    if w.m < 0.0
+        return false
+    slack: B64 = w.m *! B64.from_bits(0x3980000000000000)
+    return w.s +! (w.t +! slack) == w.s +! (w.t -! slack)
+
+### Whether b64_divide_fast settles the quotient itself.
+### :param x: The operands.
+### :returns: True unless it calls b64_divide.
+routine divide_decided(x: B64Dot) -> Bool
+    den: B64Terms = b64_dot2_terms(a: x.c, b: x.c, c: x.d, d: x.d)
+    num_re: B64Terms = b64_dot2_terms(a: x.a, b: x.c, c: x.b, d: x.d)
+    num_im: B64Terms = b64_dot2_terms(a: x.b, b: x.c, c: -x.a, d: x.d)
+    if not (den.m > 0.0 and num_re.m >= 0.0 and num_im.m >= 0.0 and den.s < B64.from_bits(0x7E20000000000000))
+        return false
+    dd: B64Pair = (hi: den.s, lo: den.t)
+    inv: B64 = 1.0 /! den.s
+    re: B64 = b64_quotient_fast(num: num_re, den: dd, inv)
+    im: B64 = b64_quotient_fast(num: num_im, den: dd, inv)
+    return re.is_finite() and im.is_finite()
+
+### Compares b64_dot2_round with b64_dot2 on every case of one kind.
+### :param kind: The kind of case.
+### :param label: Its name.
+routine check_dot(kind: U64, label: @[Byte]) -> None
+    until i >= CASES with i: U64 = 0, left: U64 = 0, wrong: U64 = 0
+        x: B64Dot = dot_case(kind, i)
+        fast: B64 = b64_dot2_round(a: x.a, b: x.b, c: x.c, d: x.d)
+        exact: B64 = b64_dot2(a: x.a, b: x.b, c: x.c, d: x.d).hi
+        miss: U64 = when
+            fast.bits() != exact.bits() => 1
+            else => 0
+        if miss == 1 and wrong < 4
+            Console.show("dot mismatch {x.a.bits()} {x.b.bits()} {x.c.bits()} {x.d.bits()}: {fast.bits()} {exact.bits()}")
+        undecided: U64 = when
+            dot_decided(x) => 0
+            else => 1
+        continue with i: i + 1, left: left + undecided, wrong: wrong + miss
+    then
+        Console.show("dot {label}: {CASES} cases, {left} to the exact path, {wrong} mismatches")
+    return
+
+### Compares b64_divide_fast with b64_divide and with b64_divide_part on every case of one kind.
+### :param kind: The kind of case.
+### :param label: Its name.
+routine check_divide(kind: U64, label: @[Byte]) -> None
+    until i >= CASES with i: U64 = 0, left: U64 = 0, wrong: U64 = 0, wrong_exact: U64 = 0
+        x: B64Dot = divide_case(kind, i)
+        fast: B64Pair = b64_divide_fast(operands: x)
+        before: B64Pair = b64_divide(operands: x)
+        re: B64 = b64_divide_part(operands: x, imaginary: false)
+        im: B64 = b64_divide_part(operands: x, imaginary: true)
+        miss: U64 = when
+            fast.hi.bits() != before.hi.bits() or fast.lo.bits() != before.lo.bits() => 1
+            else => 0
+        miss_exact: U64 = when
+            fast.hi.bits() != re.bits() or fast.lo.bits() != im.bits() => 1
+            else => 0
+        if miss + miss_exact > 0 and wrong + wrong_exact < 4
+            Console.show("divide mismatch {x.a.bits()} {x.b.bits()} {x.c.bits()} {x.d.bits()}: {fast.hi.bits()} {fast.lo.bits()} {before.hi.bits()} {before.lo.bits()} {re.bits()} {im.bits()}")
+        undecided: U64 = when
+            divide_decided(x) => 0
+            else => 1
+        continue with i: i + 1, left: left + undecided, wrong: wrong + miss, wrong_exact: wrong_exact + miss_exact
+    then
+        Console.show("divide {label}: {CASES} cases, {left} to b64_divide, {wrong} mismatches with it, {wrong_exact} with the exact numerators")
+    return
+
+### Runs every kind.
+routine start() -> None
+    check_dot(kind: 0, label: "random")
+    check_dot(kind: 1, label: "cancelling")
+    check_dot(kind: 2, label: "exact ties")
+    check_dot(kind: 3, label: "range ends")
+    check_dot(kind: 4, label: "zeros")
+    check_dot(kind: 5, label: "one factor apart")
+    check_divide(kind: 0, label: "random")
+    check_divide(kind: 1, label: "exact ties")
+    check_divide(kind: 2, label: "cancelling")
+    check_divide(kind: 3, label: "range ends")
+    check_divide(kind: 4, label: "zeros")
+    check_divide(kind: 5, label: "reciprocals")
+    return
