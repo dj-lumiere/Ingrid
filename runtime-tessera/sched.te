@@ -1009,14 +1009,18 @@ routine run_here_ready() -> Bool
 ### ready, or sleeps at most HERE_POLL, so those jobs go on while this thread waits on something else.
 routine @Sched.block_wait() -> None
     if not here_has_live()
-        me.block_cond.wait(Authorized[U8](at: me.guard))
+        # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
+        lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
+        me.block_cond.wait(lock)
         return
     AccessManager.give_back(at: me.guard)
     ran: Bool = run_here_ready()
     AccessManager.take_exclusive(at: me.guard, size: 1)
     if ran
         return
-    me.block_cond.wait_for(access: Authorized[U8](at: me.guard), timeout: HERE_POLL)
+    # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
+    held_lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
+    me.block_cond.wait_for(access: held_lock, timeout: HERE_POLL)
     return
 
 ### Spawns a new coroutine onto the process pool (start_now()).
