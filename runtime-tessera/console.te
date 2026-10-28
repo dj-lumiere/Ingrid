@@ -124,6 +124,24 @@ routine rf_console_flush() -> None
     drop held
     return
 
+### Gives standard output what is buffered when the process ends: the runtime library registers it with atexit. On
+### Windows a library's atexit routines run while the process unloads it, after the process ended every other thread
+### without letting it finish. A lock one of those threads held then stays taken (the AccessManager's table, which the
+### workers take for every scheduler step, or the buffer's own access), and waiting for it would keep the process from
+### ending. No other thread is left to write, so the buffer is drained without taking its access.
+@target(os: "windows")
+routine rf_console_flush_at_exit() -> None
+    out: @OutputBuffer = STDOUT
+    out.drain()
+    return
+
+### Gives standard output what is buffered when the process ends: the runtime library registers it with atexit, which
+### runs inside `exit` while the other threads go on, so the buffer's access is taken as for any flush.
+@target(os: not "windows")
+routine rf_console_flush_at_exit() -> None
+    rf_console_flush()
+    return
+
 ### Gives standard output what is buffered when the program crashes, without taking the buffer's exclusive access: the crashing
 ### thread may hold it, taking it could take memory (a fiber's flow is made the first time it takes an access), and
 ### the other threads that crash meanwhile wait for the stop, so nothing else writes.
@@ -279,7 +297,7 @@ routine rf_crash_exit() -> None
 routine rf_runtime_init() -> None
     Crash.report_with(runtime_crash_handler.to[Callable]())
     rf_io_runtime_init()
-    c_atexit(rf_console_flush.to[Callable]())
+    c_atexit(rf_console_flush_at_exit.to[Callable]())
     Console.errors().enable_colors()
     return
 
