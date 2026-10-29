@@ -79,4 +79,12 @@ routine rf_waitfor_duration(duration_seconds: S64, duration_nanoseconds: U32) ->
         now2: Duration = Clock.monotonic()
         if now2 >= deadline or word.peek_unbroken() != 0
             return
-        wait_on_for(at: word, expected: 0, timeout: deadline - now2)
+        # This thread's start_here() jobs take their turns while it waits: one that is ready runs, and with some
+        # left the thread sleeps at most HERE_POLL, so their timers and wakes are seen.
+        if run_here_ready()
+            continue
+        left: Duration = deadline - now2
+        slice: Duration = when
+            here_has_live() and left > HERE_POLL => HERE_POLL
+            else => left
+        wait_on_for(at: word, expected: 0, timeout: slice)

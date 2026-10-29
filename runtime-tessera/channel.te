@@ -207,9 +207,23 @@ routine @Channel.wait(list: @@ChannelWaiter) -> None
         # and it stops loudly instead of hanging.
 
         until quiet >= CHANNEL_DEADLOCK_SLICES with quiet: U64 = 0
+            # This thread's start_here() jobs take their turns while it waits, with the channel given back: one that
+            # is ready runs and the caller looks at the channel again. With some left the thread sleeps at most
+            # HERE_POLL, so their timers and wakes are seen.
+            AccessManager.give_back(at: me.guard)
+            ran: Bool = run_here_ready()
+            here_live: Bool = here_has_live()
+            AccessManager.take_exclusive(at: me.guard, size: 1)
+            if ran
+                return
+            slice: Duration = when
+                here_live => HERE_POLL
+                else => CHANNEL_GRACE
             # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
             lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
-            if me.cond.wait_for(access: lock, timeout: CHANNEL_GRACE)
+            if me.cond.wait_for(access: lock, timeout: slice)
+                return
+            if here_live
                 return
             if not (LIVE_TASKS.peek_unbroken() == 0)
                 return
@@ -265,6 +279,8 @@ routine @Channel.feed(payload: Addr) -> U32
         if not (rf_cancel_requested() == 0)
             # A rendezvous: not over until this item was taken.
             drop held
+            # The job is told the item was not sent, or a fiber told before stops here.
+            rf_coro_cancel_at_wait()
             return 0
         me.wait(me.not_full_head)
         continue
@@ -342,6 +358,8 @@ routine @Channel.next() -> Addr
     until (me.count.peek() != 0) or me.closed.peek()
         if not (rf_cancel_requested() == 0)
             drop held
+            # The job is told nothing came, or a fiber told before stops here.
+            rf_coro_cancel_at_wait()
             return .hollow()
         me.wait(me.not_empty_head)
         continue

@@ -11,7 +11,7 @@
 #   QUEUED    in a deque or the injector
 #   RUNNING   a worker took it and runs it
 #   NOTIFIED  a wake came while it ran: its worker queues it again when it parks, whatever it parked for
-#   DONE      completed, and a stray wake is dropped
+#   DONE      completed or stopped, and a stray wake is dropped
 # A park primitive running inside the coroutine only records its intent and switches out. The worker applies it
 # afterwards, under the scheduler lock, where a NOTIFIED wins.
 #
@@ -51,6 +51,7 @@ preset PARK_NONE:     U32 = 0
 preset PARK_TIMER:    U32 = 1  # into the timer heap at wake_ns
 preset PARK_EXTERNAL: U32 = 2  # in no list: only a wake queues it
 preset PARK_YIELD:    U32 = 3  # queued again at once, behind the others
+preset PARK_STOPPED:  U32 = 4  # stopped on a cancel request: never runs again, its owner abandons it
 
 ### The all-idle condition must hold this many times in a row, each after a grace wait, before it is a deadlock.
 preset DEADLOCK_CONFIRMS: U64 = 3
@@ -516,6 +517,33 @@ routine rf_coro_yield() -> None
     coro_switch_out()
     return
 
+### What a wait does about a cancel request, called where the wait starts and again where it ends: 1 when the wait
+### returns early, 0 when nothing asked the job to stop. The first wait of a coroutine after the request returns
+### early, so the body can poll `cancellation_requested()`, give back what it holds and return. A coroutine that waits
+### again after being told stops at that wait for good: it switches out, whoever waits for it goes on, and the Work
+### that holds it abandons it, which tears down the values it built (its cancellation shadow stack). One that holds an
+### access is not stopped, since abandoning it would never give the access back: its wait returns early again, after
+### a turn for the others. A thread can't be stopped from outside, so each of its waits returns early.
+### :returns: 1 when the wait returns early, 0 when it waits.
+@export("rf_coro_cancel_at_wait")
+routine rf_coro_cancel_at_wait() -> U32
+    this_coro: @Coro = current_coro()
+    if current_sched().is_hollow() or this_coro.is_hollow()
+        return rf_cancel_requested()
+    asked: U32 = this_coro.cancel_requested.peek_unbroken()
+    if asked == 0
+        return 0
+    if asked == 1
+        # Told now: this wait returns early, the next one stops.
+        this_coro.cancel_requested.poke_unbroken(2)
+        return 1
+    if AccessManager.held_count() != 0
+        rf_coro_yield()
+        return 1
+    this_coro.park_intent.poke(PARK_STOPPED)
+    coro_switch_out()
+    return 1
+
 ### Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
 ### coroutine parked on a timer (`waitfor`) is woken now, so its wait ends early. A null `coro` does nothing.
 ### :param coro: The coroutine.
@@ -523,7 +551,9 @@ routine rf_coro_yield() -> None
 routine rf_coro_request_cancel(coro: @Coro) -> None
     if coro.is_hollow()
         return
-    coro.cancel_requested.poke_unbroken(1)
+    # Asked once: a second request leaves a coroutine that was told already as it is (rf_coro_cancel_at_wait).
+    seen: &U32 <- 0
+    coro.cancel_requested.compare_exchange_unbroken_raw(expected: 0, new: 1, previous: seen)
     s: @Sched = coro.home.peek()
     if s.is_hollow()
         return
@@ -665,6 +695,9 @@ routine @Sched.run_coro(c: @Coro) -> None
     # leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
     intent: U32 = c.park_intent.peek()
     c.park_intent.poke(PARK_NONE)
+    if intent == PARK_STOPPED
+        me.finish_stopped(c)
+        return
     notified: Bool = c.sched_state.peek_unbroken() == SCHED_NOTIFIED
     id: S64 = worker_id()
     deques: @Deque = me.deques.peek()
@@ -696,6 +729,42 @@ routine @Sched.run_coro(c: @Coro) -> None
             c.sched_state.poke_unbroken(SCHED_IDLE)
             drop held2
             return
+
+### Ends a coroutine that stopped on a cancel request (rf_coro_cancel_at_wait) the way a completed one ends: it
+### is DONE and off the live count, and whoever waits for it goes on. It is marked cancelled, not completed, so the
+### Work that holds it abandons it (its shadow stack runs) instead of reading a result, and a holder that let go of it
+### already has it abandoned here.
+### :param c: The coroutine, just switched out.
+routine @Sched.finish_stopped(c: @Coro) -> None
+    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    c.sched_state.poke_unbroken(SCHED_DONE)
+    if c.completion_seq.peek_unbroken() == U64.MAX
+        c.completion_seq.poke_unbroken(next_completion_seq())
+    c.status.poke_unbroken(CORO_CANCELLED)
+    if not c.counted_done.peek()
+        c.counted_done.poke(true)
+        remaining_live: S64 = me.live.peek() - 1
+        remaining_live.poke_into(me.live)
+    w: @Coro = c.awaiter.peek()
+    away: @Coro = when
+        w.is_hollow() => .hollow()
+        else =>
+            c.awaiter.poke(.hollow())
+            home: @Me = w.home.peek()
+            if not (home.is_hollow() or (home === me))
+                becomes w
+            else
+                me.make_ready(w)
+                becomes .hollow()
+    free_now: Bool = c.owner_released.peek() or c.detached.peek()
+    me.cond.cast_one()
+    me.block_cond.cast_all()
+    drop held
+    if not away.is_hollow()
+        rf_sched_wake(s: away.home.peek(), c: away)
+    if free_now
+        rf_coro_abandon(c)
+    return
 
 ### One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
 ### :returns: The coroutine, or null.
