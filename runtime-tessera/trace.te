@@ -378,7 +378,7 @@ routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 @external("c")
 @symbol("backtrace_symbols")
 @target(os: not "windows")
-routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
+routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte?
 
 ### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
 ### Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
@@ -387,22 +387,25 @@ routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte
 routine print_platform_stack(fault: U64) -> None
     stack_buffer: &Items[Addr, 64] <- .hollow()
     frames: CInt = c_backtrace(stack_buffer.getview().to[@Addr](), 64)
-    symbols: @@Byte = c_backtrace_symbols(stack_buffer.getview().to[@Addr](), frames)
+    symbols_or_none: @@Byte? = c_backtrace_symbols(stack_buffer.getview().to[@Addr](), frames)
     stack: @Addr = stack_buffer.getview().to[@Addr]()
 
     Console.alert("Stack trace:")
 
     for i in 2 til frames
-        if symbols.is_hollow()
+        if symbols_or_none.is_absent()
             n: CInt = i - 2
             address: Addr = stack.stride(i.to[U64]()).peek()
             Console.alert("  {n}: {address}")
         else
+            symbols: @@Byte = symbols_or_none.unwrap()
             n: CInt = i - 2
             text: @Byte = symbols.stride(i.to[U64]()).peek()
             line: @[Byte] = text.to[CStrView]().getview()
             Console.alert("  {n}: {line}")
-    c_free(symbols)
+    when symbols_or_none
+        is @@Byte as symbols => c_free(symbols)
+        is None => nothing
     return
 
 # -- fault handlers: Windows ---------------------------------------------------------
