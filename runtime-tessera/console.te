@@ -191,12 +191,12 @@ global AFTER_WORD: &Bool
 ### for the terminator, and freed when that fails.
 ### :param text: The text, allocated with C's heap. It is taken over.
 ### :returns: The NUL-terminated string, or null when the reallocation fails.
-routine terminated_text(text: BorrowedSlice[Byte]) -> @Byte
+routine terminated_text(text: BorrowedSlice[Byte]) -> @Byte?
     n: U64 = text.count()
     buf: Addr = c_realloc(.hollow(), (n + 1).to[CSize]())
     if buf.is_hollow()
         drop text
-        return .hollow()
+        return None()
     buf.to[@Byte]().copy(src: text.data.peek(), count: n)
     buf.to[@Byte]().stride(n).poke(0x00)
     drop text
@@ -205,16 +205,16 @@ routine terminated_text(text: BorrowedSlice[Byte]) -> @Byte
 ### {terminated_text} of the text when there is one.
 ### :param text: The text read, or absent at the end of the input.
 ### :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
-routine terminated_option(text: Optional[BorrowedSlice[Byte]]) -> @Byte
+routine terminated_option(text: Optional[BorrowedSlice[Byte]]) -> @Byte?
     when steal text
         is BorrowedSlice[Byte] as t => return terminated_text(steal t)
-        is None => return .hollow()
+        is None => return None()
 
 ### The next line from stdin, without its end, or null at the end of the input. A blank line is an empty string. Right
 ### after ask_word, a line that is empty because the word ended it is skipped. Standard output is flushed first.
 ### :returns: The line as a NUL-terminated string the caller frees, or null.
 @export("rf_console_ask_line")
-routine rf_console_ask_line() -> @Byte
+routine rf_console_ask_line() -> @Byte?
     rf_console_flush()
     manager: @MemoryManager = heap()
     after_word: Bool = AFTER_WORD.peek()
@@ -227,23 +227,23 @@ routine rf_console_ask_line() -> @Byte
                     drop t2
                     continue with skip_blank: false
                 return terminated_text(steal t2)
-            is None => return .hollow()
+            is None => return None()
 
 ### The next word from stdin, or null at the end of the input. Standard output is flushed first.
 ### :returns: The word as a NUL-terminated string the caller frees, or null.
 @export("rf_console_ask_word")
-routine rf_console_ask_word() -> @Byte
+routine rf_console_ask_word() -> @Byte?
     rf_console_flush()
     manager: @MemoryManager = heap()
-    word: @Byte = terminated_option(try Console.ask_word(manager))
-    AFTER_WORD.poke(not word.is_hollow())
+    word: @Byte? = terminated_option(try Console.ask_word(manager))
+    AFTER_WORD.poke(word.is_present())
     return word
 
 ### Up to `count` bytes from stdin, NUL-terminated. Standard output is flushed first.
 ### :param count: The most bytes to read.
 ### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
 @export("rf_console_ask_bytes")
-routine rf_console_ask_bytes(count: U64) -> @Byte
+routine rf_console_ask_bytes(count: U64) -> @Byte?
     rf_console_flush()
     AFTER_WORD.poke(false)
     manager: @MemoryManager = heap()
@@ -252,7 +252,7 @@ routine rf_console_ask_bytes(count: U64) -> @Byte
 ### The rest of stdin, NUL-terminated. Standard output is flushed first.
 ### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
 @export("rf_console_ask_all")
-routine rf_console_ask_all() -> @Byte
+routine rf_console_ask_all() -> @Byte?
     rf_console_flush()
     AFTER_WORD.poke(false)
     manager: @MemoryManager = heap()
@@ -264,10 +264,10 @@ routine rf_console_ask_all() -> @Byte
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
 @export("rf_console_error")
-routine rf_console_error(ptr: @Byte, count: U64) -> None
-    if ptr.is_hollow() or count == 0
+routine rf_console_error(ptr: @Byte?, count: U64) -> None
+    if ptr.is_absent() or count == 0
         return
-    try Console.errors().write_all(data: ptr, count)
+    try Console.errors().write_all(data: ptr.unwrap(), count)
     return
 
 ### Flushes stdout, so a program's output appears before the crash report that follows it.

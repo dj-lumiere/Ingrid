@@ -312,16 +312,18 @@ routine rf_set_bytes_at(dest_address: Addr, value: U8, bytes: U64) -> None
 # the thread's, so a computation doesn't suspend between its mark and its release.
 
 @threadlocal
-global REGION_TOP: &@RegionBlock
+global REGION_TOP: &(@RegionBlock?)
 
 record RegionBlock
-    prev: @RegionBlock
+    prev: @RegionBlock?
 
 ### The current top: release to it to free everything allocated after.
 ### :returns: The mark, the address of this thread's top block (0 when the region is empty).
 @export("rf_region_mark")
 routine rf_region_mark() -> U64
-    return ptrtoint[@RegionBlock, U64](REGION_TOP.peek())
+    when REGION_TOP.peek()
+        is @RegionBlock as top => return ptrtoint[@RegionBlock, U64](top)
+        is None => return 0
 
 ### Allocates `bytes` zeroed bytes in this thread's region, freed by the release to a mark taken before.
 ### :param bytes: How many bytes.
@@ -342,11 +344,12 @@ routine rf_region_alloc(bytes: U64) -> Addr
 ### :param mark: A mark from rf_region_mark.
 @export("rf_region_release")
 routine rf_region_release(mark: U64) -> None
-    stop: @RegionBlock = inttoptr[U64, @RegionBlock](mark)
-
     loop
-        top2: @RegionBlock = REGION_TOP.peek()
-        if top2.is_hollow() or (top2 === stop)
+        top: @RegionBlock? = REGION_TOP.peek()
+        if top.is_absent()
+            return
+        top2: @RegionBlock = top.unwrap()
+        if ptrtoint[@RegionBlock, U64](top2) == mark
             return
         REGION_TOP.poke(top2.prev.peek())
         c_free(top2)
