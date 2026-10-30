@@ -10,7 +10,7 @@
 import Hosted
 
 ### The header the contended lock entry waits on, released by the first yield.
-global CONTENDED: &@RoamHeader <- .hollow()
+global CONTENDED: &(@RoamHeader?)
 ### How many times the runtime yielded.
 global YIELDS: &U64
 
@@ -27,12 +27,13 @@ routine stub_current_task_id() -> U64
 routine stub_coro_yield() -> None
     yields: U64 = YIELDS.peek() + 1
     yields.poke_into(YIELDS)
-    waited: @RoamHeader = CONTENDED.peek()
-    if waited.is_hollow()
+    contended: @RoamHeader? = CONTENDED.peek()
+    if contended.is_absent()
         return
+    waited: @RoamHeader = contended.unwrap()
     waited.holder_task.poke_unbroken(0)
     waited.locked.poke_unbroken(0)
-    CONTENDED.poke(.hollow())
+    CONTENDED.zeroinit(1)
     return
 
 @export("rf_access_wait_begin")
@@ -66,15 +67,16 @@ routine new_entity(id: U64, child: Addr, cyclic: Bool) -> @RoamHeader
     manager: @MemoryManager = C_HEAP
 
     node: @Node = allocate[Node](count: 1, manager).to[@Node]().to[@Node]()
-    header: @RoamHeader = allocate[RoamHeader](count: 1, manager).to[@RoamHeader]().to[@RoamHeader]()
+    header: @RoamHeader = allocate[RoamHeader](count: 1,
+        manager).to[@RoamHeader]().to[@RoamHeader]()
     id.poke_into(node.id)
     child.poke_into(node.child)
     trace: Addr = when
         cyclic => trace_node.addr()
-        else => .hollow()
+        else => Addr.zero()
     header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
         holder_task: 0, depth: 0, state: 0, buffered: false, trace_hook: trace,
-        free_hook: .hollow(), drop_hook: drop_node.addr(), shape_users: 0, kept: .hollow()))
+        free_hook: Addr.zero(), drop_hook: drop_node.addr(), shape_users: 0, kept: Addr.zero()))
     return header
 
 routine show_counts(label: @[Byte], header: @RoamHeader) -> None
@@ -94,7 +96,7 @@ routine show_lock(label: @[Byte], header: @RoamHeader) -> None
 ### hold and unhold on a local entity, the last unhold destroying it while a weak observer keeps the header.
 routine counts() -> None
     Console.show("counts")
-    a: @RoamHeader = new_entity(id: 1, child: .hollow(), cyclic: false)
+    a: @RoamHeader = new_entity(id: 1, child: Addr.zero(), cyclic: false)
     show_counts(label: "new", header: a)
     roam_hold(a)
     roam_hold(a)
@@ -108,7 +110,7 @@ routine counts() -> None
     show_counts(label: "released", header: a)
     roam_unobserve(a)
     Console.show("observer gone, header freed")
-    b: @RoamHeader = new_entity(id: 2, child: .hollow(), cyclic: false)
+    b: @RoamHeader = new_entity(id: 2, child: Addr.zero(), cyclic: false)
     roam_unhold(b)
     Console.show("no observer, header freed with the entity")
     return
@@ -116,8 +118,8 @@ routine counts() -> None
 ### A release that leaves a cyclic entity alive reports it to the collector once. An acyclic one is never reported.
 routine candidates() -> None
     Console.show("candidates")
-    acyclic: @RoamHeader = new_entity(id: 3, child: .hollow(), cyclic: false)
-    cyclic: @RoamHeader = new_entity(id: 4, child: .hollow(), cyclic: true)
+    acyclic: @RoamHeader = new_entity(id: 3, child: Addr.zero(), cyclic: false)
+    cyclic: @RoamHeader = new_entity(id: 4, child: Addr.zero(), cyclic: true)
     roam_hold(acyclic)
     roam_unhold(acyclic)
     roam_hold(cyclic)
@@ -138,7 +140,7 @@ routine candidates() -> None
 ### Promotion escapes the entity and everything it reaches. Counting goes unbroken, and a second promotion stops at once.
 routine promotion() -> None
     Console.show("promotion")
-    leaf: @RoamHeader = new_entity(id: 6, child: .hollow(), cyclic: true)
+    leaf: @RoamHeader = new_entity(id: 6, child: Addr.zero(), cyclic: true)
     parent: @RoamHeader = new_entity(id: 5, child: leaf, cyclic: true)
     before: Bool = roam_is_escaped(parent)
     roam_promote(parent)
@@ -158,12 +160,12 @@ routine promotion() -> None
 ### yields until the holder releases it.
 routine locking() -> None
     Console.show("lock")
-    subject: @RoamHeader = new_entity(id: 7, child: .hollow(), cyclic: false)
+    subject: @RoamHeader = new_entity(id: 7, child: Addr.zero(), cyclic: false)
     roam_lock_enter(subject)
     show_lock(label: "local entered", header: subject)
     roam_lock_exit(subject)
     roam_unhold(subject)
-    promoted: @RoamHeader = new_entity(id: 8, child: .hollow(), cyclic: false)
+    promoted: @RoamHeader = new_entity(id: 8, child: Addr.zero(), cyclic: false)
     roam_promote(promoted)
     roam_lock_enter(promoted)
     show_lock(label: "entered", header: promoted)

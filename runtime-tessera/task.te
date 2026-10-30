@@ -105,9 +105,9 @@ common routine Task.construct(kind: U32, status: U32, completion_seq: U64, compl
     value_payload: Addr, error_payload: Addr, cancel_requested: U32, result_consumed: Bool,
     detached: Bool, worker_exited: Bool, consumer_released: Bool, reaped: Bool, done: U32,
     execution_backend: Addr, wait_backend: Addr, dependents_head: @TaskNode?,
-    dependents_tail: @TaskNode?, prerequisite_count: U32, prerequisites_remaining: U32, task_id: U64,
-    coro_guard: U8, coro_sched: @Sched?, coro_waiter: @Coro?, race_sched: @Sched?, race_waiter: @Coro?,
-    counted: U32) -> Me
+    dependents_tail: @TaskNode?, prerequisite_count: U32, prerequisites_remaining: U32,
+    task_id: U64, coro_guard: U8, coro_sched: @Sched?, coro_waiter: @Coro?, race_sched: @Sched?,
+    race_waiter: @Coro?, counted: U32) -> Me
     return Me(kind, status, completion_seq, completion, value_payload, error_payload,
         cancel_requested, result_consumed, detached, worker_exited, consumer_released, reaped, done,
         execution_backend, wait_backend, dependents_head, dependents_tail, prerequisite_count,
@@ -334,7 +334,7 @@ routine @Task.free() -> None
     payload: Addr = me.value_payload.peek()
     if payload.is_not_hollow()
         c_free(payload)
-        me.value_payload.poke(.hollow())
+        me.value_payload.zeroinit(1)
 
     until node.is_absent() with node: @TaskNode? = me.dependents_head.peek()
         here: @TaskNode = node.unwrap()
@@ -435,10 +435,10 @@ routine rf_task_completion_kind_get(task_or_none: @Task?) -> U32
 @export("rf_task_result_payload")
 routine rf_task_result_payload(task_or_none: @Task?) -> Addr
     if task_or_none.is_absent()
-        return .hollow()
+        return Addr.zero()
     task: @Task = task_or_none.unwrap()
     payload: Addr = task.value_payload.peek()
-    task.value_payload.poke(.hollow())
+    task.value_payload.zeroinit(1)
     return payload
 
 ### A task's error payload, still the task's.
@@ -447,7 +447,7 @@ routine rf_task_result_payload(task_or_none: @Task?) -> Addr
 @export("rf_task_error_payload")
 routine rf_task_error_payload(task_or_none: @Task?) -> Addr
     if task_or_none.is_absent()
-        return .hollow()
+        return Addr.zero()
     task: @Task = task_or_none.unwrap()
     return task.error_payload.peek()
 
@@ -480,7 +480,8 @@ routine rf_task_wait(task_or_none: @Task?) -> U32
 ### :param timeout_nanoseconds: The extra nanoseconds to wait.
 ### :returns: A `COMPLETION_` value, `COMPLETION_ERROR` for a null `task`.
 @export("rf_task_wait_within")
-routine rf_task_wait_within(task_or_none: @Task?, timeout_seconds: S64, timeout_nanoseconds: U32) -> U32
+routine rf_task_wait_within(task_or_none: @Task?, timeout_seconds: S64,
+    timeout_nanoseconds: U32) -> U32
     if task_or_none.is_absent()
         return COMPLETION_ERROR
     task: @Task = task_or_none.unwrap()
@@ -522,16 +523,16 @@ routine threaded_task_main(start: @ThreadedStart) -> None
     owner: Bool = task.consumer_released.peek() or task.detached.peek()
     reap: Bool = owner and not task.reaped.peek()
     values2: (Bool, Addr) = when
-        not reap => (false, .hollow())
+        not reap => (false, Addr.zero())
         else =>
             task.reaped.poke(true)
             box: Addr = when
                 task.detached.peek() => task.value_payload.peek()
-                else => .hollow()
+                else => Addr.zero()
             if box.is_hollow()
-                becomes (true, .hollow())
+                becomes (true, Addr.zero())
             else
-                task.value_payload.poke(.hollow())
+                task.value_payload.zeroinit(1)
                 becomes (true, box)
     reap2, box = values2
     drop held
@@ -551,7 +552,8 @@ routine threaded_task_main(start: @ThreadedStart) -> None
 ### :throws: Crashes with `OutOfMemoryError` when the start data can't be allocated, and with `TaskSpawnError` when
 ###     the thread can't be started.
 @export("rf_task_spawn_threaded")
-routine rf_task_spawn_threaded(task_or_none: @Task?, entry_or_none: Callable[(Addr,), None]?, userdata: Addr) -> CInt
+routine rf_task_spawn_threaded(task_or_none: @Task?, entry_or_none: Callable[(Addr,), None]?,
+    userdata: Addr) -> CInt
     if task_or_none.is_absent() or entry_or_none.is_absent()
         return 0
     task: @Task = task_or_none.unwrap()
@@ -630,7 +632,7 @@ routine rf_task_complete_value(task_or_none: @Task?, result_payload: Addr) -> No
             return
         task.free()
         return
-    task.complete(how: COMPLETION_VALUE, value: result_payload, error: .hollow())
+    task.complete(how: COMPLETION_VALUE, value: result_payload, error: Addr.zero())
     return
 
 ### execute(): the task frees itself when it completes. A threaded task's thread is already running, so this agrees
@@ -651,7 +653,7 @@ routine rf_task_set_detached(task_or_none: @Task?) -> None
     task.reaped.poke(true)
     drop held
     payload: Addr = task.value_payload.peek()
-    task.value_payload.poke(.hollow())
+    task.value_payload.zeroinit(1)
     if not payload.is_hollow()
         rf_invalidate(payload)
     task.free()
@@ -677,7 +679,7 @@ routine rf_task_complete_error(task_or_none: @Task?, error_payload: Addr) -> Non
     if task_or_none.is_absent()
         return
     task: @Task = task_or_none.unwrap()
-    task.complete(how: COMPLETION_ERROR, value: .hollow(), error: error_payload)
+    task.complete(how: COMPLETION_ERROR, value: Addr.zero(), error: error_payload)
     return
 
 ### Completes a task as cancelled and wakes its waiters. A null `task` does nothing.
@@ -687,7 +689,7 @@ routine rf_task_complete_cancelled(task_or_none: @Task?) -> None
     if task_or_none.is_absent()
         return
     task: @Task = task_or_none.unwrap()
-    task.complete(how: COMPLETION_CANCELLED, value: .hollow(), error: .hollow())
+    task.complete(how: COMPLETION_CANCELLED, value: Addr.zero(), error: Addr.zero())
     return
 
 ### Completes a task as timed out and wakes its waiters. A null `task` does nothing.
@@ -697,7 +699,7 @@ routine rf_task_complete_timeout(task_or_none: @Task?) -> None
     if task_or_none.is_absent()
         return
     task: @Task = task_or_none.unwrap()
-    task.complete(how: COMPLETION_TIMEOUT, value: .hollow(), error: .hollow())
+    task.complete(how: COMPLETION_TIMEOUT, value: Addr.zero(), error: Addr.zero())
     return
 
 ### Asks a task to stop: a flag its routine reads with rf_cancel_requested. Its thread, when it waits in `waitfor`,
@@ -770,7 +772,7 @@ routine rf_task_attach_execution_backend(task_or_none: @Task?, backend: Addr) ->
 @export("rf_task_execution_backend")
 routine rf_task_execution_backend(task_or_none: @Task?) -> Addr
     if task_or_none.is_absent()
-        return .hollow()
+        return Addr.zero()
     task: @Task = task_or_none.unwrap()
     return task.execution_backend.peek()
 
@@ -791,7 +793,7 @@ routine rf_task_attach_wait_backend(task_or_none: @Task?, backend: Addr) -> None
 @export("rf_task_wait_backend")
 routine rf_task_wait_backend(task_or_none: @Task?) -> Addr
     if task_or_none.is_absent()
-        return .hollow()
+        return Addr.zero()
     task: @Task = task_or_none.unwrap()
     return task.wait_backend.peek()
 

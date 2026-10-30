@@ -13,8 +13,8 @@ module Ingrid/Runtime
 import Hosted
 
 ### The scheduler and coroutine rf_sched_current and current_coro report: null on a plain thread.
-global CURRENT_SCHED: &@Sched
-global CURRENT_CORO: &@Coro
+lateinit global CURRENT_SCHED: &@Sched
+lateinit global CURRENT_CORO: &@Coro
 
 ### The scheduler and the coroutine the test stands in for, for as long as the program runs.
 global THE_SCHED: &Sched <- (id: 1)
@@ -23,11 +23,11 @@ global THE_CORO: &Coro <- (id: 7)
 ### Two parked coroutines on a monitor's wait list, the newer first.
 global OLDER: &Coro <- (id: 1)
 global NEWER: &Coro <- (id: 2)
-global FIRST_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: .hollow())
+global FIRST_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: None())
 global SECOND_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
 
 ### The SignalCaster a park casts on, as another agent would meanwhile, or null to let the time run out.
-global CAST_DURING_PARK: &@Monitor
+global CAST_DURING_PARK: &(@Monitor?)
 
 ### The threads at the gate.
 preset GATE_THREADS: U64 = 3
@@ -44,7 +44,7 @@ record Coro
 record ChannelWaiter
     sched: @Sched
     coro: @Coro
-    next: @ChannelWaiter
+    next: @ChannelWaiter?
 
 ### Threads at a gate: they wait for a token (cast_one) or for the gate to open (cast_all), and the main thread waits
 ### for them on the same SignalCaster.
@@ -71,17 +71,17 @@ routine zeroed[T](count: U64, what: CStrView) -> @T
     return p.to[@T]()
 
 ### Takes node off list (as in channel.te).
-routine unlink(list: @@ChannelWaiter, node: @ChannelWaiter) -> None
-    loop with at: @@ChannelWaiter = list
-        w2: @ChannelWaiter = at.peek()
-        if w2.is_hollow()
+routine unlink(list: @(@ChannelWaiter?), node: @ChannelWaiter) -> None
+    loop with at: @(@ChannelWaiter?) = list
+        linked: @ChannelWaiter? = at.peek()
+        if linked.is_absent()
             return
+        w2: @ChannelWaiter = linked.unwrap()
         if w2 !== node
             continue with at: w2.next
-        else
-            at.poke(node.next.peek())
-            node.next.poke(.hollow())
-            return
+        at.poke(node.next.peek())
+        node.next.poke(None())
+        return
 
 routine rf_sched_current() -> @Sched
     return CURRENT_SCHED.peek()
@@ -103,21 +103,22 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> None
 
 ### The coroutine is off its thread: another agent casts meanwhile, if CAST_DURING_PARK says so.
 routine rf_sched_park_external() -> None
-    sig: @Monitor = CAST_DURING_PARK.peek()
+    cast: @Monitor? = CAST_DURING_PARK.peek()
+    sig: @Monitor = cast.unwrap()
     Console.show("  parked, {count_waiters(sig)} on the wait list")
     rf_signal_cast_one(sig)
     return
 
 ### As rf_sched_park_external, until a cast or the delay has passed.
 routine rf_sched_park_deadline(delay_ns: U64) -> None
-    sig: @Monitor = CAST_DURING_PARK.peek()
-    if sig.is_hollow()
+    cast: @Monitor? = CAST_DURING_PARK.peek()
+    if cast.is_absent()
         Console.show("  parked with a deadline, no cast comes")
         sleep_until(Clock.monotonic() + Duration.from_nanoseconds(delay_ns.to[S64]()))
         return
     else
         Console.show("  parked with a deadline, a cast comes")
-        rf_signal_cast_one(sig)
+        rf_signal_cast_one(cast.unwrap())
         return
 
 # -- helpers -------------------------------------------------------------------------
@@ -136,9 +137,9 @@ routine sleep_until(deadline: Duration) -> None
 routine count_waiters(sig: @Monitor) -> U64
     found: &U64 <- 0
 
-    until w.is_hollow() with w: @ChannelWaiter = sig.waiters.peek()
+    until w.is_absent() with w: @ChannelWaiter? = sig.waiters.peek()
         (found.load() + 1).poke_into(found)
-        continue with w: w.next.peek()
+        continue with w: w.unwrap().next.peek()
     then
         return found.load()
 
@@ -274,7 +275,7 @@ routine coroutines(sig: @Monitor) -> None
     Console.show("a coroutine waits with a deadline:")
     cast: U32 = rf_signal_wait_deadline(sig, timeout_ns: 1000000000)
     Console.show("  result {cast}, {count_waiters(sig)} on the wait list")
-    CAST_DURING_PARK.poke(.hollow())
+    CAST_DURING_PARK.zeroinit(1)
     late: U32 = rf_signal_wait_deadline(sig, timeout_ns: 2000000)
     Console.show("  result {late}, {count_waiters(sig)} on the wait list")
     rf_signal_unlock(sig)
@@ -283,9 +284,9 @@ routine coroutines(sig: @Monitor) -> None
     rf_signal_cast_one(sig)
     Console.show("cast_all:")
     rf_signal_cast_all(sig)
-    sig.waiters.poke(.hollow())
-    CURRENT_SCHED.poke(.hollow())
-    CURRENT_CORO.poke(.hollow())
+    sig.waiters.zeroinit(1)
+    CURRENT_SCHED.zeroinit(1)
+    CURRENT_CORO.zeroinit(1)
     return
 
 routine start() -> None
