@@ -416,8 +416,8 @@ routine print_platform_stack(fault: U64) -> None
 # -- fault handlers: Windows ---------------------------------------------------------
 
 ### The program's report for a stack overflow (Ingrid/tessera/crash.te, linked into the program, where the crash
-### trace lives): set at startup through rf_set_stack_overflow_report, null until then.
-lateinit global STACK_OVERFLOW_REPORT: &Callable[(U64,), None]
+### trace lives): set at startup through rf_set_stack_overflow_report, None until then.
+global STACK_OVERFLOW_REPORT: &(Callable[(U64,), None]?)
 
 ### Win32's `AddVectoredExceptionHandler`: registers a handler every exception passes through.
 ### :param first: Nonzero to call it before the handlers already registered.
@@ -483,14 +483,14 @@ routine exception_handler(pointers: @Addr) -> CInt
     exception: Addr = pointers.peek()
     code: U32 = exception.to[@U32]().peek()
     if code == 0xC00000FD
-        report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
-        if report.addr().is_hollow()
+        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.peek()
+        if report.is_absent()
             return 0
         low: &CSize <- 0
         high: &CSize <- 0
         c_get_current_thread_stack_limits(low, high)
         size: U64 = (high.load() - low.load()).to[U64]()
-        report.call(size)
+        report.unwrap().call(size)
         return 0
     if TRACE_MODE.peek() == TRACE_NONE
         return 0
@@ -561,9 +561,9 @@ routine sigbus() -> CInt
 routine fault_handler(event: CpuEvent) -> None
     rf_console_flush_on_fault()
     if event.ran_out_of_stack()
-        report: Callable[(U64,), None] = STACK_OVERFLOW_REPORT.peek()
-        if report.addr().is_not_hollow()
-            report.call(StackManager.current().size().bytes())
+        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.peek()
+        if report.is_present()
+            report.unwrap().call(StackManager.current().size().bytes())
     if not (TRACE_MODE.peek() == TRACE_NONE)
         name: @[Byte] = signal_name(event.code.to[CInt]()).getview()
         if Console.errors().is_terminal()
@@ -613,5 +613,5 @@ routine rf_thread_stack_release() -> None
 @target(os: not "windows")
 routine install_fault_handlers() -> None
     bounds: @StackManager = StackManager.current()
-    before: Callable[(CpuEvent,), None] = CpuEventManager.when_faulted(fault_handler.to[Callable]())
+    before: Callable[(CpuEvent,), None]? = CpuEventManager.when_faulted(fault_handler.to[Callable]())
     return
