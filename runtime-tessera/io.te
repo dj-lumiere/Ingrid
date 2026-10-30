@@ -51,11 +51,11 @@ routine length_of(s: @Byte, n: S32) -> U64
 ### :param s: The string.
 ### :param n: The length, or negative for a NUL-terminated `s`.
 ### :returns: The copy the caller frees, or null when the allocation fails.
-routine strdupn(s: @Byte, n: S32) -> @Byte
+routine strdupn(s: @Byte, n: S32) -> @Byte?
     len: U64 = length_of(s, n)
     d: Addr = c_malloc((len + 1).to[CSize]())
     if d.is_hollow()
-        return .hollow()
+        return None()
     c_memcpy(d, s, len.to[CSize]())
     terminator: @Byte = d.to[@Byte]().stride(len)
     terminator.poke(0x00)
@@ -65,8 +65,8 @@ routine strdupn(s: @Byte, n: S32) -> @Byte
 
 global IO_GUARD: &U8
 global IO_WORK: &SignalCaster
-global IO_HEAD: &@IoReq
-global IO_TAIL: &@IoReq
+global IO_HEAD: &(@IoReq?)
+global IO_TAIL: &(@IoReq?)
 ### 1 once the I/O threads run. Until then the work runs inline.
 global IO_OK: &U32
 ### The length of the last read, set just before rf_io_read_file_all returns and read right after.
@@ -78,15 +78,15 @@ global IO_LAST_FAILED: &Bool
 
 record IoReq
     kind: U32
-    sched: @Sched  # the parked coroutine's scheduler
-    coro: @Coro
-    qnext: @IoReq
+    sched: @Sched?  # the parked coroutine's scheduler
+    coro: @Coro?
+    qnext: @IoReq?
     path: @Byte  # a NUL-terminated copy
-    data: @Byte  # read: the contents (the caller frees them); write: a copy of the payload
+    data: Addr  # read: the contents (the caller frees them); write: a copy of the payload
     data_len: S64
     result: S64  # bytes read or written, negative on an error
-    proc: @ProcState
-    call: Callable[(Addr), None]  # IO_CALL: the routine to run, with call_arg
+    proc: @ProcState?
+    call: Callable[(Addr), None]?  # IO_CALL: the routine to run, with call_arg
     call_arg: Addr
 
 ### The length of this thread's last {rf_io_read_file_all}.
@@ -109,7 +109,7 @@ routine io_do_work(req: @IoReq) -> None
     kind: U32 = req.kind.peek()
     when
         kind == IO_READ_FILE =>
-            data: &@Byte <- .hollow()
+            data: &Addr <- .hollow()
             got: S64 = read_whole_file(cpath: req.path.peek(), data)
             if not (got >= 0)
                 # The failure's reason code, negated, for the caller's thread to record.
@@ -123,11 +123,11 @@ routine io_do_work(req: @IoReq) -> None
                 len: req.data_len.peek()))
             return
         kind == IO_CALL =>
-            body: Callable[(Addr,), None] = req.call.peek()
+            body: Callable[(Addr,), None] = req.call.peek().unwrap()
             body.call(req.call_arg.peek())
             return
         else =>
-            proc_run_blocking(req.proc.peek())
+            proc_run_blocking(req.proc.peek().unwrap())
             return
 
 ### An I/O thread: takes requests in order, runs each, and wakes its coroutine (which then reads the results).
@@ -137,14 +137,15 @@ routine io_thread_main(guard: @U8) -> None
         rf_thread_stack_guarantee()
         held: Authorized[U8] <- guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
-        until not req.is_hollow() with req: @IoReq = IO_HEAD.peek()
+        until queued.is_present() with queued: @IoReq? = IO_HEAD.peek()
             IO_WORK.wait(held)
-            continue with req: IO_HEAD.peek()
+            continue with queued: IO_HEAD.peek()
         then
-            next: @IoReq = req.qnext.peek()
+            req: @IoReq = queued.unwrap()
+            next: @IoReq? = req.qnext.peek()
             IO_HEAD.poke(next)
-            if next.is_hollow()
-                IO_TAIL.poke(.hollow())
+            if next.is_absent()
+                IO_TAIL.poke(None())
             drop held
             io_do_work(req)
             rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
@@ -168,12 +169,10 @@ routine rf_io_runtime_init() -> None
 ### :param req: The request.
 routine io_submit(req: @IoReq) -> None
     held: Authorized[U8] <- IO_GUARD.get_exclusive_access()
-    req.qnext.poke(.hollow())
-    tail: @IoReq = IO_TAIL.peek()
-    if tail.is_hollow()
-        IO_HEAD.poke(req)
-    else
-        tail.qnext.poke(req)
+    req.qnext.poke(None())
+    when IO_TAIL.peek()
+        is @IoReq as tail => tail.qnext.poke(req)
+        is None => IO_HEAD.poke(req)
     IO_TAIL.poke(req)
     IO_WORK.cast_one()
     drop held
@@ -184,9 +183,10 @@ routine io_submit(req: @IoReq) -> None
 ### :param req: The request.
 routine io_run(req: @IoReq) -> None
     if IO_OK.peek() == 1
-        sched: @Sched = rf_sched_current()
-        this_coro: @Coro = current_coro()
-        if not (sched.is_hollow() or this_coro.is_hollow())
+        sched_or_none: @Sched? = rf_sched_current()
+        this_coro: @Coro? = current_coro()
+        if sched_or_none.is_present() and this_coro.is_present()
+            sched: @Sched = sched_or_none.unwrap()
             req.sched.poke(sched)
             req.coro.poke(this_coro)
             rf_sched_arm_cross_waker(sched)
@@ -207,10 +207,10 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate async I/O request")
     req.kind.poke(kind)
     req.result.poke(-1)
-    copy: @Byte = strdupn(s: path, n: path_len)
-    if copy.is_hollow()
+    copy: @Byte? = strdupn(s: path, n: path_len)
+    if copy.is_absent()
         rf_throw(error_type: "OutOfMemoryError", message: "Failed to allocate async I/O path")
-    req.path.poke(copy)
+    req.path.poke(copy.unwrap())
     return req
 
 ### Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
@@ -221,10 +221,10 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
 ### :returns: The contents, or null.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 @export("rf_io_read_file_all")
-routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte
+routine rf_io_read_file_all(path: @Byte, path_len: S32) -> Addr
     req: @IoReq = io_req_new(kind: IO_READ_FILE, path, path_len)
     io_run(req)
-    data: @Byte = req.data.peek()
+    data: Addr = req.data.peek()
     result: S64 = req.result.peek()
     c_free(req.path.peek())
     c_free(req)
@@ -257,7 +257,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
             rf_throw(error_type: "OutOfMemoryError",
                 message: "Failed to allocate async I/O write buffer")
         c_memcpy(buf, data, len.to[CSize]())
-        req.data.poke(buf.to[@Byte]())
+        req.data.poke(buf)
     io_run(req)
     result: S64 = req.result.peek()
     IO_LAST_FAILED.poke(result < 0)
@@ -300,31 +300,34 @@ routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> None
     return
 
 ### Runs nothing: reports whether the runtime would go on.
-### :param runtime: The runtime object, or null.
+### :param runtime_or_none: The runtime object, or null.
 ### :returns: 0 when `runtime` is null or stopped, else 1.
 @export("rf_async_runtime_run_once")
-routine rf_async_runtime_run_once(runtime: @AsyncRuntime) -> CInt
-    if runtime.is_hollow()
+routine rf_async_runtime_run_once(runtime_or_none: @AsyncRuntime?) -> CInt
+    if runtime_or_none.is_absent()
         return 0
+    runtime: @AsyncRuntime = runtime_or_none.unwrap()
     if runtime.should_stop.peek()
         return 0
     return 1
 
 ### Runs nothing: reports whether there is a runtime.
-### :param runtime: The runtime object, or null.
+### :param runtime_or_none: The runtime object, or null.
 ### :returns: 0 when `runtime` is null, else 1.
 @export("rf_async_runtime_run_default")
-routine rf_async_runtime_run_default(runtime: @AsyncRuntime) -> CInt
-    if runtime.is_hollow()
+routine rf_async_runtime_run_default(runtime_or_none: @AsyncRuntime?) -> CInt
+    if runtime_or_none.is_absent()
         return 0
+    runtime: @AsyncRuntime = runtime_or_none.unwrap()
     return 1
 
 ### Marks the runtime stopped. A null `runtime` does nothing.
-### :param runtime: The runtime object.
+### :param runtime_or_none: The runtime object.
 @export("rf_async_runtime_stop")
-routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> None
-    if runtime.is_hollow()
+routine rf_async_runtime_stop(runtime_or_none: @AsyncRuntime?) -> None
+    if runtime_or_none.is_absent()
         return
+    runtime: @AsyncRuntime = runtime_or_none.unwrap()
     runtime.should_stop.poke(true)
     return
 
@@ -338,11 +341,11 @@ routine rf_async_runtime_stop(runtime: @AsyncRuntime) -> None
 global PROC_SIGNAL: &CInt
 
 @threadlocal
-global PROC_OUT: &@Byte
+global PROC_OUT: &(@Byte?)
 @threadlocal
 global PROC_OUT_LEN: &U64
 @threadlocal
-global PROC_ERR: &@Byte
+global PROC_ERR: &(@Byte?)
 @threadlocal
 global PROC_ERR_LEN: &U64
 
@@ -360,9 +363,9 @@ record ProcState
     exit_status: S64
     term_signal: CInt  # the signal that stopped the child, or 0
     spawn_failed: Bool
-    output: @Byte  # a malloc'd, NUL-terminated copy of the captured standard output, or null
+    output: @Byte?  # a malloc'd, NUL-terminated copy of the captured standard output, or null
     output_count: U64
-    errors: @Byte  # a malloc'd, NUL-terminated copy of the captured standard error, or null
+    errors: @Byte?  # a malloc'd, NUL-terminated copy of the captured standard error, or null
     errors_count: U64
 
 ### Makes a `ProcState` from its fields.
@@ -385,7 +388,7 @@ record ProcState
 ### :returns: The new value.
 common routine ProcState.construct(shell: Bool, program: @[Byte], args: @@[Byte], arg_count: U64,
     arg_cap: U64, directory: @[Byte], env: @EnvVar, env_count: U64, env_cap: U64, exit_status: S64,
-    term_signal: CInt, spawn_failed: Bool, output: @Byte, output_count: U64, errors: @Byte,
+    term_signal: CInt, spawn_failed: Bool, output: @Byte?, output_count: U64, errors: @Byte?,
     errors_count: U64) -> Me
     return Me(shell, program, args, arg_count, arg_cap, directory, env, env_count, env_cap,
         exit_status, term_signal, spawn_failed, output, output_count, errors, errors_count)
@@ -403,7 +406,7 @@ routine rf_proc_term_signal() -> S32
 ### The captured stdout of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
 @export("rf_proc_output")
-routine rf_proc_output() -> @Byte
+routine rf_proc_output() -> @Byte?
     return PROC_OUT.peek()
 
 ### The length of the captured stdout of this thread's last subprocess.
@@ -415,7 +418,7 @@ routine rf_proc_output_len() -> U64
 ### The captured stderr of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
 @export("rf_proc_errors")
-routine rf_proc_errors() -> @Byte
+routine rf_proc_errors() -> @Byte?
     return PROC_ERR.peek()
 
 ### The length of the captured stderr of this thread's last subprocess.
@@ -477,14 +480,14 @@ routine proc_state_free(st: @ProcState) -> None
 ### A malloc'd, NUL-terminated copy of the captured bytes: what RazorForge reads and frees.
 ### :param b: The captured bytes.
 ### :returns: The copy, or null when there is nothing captured or the copy can't be allocated (or nothing was).
-routine terminated(b: @BorrowedSlice[Byte]) -> @Byte
+routine terminated(b: @BorrowedSlice[Byte]) -> @Byte?
     data: @Byte = b.data.peek()
-    if data.is_hollow()
-        return .hollow()
+    if data.to[Addr]().is_hollow()
+        return None()
     n: U64 = b.count()
     buf: Addr = c_malloc((n + 1).to[CSize]())
     if buf.is_hollow()
-        return .hollow()
+        return None()
     c_memcpy(buf, data, n.to[CSize]())
     buf.to[@Byte]().stride(n).poke(0x00)
     return buf.to[@Byte]()
@@ -578,13 +581,14 @@ routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
 
 ### Appends an argument to a subprocess being built. A null `b` does nothing, and when the argument list can't grow
 ### the argument is dropped.
-### :param b: The subprocess state.
+### :param b_or_none: The subprocess state.
 ### :param arg: The argument.
 ### :param arg_len: Its length, or negative for a NUL-terminated `arg`.
 @export("rf_proc_add_arg")
-routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> None
-    if b.is_hollow()
+routine rf_proc_add_arg(b_or_none: @ProcState?, arg: @Byte, arg_len: S32) -> None
+    if b_or_none.is_absent()
         return
+    b: @ProcState = b_or_none.unwrap()
     n: U64 = b.arg_count.peek()
     if not (n < b.arg_cap.peek())
         doubled: U64 = b.arg_cap.peek() * 2
@@ -601,28 +605,30 @@ routine rf_proc_add_arg(b: @ProcState, arg: @Byte, arg_len: S32) -> None
 
 ### Sets the working directory of a subprocess being built. An empty directory inherits the parent's. A null `b` does
 ### nothing.
-### :param b: The subprocess state.
+### :param b_or_none: The subprocess state.
 ### :param cwd: The directory.
 ### :param cwd_len: Its length, or negative for a NUL-terminated `cwd`.
 @export("rf_proc_set_cwd")
-routine rf_proc_set_cwd(b: @ProcState, cwd: @Byte, cwd_len: S32) -> None
-    if b.is_hollow()
+routine rf_proc_set_cwd(b_or_none: @ProcState?, cwd: @Byte, cwd_len: S32) -> None
+    if b_or_none.is_absent()
         return
+    b: @ProcState = b_or_none.unwrap()
     free_bytes(b.directory.peek())
     b.directory.poke(owned_copy(s: cwd, n: cwd_len))
     return
 
 ### An environment override, merged into the parent's environment at launch (PATH and the rest stay). A null `b` does
 ### nothing, and when the list can't grow the override is dropped.
-### :param b: The subprocess state.
+### :param b_or_none: The subprocess state.
 ### :param key: The variable's name.
 ### :param key_len: Its length, or negative for a NUL-terminated `key`.
 ### :param val: The variable's value.
 ### :param val_len: Its length, or negative for a NUL-terminated `val`.
 @export("rf_proc_add_env")
-routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> None
-    if b.is_hollow()
+routine rf_proc_add_env(b_or_none: @ProcState?, key: @Byte, key_len: S32, val: @Byte, val_len: S32) -> None
+    if b_or_none.is_absent()
         return
+    b: @ProcState = b_or_none.unwrap()
     n: U64 = b.env_count.peek()
     if not (n < b.env_cap.peek())
         doubled: U64 = b.env_cap.peek() * 2
@@ -638,13 +644,14 @@ routine rf_proc_add_env(b: @ProcState, key: @Byte, key_len: S32, val: @Byte, val
     return
 
 ### Runs a subprocess built with {rf_proc_begin}, and frees its state.
-### :param b: The subprocess state, or null.
+### :param b_or_none: The subprocess state, or null.
 ### :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start or `b` is null.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 @export("rf_proc_run_built")
-routine rf_proc_run_built(b: @ProcState) -> S64
-    if b.is_hollow()
+routine rf_proc_run_built(b_or_none: @ProcState?) -> S64
+    if b_or_none.is_absent()
         return -1
+    b: @ProcState = b_or_none.unwrap()
     return proc_exec(b)
 
 ### Runs body(arg) for a call of a foreign routine marked @blocking: inside a scheduler-driven coroutine on an I/O

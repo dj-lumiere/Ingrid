@@ -20,30 +20,29 @@ preset ACCESS_POLL: Duration = 50us
 
 ### How a waiting agent parks: a coroutine on a short timer (so the holder can run on its worker), a plain thread by
 ### running one of its start_here() jobs, else by sleeping on the access's word. It may return early.
-### :param word: The word the agent waits on, hollow when there is none.
+### :param word: The word the agent waits on, or None.
 ### :param expected: The value the word holds while the wait goes on.
 ### :param deadline: When to stop, in `Clock.monotonic()` time, `Duration.MAX` for none.
-routine access_park(word: @U32, expected: U32, deadline: Duration) -> None
+routine access_park(word: @U32?, expected: U32, deadline: Duration) -> None
     now: Duration = Clock.monotonic()
-    this_coro: @Coro = current_coro()
 
     if deadline != Duration.MAX and now >= deadline
         return
     left: Duration = when
         deadline == Duration.MAX => ACCESS_POLL
         else => (deadline - now).min(ACCESS_POLL)
-    if this_coro.is_not_hollow() and current_sched().is_not_hollow()
+    if current_coro().is_present() and current_sched().is_present()
         rf_sched_park_timer(ns_of(left))
         return
     if run_here_ready()
         return
-    if word.is_hollow() or here_has_live()
+    if word.is_absent() or here_has_live()
         waitfor(left)
         return
     if deadline == Duration.MAX
-        wait_on(at: word, expected)
+        wait_on(at: word.unwrap(), expected)
         return
-    wait_on_for(at: word, expected, timeout: deadline - now)
+    wait_on_for(at: word.unwrap(), expected, timeout: deadline - now)
     return
 
 ### Sets the AccessManager up for this program: its checks, the language its reports speak (1 RazorForge, 2 Suflae),

@@ -73,14 +73,14 @@ routine empty_map() -> @Byte
 
 ### A failure: no buffer, length 0.
 ### :returns: Null.
-routine no_result() -> @Byte
+routine no_result() -> @Byte?
     RESULT_LEN.poke(0)
-    return .hollow()
+    return None()
 
 ### A failure for the reason `error`: no buffer, length 0, the reason recorded.
 ### :param error: The reason.
 ### :returns: Null.
-routine failed_result(error: FsError) -> @Byte
+routine failed_result(error: FsError) -> @Byte?
     LAST_ERROR.poke(reason_code(error))
     return no_result()
 
@@ -88,7 +88,7 @@ routine failed_result(error: FsError) -> @Byte
 ### :param buf: The result buffer.
 ### :param len: Its length.
 ### :returns: `buf`.
-routine result(buf: @Byte, len: U64) -> @Byte
+routine result(buf: @Byte, len: U64) -> @Byte?
     RESULT_LEN.poke(len)
     return buf
 
@@ -96,7 +96,7 @@ routine result(buf: @Byte, len: U64) -> @Byte
 ### :param s: The bytes.
 ### :param len: The number of bytes.
 ### :returns: The buffer, or null (length 0) when the allocation fails.
-routine bytes_result(s: @Byte, len: U64) -> @Byte
+routine bytes_result(s: Addr, len: U64) -> @Byte?
     buf: Addr = c_malloc((len + 1).to[CSize]())
     if buf.is_hollow()
         return no_result()
@@ -109,11 +109,11 @@ routine bytes_result(s: @Byte, len: U64) -> @Byte
 ### dropped.
 ### :param r: The directory, or the failure.
 ### :returns: The path, or null (length 0) on a failure.
-routine path_result(r: Check[Directory]) -> @Byte
+routine path_result(r: Check[Directory]) -> @Byte?
     when steal r
         is Directory as d =>
             path: @[Byte] = d.path.peek()
-            copied: @Byte = bytes_result(s: path.data, len: path.count)
+            copied: @Byte? = bytes_result(s: path.data, len: path.count)
             drop d
             return copied
         is FsError as error => return failed_result(error)
@@ -121,11 +121,11 @@ routine path_result(r: Check[Directory]) -> @Byte
 ### A File's path copied into a malloc'd, NUL-terminated buffer, as the result. The file's own memory is dropped.
 ### :param r: The file, or the error that stopped it.
 ### :returns: The copied path, or null on a failure.
-routine file_path_result(r: Check[File]) -> @Byte
+routine file_path_result(r: Check[File]) -> @Byte?
     when steal r
         is File as f =>
             path: @[Byte] = f.path.peek()
-            copied: @Byte = bytes_result(s: path.data, len: path.count)
+            copied: @Byte? = bytes_result(s: path.data, len: path.count)
             drop f
             return copied
         is FsError as error => return failed_result(error)
@@ -159,7 +159,7 @@ routine seconds(ns: S64) -> S64
 # -- a growing NUL-terminated buffer, for results -------------------------------------
 
 record ResultBuffer
-    buf: @Byte
+    buf: Addr
     len: U64
     cap: U64
 
@@ -168,7 +168,7 @@ record ResultBuffer
 ### :returns: False when the allocation fails.
 routine @ResultBuffer.start(cap: U64) -> Bool
     buf: Addr = c_malloc(cap.max(16).to[CSize]())
-    me.buf.poke(buf.to[@Byte]())
+    me.buf.poke(buf)
     me.len.poke(0)
     me.cap.poke(cap.max(16))
     return buf.is_not_hollow()
@@ -185,7 +185,7 @@ routine @ResultBuffer.room(n: U64) -> Bool
         bigger: Addr = c_realloc(me.buf.peek(), cap.to[CSize]())
         if bigger.is_hollow()
             return false
-        me.buf.poke(bigger.to[@Byte]())
+        me.buf.poke(bigger)
         me.cap.poke(cap)
         return true
     return true
@@ -194,7 +194,7 @@ routine @ResultBuffer.room(n: U64) -> Bool
 ### :param data: The bytes.
 ### :param n: The number of bytes.
 routine @ResultBuffer.add_bytes(data: @Byte, n: U64) -> None
-    c_memcpy(me.buf.peek().stride(me.len.peek()), data, n.to[CSize]())
+    c_memcpy(me.buf.peek().to[@Byte]().stride(me.len.peek()), data, n.to[CSize]())
     next_len: U64 = me.len.peek() + n
     next_len.poke_into(me.len)
     return
@@ -202,7 +202,7 @@ routine @ResultBuffer.add_bytes(data: @Byte, n: U64) -> None
 ### Appends one byte, for which {ResultBuffer.room} made room.
 ### :param b: The byte.
 routine @ResultBuffer.byte(b: Byte) -> None
-    slot: @Byte = me.buf.peek().stride(me.len.peek())
+    slot: @Byte = me.buf.peek().to[@Byte]().stride(me.len.peek())
     slot.poke(b)
     next_len: U64 = me.len.peek() + 1
     next_len.poke_into(me.len)
@@ -210,15 +210,15 @@ routine @ResultBuffer.byte(b: Byte) -> None
 
 ### NUL-terminates the buffer and hands it over as the result.
 ### :returns: The buffer, its length recorded as the result's.
-routine @ResultBuffer.finish() -> @Byte
+routine @ResultBuffer.finish() -> @Byte?
     n: U64 = me.len.peek()
-    terminator: @Byte = me.buf.peek().stride(n)
+    terminator: @Byte = me.buf.peek().to[@Byte]().stride(n)
     terminator.poke(0x00)
-    return result(buf: me.buf.peek(), len: n)
+    return result(buf: me.buf.peek().to[@Byte](), len: n)
 
 ### Frees the buffer and records a failure.
 ### :returns: Null.
-routine @ResultBuffer.fail() -> @Byte
+routine @ResultBuffer.fail() -> @Byte?
     c_free(me.buf.peek())
     return no_result()
 
@@ -260,13 +260,13 @@ routine @OpenFile.destruct() -> None
 ### The open file for a handle, or null.
 ### :param fd: The handle.
 ### :returns: The open file, or null when `fd` is out of range or not open.
-routine open_file(fd: S32) -> @OpenFile
+routine open_file(fd: S32) -> @OpenFile?
     if fd < 0 or fd >= 256
-        return .hollow()
+        return None()
     of: @OpenFile = FILE_TABLE.getview().to[@OpenFile]().stride(fd.to[U64]())
     if of.used.peek()
         return of
-    return .hollow()
+    return None()
 
 ### Opens the file at `path` for reading (mode 0), writing, emptied first (1), or appending (2).
 ### :param path: The file's path.
@@ -351,9 +351,10 @@ routine @OpenFile.refill() -> Bool
 ### :param fd: The handle.
 @export("rf_file_close")
 routine rf_file_close(fd: S32) -> None
-    of: @OpenFile = open_file(fd)
-    if of.is_hollow()
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
         return
+    of: @OpenFile = found.unwrap()
     of.drain()
     of.file.close()
     c_free(of.buffer.peek())
@@ -364,12 +365,13 @@ routine rf_file_close(fd: S32) -> None
 ### :param fd: The handle.
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't grow.
 @export("rf_file_read_all")
-routine rf_file_read_all(fd: S32) -> @Byte
-    of: @OpenFile = open_file(fd)
+routine rf_file_read_all(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_hollow()
+    if found.is_absent()
         return no_result()
+    of: @OpenFile = found.unwrap()
     if not out.start(FILE_BUFFER)
         return out.fail()
 
@@ -381,7 +383,7 @@ routine rf_file_read_all(fd: S32) -> @Byte
     of.start.poke(of.end.peek())
 
     until not out.room(FILE_BUFFER)
-        at: @Byte = out.buf.peek().stride(out.len.peek())
+        at: @Byte = out.buf.peek().to[@Byte]().stride(out.len.peek())
         got: Check[U64] = check of.file.read_bytes(buffer: at, count: FILE_BUFFER)
         n: U64 = when got
             is U64 as n => n
@@ -399,12 +401,13 @@ routine rf_file_read_all(fd: S32) -> @Byte
 ### :param fd: The handle.
 ### :returns: The line, or null (length 0) for a handle not open or when the buffer can't grow.
 @export("rf_file_read_line")
-routine rf_file_read_line(fd: S32) -> @Byte
-    of: @OpenFile = open_file(fd)
+routine rf_file_read_line(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_hollow()
+    if found.is_absent()
         return no_result()
+    of: @OpenFile = found.unwrap()
     if out.start(256)
         until of.start.peek() >= of.end.peek() and not of.refill()
             at: U64 = of.start.peek()
@@ -429,12 +432,13 @@ routine rf_file_read_line(fd: S32) -> @Byte
 ### :param count: The most bytes to read.
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
 @export("rf_file_read_bytes")
-routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
-    of: @OpenFile = open_file(fd)
+routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte?
+    found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
 
-    if of.is_hollow()
+    if found.is_absent()
         return no_result()
+    of: @OpenFile = found.unwrap()
     if out.start(count + 1)
         loop
             wanted2: U64 = count - out.len.peek()
@@ -458,10 +462,11 @@ routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte
 ### :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
 @export("rf_file_write")
 routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
-    of: @OpenFile = open_file(fd)
+    found: @OpenFile? = open_file(fd)
 
-    if of.is_hollow()
+    if found.is_absent()
         return 0
+    of: @OpenFile = found.unwrap()
     needed: U64 = of.end.peek() + len
     if needed > FILE_BUFFER
         if not of.drain()
@@ -480,9 +485,10 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
 ### :param fd: The handle.
 @export("rf_file_flush")
 routine rf_file_flush(fd: S32) -> None
-    of: @OpenFile = open_file(fd)
-    if of.is_hollow()
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
         return
+    of: @OpenFile = found.unwrap()
     of.drain()
     return
 
@@ -491,9 +497,10 @@ routine rf_file_flush(fd: S32) -> None
 ### :returns: True at the end, or for a handle not open.
 @export("rf_file_is_eof")
 routine rf_file_is_eof(fd: S32) -> Bool
-    of: @OpenFile = open_file(fd)
-    if of.is_hollow()
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
         return true
+    of: @OpenFile = found.unwrap()
     return of.eof.peek() and (of.start.peek() >= of.end.peek())
 
 # -- whole files, for the I/O threads (io.te) ---------------------------------------
@@ -504,7 +511,7 @@ routine rf_file_is_eof(fd: S32) -> Bool
 ### :param cpath: The NUL-terminated path.
 ### :param data: Where the buffer goes.
 ### :returns: The length, or a negative reason code on a failure.
-routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
+routine read_whole_file(cpath: @Byte, data: @Addr) -> S64
     manager: @MemoryManager = heap()
 
     when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), manager)
@@ -517,7 +524,7 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
             buf.to[@Byte]().copy(src: text.data.peek(), count: n)
             buf.to[@Byte]().stride(n).poke(0x00)
             drop text
-            data.poke(buf.to[@Byte]())
+            data.poke(buf)
             return n.to[S64]()
         is FsError as error => return 0 - reason_code(error).to[S64]()
 
@@ -527,9 +534,12 @@ routine read_whole_file(cpath: @Byte, data: @@Byte) -> S64
 ### :param data: The bytes.
 ### :param len: The number of bytes, negative for none.
 ### :returns: The bytes written, or a negative reason code on a failure.
-routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
+routine write_whole_file(cpath: @Byte, data: Addr, len: S64) -> S64
+    bytes: @[Byte] = when
+        len <= 0 => .hollow()
+        else => @[Byte].construct(data: data.to[@Byte](), count: len.to[U64]())
     r: Check[None] = check OsFileManager.write_all(at: File.at(cpath.to[CStrView]().getview()),
-        data: @[Byte].construct(data, count: len.max(0).to[U64]()))
+        data: bytes)
     when r
         is None => return len.max(0)
         is FsError as error => return 0 - reason_code(error).to[S64]()
@@ -544,7 +554,7 @@ routine write_whole_file(cpath: @Byte, data: @Byte, len: S64) -> S64
 ### :param b_len: Its length.
 ### :returns: The joined path, or null (length 0) when the allocation fails.
 @export("rf_fs_join_path")
-routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
+routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte?
     first: @[Byte] = path_of(path: a, len: a_len)
     second: @[Byte] = path_of(path: b, len: b_len)
     out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
@@ -563,12 +573,12 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The parent, or null (length 0) when the allocation fails.
 @export("rf_fs_parent_path")
-routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
+routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
     parent: &Directory <- file.parent()
 
     p: @[Byte] = parent.path.peek()
-    copied: @Byte = bytes_result(s: p.data, len: p.count())
+    copied: @Byte? = bytes_result(s: p.data, len: p.count())
     drop parent
     drop file
     return copied
@@ -578,11 +588,11 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The name, or null (length 0) when the allocation fails.
 @export("rf_fs_file_name")
-routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
+routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     n: @[Byte] = file.name()
-    copied: @Byte = bytes_result(s: n.data, len: n.count())
+    copied: @Byte? = bytes_result(s: n.data, len: n.count())
     drop file
     return copied
 
@@ -591,11 +601,11 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The stem, or null (length 0) when the allocation fails.
 @export("rf_fs_file_stem")
-routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
+routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     s: @[Byte] = file.stem()
-    copied: @Byte = bytes_result(s: s.data, len: s.count())
+    copied: @Byte? = bytes_result(s: s.data, len: s.count())
     drop file
     return copied
 
@@ -604,11 +614,11 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The extension, or null (length 0) when the allocation fails.
 @export("rf_fs_extension")
-routine rf_fs_extension(path: @Byte, len: S32) -> @Byte
+routine rf_fs_extension(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     e: @[Byte] = file.extension()
-    copied: @Byte = bytes_result(s: e.data, len: e.count())
+    copied: @Byte? = bytes_result(s: e.data, len: e.count())
     drop file
     return copied
 
@@ -895,7 +905,7 @@ routine @ResultBuffer.entry(name: @[Byte], typed: Bool, is_dir: Bool, mtime: S64
 ### :param len: Its length.
 ### :param typed: True for `<d|f><mtime> <name>` entries, false for names only.
 ### :returns: The listing, or null (length 0) when the directory can't be opened or the buffer can't grow.
-routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
+routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte?
     out: &ResultBuffer <- ResultBuffer(buf: .hollow(), len: 0, cap: 0)
     iter: &DirEmitter <- .hollow()
 
@@ -932,7 +942,7 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte
 ### :param len: Its length.
 ### :returns: The listing, or null (length 0) on a failure.
 @export("rf_fs_list_dir")
-routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte
+routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte?
     return list_directory(path, len, typed: false)
 
 ### `<d|f><mtime> <name>` per entry, '\n' between them.
@@ -940,7 +950,7 @@ routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The listing, or null (length 0) on a failure.
 @export("rf_fs_list_dir_typed")
-routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte
+routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
     return list_directory(path, len, typed: true)
 
 # -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
@@ -1015,7 +1025,7 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 ### The working directory.
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_current_dir")
-routine rf_fs_current_dir() -> @Byte
+routine rf_fs_current_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.working_directory(manager))
@@ -1023,7 +1033,7 @@ routine rf_fs_current_dir() -> @Byte
 ### The directory for temporary files.
 ### :returns: The path, or null (length 0) on a failure.
 @export("rf_fs_temp_dir")
-routine rf_fs_temp_dir() -> @Byte
+routine rf_fs_temp_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.temp_directory(manager))
@@ -1031,7 +1041,7 @@ routine rf_fs_temp_dir() -> @Byte
 ### The user's home directory, or null when it can't be told.
 ### :returns: The path, or null (length 0).
 @export("rf_fs_home_dir")
-routine rf_fs_home_dir() -> @Byte
+routine rf_fs_home_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.home_directory(manager))
@@ -1058,7 +1068,7 @@ routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
 ### :param len: Its length.
 ### :returns: The absolute path, or null (length 0) on a failure.
 @export("rf_fs_absolute_path")
-routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
+routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte?
     manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), manager))
@@ -1068,7 +1078,7 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte
 ### :param len: Its length.
 ### :returns: The canonical path, or null (length 0) on a failure.
 @export("rf_fs_canonical_path")
-routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte
+routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte?
     manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), manager))
@@ -1116,7 +1126,7 @@ failable routine map_storage(path: @[Byte], offset: U64, count: U64,
 ### :param count: The window's length, U64.MAX for the rest of the file.
 ### :param write: True to map it for writing.
 ### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
-routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
+routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte?
     MAP_DELTA.poke(0)
     when check map_storage(path, offset, count, write)
         is FileStorage[Byte] as m => return handed_on(steal m)
@@ -1126,7 +1136,7 @@ routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
 ### {rf_file_unmap} gives it back. An empty storage is the empty-map marker.
 ### :param m: The storage.
 ### :returns: The base, or the empty-map marker.
-routine handed_on(m: FileStorage[Byte]) -> @Byte
+routine handed_on(m: FileStorage[Byte]) -> @Byte?
     count: U64 = m.count()
     if count == 0
         drop m
@@ -1148,7 +1158,7 @@ routine handed_on(m: FileStorage[Byte]) -> @Byte
 ### :returns: The base, the empty-map marker for an empty window, or null on a failure (a file that can't be written
 ###     mapped for writing fails with the reason "not allowed").
 @export("rf_file_map")
-routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte
+routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte?
     return map_window(path: path_of(path, len: path_len), offset, count, write: write != 0)
 
 ### Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
@@ -1156,10 +1166,10 @@ routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: 
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
 @export("rf_file_unmap")
-routine rf_file_unmap(ptr: @Byte, len: U64) -> None
+routine rf_file_unmap(ptr: Addr, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
-    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr.to[Addr](), delta: 0, count: len)
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
     drop m
     return
 
@@ -1167,10 +1177,10 @@ routine rf_file_unmap(ptr: @Byte, len: U64) -> None
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
 @export("rf_file_map_flush")
-routine rf_file_map_flush(ptr: @Byte, len: U64) -> None
+routine rf_file_map_flush(ptr: Addr, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
-    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr.to[Addr](), delta: 0, count: len)
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
     try m.flush()
     # the mapping stays: rf_file_unmap gives it back
     m.take_mapping()

@@ -48,7 +48,7 @@ routine write_hex(value: U64, digits: U64, upper: Bool) -> None
 
 ### The program's report of a crash raised here (Ingrid/tessera/crash.te, linked into the program with the crash
 ### trace): set at startup through rf_set_crash_report, null until then.
-global CRASH_REPORT: &Callable[(CStrView, CStrView, @SourceLocation), None]
+global CRASH_REPORT: &(Callable[(CStrView, CStrView, @SourceLocation?), None]?)
 
 ### Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault. On
 ### Windows a stack overflow is reported as a crash in every mode.
@@ -128,7 +128,7 @@ routine rf_runtime_code(low: @Addr, high: @Addr) -> None
 ### startup.
 ### :param report: The report, called with the error type's name, the message, and where it happened (or null).
 @export("rf_set_crash_report")
-routine rf_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation), None]) -> None
+routine rf_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation?), None]?) -> None
     CRASH_REPORT.poke(report)
     return
 
@@ -161,7 +161,7 @@ routine write_error_title(name: @[Byte]) -> None
 @export("__rf_throw")
 @noreturn
 routine rf_throw(error_type: CStrView, message: CStrView) -> None
-    report_crash(error_type, message, place: .hollow())
+    report_crash(error_type, message, place: None())
 
 ### Reports a crash raised here and exits with the crash status. In the shadow trace mode the program's crash report
 ### writes it (where the program was, and its crash trace). Otherwise this writes the type, the message, the place
@@ -170,18 +170,20 @@ routine rf_throw(error_type: CStrView, message: CStrView) -> None
 ### :param message: What happened, or null for none.
 ### :param place: Where it happened, or null when that isn't known.
 @noreturn
-routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLocation) -> None
+routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLocation?) -> None
     rf_console_flush_crashing()
     kind: CStrView = when
-        error_type.data.is_hollow() => "Error"
+        error_type.data.to[Addr]().is_hollow() => "Error"
         else => error_type
     text: CStrView = when
-        message.data.is_hollow() => ""
+        message.data.to[Addr]().is_hollow() => ""
         else => message
     mode: CInt = TRACE_MODE.peek()
-    report: Callable[(CStrView, CStrView, @SourceLocation), None] = CRASH_REPORT.peek()
-    if mode == TRACE_SHADOW and not report.addr().is_hollow()
-        report.call(kind, text, place)
+    when CRASH_REPORT.peek()
+        is Callable[(CStrView, CStrView, @SourceLocation?), None] as report =>
+            if mode == TRACE_SHADOW
+                report.call(kind, text, place)
+        is None => nothing
     k: @[Byte] = kind.getview()
     m: @[Byte] = text.getview()
     if Console.errors().is_terminal()
@@ -189,11 +191,13 @@ routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLoca
     Console.alert("")
     write_error_title(k)
     Console.alert(": {m}", end: "")
-    if not place.is_hollow()
-        file: @[Byte] = place.file.peek()
-        line: U32 = place.line.peek()
-        column: U32 = place.column.peek()
-        Console.alert("\nat {file}:{line}:{column}", end: "")
+    when place
+        is @SourceLocation as at =>
+            file: @[Byte] = at.file.peek()
+            line: U32 = at.line.peek()
+            column: U32 = at.column.peek()
+            Console.alert("\nat {file}:{line}:{column}", end: "")
+        is None => nothing
     Console.alert("")
     if mode == TRACE_PLATFORM
         print_platform_stack(0)

@@ -12,7 +12,7 @@ import Hosted
 record Monitor
     guard: U8  # the byte whose exclusive access is the monitor's, which guards the caller's condition
     cond: SignalCaster  # plain threads wait here
-    waiters: @ChannelWaiter  # parked coroutines
+    waiters: @ChannelWaiter?  # parked coroutines
     refcount: U32
 
 ### Creates a SignalCaster monitor with one handle.
@@ -25,11 +25,12 @@ routine rf_signal_create() -> @Monitor
     return sig
 
 ### Adds a handle to the monitor, under its lock. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_add_ref")
-routine rf_signal_add_ref(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_add_ref(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     held: Authorized[U8] <- sig.guard.get_exclusive_access()
     next_refcount: U32 = sig.refcount.peek() + 1
     next_refcount.poke_into(sig.refcount)
@@ -37,11 +38,12 @@ routine rf_signal_add_ref(sig: @Monitor) -> None
     return
 
 ### Drops a handle. The monitor is freed with the last. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_drop")
-routine rf_signal_drop(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_drop(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     held: Authorized[U8] <- sig.guard.get_exclusive_access()
     refs: U32 = sig.refcount.peek()
     left: U32 = refs -^ 1
@@ -53,33 +55,36 @@ routine rf_signal_drop(sig: @Monitor) -> None
     return
 
 ### Takes the monitor lock. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_lock")
-routine rf_signal_lock(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_lock(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     AccessManager.take_exclusive(at: sig.guard, size: 1)
     return
 
 ### Releases the monitor lock. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_unlock")
-routine rf_signal_unlock(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_unlock(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     AccessManager.give_back(at: sig.guard)
     return
 
 ### Waits for a cast, holding the monitor lock: releases it, suspends, and takes it again. A coroutine parks on the
 ### scheduler, a plain thread waits on the condition. A null `sig` returns at once.
-### :param sig: The monitor, its lock held by the caller.
+### :param sig_or_none: The monitor, its lock held by the caller.
 @export("rf_signal_wait")
-routine rf_signal_wait(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_wait(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
-    sched: @Sched = rf_sched_current()
-    coro: @Coro = current_coro()
-    if sched.is_hollow() or coro.is_hollow()
+    sig: @Monitor = sig_or_none.unwrap()
+    sched_or_none: @Sched? = rf_sched_current()
+    coro_or_none: @Coro? = current_coro()
+    if sched_or_none.is_absent() or coro_or_none.is_absent()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
         # a cast may come from another thread: not a deadlock meanwhile
         # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
@@ -88,7 +93,8 @@ routine rf_signal_wait(sig: @Monitor) -> None
         return
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
-    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
+    sched: @Sched = sched_or_none.unwrap()
+    node.poke(ChannelWaiter(sched, coro: coro_or_none.unwrap(), next: sig.waiters.peek()))
     sig.waiters.poke(node)
     AccessManager.give_back(at: sig.guard)
     rf_sched_arm_cross_waker(sched)
@@ -101,17 +107,18 @@ routine rf_signal_wait(sig: @Monitor) -> None
 
 ### rf_signal_wait for at most timeout_ns: 1 if woken before the deadline (check the condition again), 0 if it
 ### passed. A null `sig` returns 0 at once.
-### :param sig: The monitor, its lock held by the caller.
+### :param sig_or_none: The monitor, its lock held by the caller.
 ### :param timeout_ns: The longest wait, in nanoseconds.
 ### :returns: 1 when woken before the deadline, 0 when it passed.
 @export("rf_signal_wait_deadline")
-routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
-    if sig.is_hollow()
+routine rf_signal_wait_deadline(sig_or_none: @Monitor?, timeout_ns: U64) -> U32
+    if sig_or_none.is_absent()
         return 0
+    sig: @Monitor = sig_or_none.unwrap()
     deadline: Duration = Clock.monotonic() +^ Duration.from_nanoseconds(timeout_ns.to_clamp[S64]())
-    sched: @Sched = rf_sched_current()
-    coro: @Coro = current_coro()
-    if sched.is_hollow() or coro.is_hollow()
+    sched_or_none: @Sched? = rf_sched_current()
+    coro_or_none: @Coro? = current_coro()
+    if sched_or_none.is_absent() or coro_or_none.is_absent()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
         # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
         lock: Authorized[U8] <- Authorized[U8].construct(at: sig.guard)
@@ -119,7 +126,8 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
         return in_time.to[U32]()
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
-    node.poke(ChannelWaiter(sched: sched, coro: coro, next: sig.waiters.peek()))
+    sched: @Sched = sched_or_none.unwrap()
+    node.poke(ChannelWaiter(sched, coro: coro_or_none.unwrap(), next: sig.waiters.peek()))
     sig.waiters.poke(node)
     AccessManager.give_back(at: sig.guard)
     rf_sched_park_deadline(timeout_ns)
@@ -131,36 +139,37 @@ routine rf_signal_wait_deadline(sig: @Monitor, timeout_ns: U64) -> U32
     return 1
 
 ### Wakes one waiter: a parked coroutine if there is one, else a thread. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_cast_one")
-routine rf_signal_cast_one(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_cast_one(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     sig.cast_one()
     return
 
 ### rf_signal_cast_one on a monitor that is there, under its lock.
 routine @Monitor.cast_one() -> None
     held: Authorized[U8] <- me.guard.get_exclusive_access()
-    w: @ChannelWaiter = me.waiters.peek()
-    if w.is_hollow()
-        me.cond.cast_one()
-    else
-        rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
+    when me.waiters.peek()
+        is @ChannelWaiter as w => rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
+        is None => me.cond.cast_one()
     drop held
     return
 
 ### Wakes every waiter: each parked coroutine and every waiting thread. A null `sig` does nothing.
-### :param sig: The monitor.
+### :param sig_or_none: The monitor.
 @export("rf_signal_cast_all")
-routine rf_signal_cast_all(sig: @Monitor) -> None
-    if sig.is_hollow()
+routine rf_signal_cast_all(sig_or_none: @Monitor?) -> None
+    if sig_or_none.is_absent()
         return
+    sig: @Monitor = sig_or_none.unwrap()
     held: Authorized[U8] <- sig.guard.get_exclusive_access()
 
-    until w.is_hollow() with w: @ChannelWaiter = sig.waiters.peek()
+    until at.is_absent() with at: @ChannelWaiter? = sig.waiters.peek()
+        w: @ChannelWaiter = at.unwrap()
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
-        continue with w: w.next.peek()
+        continue with at: w.next.peek()
     sig.cond.cast_all()
     drop held
     return
