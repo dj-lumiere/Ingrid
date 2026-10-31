@@ -7,8 +7,9 @@
 # (a write per show costs a system call and a reader's round trip per print). Buffered output still arrives: at exit
 # (registered with atexit at start-up), before every ask, on rf_console_flush, and before a crash report.
 # RF_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
-# a crash. alert writes to stderr in magenta. ask_line gives a blank line as an empty string and null only at the end
-# of the input. Right after ask_word it skips the line end the word left behind.
+# a crash. alert writes to stderr in magenta. Each ask hands RazorForge a malloc'd block it frees: the count of the
+# bytes read, as a U64, then the bytes. ask_line gives a blank line as an empty block and null only at the end of the input.
+# Right after ask_word it skips the line end the word left behind.
 
 module Ingrid/Runtime
 
@@ -187,35 +188,46 @@ routine rf_console_alert(ptr: @Byte, count: U64) -> None
 ### Whether the last read from stdin was ask_word, so the line end left after the word isn't read as a blank line.
 global AFTER_WORD: &Bool
 
-### `text` from the malloc heap as a NUL-terminated string the caller frees, or null. The block is grown by one byte
-### for the terminator, and freed when that fails.
-### :param text: The text, allocated with C's heap. It is taken over.
-### :returns: The NUL-terminated string, or null when the reallocation fails.
-routine terminated_text(text: BorrowedSlice[Byte]) -> @Byte?
+### `text` copied into a malloc'd block the caller frees with rf_invalidate: its count as a U64, then its bytes. The
+### count travels in the block, since the fiber that reads it may be on another thread by then (a per-thread length
+### would be another thread's). The block is never empty, so null stays the end of the input.
+### :param text: The text, taken over.
+### :returns: The block, or null when the allocation fails.
+routine counted_text(text: BorrowedSlice[Byte]) -> @Byte?
     n: U64 = text.count()
-    buf: Addr = c_realloc(Addr.zero(), (n + 1).to[CSize]())
+    buf: Addr = c_malloc((n + 8).to[CSize]())
     if buf.is_hollow()
         drop text
         return None()
-    buf.to[@Byte]().copy(src: text.data.peek(), count: n)
-    buf.to[@Byte]().stride(n).poke(0x00)
+    buf.to[@U64]().poke_unaligned(n)
+    if n > 0
+        buf.to[@Byte]().stride(8).copy(src: text.data.peek(), count: n)
     drop text
     return buf.to[@Byte]()
 
-### {terminated_text} of the text when there is one.
+### {counted_text} of the text when there is one.
 ### :param text: The text read, or absent at the end of the input.
-### :returns: The NUL-terminated string, or null when `text` is absent or the reallocation fails.
-routine terminated_option(text: Optional[BorrowedSlice[Byte]]) -> @Byte?
+### :returns: The block, or null when `text` is absent or the allocation fails.
+routine counted_option(text: Optional[BorrowedSlice[Byte]]) -> @Byte?
     when steal text
-        is BorrowedSlice[Byte] as t => return terminated_text(steal t)
+        is BorrowedSlice[Byte] as t => return counted_text(steal t)
         is None => return None()
 
-### The next line from stdin, without its end, or null at the end of the input. A blank line is an empty string. Right
-### after ask_word, a line that is empty because the word ended it is skipped. Standard output is flushed first.
-### :returns: The line as a NUL-terminated string the caller frees, or null.
+### Gives standard output what is buffered before a read, when there is something: a prompt shows before the program
+### waits for its answer. An empty buffer costs one read of its count, without taking its access.
+routine flush_before_read() -> None
+    out: @OutputBuffer = STDOUT
+    if out.count.peek_unbroken[RELAXED]() != 0
+        rf_console_flush()
+    return
+
+### The next line from stdin, without its end, or null at the end of the input. A blank line is an empty block. Right
+### after ask_word, a line that is empty because the word ended it is skipped. Standard output is flushed first when it
+### holds something.
+### :returns: The line's bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null.
 @export("rf_console_ask_line")
 routine rf_console_ask_line() -> @Byte?
-    rf_console_flush()
+    flush_before_read()
     manager: @MemoryManager = heap()
     after_word: Bool = AFTER_WORD.peek()
     AFTER_WORD.poke(false)
@@ -226,37 +238,40 @@ routine rf_console_ask_line() -> @Byte?
                 if skip_blank and t2.count() == 0
                     drop t2
                     continue with skip_blank: false
-                return terminated_text(steal t2)
+                return counted_text(steal t2)
             is None => return None()
 
-### The next word from stdin, or null at the end of the input. Standard output is flushed first.
-### :returns: The word as a NUL-terminated string the caller frees, or null.
+### The next word from stdin, or null at the end of the input. Standard output is flushed first when it holds
+### something.
+### :returns: The word's bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null.
 @export("rf_console_ask_word")
 routine rf_console_ask_word() -> @Byte?
-    rf_console_flush()
+    flush_before_read()
     manager: @MemoryManager = heap()
-    word: @Byte? = terminated_option(try Console.ask_word(manager))
+    word: @Byte? = counted_option(try Console.ask_word(manager))
     AFTER_WORD.poke(word.is_present())
     return word
 
-### Up to `count` bytes from stdin, NUL-terminated. Standard output is flushed first.
+### Up to `count` bytes from stdin. Standard output is flushed first when it holds something.
 ### :param count: The most bytes to read.
-### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
+### :returns: The bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null when the
+###     allocation fails.
 @export("rf_console_ask_bytes")
 routine rf_console_ask_bytes(count: U64) -> @Byte?
-    rf_console_flush()
+    flush_before_read()
     AFTER_WORD.poke(false)
     manager: @MemoryManager = heap()
-    return terminated_text(Console.ask_bytes(count, manager))
+    return counted_text(Console.ask_bytes(count, manager))
 
-### The rest of stdin, NUL-terminated. Standard output is flushed first.
-### :returns: The bytes as a NUL-terminated string the caller frees, or null when the reallocation fails.
+### The rest of stdin. Standard output is flushed first when it holds something.
+### :returns: The bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null when the
+###     allocation fails.
 @export("rf_console_ask_all")
 routine rf_console_ask_all() -> @Byte?
-    rf_console_flush()
+    flush_before_read()
     AFTER_WORD.poke(false)
     manager: @MemoryManager = heap()
-    return terminated_text(Console.ask_all(manager))
+    return counted_text(Console.ask_all(manager))
 
 # -- the crash report's OS side ------------------------------------------------------
 
