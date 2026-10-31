@@ -27,7 +27,7 @@ global FIRST_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: OLDER, next: Non
 global SECOND_WAITER: &ChannelWaiter <- (sched: THE_SCHED, coro: NEWER, next: FIRST_WAITER)
 
 ### The SignalCaster a park casts on, as another agent would meanwhile, or null to let the time run out.
-global CAST_DURING_PARK: &(@Monitor?)
+global CAST_DURING_PARK: &Addr
 
 ### The threads at the gate.
 preset GATE_THREADS: U64 = 3
@@ -103,7 +103,7 @@ routine rf_sched_wake(s: @Sched, c: @Coro) -> None
 
 ### The coroutine is off its thread: another agent casts meanwhile, if CAST_DURING_PARK says so.
 routine rf_sched_park_external() -> None
-    cast: @Monitor? = CAST_DURING_PARK.peek()
+    cast: @Monitor? = CAST_DURING_PARK.peek().to[@Monitor?]()
     sig: @Monitor = cast.unwrap()
     Console.show("  parked, {count_waiters(sig)} on the wait list")
     rf_signal_cast_one(sig)
@@ -111,7 +111,7 @@ routine rf_sched_park_external() -> None
 
 ### As rf_sched_park_external, until a cast or the delay has passed.
 routine rf_sched_park_deadline(delay_ns: U64) -> None
-    cast: @Monitor? = CAST_DURING_PARK.peek()
+    cast: @Monitor? = CAST_DURING_PARK.peek().to[@Monitor?]()
     if cast.is_absent()
         Console.show("  parked with a deadline, no cast comes")
         sleep_until(Clock.monotonic() + Duration.from_nanoseconds(delay_ns.to[S64]()))
@@ -267,7 +267,7 @@ routine coroutines(sig: @Monitor) -> None
     Console.show("after drop: {sig.refcount.peek()}")
     CURRENT_SCHED.poke(THE_SCHED)
     CURRENT_CORO.poke(THE_CORO)
-    CAST_DURING_PARK.poke(sig)
+    CAST_DURING_PARK.poke(sig.to[Addr]())
     Console.show("a coroutine waits:")
     rf_signal_lock(sig)
     rf_signal_wait(sig)

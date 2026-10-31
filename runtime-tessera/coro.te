@@ -13,7 +13,7 @@ import Hosted
 
 ### The coroutine running on this thread, or null.
 @threadlocal
-global CURRENT_CORO: &(@Coro?)
+global CURRENT_CORO: &Addr
 
 ### The order in which coroutines and threaded tasks finish, shared by both so race! compares them directly.
 ### Starts at 1, so 0 is never a stamp and U64.MAX always means "not yet".
@@ -45,8 +45,8 @@ entity Coro
     entry: Callable[(Addr,), None]
     userdata: Addr
     status: U32  # a CORO_ value; read across threads
-    cf_top: @CancelFrame?  # the cancellation shadow stack's top
-    sched_next: @Coro?  # the injector's link
+    cf_top: Addr  # the cancellation shadow stack's top
+    sched_next: Addr  # the injector's link
     wake_ns: U64  # the deadline it is parked until
     timer_idx: S64  # its slot in the scheduler's timer heap, or -1
     sched_state: U32  # a SCHED_ value (sched.te)
@@ -56,8 +56,8 @@ entity Coro
     cancel_requested: U32
     initial_spawned: Bool  # spawned once: a second spawn does nothing
     detached: Bool  # execute(): the worker that completes it frees it
-    awaiter: @Coro?  # a coroutine waiting for this one to finish
-    home: @Sched?  # the scheduler it was spawned on, where its wakes go
+    awaiter: Addr  # a coroutine waiting for this one to finish
+    home: Addr  # the scheduler it was spawned on, where its wakes go
     completion_seq: U64  # when it finished, in completion order (race! picks the first); U64.MAX until then
     stack: StackManager  # its stack, on pages from PAGES, whose sp is its stack pointer while it isn't running
     resumer_sp: Addr  # the resumer's stack pointer while it runs: where a yield goes back to
@@ -122,9 +122,9 @@ routine exchange_trace(area: @TraceArea) -> None
 ### :param trace: Its `trace`.
 ### :returns: The new value.
 common routine Coro.construct(entry: Callable[(Addr,), None], userdata: Addr, status: U32,
-    cf_top: @CancelFrame?, sched_next: @Me?, wake_ns: U64, timer_idx: S64, sched_state: U32,
+    cf_top: Addr, sched_next: Addr, wake_ns: U64, timer_idx: S64, sched_state: U32,
     park_intent: U32, counted_done: Bool, owner_released: Bool, cancel_requested: U32,
-    initial_spawned: Bool, detached: Bool, awaiter: @Me?, home: @Sched?, completion_seq: U64,
+    initial_spawned: Bool, detached: Bool, awaiter: Addr, home: Addr, completion_seq: U64,
     stack: StackManager, resumer_sp: Addr, access: @AccessFlow?, eq: EqTrack, mold: Addr,
     trace: TraceArea) -> Me
     return Me(entry, userdata, status, cf_top, sched_next, wake_ns, timer_idx, sched_state,
@@ -141,7 +141,7 @@ routine @Coro.destruct() -> None
 ### :returns: The running coroutine, or null on a plain thread.
 @noinline
 routine current_coro() -> @Coro?
-    c: @Coro? = CURRENT_CORO.peek()
+    c: @Coro? = CURRENT_CORO.peek().to[@Coro?]()
     return c
 
 ### Takes the next completion stamp, shared by coroutines and threaded tasks.
@@ -166,7 +166,7 @@ routine coro_trampoline() -> None
 
 ### A coroutine whose body is entry(userdata), on a stack of stack_size bytes (0: DEFAULT_STACK). It starts when it
 ### is first resumed. Null for a null entry.
-### :param entry: The coroutine's body.
+### :param entry_or_none: The coroutine's body.
 ### :param userdata: The argument passed to `entry`.
 ### :param stack_size: The stack's reserve in bytes, or 0 for `DEFAULT_STACK`.
 ### :returns: The new coroutine, or null when `entry` is null.
@@ -200,7 +200,7 @@ routine rf_coro_create(entry_or_none: Callable[(Addr,), None]?, userdata: Addr,
         return coro
 
 ### Switches into `coro` until it parks or finishes. A null or completed `coro` isn't switched into.
-### :param coro: The coroutine to run.
+### :param coro_or_none: The coroutine to run.
 ### :returns: Its status then (`CORO_PARKED` or `CORO_COMPLETED`), `CORO_COMPLETED` for a null `coro`.
 @export("rf_coro_resume")
 routine rf_coro_resume(coro_or_none: @Coro?) -> U32
@@ -210,11 +210,11 @@ routine rf_coro_resume(coro_or_none: @Coro?) -> U32
     if coro.status.peek_unbroken() == CORO_COMPLETED
         return CORO_COMPLETED
     prev: @Coro? = current_coro()
-    CURRENT_CORO.poke(coro)
+    CURRENT_CORO.poke(coro.to[Addr]())
     coro.status.poke_unbroken(CORO_RUNNING)
     # The running flow's StackManager is the coroutine's while it runs.
-    outer_stack: @StackManager? = RUNNING_STACK.peek()
-    RUNNING_STACK.poke(coro.stack)
+    outer_stack: Addr = RUNNING_STACK.peek()
+    RUNNING_STACK.poke(coro.stack.to[Addr]())
     # The AccessManager sees the coroutine as the agent running here while it runs.
     outer_flow: @(@AccessFlow?)? = AccessManager.switch_flow(coro.access)
     # The coroutine's stack pointer is the CPU's while it runs, and its switch out writes it back.
@@ -226,7 +226,7 @@ routine rf_coro_resume(coro_or_none: @Coro?) -> U32
     switch_stack(from: coro.resumer_sp, to: resume_at)
     AccessManager.switch_flow(outer_flow)
     RUNNING_STACK.poke(outer_stack)
-    CURRENT_CORO.poke(prev)
+    CURRENT_CORO.poke(prev.to[Addr]())
     return coro.status.peek_unbroken()
 
 ### The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.
@@ -278,7 +278,7 @@ routine rf_coro_is_cancel_requested(coro: @Coro?) -> U32
 
 ### Frees a coroutine and its stack. Not one that runs, nor a parked one with live values (rf_coro_abandon). A null
 ### `coro` does nothing.
-### :param coro: The coroutine to free.
+### :param coro_or_none: The coroutine to free.
 @export("rf_coro_delete")
 routine rf_coro_delete(coro_or_none: @Coro?) -> None
     if coro_or_none.is_absent()
@@ -308,7 +308,7 @@ routine rf_coro_set_detached(coro: @Coro?) -> None
 
 ### An owned value was constructed: frame (a node in the owning scope) becomes the running coroutine's top. Outside a
 ### coroutine nothing is tracked.
-### :param frame: The node, in the scope owning the value.
+### :param frame_or_none: The node, in the scope owning the value.
 ### :param value_ptr: The value.
 ### :param destroy_fn: What destroys the value if the coroutine is abandoned.
 @export("rf_coro_cf_push")
@@ -321,13 +321,13 @@ routine rf_coro_cf_push(frame_or_none: @CancelFrame?, value_ptr: Addr,
     this_coro: @Coro = this_coro_or_none.unwrap()
     frame.value_ptr.poke(value_ptr)
     frame.destroy_fn.poke(destroy_fn)
-    frame.prev.poke(this_coro.cf_top.peek())
-    this_coro.cf_top.poke(frame)
+    frame.prev.poke(this_coro.cf_top.peek().to[@CancelFrame?]())
+    this_coro.cf_top.poke(frame.to[Addr]())
     return
 
 ### The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
 ### it is. Outside a coroutine, or for a null `frame` (which push never linked), nothing happens.
-### :param frame: The node pushed for the value.
+### :param frame_or_none: The node pushed for the value.
 @export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame_or_none: @CancelFrame?) -> None
     this_coro_or_none: @Coro? = current_coro()
@@ -335,18 +335,18 @@ routine rf_coro_cf_pop(frame_or_none: @CancelFrame?) -> None
         return
     frame: @CancelFrame = frame_or_none.unwrap()
     this_coro: @Coro = this_coro_or_none.unwrap()
-    when this_coro.cf_top.peek()
+    when this_coro.cf_top.peek().to[@CancelFrame?]()
         is @CancelFrame as top =>
             if top !== frame
                 return
         is None => return
-    this_coro.cf_top.poke(frame.prev.peek())
+    this_coro.cf_top.poke(frame.prev.peek().to[Addr]())
     return
 
 ### A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
 ### construction order), then the coroutine and its stack are freed. A completed one is just freed. An abandoned one
 ### is marked `CORO_CANCELLED` and given a completion stamp if it had none. A null `coro` does nothing.
-### :param coro: The coroutine to abandon.
+### :param coro_or_none: The coroutine to abandon.
 @export("rf_coro_abandon")
 routine rf_coro_abandon(coro_or_none: @Coro?) -> None
     if coro_or_none.is_absent()
@@ -360,12 +360,12 @@ routine rf_coro_abandon(coro_or_none: @Coro?) -> None
         coro.completion_seq.poke_unbroken(next_completion_seq())
     coro.status.poke_unbroken(CORO_CANCELLED)
 
-    until at.is_absent() with at: @CancelFrame? = coro.cf_top.peek()
+    until at.is_absent() with at: @CancelFrame? = coro.cf_top.peek().to[@CancelFrame?]()
         f: @CancelFrame = at.unwrap()
         when f.destroy_fn.peek()
             is Callable[(Addr,), None] as destroy => destroy.call(f.value_ptr.peek())
             is None => nothing
         continue with at: f.prev.peek()
-    coro.cf_top.poke(None())
+    coro.cf_top.poke(Addr.zero())
     rf_coro_delete(coro)
     return

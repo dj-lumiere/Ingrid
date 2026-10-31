@@ -65,8 +65,8 @@ routine strdupn(s: @Byte, n: S32) -> @Byte?
 
 global IO_GUARD: &U8
 global IO_WORK: &SignalCaster
-global IO_HEAD: &(@IoReq?)
-global IO_TAIL: &(@IoReq?)
+global IO_HEAD: &Addr
+global IO_TAIL: &Addr
 ### 1 once the I/O threads run. Until then the work runs inline.
 global IO_OK: &U32
 ### The length of the last read, set just before rf_io_read_file_all returns and read right after.
@@ -80,7 +80,7 @@ record IoReq
     kind: U32
     sched: @Sched?  # the parked coroutine's scheduler
     coro: @Coro?
-    qnext: @IoReq?
+    qnext: Addr
     path: @Byte  # a NUL-terminated copy
     data: Addr  # read: the contents (the caller frees them); write: a copy of the payload
     data_len: S64
@@ -137,15 +137,15 @@ routine io_thread_main(guard: @U8) -> None
         rf_thread_stack_guarantee()
         held: Authorized[U8] <- guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
-        until queued.is_present() with queued: @IoReq? = IO_HEAD.peek()
+        until queued.is_present() with queued: @IoReq? = IO_HEAD.peek().to[@IoReq?]()
             IO_WORK.wait(held)
-            continue with queued: IO_HEAD.peek()
+            continue with queued: IO_HEAD.peek().to[@IoReq?]()
         then
             req: @IoReq = queued.unwrap()
-            next: @IoReq? = req.qnext.peek()
-            IO_HEAD.poke(next)
+            next: @IoReq? = req.qnext.peek().to[@IoReq?]()
+            IO_HEAD.poke(next.to[Addr]())
             if next.is_absent()
-                IO_TAIL.poke(None())
+                IO_TAIL.poke(Addr.zero())
             drop held
             io_do_work(req)
             rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
@@ -169,11 +169,11 @@ routine rf_io_runtime_init() -> None
 ### :param req: The request.
 routine io_submit(req: @IoReq) -> None
     held: Authorized[U8] <- IO_GUARD.get_exclusive_access()
-    req.qnext.poke(None())
-    when IO_TAIL.peek()
-        is @IoReq as tail => tail.qnext.poke(req)
-        is None => IO_HEAD.poke(req)
-    IO_TAIL.poke(req)
+    req.qnext.poke(Addr.zero())
+    when IO_TAIL.peek().to[@IoReq?]()
+        is @IoReq as tail => tail.qnext.poke(req.to[Addr]())
+        is None => IO_HEAD.poke(req.to[Addr]())
+    IO_TAIL.poke(req.to[Addr]())
     IO_WORK.cast_one()
     drop held
     return
@@ -341,11 +341,11 @@ routine rf_async_runtime_stop(runtime_or_none: @AsyncRuntime?) -> None
 global PROC_SIGNAL: &CInt
 
 @threadlocal
-global PROC_OUT: &(@Byte?)
+global PROC_OUT: &Addr
 @threadlocal
 global PROC_OUT_LEN: &U64
 @threadlocal
-global PROC_ERR: &(@Byte?)
+global PROC_ERR: &Addr
 @threadlocal
 global PROC_ERR_LEN: &U64
 
@@ -407,7 +407,7 @@ routine rf_proc_term_signal() -> S32
 ### :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
 @export("rf_proc_output")
 routine rf_proc_output() -> @Byte?
-    return PROC_OUT.peek()
+    return PROC_OUT.peek().to[@Byte?]()
 
 ### The length of the captured stdout of this thread's last subprocess.
 ### :returns: The output's length in bytes.
@@ -419,7 +419,7 @@ routine rf_proc_output_len() -> U64
 ### :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
 @export("rf_proc_errors")
 routine rf_proc_errors() -> @Byte?
-    return PROC_ERR.peek()
+    return PROC_ERR.peek().to[@Byte?]()
 
 ### The length of the captured stderr of this thread's last subprocess.
 ### :returns: The errors' length in bytes.
@@ -548,9 +548,9 @@ routine proc_exec(st: @ProcState) -> S64
     req.proc.poke(st)
     io_run(req)
     PROC_SIGNAL.poke(st.term_signal.peek())
-    PROC_OUT.poke(st.output.peek())
+    PROC_OUT.poke(st.output.peek().to[Addr]())
     PROC_OUT_LEN.poke(st.output_count.peek().to[U64]())
-    PROC_ERR.poke(st.errors.peek())
+    PROC_ERR.poke(st.errors.peek().to[Addr]())
     PROC_ERR_LEN.poke(st.errors_count.peek().to[U64]())
     failed: Bool = st.spawn_failed.peek()
     code: S64 = st.exit_status.peek()
