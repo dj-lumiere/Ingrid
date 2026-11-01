@@ -225,9 +225,11 @@ routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
 ### :throws: Crashes with `OutOfMemoryError` when growing the roots buffer fails.
 routine add_candidate(header: @RoamHeader) -> None
     if IN_COLLECTOR.peek()
+        (ROOTS.count.peek() + 1).to[U32]().poke_into(header.buffered_at)
         buffer_push(buffer: ROOTS, item: header)
         return
     lock_roots()
+    (ROOTS.count.peek() + 1).to[U32]().poke_into(header.buffered_at)
     buffer_push(buffer: ROOTS, item: header)
     unlock_roots()
     return
@@ -247,24 +249,27 @@ routine remove_candidate(header: @RoamHeader) -> None
         return
     return
 
-### Removes `header` from `buffer` if it is there, moving the last item into its place.
-### :param buffer: The buffer to remove from.
+### Removes `header` from the roots buffer if it is there, moving the last item into its place. The header knows its
+### index (`buffered_at`), so nothing is searched for.
+### :param buffer: The roots buffer.
 ### :param header: The header to remove.
 routine buffer_remove(buffer: @HeaderBuffer, header: @RoamHeader) -> None
     n: U64 = buffer.count.peek()
-
-    for i in 0 til n
-        if buffer_at(buffer, i) === header
-            last: U64 = n - 1
-            last_slot: @Addr = buffer.items.peek().stride(last.to[U64]())
-            moved: Addr = last_slot.peek()
-            hole: @Addr = buffer.items.peek().stride(i.to[U64]())
-            hole.poke(moved)
-            last.poke_into(buffer.count)
-            return
-        continue
-    then
+    at: U64 = header.buffered_at.peek().to[U64]()
+    if at == 0 or at > n
         return
+    i: U64 = at - 1
+    if buffer_at(buffer, i) !== header
+        return
+    last: U64 = n - 1
+    last_slot: @Addr = buffer.items.peek().stride(last.to[U64]())
+    moved: Addr = last_slot.peek()
+    hole: @Addr = buffer.items.peek().stride(i.to[U64]())
+    hole.poke(moved)
+    last.poke_into(buffer.count)
+    at.to[U32]().poke_into(moved.to[@RoamHeader]().buffered_at)
+    0.poke_into(header.buffered_at)
+    return
 
 ### Called by a type's trace routine for each of the entity's Roamed fields: records that field's header as a child.
 ### :param child: The field's header.
@@ -410,7 +415,7 @@ routine collect_garbage(root: @RoamHeader, manager: @MemoryManager) -> None
     until work.is_empty()
         node: @RoamHeader = work.remove_last().to[@RoamHeader]()
         garbage: Bool = node.state.peek() == GARBAGE
-        if not (garbage and not node.buffered.peek())
+        if not (garbage and node.buffered_at.peek() == 0)
             continue
         LIVE.poke_into(node.state)
         buffer_push(buffer: REAP, item: node)
@@ -447,7 +452,7 @@ routine collect() -> U64
             # mark_scanning is in this module, so it can reach ROOTS: the root is read from the buffer again after it.
             roots.add_last(buffer_at(buffer: ROOTS, i))
         else
-            false.poke_into(node.buffered)
+            0.poke_into(node.buffered_at)
     then
         # Exactly the n roots this pass took leave the buffer: a root reported while freeing must stay for a later pass.
         remove_front(buffer: ROOTS, n)
@@ -464,7 +469,7 @@ routine collect() -> U64
         for i3 in 0 til n3
             root_address: Addr = roots[i3]
             root: @RoamHeader = root_address.to[@RoamHeader]()
-            false.poke_into(root.buffered)
+            0.poke_into(root.buffered_at)
             collect_garbage(root, manager)
         # Frees the garbage: each entity's type tears it down, then its header goes unless a weak observer remains.
         m: U64 = REAP.count.peek()
@@ -494,6 +499,7 @@ routine remove_front(buffer: @HeaderBuffer, n: U64) -> None
         moved: Addr = from_slot.peek()
         to_slot: @Addr = buffer.items.peek().stride(k.to[U64]())
         to_slot.poke(moved)
+        (k + 1).to[U32]().poke_into(moved.to[@RoamHeader]().buffered_at)
     then
         remaining.poke_into(buffer.count)
         return

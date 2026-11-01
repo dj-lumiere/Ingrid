@@ -32,8 +32,9 @@ record RoamHeader
     depth: U64
     ### The cycle collector's mark for this entity (LIVE, SCANNING, GARBAGE, SUSPECTED).
     state: S32
-    ### Whether this header sits in the collector's candidate buffer.
-    buffered: Bool
+    ### Where this header sits in the collector's candidate buffer, as its index plus one, or 0 when it is not in the
+    ### buffer. Removing it then needs no search.
+    buffered_at: U32
     ### The entity type's trace routine (visits its Roamed fields), or null for a type that cannot form a cycle.
     trace_hook: Addr
     ### The entity type's collector free routine (tears down its fields other than Roamed ones, frees it).
@@ -56,7 +57,7 @@ record RoamHeader
 ### :param holder_task: Its `holder_task`.
 ### :param depth: Its `depth`.
 ### :param state: Its `state`.
-### :param buffered: Its `buffered`.
+### :param buffered_at: Its `buffered_at`.
 ### :param trace_hook: Its `trace_hook`.
 ### :param free_hook: Its `free_hook`.
 ### :param drop_hook: Its `drop_hook`.
@@ -64,9 +65,9 @@ record RoamHeader
 ### :param kept: Its `kept`.
 ### :returns: The new value.
 common routine RoamHeader.construct(count: U64, weak: U64, dead: U8, escaped: U8, data: Addr,
-    locked: U8, holder_task: U64, depth: U64, state: S32, buffered: Bool, trace_hook: Addr,
+    locked: U8, holder_task: U64, depth: U64, state: S32, buffered_at: U32, trace_hook: Addr,
     free_hook: Addr, drop_hook: Addr, shape_users: U64, kept: Addr) -> Me
-    return Me(count, weak, dead, escaped, data, locked, holder_task, depth, state, buffered,
+    return Me(count, weak, dead, escaped, data, locked, holder_task, depth, state, buffered_at,
         trace_hook, free_hook, drop_hook, shape_users, kept)
 
 # ── The task scheduler (native) ──────────────────────────────────────────
@@ -156,7 +157,7 @@ secret routine drop_count(header: @RoamHeader) -> Bool
 secret routine destroy_entity(header: @RoamHeader) -> None
     escaped: Bool = header.escaped.peek_unbroken() == 1
     # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
-    if header.buffered.peek()
+    if header.buffered_at.peek() != 0
         remove_candidate(header)
     run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
     header.dead.poke_unbroken(1)
@@ -214,7 +215,7 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
         else => header.weak.peek()
     if count == 1 and weak == 0
         data: Addr = header.data.peek()
-        if header.buffered.peek()
+        if header.buffered_at.peek() != 0
             remove_candidate(header)
         free_header_memory(header)
         world_leave()
@@ -229,9 +230,8 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
 secret routine mark_candidate(header: @RoamHeader) -> None
     if header.trace_hook.peek().is_hollow()
         return
-    if header.buffered.peek()
+    if header.buffered_at.peek() != 0
         return
-    true.poke_into(header.buffered)
     SUSPECTED.poke_into(header.state)
     add_candidate(header)
     return
@@ -481,7 +481,7 @@ routine roam_field_offset(i: U64) -> U64
             return place - base
         9 =>
             base: U64 = ptrtoint[Addr, U64](header)
-            place: U64 = ptrtoint[Addr, U64](header.buffered)
+            place: U64 = ptrtoint[Addr, U64](header.buffered_at)
             return place - base
         10 =>
             base: U64 = ptrtoint[Addr, U64](header)
