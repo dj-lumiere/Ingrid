@@ -38,6 +38,7 @@ record Channel
     closed: Bool
     not_full_head: @ChannelWaiter?  # producers parked for room
     not_empty_head: @ChannelWaiter?  # consumers parked for an item
+    casts: U64  # wakes sent so far, so a thread that gave the lock back can tell whether anything changed
 
 ### Makes a `Channel` from its fields.
 ### :param guard: Its `guard`.
@@ -52,12 +53,13 @@ record Channel
 ### :param closed: Its `closed`.
 ### :param not_full_head: Its `not_full_head`.
 ### :param not_empty_head: Its `not_empty_head`.
+### :param casts: Its `casts`.
 ### :returns: The new value.
 common routine Channel.construct(guard: U8, cond: SignalCaster, slots: @Addr, capacity: U64,
     slot_cap: U64, head: U64, count: U64, producer_refs: U32, consumer_refs: U32, closed: Bool,
-    not_full_head: @ChannelWaiter?, not_empty_head: @ChannelWaiter?) -> Me
+    not_full_head: @ChannelWaiter?, not_empty_head: @ChannelWaiter?, casts: U64) -> Me
     return Me(guard, cond, slots, capacity, slot_cap, head, count, producer_refs, consumer_refs,
-        closed, not_full_head, not_empty_head)
+        closed, not_full_head, not_empty_head, casts)
 
 ### Releases nothing: a `Channel` holds no memory of its own.
 routine @Channel.destruct() -> None
@@ -71,6 +73,7 @@ routine @Channel.cast_all(list: @ChannelWaiter?) -> None
         w: @ChannelWaiter = at.unwrap()
         rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         continue with at: w.next.peek()
+    me.casts.poke(me.casts.peek() + 1)
     me.cond.cast_all()
     return
 
@@ -212,6 +215,9 @@ routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
         # nothing can ever wake it: its own scope holds what it waits on (a sender it still has, the receiver it reads),
         # and it stops loudly instead of hanging.
 
+        # The lock is given back below while this thread runs its jobs, and a wake sent meanwhile finds no one waiting
+        # on the condition. The wake count tells it apart: a changed count means the caller must look again.
+        seen: U64 = me.casts.peek()
         until quiet >= CHANNEL_DEADLOCK_SLICES with quiet: U64 = 0
             # This thread's start_here() jobs take their turns while it waits, with the channel given back: one that
             # is ready runs and the caller looks at the channel again. With some left the thread sleeps at most
@@ -220,7 +226,7 @@ routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
             ran: Bool = run_here_ready()
             here_live: Bool = here_has_live()
             AccessManager.take_exclusive(at: me.guard, size: 1)
-            if ran
+            if ran or (me.casts.peek() != seen)
                 return
             slice: Duration = when
                 here_live => HERE_POLL
