@@ -85,13 +85,13 @@ record TraceArea
 ### :param exchange: The exchange, called with the coroutine's `trace`.
 @export("rf_set_trace_exchange")
 routine rf_set_trace_exchange(exchange: Callable[(@TraceArea,), None]) -> None
-    TRACE_EXCHANGE.poke(exchange)
+    TRACE_EXCHANGE.store(exchange)
     return
 
 ### Swaps the calling thread's crash trace with `area`, when the program set an exchange.
 ### :param area: The trace kept aside.
 routine exchange_trace(area: @TraceArea) -> None
-    when TRACE_EXCHANGE.peek()
+    when TRACE_EXCHANGE.load()
         is Callable[(@TraceArea,), None] as exchange => exchange.call(area)
         is None => nothing
     return
@@ -141,7 +141,7 @@ routine @Coro.destruct() -> None
 ### :returns: The running coroutine, or null on a plain thread.
 @noinline
 routine current_coro() -> @Coro?
-    c: @Coro? = CURRENT_CORO.peek().to[@Coro?]()
+    c: @Coro? = CURRENT_CORO.load().to[@Coro?]()
     return c
 
 ### Takes the next completion stamp, shared by coroutines and threaded tasks.
@@ -210,11 +210,11 @@ routine rf_coro_resume(coro_or_none: @Coro?) -> U32
     if coro.status.peek_unbroken() == CORO_COMPLETED
         return CORO_COMPLETED
     prev: @Coro? = current_coro()
-    CURRENT_CORO.poke(coro.to[Addr]())
+    CURRENT_CORO.store(coro.to[Addr]())
     coro.status.poke_unbroken(CORO_RUNNING)
     # The running flow's StackManager is the coroutine's while it runs.
-    outer_stack: Addr = RUNNING_STACK.peek()
-    RUNNING_STACK.poke(coro.stack.to[Addr]())
+    outer_stack: Addr = RUNNING_STACK.load()
+    RUNNING_STACK.store(coro.stack.to[Addr]())
     # The AccessManager sees the coroutine as the agent running here while it runs.
     outer_flow: @(@AccessFlow?)? = AccessManager.switch_flow(coro.access)
     # The coroutine's stack pointer is the CPU's while it runs, and its switch out writes it back.
@@ -225,8 +225,8 @@ routine rf_coro_resume(coro_or_none: @Coro?) -> U32
     exchange_trace(coro.trace)
     switch_stack(from: coro.resumer_sp, to: resume_at)
     AccessManager.switch_flow(outer_flow)
-    RUNNING_STACK.poke(outer_stack)
-    CURRENT_CORO.poke(prev.to[Addr]())
+    RUNNING_STACK.store(outer_stack)
+    CURRENT_CORO.store(prev.to[Addr]())
     return coro.status.peek_unbroken()
 
 ### The running coroutine goes back to its resumer, parked. Whoever parks it says when it runs again.

@@ -45,26 +45,26 @@ routine reason_code(error: FsError) -> S32
 ### :param error: The reason.
 ### :returns: -1, a failure's status.
 routine failed(error: FsError) -> S32
-    LAST_ERROR.poke(reason_code(error))
+    LAST_ERROR.store(reason_code(error))
     return -1
 
 ### Why this thread's last file system call failed, see {reason_code}: 0 when it didn't fail.
 ### :returns: The reason code.
 @export("rf_fs_last_error")
 routine rf_fs_last_error() -> S32
-    return LAST_ERROR.peek()
+    return LAST_ERROR.load()
 
 ### The length of the last buffer a routine here returned.
 ### :returns: The length in bytes, 0 after a failure.
 @export("rf_get_result_len")
 routine rf_get_result_len() -> U64
-    return RESULT_LEN.peek().to[U64]()
+    return RESULT_LEN.load().to[U64]()
 
 ### The offset from the last sub-range mapping's base to the byte asked for, 0 for a whole-file mapping.
 ### :returns: The delta in bytes.
 @export("rf_file_map_delta")
 routine rf_file_map_delta() -> U64
-    return MAP_DELTA.peek().to[U64]()
+    return MAP_DELTA.load().to[U64]()
 
 ### A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
 ### :returns: The address 1.
@@ -74,14 +74,14 @@ routine empty_map() -> @Byte
 ### A failure: no buffer, length 0.
 ### :returns: Null.
 routine no_result() -> @Byte?
-    RESULT_LEN.poke(0)
+    RESULT_LEN.store(0)
     return None()
 
 ### A failure for the reason `error`: no buffer, length 0, the reason recorded.
 ### :param error: The reason.
 ### :returns: Null.
 routine failed_result(error: FsError) -> @Byte?
-    LAST_ERROR.poke(reason_code(error))
+    LAST_ERROR.store(reason_code(error))
     return no_result()
 
 ### Records `len` as the result's length and hands `buf` back.
@@ -89,7 +89,7 @@ routine failed_result(error: FsError) -> @Byte?
 ### :param len: Its length.
 ### :returns: `buf`.
 routine result(buf: @Byte, len: U64) -> @Byte?
-    RESULT_LEN.poke(len)
+    RESULT_LEN.store(len)
     return buf
 
 ### `len` bytes at `s`, copied into a malloc'd, NUL-terminated buffer, as the result.
@@ -294,7 +294,7 @@ routine open_in_mode(path: @[Byte], mode: S32) -> FileHandle
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     if mode < 0 or mode > 2
-        LAST_ERROR.poke(1)
+        LAST_ERROR.store(1)
         return -1
     writer: Bool = mode != 0
     f: FileHandle = when check open_in_mode(path: p, mode)
@@ -302,7 +302,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
         is FsError as error => return failed(error)
     buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
     if buffer.is_hollow()
-        LAST_ERROR.poke(1)
+        LAST_ERROR.store(1)
         c_free(buffer)
         f2: &FileHandle <- f
         f2.close()
@@ -317,7 +317,7 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
             start: 0, end: 0))
         return i.to[S32]()
     then
-        LAST_ERROR.poke(1)
+        LAST_ERROR.store(1)
         c_free(buffer2)
         f2: &FileHandle <- f
         f2.close()
@@ -843,7 +843,7 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
                 return 1
             return failed(error)
         is OriginalKeptError =>
-            LAST_ERROR.poke(1)
+            LAST_ERROR.store(1)
             return -2
         is Crashables as error =>
             # A failure that isn't the file system's stops the program here: C has no way to receive it.
@@ -973,31 +973,31 @@ global META_READONLY: &Bool
 ### :returns: The size in bytes.
 @export("rf_fs_meta_size")
 routine rf_fs_meta_size() -> S64
-    return META_SIZE.peek()
+    return META_SIZE.load()
 
 ### The modification time from the last {rf_fs_metadata}.
 ### :returns: Unix seconds.
 @export("rf_fs_meta_modified")
 routine rf_fs_meta_modified() -> S64
-    return META_MODIFIED.peek()
+    return META_MODIFIED.load()
 
 ### The creation time from the last {rf_fs_metadata}.
 ### :returns: Unix seconds.
 @export("rf_fs_meta_created")
 routine rf_fs_meta_created() -> S64
-    return META_CREATED.peek()
+    return META_CREATED.load()
 
 ### Whether the last {rf_fs_metadata} was of a directory.
 ### :returns: True for a directory.
 @export("rf_fs_meta_is_directory")
 routine rf_fs_meta_is_directory() -> Bool
-    return META_IS_DIRECTORY.peek()
+    return META_IS_DIRECTORY.load()
 
 ### Whether the last {rf_fs_metadata} was of a read-only path.
 ### :returns: True when read-only.
 @export("rf_fs_meta_readonly")
 routine rf_fs_meta_readonly() -> Bool
-    return META_READONLY.peek()
+    return META_READONLY.load()
 
 ### Reads the path's metadata for the `rf_fs_meta_` accessors. Where the filesystem doesn't record a creation time,
 ### the modification time stands in.
@@ -1010,11 +1010,11 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> S32
     info: Metadata = when m
         is Metadata as info => info
         is FsError as error => return failed(error)
-    META_SIZE.poke(info.size.to_wrap[S64]())
-    META_MODIFIED.poke(seconds(info.modified_ns))
-    META_CREATED.poke(seconds(info.created_ns.unwrap_or(info.modified_ns)))
-    META_IS_DIRECTORY.poke(info.kind == FileKind.DIRECTORY)
-    META_READONLY.poke(info.readonly)
+    META_SIZE.store(info.size.to_wrap[S64]())
+    META_MODIFIED.store(seconds(info.modified_ns))
+    META_CREATED.store(seconds(info.created_ns.unwrap_or(info.modified_ns)))
+    META_IS_DIRECTORY.store(info.kind == FileKind.DIRECTORY)
+    META_READONLY.store(info.readonly)
     return 0
 
 ### The size of the file at the path.
@@ -1137,7 +1137,7 @@ routine map_storage(path: @[Byte], offset: U64, count: U64, write: Bool) -> File
 ### :param write: True to map it for writing.
 ### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
 routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte?
-    MAP_DELTA.poke(0)
+    MAP_DELTA.store(0)
     when check map_storage(path, offset, count, write)
         is FileStorage[Byte] as m => return handed_on(steal m)
         is FsError as error => return failed_result(error)
@@ -1150,10 +1150,10 @@ routine handed_on(m: FileStorage[Byte]) -> @Byte?
     count: U64 = m.count()
     if count == 0
         drop m
-        RESULT_LEN.poke(0)
+        RESULT_LEN.store(0)
         return empty_map()
     advise(m)
-    MAP_DELTA.poke(m.delta.peek())
+    MAP_DELTA.store(m.delta.peek())
     base: Addr = m.take_mapping()
     drop m
     return result(buf: base.to[@Byte](), len: count)

@@ -166,7 +166,7 @@ routine rf_heap_limit_init() -> None
         (at.load() + 1).poke_into(at)
     if limit.load() == 0
         return
-    HEAP_LIMIT.poke(limit.load())
+    HEAP_LIMIT.store(limit.load())
     HEAP_IN_USE.poke_unbroken(0)
     HEAP_PEAK.poke_unbroken(0)
     HEAP_COUNTING.poke_unbroken(1)
@@ -178,7 +178,7 @@ routine rf_heap_limit_init() -> None
 ### :returns: The status to end with.
 @export("rf_heap_limit_status")
 routine rf_heap_limit_status(status: CInt) -> CInt
-    limit: U64 = HEAP_LIMIT.peek()
+    limit: U64 = HEAP_LIMIT.load()
     peak: S64 = HEAP_PEAK.peek_unbroken()
     if limit == 0 or peak <= 0 or peak.to[U64]() <= limit
         return status
@@ -321,7 +321,7 @@ record RegionBlock
 ### :returns: The mark, the address of this thread's top block (0 when the region is empty).
 @export("rf_region_mark")
 routine rf_region_mark() -> U64
-    when REGION_TOP.peek()
+    when REGION_TOP.load()
         is @RegionBlock as top => return ptrtoint[@RegionBlock, U64](top)
         is None => return 0
 
@@ -336,8 +336,8 @@ routine rf_region_alloc(bytes: U64) -> Addr
     if p.is_hollow()
         out_of_memory(what: "allocate scratch", bytes)
     node: @RegionBlock = p.to[@RegionBlock]()
-    node.prev.poke(REGION_TOP.peek())
-    REGION_TOP.poke(node)
+    node.prev.poke(REGION_TOP.load())
+    REGION_TOP.store(node)
     return node.stride(1)
 
 ### Frees every block allocated since `mark`, in this thread's region.
@@ -345,11 +345,11 @@ routine rf_region_alloc(bytes: U64) -> Addr
 @export("rf_region_release")
 routine rf_region_release(mark: U64) -> None
     loop
-        top: @RegionBlock? = REGION_TOP.peek()
+        top: @RegionBlock? = REGION_TOP.load()
         if top.is_absent()
             return
         top2: @RegionBlock = top.unwrap()
         if ptrtoint[@RegionBlock, U64](top2) == mark
             return
-        REGION_TOP.poke(top2.prev.peek())
+        REGION_TOP.store(top2.prev.peek())
         c_free(top2)

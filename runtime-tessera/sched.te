@@ -113,7 +113,7 @@ common routine Sched.construct(injector_head: @Coro?, injector_tail: @Coro?, tim
 ### :returns: The scheduler, or null.
 @noinline
 routine current_sched() -> @Sched?
-    s: @Sched? = CURRENT_SCHED.peek().to[@Sched?]()
+    s: @Sched? = CURRENT_SCHED.load().to[@Sched?]()
     return s
 
 ### Whether `a` is the coroutine `b`.
@@ -129,7 +129,7 @@ routine is_coro(a: @Coro?, b: @Coro) -> Bool
 ### :returns: The index, or -1 off the pool.
 @noinline
 routine worker_id() -> S64
-    id: S64 = WORKER_ID.peek()
+    id: S64 = WORKER_ID.load()
     return id
 
 # -- deques --------------------------------------------------------------------------
@@ -633,7 +633,7 @@ routine rf_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
 ### :returns: A nonzero pseudo-random number.
 @noinline
 routine steal_rand() -> U32
-    x: U32 = STEAL_RNG.peek()
+    x: U32 = STEAL_RNG.load()
     none: Bool = x == 0
     x2: U32 = when
         none =>
@@ -647,7 +647,7 @@ routine steal_rand() -> U32
     a: U32 = x2 ^ (x2 << 13)
     b: U32 = a ^ (a >> 17)
     c: U32 = b ^ (b << 5)
-    STEAL_RNG.poke(c)
+    STEAL_RNG.store(c)
     return c
 
 ### A coroutine stolen from another worker's deque (now RUNNING), or null. The victims are tried in turn from a
@@ -905,14 +905,14 @@ routine rf_sched_run(s_or_none: @Sched?) -> None
         return
     s: @Sched = s_or_none.unwrap()
     prev: @Sched? = current_sched()
-    CURRENT_SCHED.poke(s.to[Addr]())
+    CURRENT_SCHED.store(s.to[Addr]())
 
     loop
         held: Authorized[U8] <- s.guard.get_exclusive_access()
         done2: Bool = s.live.peek() <= 0
         drop held
         if done2
-            CURRENT_SCHED.poke(prev.to[Addr]())
+            CURRENT_SCHED.store(prev.to[Addr]())
             return
         s.step()
         continue
@@ -941,12 +941,12 @@ routine rf_sched_run_until(s: @Sched?, target: @Coro?) -> None
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 routine @Sched.run_until(target: @Coro) -> None
     prev: @Me? = current_sched()
-    CURRENT_SCHED.poke(me.to[Addr]())
+    CURRENT_SCHED.store(me.to[Addr]())
 
     until is_finished(target)
         me.step()
     then
-        CURRENT_SCHED.poke(prev.to[Addr]())
+        CURRENT_SCHED.store(prev.to[Addr]())
         return
 
 ### Wakes a scheduler's waiters with no coroutine in particular: a top-level race! re-polls. From any thread. A null
@@ -994,9 +994,9 @@ record WorkerStart
 routine worker_main(start: @WorkerStart) -> None
     rf_thread_stack_guarantee()
     s: @Sched = start.sched.peek()
-    WORKER_ID.poke(start.index.peek())
+    WORKER_ID.store(start.index.peek())
     c_free(start)
-    CURRENT_SCHED.poke(s.to[Addr]())
+    CURRENT_SCHED.store(s.to[Addr]())
 
     loop
         s.step()
@@ -1058,19 +1058,19 @@ routine rf_sched_thread_default() -> @Sched
 ### :throws: Crashes with `OutOfMemoryError` when the scheduler can't be allocated.
 @export("rf_sched_here")
 routine rf_sched_here() -> @Sched?
-    s: @Sched? = HERE_SCHED.peek()
+    s: @Sched? = HERE_SCHED.load()
     if s.is_present()
         return s
     if current_coro().is_present()
         return None()
     made: @Sched = rf_sched_create()
-    HERE_SCHED.poke(made)
+    HERE_SCHED.store(made)
     return made
 
 ### Whether this thread has start_here() jobs that have not finished.
 ### :returns: True when some are live.
 routine here_has_live() -> Bool
-    here_or_none: @Sched? = HERE_SCHED.peek()
+    here_or_none: @Sched? = HERE_SCHED.load()
     if here_or_none.is_absent()
         return false
     here: @Sched = here_or_none.unwrap()
@@ -1084,7 +1084,7 @@ routine here_has_live() -> Bool
 ### :returns: True when a job ran.
 ### :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
 routine run_here_ready() -> Bool
-    here_or_none: @Sched? = HERE_SCHED.peek()
+    here_or_none: @Sched? = HERE_SCHED.load()
 
     if here_or_none.is_absent()
         return false
@@ -1105,9 +1105,9 @@ routine run_here_ready() -> Bool
         return false
     c: @Coro = injected.unwrap()
     prev: @Sched? = current_sched()
-    CURRENT_SCHED.poke(here.to[Addr]())
+    CURRENT_SCHED.store(here.to[Addr]())
     here.run_coro(c)
-    CURRENT_SCHED.poke(prev.to[Addr]())
+    CURRENT_SCHED.store(prev.to[Addr]())
     return true
 
 ### Waits on a pool's block_cond with its lock held. With start_here() jobs live on this thread, it runs one that is

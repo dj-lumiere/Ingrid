@@ -93,14 +93,14 @@ record IoReq
 ### :returns: The bytes read, 0 after an error.
 @export("rf_io_get_result_len")
 routine rf_io_get_result_len() -> U64
-    return IO_LAST_LEN.peek()
+    return IO_LAST_LEN.load()
 
 ### Whether this thread's last {rf_io_read_file_all} or {rf_io_write_file_all} failed. It tells an empty file
 ### from a failed read, since both give null with length 0.
 ### :returns: True when that call failed.
 @export("rf_io_last_failed")
 routine rf_io_last_failed() -> Bool
-    return IO_LAST_FAILED.peek()
+    return IO_LAST_FAILED.load()
 
 ### Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
 ### and stores the results in `req`.
@@ -137,15 +137,15 @@ routine io_thread_main(guard: @U8) -> None
         rf_thread_stack_guarantee()
         held: Authorized[U8] <- guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
-        until queued.is_present() with queued: @IoReq? = IO_HEAD.peek().to[@IoReq?]()
+        until queued.is_present() with queued: @IoReq? = IO_HEAD.load().to[@IoReq?]()
             IO_WORK.wait(held)
-            continue with queued: IO_HEAD.peek().to[@IoReq?]()
+            continue with queued: IO_HEAD.load().to[@IoReq?]()
         then
             req: @IoReq = queued.unwrap()
             next: @IoReq? = req.qnext.peek().to[@IoReq?]()
-            IO_HEAD.poke(next.to[Addr]())
+            IO_HEAD.store(next.to[Addr]())
             if next.is_absent()
-                IO_TAIL.poke(Addr.zero())
+                IO_TAIL.store(Addr.zero())
             drop held
             io_do_work(req)
             rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
@@ -155,14 +155,14 @@ routine io_thread_main(guard: @U8) -> None
 ### :throws: Crashes with `TaskSpawnError` when an I/O thread can't be started.
 @export("rf_io_runtime_init")
 routine rf_io_runtime_init() -> None
-    if IO_OK.peek() == 1
+    if IO_OK.load() == 1
         return
 
     loop with i: U64 = 0
         if not (i == IO_THREADS)
             DEFAULT_THREADS.launch_unwatched(entry: io_thread_main.to[Callable](), arg: IO_GUARD)
             continue with i: i + 1
-        IO_OK.poke(1)
+        IO_OK.store(1)
         return
 
 ### Appends a request to the I/O queue and wakes one I/O thread.
@@ -170,10 +170,10 @@ routine rf_io_runtime_init() -> None
 routine io_submit(req: @IoReq) -> None
     held: Authorized[U8] <- IO_GUARD.get_exclusive_access()
     req.qnext.poke(Addr.zero())
-    when IO_TAIL.peek().to[@IoReq?]()
+    when IO_TAIL.load().to[@IoReq?]()
         is @IoReq as tail => tail.qnext.poke(req.to[Addr]())
-        is None => IO_HEAD.poke(req.to[Addr]())
-    IO_TAIL.poke(req.to[Addr]())
+        is None => IO_HEAD.store(req.to[Addr]())
+    IO_TAIL.store(req.to[Addr]())
     IO_WORK.cast_one()
     drop held
     return
@@ -182,7 +182,7 @@ routine io_submit(req: @IoReq) -> None
 ### parked, else here. The one park pairs with the I/O thread's one wake, which may come first.
 ### :param req: The request.
 routine io_run(req: @IoReq) -> None
-    if IO_OK.peek() == 1
+    if IO_OK.load() == 1
         sched_or_none: @Sched? = rf_sched_current()
         this_coro: @Coro? = current_coro()
         if sched_or_none.is_present() and this_coro.is_present()
@@ -228,12 +228,12 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> Addr
     result: S64 = req.result.peek()
     c_free(req.path.peek())
     c_free(req)
-    IO_LAST_FAILED.poke(result < 0)
+    IO_LAST_FAILED.store(result < 0)
     if result < 0
-        LAST_ERROR.poke((0 - result).to[S32]())
-        IO_LAST_LEN.poke(0)
+        LAST_ERROR.store((0 - result).to[S32]())
+        IO_LAST_LEN.store(0)
         return Addr.zero()
-    IO_LAST_LEN.poke(result.to[U64]())
+    IO_LAST_LEN.store(result.to[U64]())
     return data
 
 ### Writes data_len bytes of data as the whole content of the existing file (emptied first): the bytes written, or
@@ -260,9 +260,9 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
         req.data.poke(buf)
     io_run(req)
     result: S64 = req.result.peek()
-    IO_LAST_FAILED.poke(result < 0)
+    IO_LAST_FAILED.store(result < 0)
     if result < 0
-        LAST_ERROR.poke((0 - result).to[S32]())
+        LAST_ERROR.store((0 - result).to[S32]())
     c_free(req.data.peek())
     c_free(req.path.peek())
     c_free(req)
@@ -401,31 +401,31 @@ routine @ProcState.destruct() -> None
 ### :returns: The signal, or 0 when it exited normally.
 @export("rf_proc_term_signal")
 routine rf_proc_term_signal() -> S32
-    return PROC_SIGNAL.peek()
+    return PROC_SIGNAL.load()
 
 ### The captured stdout of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
 @export("rf_proc_output")
 routine rf_proc_output() -> @Byte?
-    return PROC_OUT.peek().to[@Byte?]()
+    return PROC_OUT.load().to[@Byte?]()
 
 ### The length of the captured stdout of this thread's last subprocess.
 ### :returns: The output's length in bytes.
 @export("rf_proc_output_len")
 routine rf_proc_output_len() -> U64
-    return PROC_OUT_LEN.peek()
+    return PROC_OUT_LEN.load()
 
 ### The captured stderr of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
 @export("rf_proc_errors")
 routine rf_proc_errors() -> @Byte?
-    return PROC_ERR.peek().to[@Byte?]()
+    return PROC_ERR.load().to[@Byte?]()
 
 ### The length of the captured stderr of this thread's last subprocess.
 ### :returns: The errors' length in bytes.
 @export("rf_proc_errors_len")
 routine rf_proc_errors_len() -> U64
-    return PROC_ERR_LEN.peek()
+    return PROC_ERR_LEN.load()
 
 ### A malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or empty when that can't be had.
 ### :param s: The string.
@@ -546,11 +546,11 @@ routine proc_exec(st: @ProcState) -> S64
     req.kind.poke(IO_RUN_PROCESS)
     req.proc.poke(st)
     io_run(req)
-    PROC_SIGNAL.poke(st.term_signal.peek())
-    PROC_OUT.poke(st.output.peek().to[Addr]())
-    PROC_OUT_LEN.poke(st.output_count.peek().to[U64]())
-    PROC_ERR.poke(st.errors.peek().to[Addr]())
-    PROC_ERR_LEN.poke(st.errors_count.peek().to[U64]())
+    PROC_SIGNAL.store(st.term_signal.peek())
+    PROC_OUT.store(st.output.peek().to[Addr]())
+    PROC_OUT_LEN.store(st.output_count.peek().to[U64]())
+    PROC_ERR.store(st.errors.peek().to[Addr]())
+    PROC_ERR_LEN.store(st.errors_count.peek().to[U64]())
     failed: Bool = st.spawn_failed.peek()
     code: S64 = st.exit_status.peek()
     proc_state_free(st)

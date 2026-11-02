@@ -66,12 +66,12 @@ record HeaderBuffer
 ### :returns: The slot.
 ### :throws: Crashes with `OutOfMemoryError` when the slot can't be allocated.
 routine my_slot() -> @WorldSlot
-    mine: Addr = MY_SLOT.peek()
+    mine: Addr = MY_SLOT.load()
     if mine.is_hollow()
         manager: @MemoryManager = C_HEAP
         slot: @WorldSlot = allocate[WorldSlot](count: 1, manager).to[@WorldSlot]().to[@WorldSlot]()
         slot.poke(WorldSlot(inside: 0, next: Addr.zero()))
-        MY_SLOT.poke(slot)
+        MY_SLOT.store(slot)
 
         loop
             head: Addr = SLOTS.peek_unbroken()
@@ -100,7 +100,7 @@ routine unlock_roots() -> None
 ### its own slot. A pass sets WRITER first and then waits on every slot, and a mutator raises its slot first and then
 ### reads WRITER, so one of them always sees the other (both are sequentially consistent).
 routine world_enter() -> None
-    if IN_COLLECTOR.peek()
+    if IN_COLLECTOR.load()
         return
 
     slot: @WorldSlot = my_slot()
@@ -118,9 +118,9 @@ routine world_enter() -> None
 
 ### Leaves the world as a mutator: one step shallower in this thread's slot.
 routine world_leave() -> None
-    if IN_COLLECTOR.peek()
+    if IN_COLLECTOR.load()
         return
-    step_out(MY_SLOT.peek().to[@WorldSlot]())
+    step_out(MY_SLOT.load().to[@WorldSlot]())
     return
 
 ### One step out of `slot`. Leaving the last step wakes a pass that waits for this thread. With no pass waiting it
@@ -224,7 +224,7 @@ routine buffer_at(buffer: @HeaderBuffer, i: U64) -> @RoamHeader
 ### :param header: The entity's header.
 ### :throws: Crashes with `OutOfMemoryError` when growing the roots buffer fails.
 routine add_candidate(header: @RoamHeader) -> None
-    if IN_COLLECTOR.peek()
+    if IN_COLLECTOR.load()
         (ROOTS.count.peek() + 1).to[U32]().poke_into(header.buffered_at)
         buffer_push(buffer: ROOTS, item: header)
         return
@@ -239,7 +239,7 @@ routine add_candidate(header: @RoamHeader) -> None
 ### :param header: The header about to be freed.
 routine remove_candidate(header: @RoamHeader) -> None
     unlock: Bool = when
-        IN_COLLECTOR.peek() => false
+        IN_COLLECTOR.load() => false
         else =>
             lock_roots()
             becomes true
@@ -439,7 +439,7 @@ routine collect() -> U64
     lateinit roots: &List[Addr]
 
     world_stop()
-    manager.store(C_HEAP.peek())
+    manager.store(C_HEAP.load())
     roots.store(.construct(manager))
 
     # MarkRoots: a root still SUSPECTED seeds the scan. Any other root is stale and only leaves the buffer.

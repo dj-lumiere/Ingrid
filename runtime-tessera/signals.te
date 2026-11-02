@@ -96,7 +96,7 @@ routine rf_cpu_event_replace(which: S32, handler_box: Addr) -> Addr
         else => SIG_INTERRUPT
     held: Authorized[U8] <- SIGNALS_GUARD.get_exclusive_access()
     before: Addr = holder_of(kind).swap_unbroken(handler_box)
-    if not handler_box.is_hollow() and not SIGNALS_INSTALLED.peek()
+    if not handler_box.is_hollow() and not SIGNALS_INSTALLED.load()
         install_signal_dispatch()
     listen(kind, on: not handler_box.is_hollow())
     drop held
@@ -170,7 +170,7 @@ routine install_signal_dispatch() -> None
     DEFAULT_THREADS.launch_unwatched(entry: interrupt_dispatch_main.to[Callable](),
         arg: INTERRUPT_PENDING)
     c_set_console_ctrl_handler(console_ctrl_handler.to[Callable](), 1)
-    SIGNALS_INSTALLED.poke(true)
+    SIGNALS_INSTALLED.store(true)
     return
 
 ### Nothing to do on Windows: the console handler stays installed and lets the system act for a slot with no handler.
@@ -339,7 +339,7 @@ routine system_action(signo: CInt) -> None
 ### :param on: Whether a handler holds its slot.
 @target(os: not "windows")
 routine listen(which: S32, on: Bool) -> None
-    if SIGNALS_INSTALLED.peek()
+    if SIGNALS_INSTALLED.load()
         set_signal_action(signal_of(which), on)
     return
 
@@ -395,7 +395,7 @@ routine install_signal_dispatch() -> None
     if c_pipe(fds) != 0
         return
     DEFAULT_THREADS.launch_unwatched(entry: signal_dispatch_main.to[Callable](), arg: SELF_PIPE)
-    SIGNALS_INSTALLED.poke(true)
+    SIGNALS_INSTALLED.store(true)
     if not INTERRUPT_HOLDER.peek_unbroken().is_hollow()
         set_signal_action(SIGINT, on: true)
     if not TERMINATE_HOLDER.peek_unbroken().is_hollow()

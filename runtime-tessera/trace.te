@@ -55,7 +55,7 @@ global CRASH_REPORT: &(Callable[(CStrView, CStrView, @SourceLocation?), None]?)
 ### :param mode: `TRACE_NONE`, `TRACE_PLATFORM`, or `TRACE_SHADOW`.
 @export("__rf_set_trace_mode")
 routine rf_set_trace_mode(mode: CInt) -> None
-    TRACE_MODE.poke(mode)
+    TRACE_MODE.store(mode)
     install_fault_handlers()
     return
 
@@ -131,7 +131,7 @@ routine rf_runtime_code(low: @Addr, high: @Addr) -> None
 ### :param report: The report, called with the error type's name, the message, and where it happened (or null).
 @export("rf_set_crash_report")
 routine rf_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation?), None]?) -> None
-    CRASH_REPORT.poke(report)
+    CRASH_REPORT.store(report)
     return
 
 ### Writes a crash's name as its title, the way a crashable's crash_title reads: `IntegerOverflowError` as
@@ -180,8 +180,8 @@ routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLoca
     text: CStrView = when
         message.data.to[Addr]().is_hollow() => ""
         else => message
-    mode: CInt = TRACE_MODE.peek()
-    when CRASH_REPORT.peek()
+    mode: CInt = TRACE_MODE.load()
+    when CRASH_REPORT.load()
         is Callable[(CStrView, CStrView, @SourceLocation?), None] as report =>
             if mode == TRACE_SHADOW
                 report.call(kind, text, place)
@@ -455,7 +455,7 @@ routine c_set_thread_stack_guarantee(size: @U32) -> CInt
 ### :param report: The report, called with the thread's stack size in bytes.
 @export("rf_set_stack_overflow_report")
 routine rf_set_stack_overflow_report(report: Callable[(U64,), None]) -> None
-    STACK_OVERFLOW_REPORT.poke(report)
+    STACK_OVERFLOW_REPORT.store(report)
     return
 
 ### Keeps 64 KiB of the calling thread's stack back for its exception handler, so a stack overflow on the thread can
@@ -485,7 +485,7 @@ routine exception_handler(pointers: @Addr) -> CInt
     exception: Addr = pointers.peek()
     code: U32 = exception.to[@U32]().peek()
     if code == 0xC00000FD
-        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.peek()
+        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.load()
         if report.is_absent()
             return 0
         low: &CSize <- 0
@@ -494,7 +494,7 @@ routine exception_handler(pointers: @Addr) -> CInt
         size: U64 = (high.load() - low.load()).to[U64]()
         report.unwrap().call(size)
         return 0
-    if TRACE_MODE.peek() == TRACE_NONE
+    if TRACE_MODE.load() == TRACE_NONE
         return 0
     name: @[Byte] = exception_name(code).getview()
     rf_console_flush_on_fault()
@@ -563,10 +563,10 @@ routine sigbus() -> CInt
 routine fault_handler(event: CpuEvent) -> None
     rf_console_flush_on_fault()
     if event.ran_out_of_stack()
-        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.peek()
+        report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.load()
         if report.is_present()
             report.unwrap().call(StackManager.current().size().bytes())
-    if not (TRACE_MODE.peek() == TRACE_NONE)
+    if not (TRACE_MODE.load() == TRACE_NONE)
         name: @[Byte] = signal_name(event.code.to[CInt]()).getview()
         if Console.errors().is_terminal()
             Console.alert("[91m", end: "")
@@ -595,10 +595,10 @@ routine signal_name(signo: CInt) -> CStrView
 @export("rf_thread_stack_guarantee")
 @target(os: not "windows")
 routine rf_thread_stack_guarantee() -> None
-    if THREAD_FAULT_STACK.peek().is_not_hollow()
+    if THREAD_FAULT_STACK.load().is_not_hollow()
         return
     bounds: @StackManager = StackManager.current()
-    THREAD_FAULT_STACK.poke(give_fault_stack())
+    THREAD_FAULT_STACK.store(give_fault_stack())
     return
 
 ### Takes the calling thread's fault stack away and gives its memory back: a thread the runtime started for one task
@@ -606,7 +606,7 @@ routine rf_thread_stack_guarantee() -> None
 @export("rf_thread_stack_release")
 @target(os: not "windows")
 routine rf_thread_stack_release() -> None
-    release_fault_stack(THREAD_FAULT_STACK.peek())
+    release_fault_stack(THREAD_FAULT_STACK.load())
     THREAD_FAULT_STACK.zeroinit(1)
     return
 

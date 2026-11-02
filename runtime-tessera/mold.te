@@ -24,7 +24,7 @@ global THREAD_MOLD: &Addr
 ### :returns: The mold.
 ### :throws: Crashes with `OutOfMemoryError` when it can't be allocated.
 routine new_mold() -> Addr
-    size: U64 = MOLD_SIZE.peek().max(8)
+    size: U64 = MOLD_SIZE.load().max(8)
     mold: @Byte = zeroed[Byte](count: size, what: "Failed to allocate a failure mold")
     return mold.to[Addr]()
 
@@ -33,20 +33,20 @@ routine new_mold() -> Addr
 ### :param bytes: The room of the program's largest crashable.
 @export("rf_failure_mold_size")
 routine rf_failure_mold_size(bytes: U64) -> None
-    MOLD_SIZE.poke(bytes)
-    if THREAD_MOLD.peek().is_hollow()
-        THREAD_MOLD.poke(new_mold())
+    MOLD_SIZE.store(bytes)
+    if THREAD_MOLD.load().is_hollow()
+        THREAD_MOLD.store(new_mold())
     return
 
 ### Reserves the calling thread's mold, for a thread the runtime starts.
 routine thread_mold_reserve() -> None
-    if THREAD_MOLD.peek().is_hollow()
-        THREAD_MOLD.poke(new_mold())
+    if THREAD_MOLD.load().is_hollow()
+        THREAD_MOLD.store(new_mold())
     return
 
 ### Gives back the calling thread's mold, as the thread ends.
 routine thread_mold_release() -> None
-    mold: Addr = THREAD_MOLD.peek()
+    mold: Addr = THREAD_MOLD.load()
     if mold.is_not_hollow()
         c_free(mold)
         THREAD_MOLD.zeroinit(1)
@@ -59,7 +59,7 @@ routine rf_failure_mold() -> Addr
     when current_coro()
         is @Coro as c => return c.mold.peek()
         is None => nothing
-    if THREAD_MOLD.peek().is_hollow()
+    if THREAD_MOLD.load().is_hollow()
         # A thread the runtime didn't start (one C made): its mold is made at its first failure.
-        THREAD_MOLD.poke(new_mold())
-    return THREAD_MOLD.peek()
+        THREAD_MOLD.store(new_mold())
+    return THREAD_MOLD.load()
