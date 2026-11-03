@@ -107,6 +107,20 @@ routine free_header_memory(header: @RoamHeader) -> None
 
 # ── Reference counting ─────────────────────────────────────────────────────
 
+### How many destroy_entity calls are nested on this thread. Past DESTROY_NEST_LIMIT a destroy waits in DESTROY_QUEUE for
+### the call at the bottom, so a chain of a million entities ends in a loop and not in a million nested calls.
+@threadlocal
+global DESTROY_NEST: &U64
+
+### The headers whose last strong handle went too deep in the nesting, linked through their `depth` field (an entity with no
+### strong handle left has no holder of its lock), the next one to destroy first. Null when none waits.
+@threadlocal
+global DESTROY_QUEUE: &Addr
+
+### How many destroys may nest before the next one waits. A destroy and the drop hook it runs take a few frames, so this
+### keeps the deepest nesting to a small part of the stack.
+preset DESTROY_NEST_LIMIT: U64 = 256
+
 ### Adds a strong handle. The count changes inside the collector's shared lock, so a collection pass (which
 ### adjusts counts while it traces) never races it.
 ### :param header: The entity's header.
@@ -150,20 +164,6 @@ secret routine drop_count(header: @RoamHeader) -> Bool
     remaining: U64 = header.count.peek() - 1
     remaining.poke_into(header.count)
     return remaining == 0
-
-### How many destroy_entity calls are nested on this thread. Past DESTROY_NEST_LIMIT a destroy waits in DESTROY_QUEUE for
-### the call at the bottom, so a chain of a million entities ends in a loop and not in a million nested calls.
-@threadlocal
-global DESTROY_NEST: &U64
-
-### The headers whose last strong handle went too deep in the nesting, linked through their `depth` field (an entity with no
-### strong handle left has no holder of its lock), the next one to destroy first. Null when none waits.
-@threadlocal
-global DESTROY_QUEUE: &Addr
-
-### How many destroys may nest before the next one waits. A destroy and the drop hook it runs take a few frames, so this
-### keeps the deepest nesting to a small part of the stack.
-preset DESTROY_NEST_LIMIT: U64 = 256
 
 ### The last strong handle went: destroys the entity, frees the header unless a weak observer still holds it, and
 ### leaves the shared lock the release entered. What the entity kept alive is let go after that, outside the lock. Past
