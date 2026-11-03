@@ -412,6 +412,44 @@ routine roam_promote(header: @RoamHeader) -> None
         drop kids
         return
 
+### Starts a store of a value into something the entity of `holder` keeps (the places of a container, a member
+### variable): when the holder has escaped, the entity the value reaches has to escape before the store is visible,
+### and this opens the scratch buffer the value's trace routine reports its handles into. The caller then runs the
+### value's trace routine and ends with `roam_store_end`. A holder that is local (or hollow) has nothing to do.
+### :param holder: The holder entity's header, or null.
+### :returns: True when the caller must trace the value and call `roam_store_end`.
+@export("ingrid_roam_store_begin")
+routine roam_store_begin(holder: Addr) -> Bool
+    if holder.is_hollow()
+        return false
+    header: @RoamHeader = holder.to[@RoamHeader]()
+    if header.escaped.peek_unbroken() != 1
+        return false
+    lock_scratch()
+    buffer_clear(SCRATCH)
+    return true
+
+### Ends a store opened by `roam_store_begin` that returned true: promotes every entity the value's trace routine
+### reported, and everything those reach.
+### :throws: Crashes with `OutOfMemoryError` when the list of reported handles cannot grow.
+@export("ingrid_roam_store_end")
+routine roam_store_end() -> None
+    manager: @MemoryManager = C_HEAP
+    reported: &List[Addr] <- .construct(manager)
+
+    n: U64 = SCRATCH.count.peek()
+
+    for i in 0 til n
+        reported.add_last(buffer_at(buffer: SCRATCH, i))
+    then
+        unlock_scratch()
+
+    for i in 0 til n
+        roam_promote(header: reported[i].to[@RoamHeader]())
+    then
+        drop reported
+        return
+
 # ── The agent-keyed reentrant lock ──────────────────────────────────────────
 
 ### Enters the entity's lock when it has escaped (a local entity has no contention). Only the check is inlined into

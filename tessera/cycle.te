@@ -23,6 +23,9 @@ lateinit global REAP: &HeaderBuffer
 ### of accesses lives once, in the runtime library.
 global ROOTS_FLAG: &U32
 
+### Guards SCRATCH, which a promotion (roam.te) and a pass both fill: 1 while one of them uses it.
+global SCRATCH_FLAG: &U32
+
 ### The world lock's pass side: the WRITER bit while a pass runs. Mutators only read it, so it stays in every core's
 ### cache. Which mutators are inside is kept per thread, in SLOTS.
 global WORLD: &U32
@@ -94,6 +97,19 @@ routine lock_roots() -> None
 routine unlock_roots() -> None
     ROOTS_FLAG.poke_unbroken(0)
     wake_one(ROOTS_FLAG)
+    return
+
+### Takes SCRATCH_FLAG, sleeping while another thread holds it.
+routine lock_scratch() -> None
+    until SCRATCH_FLAG.swap_unbroken(1) == 0
+        wait_on(at: SCRATCH_FLAG, expected: 1)
+    then
+        return
+
+### Gives SCRATCH_FLAG up, waking one thread that sleeps on it.
+routine unlock_scratch() -> None
+    SCRATCH_FLAG.poke_unbroken(0)
+    wake_one(SCRATCH_FLAG)
     return
 
 ### Enters the world as a mutator: one step deeper in this thread's slot. Many mutators may be inside at once, each in
@@ -289,6 +305,7 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> None
     trace: Addr = node.trace_hook.peek()
     if trace.is_hollow()
         return
+    lock_scratch()
     buffer_clear(SCRATCH)
     run_hook(hook: trace, subject: node.data.peek())
 
@@ -297,6 +314,7 @@ routine children(node: @RoamHeader, kids: @List[Addr]) -> None
     for i in 0 til n
         kids.add_last(buffer_at(buffer: SCRATCH, i))
     then
+        unlock_scratch()
         return
 
 # ── The three passes ───────────────────────────────────────────────────────
