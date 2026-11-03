@@ -27,19 +27,20 @@ secret routine limbs_mul_schoolbook(result: @U64, a: @[U64], b: @[U64]) -> None
 ### :param result: The product, which must not overlap the factors.
 ### :param a: The first factor.
 ### :param b: The second factor.
-secret routine limbs_mul_ntt(result: @U64, a: @[U64], b: @[U64]) -> None
+### :param scratch: The call's arena.
+secret routine limbs_mul_ntt(result: @U64, a: @[U64], b: @[U64], scratch: @Arena) -> None
     len: U64 = a.count() + b.count()
     plan: NttPlan = fft_size(len)
     fft_len: U64 = plan.fft_len()
-    buf1: @U64 = alloc_limbs(n: fft_len * plan.nb_mods)
+    buf1: @U64 = alloc_limbs(n: fft_len * plan.nb_mods, scratch)
     limb_to_ntt(tabr: buf1, a, plan)
-    buf2: @U64 = alloc_limbs(n: fft_len * plan.nb_mods)
+    buf2: @U64 = alloc_limbs(n: fft_len * plan.nb_mods, scratch)
     limb_to_ntt(tabr: buf2, a: b, plan)
     for j in 0 til plan.nb_mods
         job: NttJob = (log2: plan.fft_len_log2, inverse: 0, m_idx: plan.first_m_idx() + j)
-        ntt_conv(buf1: buf1.stride(fft_len * j), buf2: buf2.stride(fft_len * j), job,
-            k_tot: plan.fft_len_log2)
-    ntt_to_limb(tabr: limbs_span(tab: result, n: len), buf: buf1, plan)
+        ntt_conv(bufs: (first: buf1.stride(fft_len * j), second: buf2.stride(fft_len * j)), job,
+            k_tot: plan.fft_len_log2, scratch)
+    ntt_to_limb(tabr: limbs_span(tab: result, n: len), buf: buf1, plan, scratch)
     return
 
 ### result[0 .. a.count + b.count) = a × b, by the schoolbook method below FFT_MUL_THRESHOLD limbs of the smaller factor
@@ -47,9 +48,10 @@ secret routine limbs_mul_ntt(result: @U64, a: @[U64], b: @[U64]) -> None
 ### :param result: The product, which must not overlap the factors.
 ### :param a: The first factor.
 ### :param b: The second factor.
-secret routine limbs_mul(result: @U64, a: @[U64], b: @[U64]) -> None
+### :param scratch: The call's arena.
+secret routine limbs_mul(result: @U64, a: @[U64], b: @[U64], scratch: @Arena) -> None
     if a.count().min(b.count()) >= FFT_MUL_THRESHOLD
-        limbs_mul_ntt(result, a, b)
+        limbs_mul_ntt(result, a, b, scratch)
         return
     limbs_mul_schoolbook(result, a, b)
     return

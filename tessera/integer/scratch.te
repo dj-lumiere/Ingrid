@@ -6,26 +6,12 @@
 # of computing, loops whose end depends on a value stop, and the call reports how much it needed. The caller then
 # retries with a larger buffer. Taking more than was admitted is a wrong bound in the engine and crashes.
 #
-# The arena is the running thread's, one call at a time: an engine call doesn't start another one.
+# The arena is a local of the export that makes it, handed down to every engine routine that takes temporaries, so a
+# call has its own and nothing is shared between threads.
 
 module Ingrid/Integer
 
-### This thread's arena.
-@threadlocal
-@target(os: not "none")
-lateinit global ARENA: &Arena
-
-### This thread's arena, on AArch64 without an operating system (its link script holds the thread-local block).
-@threadlocal
-@target(os: "none", arch: "aarch64")
-lateinit global ARENA: &Arena
-
-### The arena on a target without an operating system and without a thread-local area: the threads of its one core
-### share it.
-@target(os: "none", arch: not "aarch64")
-lateinit global ARENA: &Arena
-
-### The arena of the call running on this thread: the buffer its caller handed over and how much is taken.
+### The arena of one call: the buffer its caller handed over and how much is taken.
 secret record Arena
     ### The address of the buffer's first limb.
     base: Addr
@@ -41,21 +27,18 @@ secret record Arena
 ### Starts a call's arena on a buffer of `limbs` limbs at `base`, with nothing taken.
 ### :param base: The buffer the caller hands over (anything when `limbs` is 0).
 ### :param limbs: How many limbs the buffer has.
-secret routine scratch_open(base: @U64, limbs: U64) -> None
-    ARENA.base.poke(base.to[Addr]())
-    ARENA.top.poke(0)
-    ARENA.cap.poke(limbs)
-    ARENA.need.poke(0)
-    ARENA.exhausted.poke(false)
-    return
+### :returns: The arena.
+secret common routine Arena.construct(base: @U64, limbs: U64) -> Me
+    arena: Me = Me(base: base.to[Addr](), top: 0, cap: limbs, need: 0, exhausted: false)
+    return arena
 
-### Ends the call's arena: nothing can be taken from it until the next call opens one.
+### Ends the call's arena: nothing can be taken from it afterwards.
 ### :returns: 0 when every admission fit, else the limbs the call needs at least, what its retry hands over.
-secret routine scratch_close() -> U64
-    exhausted: Bool = ARENA.exhausted.peek()
-    need: U64 = ARENA.need.peek()
-    ARENA.top.poke(0)
-    ARENA.cap.poke(0)
+secret routine @Arena.close() -> U64
+    exhausted: Bool = me.exhausted.peek()
+    need: U64 = me.need.peek()
+    me.top.poke(0)
+    me.cap.poke(0)
     if exhausted
         return need.max(1)
     return 0
@@ -64,34 +47,34 @@ secret routine scratch_close() -> U64
 ### admission is refused too, and the call reports what it needed.
 ### :param limbs: The most the operation takes.
 ### :returns: True when they fit and the call isn't exhausted.
-secret routine scratch_admit(limbs: U64) -> Bool
-    if ARENA.exhausted.peek()
+secret routine @Arena.admit(limbs: U64) -> Bool
+    if me.exhausted.peek()
         return false
-    top: U64 = ARENA.top.peek()
-    room: U64 = ARENA.cap.peek() - top
+    top: U64 = me.top.peek()
+    room: U64 = me.cap.peek() - top
     if limbs <= room
         return true
-    ARENA.exhausted.poke(true)
-    ARENA.need.poke(top +^ limbs)
+    me.exhausted.poke(true)
+    me.need.poke(top +^ limbs)
     return false
 
 ### True once an admission of this call was refused: the result is a placeholder, and loops that wait for a value
 ### stop.
 ### :returns: Whether the call is exhausted.
-secret routine scratch_exhausted() -> Bool
-    return ARENA.exhausted.peek()
+secret routine @Arena.is_exhausted() -> Bool
+    return me.exhausted.peek()
 
 ### Takes `limbs` zeroed limbs from the arena, which an admission has made room for.
 ### :param limbs: How many limbs.
 ### :returns: The first of them.
 ### :throws: Crashes with `MemoryError` when they don't fit: the engine admitted less than it takes.
-secret routine scratch_take(limbs: U64) -> @U64
-    top: U64 = ARENA.top.peek()
-    room: U64 = ARENA.cap.peek() - top
+secret routine @Arena.take(limbs: U64) -> @U64
+    top: U64 = me.top.peek()
+    room: U64 = me.cap.peek() - top
     if not (limbs <= room)
         throw ForeignError(kind: "MemoryError",
             description: "The arbitrary-precision engine took more scratch than it admitted.")
-    first: @U64 = ARENA.base.peek().to[@U64]().stride(top)
+    first: @U64 = me.base.peek().to[@U64]().stride(top)
     first.zeroinit(limbs)
-    ARENA.top.poke(top + limbs)
+    me.top.poke(top + limbs)
     return first

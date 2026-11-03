@@ -14,6 +14,13 @@ secret record SqrtBits
     ### The `ext` bits after them, which extend the remainder after it.
     lo: U64
 
+### The two buffers of a root: where it goes and the number it comes from.
+secret record SqrtTabs
+    ### The root, n limbs.
+    root: @U64
+    ### The number, 2n limbs.
+    number: @U64
+
 ### floor(sqrt(x)) for x < 2^16, which seeds the root of a limb (it replaces LibBF's table of 192 roots).
 ### :param x: The number, below 2^16.
 ### :returns: The root.
@@ -84,21 +91,24 @@ secret routine limbs_sqrt_2word(tabs: @U64, taba: @U64) -> U64
 
 ### The recursive Karatsuba root: taba has 2n limbs with a top limb of at least 2^62. Writes floor(sqrt(a)) to
 ### tabs[0..n) and the remainder to taba[0..n) (LibBF mp_sqrtrem_rec).
-### :param tabs: The root, n limbs.
-### :param taba: The number, then the low limbs of the remainder.
+### :param tabs_taba: The root (n limbs) and the number (then the low limbs of the remainder).
 ### :param n: Half the number's limbs.
 ### :param tmp_buf: Scratch for n / 2 + 1 limbs.
+### :param scratch: The call's arena.
 ### :returns: The high limb of the remainder.
-secret routine limbs_sqrt_rec(tabs: @U64, taba: @U64, n: U64, tmp_buf: @U64) -> U64
+secret routine limbs_sqrt_rec(tabs_taba: SqrtTabs, n: U64, tmp_buf: @U64, scratch: @Arena) -> U64
+    tabs: @U64 = tabs_taba.root
+    taba: @U64 = tabs_taba.number
     if n == 1
         return limbs_sqrt_2word(tabs, taba)
     l: U64 = n // 2
     h: U64 = n - l
-    qh0: U64 = limbs_sqrt_rec(tabs: tabs.stride(l), taba: taba.stride(2 * l), n: h, tmp_buf)
+    qh0: U64 = limbs_sqrt_rec(tabs_taba: (root: tabs.stride(l), number: taba.stride(2 * l)), n: h,
+        tmp_buf, scratch)
     if qh0 != 0
         limbs_sub(res: taba.stride(2 * l), op1: taba.stride(2 * l), op2: tabs.stride(l), n: h)
     limbs_divmod_norm(tabq: tmp_buf, a: limbs_span(tab: taba.stride(l), n),
-        b: limbs_span(tab: tabs.stride(l), n: h))
+        b: limbs_span(tab: tabs.stride(l), n: h), scratch)
     qh1: U64 = qh0 +% limb(tab: tmp_buf, i: l)
     limbs_copy(dst: tabs, src: tmp_buf, n: l)
     ql: U64 = limbs_shr(tab_r: tabs, tab: tabs, n: l, shift: 1)
@@ -110,7 +120,9 @@ secret routine limbs_sqrt_rec(tabs: @U64, taba: @U64, n: U64, tmp_buf: @U64) -> 
         ql != 0 => limbs_add(res: taba.stride(l), op1: taba.stride(l), op2: tabs.stride(l), n: h)
         else => 0
     limbs_add_word(tab: tabs.stride(l), b: qh, n: h)
-    c: U64 = sqrt_subtract_square(taba, tabs, n, qh)
+    c: U64 = when
+        qh != 0 => qh
+        else => sqrt_subtract_square(taba, tabs, n, scratch)
     rh1: U64 = rh0 -% limbs_sub_word(tab: taba.stride(2 * l), b: c, n: n - 2 * l)
     if (rh1 >> 63) != 0
         # the remainder went negative: the root was one too big
@@ -119,19 +131,16 @@ secret routine limbs_sqrt_rec(tabs: @U64, taba: @U64, n: U64, tmp_buf: @U64) -> 
         return rh2 +% limbs_add_word(tab: taba, b: 1, n)
     return rh1
 
-### Takes the square of the low half of the root off the remainder's low limbs, unless the quotient's carry stands for
-### it.
+### Takes the square of the low half of the root off the remainder's low limbs.
 ### :param taba: The remainder, 2n limbs of room, changed in place.
 ### :param tabs: The root, n limbs.
 ### :param n: The root's limbs.
-### :param qh: The carry of the quotient.
+### :param scratch: The call's arena.
 ### :returns: The borrow to take off the limbs above.
-secret routine sqrt_subtract_square(taba: @U64, tabs: @U64, n: U64, qh: U64) -> U64
-    if qh != 0
-        return qh
+secret routine sqrt_subtract_square(taba: @U64, tabs: @U64, n: U64, scratch: @Arena) -> U64
     l: U64 = n // 2
     limbs_mul(result: taba.stride(n), a: limbs_span(tab: tabs, n: l),
-        b: limbs_span(tab: tabs, n: l))
+        b: limbs_span(tab: tabs, n: l), scratch)
     return limbs_sub(res: taba, op1: taba, op2: taba.stride(n), n: 2 * l)
 
 ### floor(sqrt(a)) of a number of 2n limbs whose top limb is at least 2^62: the root goes to tabs and the remainder
@@ -139,10 +148,11 @@ secret routine sqrt_subtract_square(taba: @U64, tabs: @U64, n: U64, qh: U64) -> 
 ### :param tabs: The root, n limbs.
 ### :param taba: The number.
 ### :param n: Half the number's limbs.
+### :param scratch: The call's arena.
 ### :returns: The high limb of the remainder.
-secret routine limbs_sqrt_rem(tabs: @U64, taba: @U64, n: U64) -> U64
-    tmp_buf: @U64 = alloc_limbs(n: n // 2 + 1)
-    return limbs_sqrt_rec(tabs, taba, n, tmp_buf)
+secret routine limbs_sqrt_rem(tabs: @U64, taba: @U64, n: U64, scratch: @Arena) -> U64
+    tmp_buf: @U64 = alloc_limbs(n: n // 2 + 1, scratch)
+    return limbs_sqrt_rec(tabs_taba: (root: tabs, number: taba), n, tmp_buf, scratch)
 
 ### The most limbs `limbs_sqrt_rec` of 2n limbs takes.
 ### :param n: Half the number's limbs.

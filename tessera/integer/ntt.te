@@ -204,6 +204,20 @@ secret record NttCut
     ### The index of the prime.
     m_idx: U64
 
+### The two buffers a cyclic convolution works on.
+secret record NttConvBufs
+    ### The first operand's residues, which become the product's.
+    first: @U64
+    ### The second operand's residues.
+    second: @U64
+
+### The two buffers a strip of columns works on.
+secret record NttStripBufs
+    ### The strip: 16 columns of n1 values.
+    strip: @U64
+    ### Scratch for n1 values.
+    tmp: @U64
+
 ### One pass of the transform: the blocks it runs and how they are laid out.
 secret record NttLevel
     ### How many blocks.
@@ -492,15 +506,16 @@ secret routine carry_shift_down(carry: @U64, u: @U64, plan: NttPlan) -> None
 ### :param tabr: The product, zeroed here.
 ### :param buf: The residues, fft_len × nb_mods limbs.
 ### :param plan: The plan.
-secret routine ntt_to_limb(tabr: @[U64], buf: @U64, plan: NttPlan) -> None
+### :param scratch: The call's arena.
+secret routine ntt_to_limb(tabr: @[U64], buf: @U64, plan: NttPlan, scratch: @Arena) -> None
     dpl: U64 = plan.dpl
     r_len: U64 = tabr.count()
     out: @U64 = tabr.to[@U64]()
     base_mask1: U64 = digit_mask(dpl)
     n_limb1: U64 = (dpl - 1) // 64
-    y: @U64 = alloc_limbs(n: 5)
-    u: @U64 = alloc_limbs(n: 5)
-    carry: @U64 = alloc_limbs(n: 5)
+    y: @U64 = alloc_limbs(n: 5, scratch)
+    u: @U64 = alloc_limbs(n: 5, scratch)
+    carry: @U64 = alloc_limbs(n: 5, scratch)
     zero_limbs(tab: out, n: r_len)
     fft_len: U64 = plan.fft_len()
     ndig: U64 = (r_len * 64 + dpl - 1) // dpl
@@ -528,11 +543,12 @@ secret routine ntt_to_limb(tabr: @[U64], buf: @U64, plan: NttPlan) -> None
 ### :param k: The level.
 ### :param inverse: 0 for the forward transform, 1 for the inverse.
 ### :param m_idx: The prime's index.
+### :param scratch: The call's arena.
 ### :returns: The table, taken from the scratch arena.
-secret routine get_trig(k: U64, inverse: U64, m_idx: U64) -> @U64
+secret routine get_trig(k: U64, inverse: U64, m_idx: U64, scratch: @Arena) -> @U64
     n2: U64 = 1 << (k - 1)
     m: U64 = ntt_mod(idx: m_idx)
-    tab: @U64 = alloc_limbs(n: n2 * 2)
+    tab: @U64 = alloc_limbs(n: n2 * 2, scratch)
     root: U64 = ntt_proot_pow(j: m_idx, inverse, k)
     root_inv: U64 = init_mul_mod_fast2(b: root, m)
     for i in 0 til n2 with c: U64 = 1
@@ -566,16 +582,16 @@ secret routine ntt_pass(tab_in: @U64, tab_out: @U64, trig: @U64, level: NttLevel
 
 ### The transform of 2^k values modulo a prime, ping-ponging between `in_buf` and `tmp_buf`, the last level into
 ### `out_buf`. Values stay below 2m throughout (LibBF ntt_fft).
-### :param out_buf: The result, which may be `in_buf`.
-### :param in_buf: The values.
+### :param buf: The values, replaced by the transform.
 ### :param tmp_buf: Scratch for 2^k values.
 ### :param job: The length, direction and prime.
-secret routine ntt_fft(out_buf: @U64, in_buf: @U64, tmp_buf: @U64, job: NttJob) -> None
+### :param scratch: The call's arena.
+secret routine ntt_fft(buf: @U64, tmp_buf: @U64, job: NttJob, scratch: @Arena) -> None
     m: U64 = ntt_mod(idx: job.m_idx)
     m2: U64 = 2 * m
     stride_in: U64 = (1 << job.log2) // 2
-    until blocks == 2 with blocks: U64 = 1 << job.log2, per_block: U64 = 1, tab_in: @U64 = in_buf, tab_out: @U64 = tmp_buf, l: U64 = job.log2
-        trig: @U64 = get_trig(k: l, inverse: job.inverse, m_idx: job.m_idx)
+    until blocks == 2 with blocks: U64 = 1 << job.log2, per_block: U64 = 1, tab_in: @U64 = buf, tab_out: @U64 = tmp_buf, l: U64 = job.log2
+        trig: @U64 = get_trig(k: l, inverse: job.inverse, m_idx: job.m_idx, scratch)
         ntt_pass(tab_in, tab_out, trig,
             level: (blocks: blocks >> 1, per_block: per_block, stride_in: stride_in, m: m))
         continue with blocks: blocks >> 1, per_block: per_block << 1, tab_in: tab_out, tab_out: tab_in, l: l - 1
@@ -584,8 +600,8 @@ secret routine ntt_fft(out_buf: @U64, in_buf: @U64, tmp_buf: @U64, job: NttJob) 
         for k2 in 0 til stride_in
             a0: U64 = limb(tab: tab_in, i: k2)
             a1: U64 = limb(tab: tab_in, i: k2 + stride_in)
-            set_limb(tab: out_buf, i: k2, value: add_mod(a: a0, b: a1, m: m2))
-            set_limb(tab: out_buf, i: k2 + stride_in, value: sub_mod(a: a0, b: a1, m: m2))
+            set_limb(tab: buf, i: k2, value: add_mod(a: a0, b: a1, m: m2))
+            set_limb(tab: buf, i: k2 + stride_in, value: sub_mod(a: a0, b: a1, m: m2))
         return
 
 ### tab1 *= tab2 pointwise modulo a prime, scaled by 1/2^k_tot (LibBF ntt_vec_mul).
@@ -620,12 +636,14 @@ secret routine mul_trig(buf: @U64, n: U64, c_mul: U64, m_idx: U64) -> None
         return
 
 ### Transforms the 16 columns of a strip, twisting each by its power of the root.
-### :param buf2: The strip, 16 columns of n1 values.
-### :param buf3: Scratch for n1 values.
+### :param bufs: The strip (16 columns of n1 values) and scratch for n1 values.
 ### :param cut: How the transform is cut.
 ### :param c_mul: The twist of the first column.
+### :param scratch: The call's arena.
 ### :returns: The twist of the next strip's first column.
-secret routine ntt_strip(buf2: @U64, buf3: @U64, cut: NttCut, c_mul: U64) -> U64
+secret routine ntt_strip(bufs: NttStripBufs, cut: NttCut, c_mul: U64, scratch: @Arena) -> U64
+    buf2: @U64 = bufs.strip
+    buf3: @U64 = bufs.tmp
     n1: U64 = 1 << cut.k1
     m: U64 = ntt_mod(idx: cut.m_idx)
     m_inv: U64 = NTT_MOD_INVS.getitem(cut.m_idx)
@@ -635,7 +653,7 @@ secret routine ntt_strip(buf2: @U64, buf3: @U64, cut: NttCut, c_mul: U64) -> U64
         column: @U64 = buf2.stride(l2 * n1)
         if cut.inverse != 0
             mul_trig(buf: column, n: n1, c_mul: twist, m_idx: cut.m_idx)
-        ntt_fft(out_buf: column, in_buf: column, tmp_buf: buf3, job)
+        ntt_fft(buf: column, tmp_buf: buf3, job, scratch)
         if cut.inverse == 0
             mul_trig(buf: column, n: n1, c_mul: twist, m_idx: cut.m_idx)
         continue with twist: mul_mod_fast(a: twist, b: c0, m, m_inv)
@@ -646,20 +664,21 @@ secret routine ntt_strip(buf2: @U64, buf3: @U64, cut: NttCut, c_mul: U64) -> U64
 ### of 16 (LibBF ntt_fft_partial). The cut form is used only above 2^19 values.
 ### :param buf1: The values, changed in place.
 ### :param cut: How the transform is cut.
-secret routine ntt_fft_partial(buf1: @U64, cut: NttCut) -> None
+### :param scratch: The call's arena.
+secret routine ntt_fft_partial(buf1: @U64, cut: NttCut, scratch: @Arena) -> None
     n1: U64 = 1 << cut.k1
     n2: U64 = 1 << cut.k2
-    buf3: @U64 = alloc_limbs(n: n1)
+    buf3: @U64 = alloc_limbs(n: n1, scratch)
     if cut.k2 == 0
-        ntt_fft(out_buf: buf1, in_buf: buf1, tmp_buf: buf3,
-            job: (log2: cut.k1, inverse: cut.inverse, m_idx: cut.m_idx))
+        ntt_fft(buf: buf1, tmp_buf: buf3,
+            job: (log2: cut.k1, inverse: cut.inverse, m_idx: cut.m_idx), scratch)
         return
-    buf2: @U64 = alloc_limbs(n: n1 * 16)
+    buf2: @U64 = alloc_limbs(n: n1 * 16, scratch)
     until j >= n2 with j: U64 = 0, c_mul: U64 = 1
         for i in 0 til n1
             for l: U64 in 0 til 16
                 set_limb(tab: buf2, i: i + l * n1, value: limb(tab: buf1, i: i * n2 + (j + l)))
-        next_c_mul: U64 = ntt_strip(buf2, buf3, cut, c_mul)
+        next_c_mul: U64 = ntt_strip(bufs: (strip: buf2, tmp: buf3), cut, c_mul, scratch)
         for i2 in 0 til n1
             for l3: U64 in 0 til 16
                 set_limb(tab: buf1, i: i2 * n2 + (j + l3), value: limb(tab: buf2, i: i2 + l3 * n1))
@@ -677,24 +696,26 @@ secret routine ntt_split(k: U64) -> U64
 
 ### The cyclic convolution buf1 = buf1 ⊛ buf2 modulo a prime: both transformed forward, multiplied pointwise, the
 ### product transformed back (LibBF ntt_conv).
-### :param buf1: The first operand's residues, replaced by the product's.
-### :param buf2: The second operand's residues, destroyed.
+### :param bufs: The first operand's residues (replaced by the product's) and the second's (destroyed).
 ### :param job: The length (log2) and the prime.
 ### :param k_tot: log2 of the whole transform, which the product is scaled by.
-secret routine ntt_conv(buf1: @U64, buf2: @U64, job: NttJob, k_tot: U64) -> None
+### :param scratch: The call's arena.
+secret routine ntt_conv(bufs: NttConvBufs, job: NttJob, k_tot: U64, scratch: @Arena) -> None
+    buf1: @U64 = bufs.first
+    buf2: @U64 = bufs.second
     k1: U64 = ntt_split(k: job.log2)
     k2: U64 = job.log2 - k1
     n2: U64 = 1 << k2
     forward: NttCut = (k1: k1, k2: k2, inverse: 0, m_idx: job.m_idx)
-    ntt_fft_partial(buf1, cut: forward)
-    ntt_fft_partial(buf1: buf2, cut: forward)
+    ntt_fft_partial(buf1, cut: forward, scratch)
+    ntt_fft_partial(buf1: buf2, cut: forward, scratch)
     if k2 == 0
         ntt_vec_mul(tab1: buf1, tab2: buf2, job, k_tot)
     else
         for i: U64 in 0 til 1 << k1
-            ntt_conv(buf1: buf1.stride(i * n2), buf2: buf2.stride(i * n2),
-                job: (log2: k2, inverse: 0, m_idx: job.m_idx), k_tot)
-    ntt_fft_partial(buf1, cut: (k1: k1, k2: k2, inverse: 1, m_idx: job.m_idx))
+            ntt_conv(bufs: (first: buf1.stride(i * n2), second: buf2.stride(i * n2)),
+                job: (log2: k2, inverse: 0, m_idx: job.m_idx), k_tot, scratch)
+    ntt_fft_partial(buf1, cut: (k1: k1, k2: k2, inverse: 1, m_idx: job.m_idx), scratch)
     return
 
 # ── scratch ───────────────────────────────────────────────────────────────────────────────────────

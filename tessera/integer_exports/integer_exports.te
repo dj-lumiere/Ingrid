@@ -38,9 +38,10 @@ routine words_need(status: U64, need: U64) -> Words
 ### :param r: The result.
 ### :param out: The result buffer.
 ### :param out_cap: Its limbs.
+### :param scratch: The call's arena.
 ### :returns: The words of the call.
-routine integer_done(r: IntV, out: @U64, out_cap: U64) -> Words
-    need: U64 = scratch_close()
+routine integer_done(r: IntV, out: @U64, out_cap: U64, scratch: @Arena) -> Words
+    need: U64 = scratch.close()
     if need != 0
         return words_need(status: 1, need)
     if r.len > out_cap
@@ -68,8 +69,8 @@ routine ingrid_integer_add(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_le
     cap: U64 = bigint_add_capacity(a, b)
     if out_cap < cap
         return words_need(status: 2, need: cap)
-    scratch_open(base: out, limbs: 0)
-    return integer_done(r: bigint_add_into(a, b, r: out), out, out_cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_add_into(a, b, r: out), out, out_cap, scratch: arena)
 
 ### a * b.
 ### :param a_neg: 1 when a is negative.
@@ -86,10 +87,10 @@ routine ingrid_integer_add(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_le
 @export("ingrid_integer_mul")
 routine ingrid_integer_mul(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
     out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
     r: IntV = bigint_mul(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
-        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab))
-    return integer_done(r, out, out_cap)
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
 
 ### The scratch `integer_mul` takes for a_len x b_len limbs.
 ### :param a_len: a's limbs.
@@ -119,10 +120,10 @@ routine ingrid_integer_mul_scratch_size(a_len: U64, b_len: U64) -> U64
 routine ingrid_integer_divmod(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64,
     b_tab: @U64, q_out: @U64, q_cap: U64, r_out: @U64, r_cap: U64, scratch: @U64,
     scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
     q, r = bigint_divmod(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
-        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab))
-    need: U64 = scratch_close()
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), scratch: arena)
+    need: U64 = arena.close()
     if need != 0
         return words_need(status: 1, need)
     if q.len > q_cap or r.len > r_cap
@@ -154,8 +155,8 @@ routine ingrid_integer_shift_left(a_neg: U64, a_len: U64, a_tab: @U64, bits: U64
     cap: U64 = bigint_shl_capacity(a, bits)
     if out_cap < cap
         return words_need(status: 2, need: cap)
-    scratch_open(base: out, limbs: 0)
-    return integer_done(r: bigint_shl_into(a, bits, r: out), out, out_cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_shl_into(a, bits, r: out), out, out_cap, scratch: arena)
 
 ### floor(a / 2^bits), the arithmetic shift of the two's-complement form, into `out` (at least a_len - bits / 64 + 1
 ### limbs, and 1). Takes no scratch.
@@ -173,8 +174,8 @@ routine ingrid_integer_shift_right(a_neg: U64, a_len: U64, a_tab: @U64, bits: U6
     cap: U64 = bigint_shr_capacity(a, bits)
     if out_cap < cap
         return words_need(status: 2, need: cap)
-    scratch_open(base: out, limbs: 0)
-    return integer_done(r: bigint_shr_into(a, bits, r: out), out, out_cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_shr_into(a, bits, r: out), out, out_cap, scratch: arena)
 
 ### One two's-complement bitwise operation (0 AND, 1 OR, 2 XOR) into `out`.
 ### :param a: The first value.
@@ -186,9 +187,9 @@ routine integer_bitop(a: IntV, b: IntV, op: U64, out: @[U64]) -> Words
     cap: U64 = bigint_bitop_capacity(a, b)
     if out.count() < cap
         return words_need(status: 2, need: cap)
-    scratch_open(base: out.to[@U64](), limbs: 0)
+    arena: &Arena <- .construct(base: out.to[@U64](), limbs: 0)
     return integer_done(r: bigint_bitop_into(a, b, op, r: out.to[@U64]()), out: out.to[@U64](),
-        out_cap: out.count())
+        out_cap: out.count(), scratch: arena)
 
 ### a AND b over the two's-complement forms, into `out` (at least max(a_len, b_len) + 1 limbs). Takes no scratch.
 ### :param a_neg: 1 when a is negative.
@@ -254,9 +255,9 @@ routine ingrid_integer_xor(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_le
 @export("ingrid_integer_pow")
 routine ingrid_integer_pow(a_neg: U64, a_len: U64, a_tab: @U64, e: U64, out: @U64, out_cap: U64,
     scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
-    r: IntV = bigint_pow(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), e)
-    return integer_done(r, out, out_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_pow(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), e, scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
 
 ### The scratch `integer_pow` takes for an a_len-limb base of `a_bits` significant bits and exponent `e`.
 ### :param a_len: a's limbs.
@@ -278,9 +279,9 @@ routine ingrid_integer_pow_scratch_size(a_len: U64, a_bits: U64, e: U64) -> U64
 @export("ingrid_integer_sqrt")
 routine ingrid_integer_sqrt(a_len: U64, a_tab: @U64, out: @U64, out_cap: U64, scratch: @U64,
     scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
-    r: IntV = bigint_isqrt(a: abi_intv(neg: 0, len: a_len, tab: a_tab))
-    return integer_done(r, out, out_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_isqrt(a: abi_intv(neg: 0, len: a_len, tab: a_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
 
 ### s = floor(sqrt(a)) into `s_out` and a - s*s into `r_out`, for a non-negative a. Done: `w1` the root's length, `w3` the
 ### remainder's. Status 2: `w1` and `w2` the root's and the remainder's lengths needed.
@@ -296,11 +297,11 @@ routine ingrid_integer_sqrt(a_len: U64, a_tab: @U64, out: @U64, out_cap: U64, sc
 @export("ingrid_integer_sqrtrem")
 routine ingrid_integer_sqrtrem(a_len: U64, a_tab: @U64, s_out: @U64, s_cap: U64, r_out: @U64,
     r_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
     a: IntV = abi_intv(neg: 0, len: a_len, tab: a_tab)
-    s: IntV = bigint_isqrt(a)
-    r: IntV = bigint_sub(a, b: bigint_mul(a: s, b: s))
-    need: U64 = scratch_close()
+    s: IntV = bigint_isqrt(a, scratch: arena)
+    r: IntV = bigint_sub(a, b: bigint_mul(a: s, b: s, scratch: arena), scratch: arena)
+    need: U64 = arena.close()
     if need != 0
         return words_need(status: 1, need)
     if s.len > s_cap or r.len > r_cap
@@ -329,10 +330,10 @@ routine ingrid_integer_sqrt_scratch_size(a_len: U64) -> U64
 @export("ingrid_integer_gcd")
 routine ingrid_integer_gcd(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64,
     out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
     r: IntV = bigint_gcd(a: abi_intv(neg: 0, len: a_len, tab: a_tab),
-        b: abi_intv(neg: 0, len: b_len, tab: b_tab))
-    return integer_done(r, out, out_cap)
+        b: abi_intv(neg: 0, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
 
 ### lcm(|a|, |b|), 0 when either is 0.
 ### :param a_len: a's limbs.
@@ -347,10 +348,10 @@ routine ingrid_integer_gcd(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out
 @export("ingrid_integer_lcm")
 routine ingrid_integer_lcm(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64,
     out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
     r: IntV = bigint_lcm(a: abi_intv(neg: 0, len: a_len, tab: a_tab),
-        b: abi_intv(neg: 0, len: b_len, tab: b_tab))
-    return integer_done(r, out, out_cap)
+        b: abi_intv(neg: 0, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
 
 ### The scratch `integer_gcd` and `integer_lcm` take for a_len and b_len limbs.
 ### :param a_len: a's limbs.
@@ -400,9 +401,10 @@ routine ingrid_integer_to_text(a_neg: U64, a_len: U64, a_tab: @U64, radix: U64, 
     cap: U64 = bigint_text_capacity(len: a_len, radix)
     if out_cap < cap
         return words_need(status: 2, need: cap)
-    scratch_open(base: scratch, limbs: scratch_cap)
-    count: U64 = bigint_to_text_into(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), radix, out)
-    need: U64 = scratch_close()
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    count: U64 = bigint_to_text_into(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), radix, out,
+        scratch: arena)
+    need: U64 = arena.close()
     if need != 0
         return words_need(status: 1, need)
     return (w0: 0, w1: count, w2: 0, w3: 0)
@@ -422,9 +424,9 @@ routine ingrid_integer_to_text(a_neg: U64, a_len: U64, a_tab: @U64, radix: U64, 
 @export("ingrid_integer_parse")
 routine ingrid_integer_parse(chars: @U32, count: U64, radix: U64, out: @U64, out_cap: U64,
     scratch: @U64, scratch_cap: U64) -> Words
-    scratch_open(base: scratch, limbs: scratch_cap)
-    value, ok = bigint_parse(chars: @[U32].construct(data: chars, count), radix)
-    w: Words = integer_done(r: value, out, out_cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    value, ok = bigint_parse(chars: @[U32].construct(data: chars, count), radix, scratch: arena)
+    w: Words = integer_done(r: value, out, out_cap, scratch: arena)
     if w.w0 != 0
         return w
     return (w0: 0, w1: w.w1, w2: w.w2, w3: bit_of(flag: ok))

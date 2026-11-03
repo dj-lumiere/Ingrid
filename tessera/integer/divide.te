@@ -29,25 +29,27 @@ secret record NormDivisor
 ### :param tabr: The reciprocal, n + 1 limbs (the top one is 1).
 ### :param taba: The divisor, with its top bit set.
 ### :param n: Its limbs.
-secret routine limbs_reciprocal(tabr: @U64, taba: @U64, n: U64) -> None
+### :param scratch: The call's arena.
+secret routine limbs_reciprocal(tabr: @U64, taba: @U64, n: U64, scratch: @Arena) -> None
     if n <= 2
-        tabu: @U64 = alloc_limbs(n: 2 * n + 1)
-        tabt: @U64 = alloc_limbs(n: n + 2)
+        tabu: @U64 = alloc_limbs(n: 2 * n + 1, scratch)
+        tabt: @U64 = alloc_limbs(n: n + 2, scratch)
         zero_limbs(tab: tabu, n: 2 * n)
         set_limb(tab: tabu, i: 2 * n, value: 1)
         limbs_divmod_norm(tabq: tabt, a: limbs_span(tab: tabu, n: 2 * n + 1),
-            b: limbs_span(tab: taba, n))
+            b: limbs_span(tab: taba, n), scratch)
         limbs_copy(dst: tabr, src: tabt, n: n + 1)
         if limbs_any_nonzero(tab: tabu, n) == 0
             limbs_sub_word(tab: tabr, b: 1, n: n + 1)
         return
     l: U64 = (n - 1) // 2
     h: U64 = n - l
-    tabt: @U64 = alloc_limbs(n: n + h + 1)
-    tabu: @U64 = alloc_limbs(n: n + 2 * h - l + 2)
+    tabt: @U64 = alloc_limbs(n: n + h + 1, scratch)
+    tabu: @U64 = alloc_limbs(n: n + 2 * h - l + 2, scratch)
     tabxh: @U64 = tabr.stride(l)
-    limbs_reciprocal(tabr: tabxh, taba: taba.stride(l), n: h)
-    limbs_mul(result: tabt, a: limbs_span(tab: taba, n), b: limbs_span(tab: tabxh, n: h + 1))
+    limbs_reciprocal(tabr: tabxh, taba: taba.stride(l), n: h, scratch)
+    limbs_mul(result: tabt, a: limbs_span(tab: taba, n), b: limbs_span(tab: tabxh, n: h + 1),
+        scratch)
     until limb(tab: tabt, i: n + h) == 0
         limbs_sub_word(tab: tabxh, b: 1, n: h + 1)
         borrow: U64 = limbs_sub(res: tabt, op1: tabt, op2: taba, n)
@@ -56,7 +58,7 @@ secret routine limbs_reciprocal(tabr: @U64, taba: @U64, n: U64) -> None
     limbs_neg(res: tabt, op2: tabt, n: n + h + 1)
     set_limb(tab: tabt, i: n + h, value: limb(tab: tabt, i: n + h) +% 1)
     limbs_mul(result: tabu, a: limbs_span(tab: tabt.stride(l), n: n + h + 1 - l),
-        b: limbs_span(tab: tabxh, n: h + 1))
+        b: limbs_span(tab: tabxh, n: h + 1), scratch)
     limbs_copy(dst: tabr, src: tabu.stride(2 * h - l), n: l)
     limbs_add(res: tabr.stride(l), op1: tabr.stride(l), op2: tabu.stride(2 * h), n: h)
     return
@@ -66,34 +68,35 @@ secret routine limbs_reciprocal(tabr: @U64, taba: @U64, n: U64) -> None
 ### :param tabq: The quotient.
 ### :param a: The dividend, which the remainder replaces.
 ### :param b: The divisor, with its top bit set.
-secret routine limbs_divmod_newton(tabq: @U64, a: @[U64], b: @[U64]) -> None
+### :param scratch: The call's arena.
+secret routine limbs_divmod_newton(tabq: @U64, a: @[U64], b: @[U64], scratch: @Arena) -> None
     taba: @U64 = a.to[@U64]()
     tabb: @U64 = b.to[@U64]()
     na: U64 = a.count()
     nb: U64 = b.count()
     nq: U64 = na - nb
     n: U64 = nq + bit_of(flag: nq < nb)
-    tabb_inv: @U64 = alloc_limbs(n: n + 1)
-    tabt: @U64 = alloc_limbs(n: 2 * (n + 1))
+    tabb_inv: @U64 = alloc_limbs(n: n + 1, scratch)
+    tabt: @U64 = alloc_limbs(n: 2 * (n + 1), scratch)
     if n >= nb
         # the divisor padded with zeros below
         for i in 0 til nb
             set_limb(tab: tabt, i: i + n - nb, value: limb(tab: tabb, i))
-        limbs_reciprocal(tabr: tabb_inv, taba: tabt, n)
+        limbs_reciprocal(tabr: tabb_inv, taba: tabt, n, scratch)
     else
         # the top n limbs of the divisor plus one: the reciprocal of something at least as big
         limbs_copy(dst: tabt, src: tabb.stride(nb - n), n)
         if limbs_add_word(tab: tabt, b: 1, n) != 0
             set_limb(tab: tabb_inv, i: n, value: 1)
         else
-            limbs_reciprocal(tabr: tabb_inv, taba: tabt, n)
+            limbs_reciprocal(tabr: tabb_inv, taba: tabt, n, scratch)
     # Q = A × B^-1
     limbs_mul(result: tabt, a: limbs_span(tab: tabb_inv, n: n + 1),
-        b: limbs_span(tab: taba.stride(na - (n + 1)), n: n + 1))
+        b: limbs_span(tab: taba.stride(na - (n + 1)), n: n + 1), scratch)
     limbs_copy(dst: tabq, src: tabt.stride(2 * (n + 1) - (nq + 1)), n: nq + 1)
     # R = A - B × Q
-    tabt2: @U64 = alloc_limbs(n: na + 1)
-    limbs_mul(result: tabt2, a: limbs_span(tab: tabq, n: nq + 1), b)
+    tabt2: @U64 = alloc_limbs(n: na + 1, scratch)
+    limbs_mul(result: tabt2, a: limbs_span(tab: tabq, n: nq + 1), b, scratch)
     limbs_sub(res: taba, op1: taba, op2: tabt2, n: nb + 1)
     # the approximate quotient is at most the exact one, so step it up while the remainder is still at least B
     loop
@@ -157,7 +160,8 @@ secret routine quotient_add_back(taba: @U64, d: NormDivisor, i: U64, estimate: U
 ### :param tabq: The quotient.
 ### :param a: The dividend, which the remainder replaces.
 ### :param b: The divisor, with its top bit set.
-secret routine limbs_divmod_norm(tabq: @U64, a: @[U64], b: @[U64]) -> None
+### :param scratch: The call's arena.
+secret routine limbs_divmod_norm(tabq: @U64, a: @[U64], b: @[U64], scratch: @Arena) -> None
     taba: @U64 = a.to[@U64]()
     na: U64 = a.count()
     nb: U64 = b.count()
@@ -167,7 +171,7 @@ secret routine limbs_divmod_norm(tabq: @U64, a: @[U64], b: @[U64]) -> None
         return
     n: U64 = na - nb
     if n.min(nb) >= DIV_NEWTON_THRESHOLD
-        limbs_divmod_newton(tabq, a, b)
+        limbs_divmod_newton(tabq, a, b, scratch)
         return
     d: NormDivisor = norm_divisor(b)
     # the first quotient limb is 0 or 1
@@ -184,22 +188,32 @@ secret routine limbs_divmod_norm(tabq: @U64, a: @[U64], b: @[U64]) -> None
 
 # ── a divisor that is not normalized ──────────────────────────────────────────────────────────────
 
+### Where a division puts its results.
+secret record DivmodOut
+    ### The quotient.
+    quotient: @U64
+    ### The remainder.
+    remainder: @U64
+
 ### q = a / b and r = a mod b for any divisor with na >= nb and a nonzero top limb: shifts b up until its top bit is
 ### set, shifts a the same, divides and shifts the remainder back.
-### :param q: The quotient, na - nb + 1 limbs.
-### :param r: The remainder, nb limbs.
+### :param out: The quotient (na - nb + 1 limbs) and the remainder (nb limbs).
 ### :param a: The dividend.
 ### :param b: The divisor.
-secret routine limbs_divmod(q: @U64, r: @U64, a: @[U64], b: @[U64]) -> None
+### :param scratch: The call's arena.
+secret routine limbs_divmod(out: DivmodOut, a: @[U64], b: @[U64], scratch: @Arena) -> None
+    q: @U64 = out.quotient
+    r: @U64 = out.remainder
     na: U64 = a.count()
     nb: U64 = b.count()
     shift: U64 = limb(tab: b.to[@U64](), i: nb - 1).leading_zeros()
-    bn: @U64 = alloc_limbs(n: nb)
+    bn: @U64 = alloc_limbs(n: nb, scratch)
     limbs_shl(dst: bn, src: b.to[@U64](), n: nb, shift)
-    an: @U64 = alloc_limbs(n: na + 1)
+    an: @U64 = alloc_limbs(n: na + 1, scratch)
     set_limb(tab: an, i: na, value: limbs_shl(dst: an, src: a.to[@U64](), n: na, shift))
-    qq: @U64 = alloc_limbs(n: na + 2 - nb)
-    limbs_divmod_norm(tabq: qq, a: limbs_span(tab: an, n: na + 1), b: limbs_span(tab: bn, n: nb))
+    qq: @U64 = alloc_limbs(n: na + 2 - nb, scratch)
+    limbs_divmod_norm(tabq: qq, a: limbs_span(tab: an, n: na + 1), b: limbs_span(tab: bn, n: nb),
+        scratch)
     limbs_copy(dst: q, src: qq, n: na + 1 - nb)
     if shift == 0
         limbs_copy(dst: r, src: an, n: nb)
