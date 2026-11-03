@@ -56,10 +56,10 @@ DEALINGS IN THE SOFTWARE.
 
 ## LibBF — tiny arbitrary-precision floating-point library
 
-Used by the RazorForge arbitrary-precision **`Int`** engine (`IntEngine`, built on the limb
-layer in `LimbEngine`). The limb primitives, the NTT multiplication over five ~2^62 primes, and
-Newton-reciprocal division and square root are ports of LibBF (64-bit limb configuration). The engine runs in Ingrid: `tessera/generated/numerics.te` is written from it by
-`RazorForge export-ingrid`, so it is a derivative of LibBF too.
+Used by the arbitrary-precision **`Int`** engine in `tessera/integer/` (the engine in `bigint.te`, built on the
+limb layer in `limbs.te`, `multiply.te`, `ntt.te`, `divide.te` and `sqrt.te`). The limb primitives, the NTT
+multiplication over five ~2^62 primes, and Newton-reciprocal division and square root are ports of LibBF (64-bit
+limb configuration), written by hand in Tessera.
 
 - Project: **LibBF** — https://bellard.org/libbf/
 - Copyright © 2017-2025 Fabrice Bellard.
@@ -91,11 +91,10 @@ THE SOFTWARE.
 
 ## LibTomMath — multiple-precision integer library
 
-Used by the RazorForge **`Int`** engine (`IntEngine`, `Int`). The engine replaced the
+Used by the arbitrary-precision **`Int`** engine in `tessera/integer/` (`bigint.te`). The engine replaced the
 LibTomMath-backed runtime and follows its integer semantics and algorithms: sign-magnitude values,
 Euclidean division, binary GCD, two's-complement bitwise operations on negative values, and the radix
-text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36). The engine runs in Ingrid as
-part of `tessera/generated/numerics.te`.
+text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36).
 
 - Project: **LibTomMath** — https://github.com/libtom/libtommath
 - Copyright © Tom St Denis and LibTomMath contributors.

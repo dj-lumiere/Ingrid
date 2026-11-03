@@ -1,0 +1,727 @@
+# The arbitrary-precision integer engine behind RazorForge's and Suflae's Int, built on the limb layer (limbs.te,
+# multiply.te, divide.te, sqrt.te). An integer is a sign and a magnitude. Division is Euclidean (the remainder is
+# always in [0, |b|)). AND, OR and XOR act on the infinite two's-complement form, a right shift is the floor of the
+# quotient by a power of two, and text uses the digit map 0-9 A-Z a-z + / (letters case-insensitive up to radix 36).
+#
+# The integer semantics and algorithms (Euclidean division, binary GCD, two's-complement bitwise operations, radix
+# text with its digit map) follow LibTomMath (The Unlicense), which RazorForge's engine replaced. See
+# THIRD-PARTY-NOTICES.md.
+#
+# Memory: the engine allocates nothing. A result goes into a buffer its caller hands over (the `_into` routines), and
+# every temporary comes from the call's scratch arena (scratch.te), the buffer the caller hands over for it. An
+# operation that takes limbs first asks the arena to admit the most it takes: when that doesn't fit, it returns zero,
+# and the call reports the room it needed so that the caller retries with a larger buffer.
+
+module Ingrid/Integer
+
+### An engine integer in sign-magnitude form: `len` little-endian limbs at `tab` with a nonzero top limb. Zero has
+### len 0 and is never negative.
+secret record IntV
+    ### Whether the value is negative.
+    neg: Bool
+    ### How many limbs.
+    len: U64
+    ### The first limb.
+    tab: @U64
+
+### Zero.
+### :returns: The value 0.
+secret routine bigint_zero() -> IntV
+    return (neg: false, len: 0, tab: no_limbs())
+
+### `len` limbs of `tab` as a value, without the zero limbs at the top. A zero is not negative.
+### :param neg: Whether the value is negative.
+### :param tab: The limbs.
+### :param len: How many there are.
+### :returns: The value.
+secret routine bigint_make(neg: Bool, tab: @U64, len: U64) -> IntV
+    n: U64 = limbs_trim(tab, n: len)
+    if n == 0
+        return bigint_zero()
+    return (neg: neg, len: n, tab: tab)
+
+### `a` with its sign replaced (a zero stays non-negative).
+### :param a: The value.
+### :param neg: The new sign.
+### :returns: The value with the sign.
+secret routine bigint_with_sign(a: IntV, neg: Bool) -> IntV
+    if a.len == 0
+        return a
+    return (neg: neg, len: a.len, tab: a.tab)
+
+### A word as a value in the scratch arena.
+### :param v: The word.
+### :param neg: Whether the value is negative.
+### :returns: The value, zero for a word of 0 or an exhausted call.
+secret routine bigint_from_u64(v: U64, neg: Bool) -> IntV
+    if v == 0 or not scratch_admit(limbs: 1)
+        return bigint_zero()
+    tab: @U64 = alloc_limbs(n: 1)
+    set_limb(tab, i: 0, value: v)
+    return (neg: neg, len: 1, tab: tab)
+
+### Compares the magnitudes.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: -1, 0 or 1 as |a| is below, equal to or above |b|.
+secret routine bigint_cmp_mag(a: IntV, b: IntV) -> S64
+    if a.len != b.len
+        return if a.len < b.len then -1 else 1
+    if a.len == 0
+        return 0
+    return limbs_cmp(a: a.tab, b: b.tab, n: a.len)
+
+### Compares the values.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: -1, 0 or 1 as a is below, equal to or above b.
+secret routine bigint_cmp(a: IntV, b: IntV) -> S64
+    if a.neg != b.neg
+        return if a.neg then -1 else 1
+    c: S64 = bigint_cmp_mag(a, b)
+    return if a.neg then 0 - c else c
+
+# ── add and subtract ──────────────────────────────────────────────────────────────────────────────
+
+### |a| + |b| written into `r` (at least max(a.len, b.len) + 1 limbs), carrying the sign `neg`.
+### :param a: The first value.
+### :param b: The second value.
+### :param neg: The sign of the result.
+### :param r: The result's limbs.
+### :returns: The sum.
+secret routine bigint_add_mag_into(a: IntV, b: IntV, neg: Bool, r: @U64) -> IntV
+    longer: IntV = when
+        a.len < b.len => b
+        else => a
+    shorter: IntV = when
+        a.len < b.len => a
+        else => b
+    first_carry: U64 = limbs_add(res: r, op1: longer.tab, op2: shorter.tab, n: shorter.len)
+    for i in shorter.len til longer.len with carry: U64 = first_carry
+        v: U64 = limb(tab: longer.tab, i) +% carry
+        set_limb(tab: r, i, value: v)
+        continue with carry: bit_of(flag: v < carry)
+    then
+        set_limb(tab: r, i: longer.len, value: carry)
+        return bigint_make(neg, tab: r, len: longer.len + 1)
+
+### |a| - |b| written into `r` (at least a.len limbs), carrying the sign `neg`. Needs |a| >= |b|.
+### :param a: The first value.
+### :param b: The second value.
+### :param neg: The sign of the result.
+### :param r: The result's limbs.
+### :returns: The difference.
+secret routine bigint_sub_mag_into(a: IntV, b: IntV, neg: Bool, r: @U64) -> IntV
+    if a.len == 0
+        return bigint_zero()
+    first_borrow: U64 = limbs_sub(res: r, op1: a.tab, op2: b.tab, n: b.len)
+    for i in b.len til a.len with borrow: U64 = first_borrow
+        v: U64 = limb(tab: a.tab, i)
+        set_limb(tab: r, i, value: v -% borrow)
+        continue with borrow: bit_of(flag: v < borrow)
+    then
+        return bigint_make(neg, tab: r, len: a.len)
+
+### The limbs `a + b` needs as an output buffer for `bigint_add_into`.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The limbs.
+secret routine bigint_add_capacity(a: IntV, b: IntV) -> U64
+    return a.len.max(b.len) +% 1
+
+### a + b written into `r` (at least `bigint_add_capacity(a, b)` limbs). The result's limbs are `r` unless it is zero.
+### :param a: The first value.
+### :param b: The second value.
+### :param r: The result's limbs.
+### :returns: The sum.
+secret routine bigint_add_into(a: IntV, b: IntV, r: @U64) -> IntV
+    if a.neg == b.neg
+        return bigint_add_mag_into(a, b, neg: a.neg, r)
+    if bigint_cmp_mag(a, b) >= 0
+        return bigint_sub_mag_into(a, b, neg: a.neg, r)
+    return bigint_sub_mag_into(a: b, b: a, neg: b.neg, r)
+
+### |a| + |b| in the scratch arena, carrying the sign `neg`.
+### :param a: The first value.
+### :param b: The second value.
+### :param neg: The sign of the result.
+### :returns: The sum, zero for an exhausted call.
+secret routine bigint_add_mag(a: IntV, b: IntV, neg: Bool) -> IntV
+    n: U64 = bigint_add_capacity(a, b)
+    if not scratch_admit(limbs: n)
+        return bigint_zero()
+    return bigint_add_mag_into(a, b, neg, r: alloc_limbs(n))
+
+### |a| - |b| in the scratch arena, carrying the sign `neg`. Needs |a| >= |b|.
+### :param a: The first value.
+### :param b: The second value.
+### :param neg: The sign of the result.
+### :returns: The difference, zero for an exhausted call.
+secret routine bigint_sub_mag(a: IntV, b: IntV, neg: Bool) -> IntV
+    if not scratch_admit(limbs: a.len)
+        return bigint_zero()
+    return bigint_sub_mag_into(a, b, neg, r: alloc_limbs(n: a.len))
+
+### -a.
+### :param a: The value.
+### :returns: The value with its sign flipped.
+secret routine bigint_neg(a: IntV) -> IntV
+    return bigint_with_sign(a, neg: not a.neg)
+
+### |a|.
+### :param a: The value.
+### :returns: The value without its sign.
+secret routine bigint_abs(a: IntV) -> IntV
+    return bigint_with_sign(a, neg: false)
+
+### a + b in the scratch arena.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The sum, zero for an exhausted call.
+secret routine bigint_add(a: IntV, b: IntV) -> IntV
+    n: U64 = bigint_add_capacity(a, b)
+    if not scratch_admit(limbs: n)
+        return bigint_zero()
+    return bigint_add_into(a, b, r: alloc_limbs(n))
+
+### a - b in the scratch arena.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The difference, zero for an exhausted call.
+secret routine bigint_sub(a: IntV, b: IntV) -> IntV
+    return bigint_add(a, b: bigint_neg(a: b))
+
+# ── multiply and divide ───────────────────────────────────────────────────────────────────────────
+
+### a × b in the scratch arena: the schoolbook method below FFT_MUL_THRESHOLD limbs of the smaller factor, the transform
+### above.
+### :param a: The first factor.
+### :param b: The second factor.
+### :returns: The product, zero for an exhausted call.
+secret routine bigint_mul(a: IntV, b: IntV) -> IntV
+    if a.len == 0 or b.len == 0
+        return bigint_zero()
+    n: U64 = a.len + b.len
+    if not scratch_admit(limbs: n + limbs_mul_scratch(a_len: a.len, b_len: b.len))
+        return bigint_zero()
+    r: @U64 = alloc_limbs(n)
+    limbs_mul(result: r, a: limbs_span(tab: a.tab, n: a.len), b: limbs_span(tab: b.tab, n: b.len))
+    return bigint_make(neg: a.neg != b.neg, tab: r, len: n)
+
+### (|a| / |b|, |a| mod |b|) as non-negative values, for a nonzero `b`.
+### :param a: The dividend.
+### :param b: The divisor.
+### :returns: The quotient and the remainder, zeros for an exhausted call.
+secret routine bigint_divmod_mag(a: IntV, b: IntV) -> (IntV, IntV)
+    if bigint_cmp_mag(a, b) < 0
+        return (bigint_zero(), bigint_abs(a))
+    nq: U64 = a.len - b.len + 1
+    if not scratch_admit(limbs: nq + b.len + limbs_divmod_scratch(na: a.len, nb: b.len))
+        return (bigint_zero(), bigint_zero())
+    q: @U64 = alloc_limbs(n: nq)
+    r: @U64 = alloc_limbs(n: b.len)
+    limbs_divmod(q, r, a: limbs_span(tab: a.tab, n: a.len), b: limbs_span(tab: b.tab, n: b.len))
+    return (bigint_make(neg: false, tab: q, len: nq), bigint_make(neg: false, tab: r, len: b.len))
+
+### Euclidean division: a = b × q + r with 0 <= r < |b|, for a nonzero `b`. The quotient starts as the truncated one.
+### When a is negative and the remainder is nonzero, the remainder becomes |b| - r and the quotient moves one step away
+### from zero.
+### :param a: The dividend.
+### :param b: The divisor.
+### :returns: The quotient and the remainder.
+secret routine bigint_divmod(a: IntV, b: IntV) -> (IntV, IntV)
+    q, r = bigint_divmod_mag(a, b)
+    if a.neg and r.len != 0
+        stepped: IntV = bigint_add_mag(a: q, b: bigint_from_u64(v: 1, neg: false), neg: false)
+        return (bigint_with_sign(a: stepped, neg: a.neg != b.neg), bigint_sub_mag(a: bigint_abs(a: b), b: r, neg: false))
+    return (bigint_with_sign(a: q, neg: a.neg != b.neg), r)
+
+# ── shifts ────────────────────────────────────────────────────────────────────────────────────────
+
+### The limbs `a << bits` needs as an output buffer for `bigint_shl_into`.
+### :param a: The value.
+### :param bits: The shift.
+### :returns: The limbs.
+secret routine bigint_shl_capacity(a: IntV, bits: U64) -> U64
+    return a.len +% bits // 64 +% 1
+
+### a × 2^bits written into `r` (at least `bigint_shl_capacity(a, bits)` limbs).
+### :param a: The value.
+### :param bits: The shift.
+### :param r: The result's limbs.
+### :returns: The shifted value.
+secret routine bigint_shl_into(a: IntV, bits: U64, r: @U64) -> IntV
+    if a.len == 0
+        return a
+    limb_shift: U64 = bits // 64
+    zero_limbs(tab: r, n: limb_shift)
+    carry: U64 = limbs_shl(dst: r.stride(limb_shift), src: a.tab, n: a.len, shift: bits % 64)
+    set_limb(tab: r, i: limb_shift + a.len, value: carry)
+    return bigint_make(neg: a.neg, tab: r, len: a.len + limb_shift + 1)
+
+### a × 2^bits in the scratch arena.
+### :param a: The value.
+### :param bits: The shift.
+### :returns: The shifted value, zero for an exhausted call.
+secret routine bigint_shl(a: IntV, bits: U64) -> IntV
+    if a.len == 0 or bits == 0
+        return a
+    n: U64 = bigint_shl_capacity(a, bits)
+    if not scratch_admit(limbs: n)
+        return bigint_zero()
+    return bigint_shl_into(a, bits, r: alloc_limbs(n))
+
+### The limbs `a >> bits` needs as an output buffer for `bigint_shr_into`: one more than the shifted magnitude, for the
+### carry when a negative value rounds its magnitude up.
+### :param a: The value.
+### :param bits: The shift.
+### :returns: The limbs.
+secret routine bigint_shr_capacity(a: IntV, bits: U64) -> U64
+    limb_shift: U64 = bits // 64
+    if limb_shift >= a.len
+        return 1
+    return a.len - limb_shift + 1
+
+### The magnitude shifted right by `bits`, keeping the sign (it truncates toward zero), written into `r` (at least
+### a.len - bits / 64 limbs when that is positive).
+### :param a: The value.
+### :param bits: The shift.
+### :param r: The result's limbs.
+### :returns: The shifted value.
+secret routine bigint_shr_mag_into(a: IntV, bits: U64, r: @U64) -> IntV
+    limb_shift: U64 = bits // 64
+    if limb_shift >= a.len
+        return bigint_zero()
+    n: U64 = a.len - limb_shift
+    src: @U64 = a.tab.stride(limb_shift)
+    bit_shift: U64 = bits % 64
+    if bit_shift == 0
+        limbs_copy(dst: r, src, n)
+    else
+        limbs_shr(tab_r: r, tab: src, n, shift: bit_shift)
+    return bigint_make(neg: a.neg, tab: r, len: n)
+
+### floor(a / 2^bits), the arithmetic right shift of the two's-complement form (so -5 >> 1 is -3), written into `r` (at
+### least `bigint_shr_capacity(a, bits)` limbs).
+### :param a: The value.
+### :param bits: The shift.
+### :param r: The result's limbs.
+### :returns: The shifted value.
+secret routine bigint_shr_into(a: IntV, bits: U64, r: @U64) -> IntV
+    q: IntV = bigint_shr_mag_into(a, bits, r)
+    if a.neg and limbs_ctz(tab: a.tab, n: a.len) < bits
+        # a negative value lost nonzero bits: round its magnitude up
+        n: U64 = q.len
+        if n == 0
+            set_limb(tab: r, i: 0, value: 1)
+            return (neg: true, len: 1, tab: r)
+        set_limb(tab: r, i: n, value: limbs_add_word(tab: r, b: 1, n))
+        return bigint_make(neg: true, tab: r, len: n + 1)
+    return q
+
+### The magnitude shifted right by `bits`, keeping the sign, in the scratch arena.
+### :param a: The value.
+### :param bits: The shift.
+### :returns: The shifted value, zero for an exhausted call.
+secret routine bigint_shr_mag(a: IntV, bits: U64) -> IntV
+    limb_shift: U64 = bits // 64
+    if limb_shift >= a.len
+        return bigint_zero()
+    if not scratch_admit(limbs: a.len - limb_shift)
+        return bigint_zero()
+    return bigint_shr_mag_into(a, bits, r: alloc_limbs(n: a.len - limb_shift))
+
+# ── bitwise operations ────────────────────────────────────────────────────────────────────────────
+
+### The limbs a bitwise operation of `a` and `b` needs as an output buffer for `bigint_bitop_into`.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The limbs.
+secret routine bigint_bitop_capacity(a: IntV, b: IntV) -> U64
+    return a.len.max(b.len) +% 1
+
+### A limb of the two's-complement form of a value: a negative value's limbs are inverted with 1 added at the bottom.
+### :param neg: Whether the value is negative.
+### :param v: The limb of the magnitude.
+### :param carry: The carry of the limbs below, 1 at the bottom.
+### :returns: The limb and the carry into the limb above.
+secret routine twos_limb(neg: Bool, v: U64, carry: U64) -> (U64, U64)
+    if neg
+        x: U64 = (v ^ U64.MAX) +% carry
+        return (x, bit_of(flag: x < carry))
+    return (v, carry)
+
+### Bitwise AND (op 0), OR (op 1) or XOR (op 2) over the infinite two's-complement forms, written into `r` (at least
+### `bigint_bitop_capacity(a, b)` limbs).
+### :param a: The first value.
+### :param b: The second value.
+### :param op: 0, 1 or 2.
+### :param r: The result's limbs.
+### :returns: The result.
+secret routine bigint_bitop_into(a: IntV, b: IntV, op: U64, r: @U64) -> IntV
+    w: U64 = bigint_bitop_capacity(a, b)
+    neg_r: Bool = when op
+        0 => a.neg and b.neg
+        1 => a.neg or b.neg
+        else => a.neg != b.neg
+    for i in 0 til w with ac: U64 = 1, bc: U64 = 1, cc: U64 = 1
+        x, next_ac = twos_limb(neg: a.neg, v: limb_or_zero(tab: a.tab, len: a.len, i), carry: ac)
+        y, next_bc = twos_limb(neg: b.neg, v: limb_or_zero(tab: b.tab, len: b.len, i), carry: bc)
+        combined: U64 = when op
+            0 => x & y
+            1 => x | y
+            else => x ^ y
+        c, next_cc = twos_limb(neg: neg_r, v: combined, carry: cc)
+        set_limb(tab: r, i, value: c)
+        continue with ac: next_ac, bc: next_bc, cc: next_cc
+    then
+        return bigint_make(neg: neg_r, tab: r, len: w)
+
+# ── power, square root, gcd ───────────────────────────────────────────────────────────────────────
+
+### a^e by square and multiply (0^0 = 1), in the scratch arena.
+### :param a: The base.
+### :param e: The exponent.
+### :returns: The power, zero for an exhausted call.
+secret routine bigint_pow(a: IntV, e: U64) -> IntV
+    until ee == 0 with result: IntV = bigint_from_u64(v: 1, neg: false), base: IntV = a, ee: U64 = e
+        taken: IntV = when
+            (ee & 1) != 0 => bigint_mul(a: result, b: base)
+            else => result
+        rest: U64 = ee >> 1
+        squared: IntV = when
+            rest > 0 => bigint_mul(a: base, b: base)
+            else => base
+        continue with result: taken, base: squared, ee: rest
+    then
+        return result
+
+### floor(sqrt(a)) of a non-negative `a`, in the scratch arena. Shifts `a` left by an even amount so the 2n-limb square
+### root sees a top limb of at least 2^62, then shifts the root back by half.
+### :param a: The value.
+### :returns: The root, zero for an exhausted call.
+secret routine bigint_isqrt(a: IntV) -> IntV
+    if a.neg or a.len == 0
+        return bigint_zero()
+    n: U64 = (a.len + 1) // 2
+    if not scratch_admit(limbs: 4 * n + limbs_sqrt_rem_scratch(n))
+        return bigint_zero()
+    lz: U64 = limb(tab: a.tab, i: a.len - 1).leading_zeros() + (2 * n - a.len) * 64
+    sh: U64 = lz - lz % 2
+    buf: @U64 = alloc_limbs(n: 2 * n)
+    limb_shift: U64 = sh // 64
+    carry: U64 = limbs_shl(dst: buf.stride(limb_shift), src: a.tab, n: a.len, shift: sh % 64)
+    if limb_shift + a.len < 2 * n
+        set_limb(tab: buf, i: limb_shift + a.len, value: carry)
+    s: @U64 = alloc_limbs(n)
+    limbs_sqrt_rem(tabs: s, taba: buf, n)
+    return bigint_shr_mag(a: bigint_make(neg: false, tab: s, len: n), bits: sh // 2)
+
+### gcd of two words by the binary method (gcd(0, b) = b).
+### :param a: The first word.
+### :param b: The second word.
+### :returns: The greatest common divisor.
+secret routine gcd_u64(a: U64, b: U64) -> U64
+    if a == 0
+        return b
+    if b == 0
+        return a
+    k: U64 = (a | b).trailing_zeros()
+    until y == 0 with x: U64 = a >> a.trailing_zeros(), y: U64 = b
+        stripped: U64 = y >> y.trailing_zeros()
+        continue with x: x.min(stripped), y: x.max(stripped) - x.min(stripped)
+    then
+        return x << k
+
+### gcd(x, y) of two nonzero magnitudes by the binary method, on copies in the scratch arena.
+### :param x: The first value.
+### :param y: The second value.
+### :returns: The greatest common divisor, zero for an exhausted call.
+secret routine bigint_gcd_binary(x: IntV, y: IntV) -> IntV
+    longer: U64 = x.len.max(y.len)
+    # the copies, then the result shifted back by the common power of two (below 64 × longer bits)
+    if not scratch_admit(limbs: x.len + y.len + 2 * longer + 1)
+        return bigint_zero()
+    u0: @U64 = alloc_limbs(n: x.len)
+    v0: @U64 = alloc_limbs(n: y.len)
+    limbs_copy(dst: u0, src: x.tab, n: x.len)
+    limbs_copy(dst: v0, src: y.tab, n: y.len)
+    tu: U64 = limbs_ctz(tab: u0, n: x.len)
+    tv: U64 = limbs_ctz(tab: v0, n: y.len)
+    k: U64 = tu.min(tv)
+    ul0: U64 = limbs_shr_in_place(tab: u0, n: x.len, bits: tu)
+    vl0: U64 = limbs_shr_in_place(tab: v0, n: y.len, bits: tv)
+    loop with u: @U64 = u0, v: @U64 = v0, ul: U64 = ul0, vl: U64 = vl0
+        # u and v are odd here: keep u <= v, then v = v - u (even), then strip v's trailing zeros
+        if ul == 1 and vl == 1
+            set_limb(tab: u, i: 0, value: gcd_u64(a: limb(tab: u, i: 0), b: limb(tab: v, i: 0)))
+            return bigint_shl(a: bigint_make(neg: false, tab: u, len: ul), bits: k)
+        swap: Bool = ul > vl or (ul == vl and limbs_cmp(a: u, b: v, n: ul) > 0)
+        small: @U64 = when
+            swap => v
+            else => u
+        small_len: U64 = when
+            swap => vl
+            else => ul
+        big: @U64 = when
+            swap => u
+            else => v
+        big_len: U64 = when
+            swap => ul
+            else => vl
+        diff_len: U64 = limbs_sub_in_place(a: big, na: big_len, b: small, nb: small_len)
+        if diff_len == 0
+            return bigint_shl(a: bigint_make(neg: false, tab: small, len: small_len), bits: k)
+        stripped: U64 = limbs_shr_in_place(tab: big, n: diff_len,
+            bits: limbs_ctz(tab: big, n: diff_len))
+        continue with u: small, v: big, ul: small_len, vl: stripped
+
+### gcd(|a|, |b|), with gcd(0, 0) = 0, in the scratch arena. Euclid remainder steps while one operand is much longer than
+### the other, then the binary GCD on balanced sizes.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The greatest common divisor, zero for an exhausted call.
+secret routine bigint_gcd(a: IntV, b: IntV) -> IntV
+    until x.len == 0 or y.len == 0 or (x.len <= y.len + 1 and y.len <= x.len + 1) with x: IntV = bigint_abs(a), y: IntV = bigint_abs(a: b)
+        if x.len > y.len
+            continue with x: bigint_divmod_mag(a: x, b: y).item1, y: y
+        continue with x: x, y: bigint_divmod_mag(a: y, b: x).item1
+    then
+        if x.len == 0
+            return y
+        if y.len == 0
+            return x
+        return bigint_gcd_binary(x, y)
+
+### lcm(|a|, |b|), 0 when either is 0, in the scratch arena.
+### :param a: The first value.
+### :param b: The second value.
+### :returns: The least common multiple, zero for an exhausted call.
+secret routine bigint_lcm(a: IntV, b: IntV) -> IntV
+    if a.len == 0 or b.len == 0
+        return bigint_zero()
+    g: IntV = bigint_gcd(a, b)
+    if g.len == 0
+        # an exhausted call: the gcd of two nonzero values is never zero
+        return bigint_zero()
+    return bigint_mul(a: bigint_divmod_mag(a: bigint_abs(a), b: g).item0, b: bigint_abs(a: b))
+
+# ── text ──────────────────────────────────────────────────────────────────────────────────────────
+
+### The largest power of a radix below 2^64 and its exponent: the digits one word division gives or takes.
+secret record RadixChunk
+    ### The radix.
+    radix: U64
+    ### The radix to the power `digits`.
+    power: U64
+    ### How many digits one chunk has.
+    digits: U64
+
+### The chunk of a radix.
+### :param radix: The radix, 2 to 64.
+### :returns: The largest power of the radix that fits a word, and its exponent.
+secret routine radix_chunk(radix: U64) -> RadixChunk
+    until power > U64.MAX // radix with power: U64 = 1, digits: U64 = 0
+        continue with power: power * radix, digits: digits + 1
+    then
+        return (radix: radix, power: power, digits: digits)
+
+### The character of a digit in the map used up to radix 64: 0-9, A-Z, a-z, '+', '/'.
+### :param d: The digit, 0 to 63.
+### :returns: The code point.
+secret routine bigint_digit_char(d: U64) -> U32
+    when
+        d < 10 => return 48 + d.to[U32]()
+        d < 36 => return 55 + d.to[U32]()
+        d < 62 => return 61 + d.to[U32]()
+        d == 62 => return 43
+        else => return 47
+
+### The digit a code point stands for in `radix` under the digit map (letters case-insensitive up to radix 36).
+### :param cp: The code point.
+### :param radix: The radix, 2 to 64.
+### :returns: The digit value, or 255 when the code point is not a digit of the map.
+secret routine bigint_digit_value(cp: U32, radix: U64) -> U64
+    c: U32 = when
+        radix <= 36 and 97 <= cp <= 122 => cp - 32
+        else => cp
+    when
+        48 <= c <= 57 => return (c - 48).to[U64]()
+        65 <= c <= 90 => return (c - 55).to[U64]()
+        97 <= c <= 122 => return (c - 61).to[U64]()
+        c == 43 => return 62
+        c == 47 => return 63
+        else => return 255
+
+### The most characters `bigint_to_text_into` writes for a `len`-limb value in `radix`: the digits of len × 64 bits at
+### floor(log2(radix)) bits each, and a sign.
+### :param len: The value's limbs.
+### :param radix: The radix, 2 to 64.
+### :returns: The characters.
+secret routine bigint_text_capacity(len: U64, radix: U64) -> U64
+    bits_per_digit: U64 = 63 - radix.leading_zeros()
+    if len == 0
+        return 1
+    return (len * 64 + bits_per_digit - 1) // bits_per_digit + 1
+
+### Writes the digits of `rem` into `out` from the start, least significant first.
+### :param out: Where the first digit goes.
+### :param rem: The chunk's value.
+### :param chunk: The radix.
+### :param count: The digits to write, or 0 to write up to the leading zeros.
+### :returns: How many digits it wrote.
+secret routine text_emit_digits(out: @U32, rem: U64, chunk: RadixChunk, count: U64) -> U64
+    until (count == 0 and r == 0) or (count != 0 and c >= count) with c: U64 = 0, r: U64 = rem
+        bigint_digit_char(d: r % chunk.radix).poke_into(out.stride(c))
+        continue with c: c + 1, r: r // chunk.radix
+    then
+        return c
+
+### Reverses out[lo .. hi).
+### :param out: The characters.
+### :param lo: The first.
+### :param hi: One past the last.
+secret routine text_reverse(out: @U32, lo: U64, hi: U64) -> None
+    until right <= left + 1 with left: U64 = lo, right: U64 = hi
+        t: U32 = out.stride(left).peek()
+        out.stride(right - 1).peek().poke_into(out.stride(left))
+        t.poke_into(out.stride(right - 1))
+        continue with left: left + 1, right: right - 1
+    then
+        return
+
+### `a` in `radix` (2 to 64), written into `out` (at least `bigint_text_capacity(a.len, radix)` characters): an optional
+### '-' then the digits, "0" for zero.
+### :param a: The value.
+### :param radix: The radix, 2 to 64.
+### :param out: The characters, one code point each.
+### :returns: The character count, or 0 when the call is exhausted.
+secret routine bigint_to_text_into(a: IntV, radix: U64, out: @U32) -> U64
+    if a.len == 0
+        48.poke_into(out)
+        return 1
+    if not scratch_admit(limbs: a.len)
+        return 0
+    chunk: RadixChunk = radix_chunk(radix)
+    buf: @U64 = alloc_limbs(n: a.len)
+    limbs_copy(dst: buf, src: a.tab, n: a.len)
+    first: U64 = bit_of(flag: a.neg)
+    if a.neg
+        45.poke_into(out)
+    # the digits, least significant first, one chunk of them for each word division, then reversed in place
+    until n == 0 with n: U64 = a.len, count: U64 = first
+        rem: U64 = limbs_divmod_word_any(tabr: buf, taba: buf, n, b: chunk.power)
+        rest: U64 = limbs_trim(tab: buf, n)
+        if rest == 0
+            continue with n: 0, count: count + text_emit_digits(out: out.stride(count), rem, chunk,
+                count: 0)
+        continue with n: rest, count: count + text_emit_digits(out: out.stride(count), rem, chunk,
+            count: chunk.digits)
+    then
+        text_reverse(out, lo: first, hi: count)
+        return count
+
+### Appends one more chunk of digits to the magnitude being read: mant = mant × power + cur.
+### :param mant: The limbs read so far, with room for one more.
+### :param mlen: How many are in use.
+### :param power: The factor.
+### :param cur: The chunk's value.
+### :returns: How many limbs are in use after.
+secret routine parse_fold(mant: @U64, mlen: U64, power: U64, cur: U64) -> U64
+    carry: U64 = limbs_mul_add_word(tab: mant, n: mlen, b: power, l: cur)
+    if carry != 0
+        set_limb(tab: mant, i: mlen, value: carry)
+        return mlen + 1
+    return mlen
+
+### Reads `chars` in `radix` (2 to 64): an optional leading '-', then digits up to the first character outside the
+### radix. The text must end there, or at a '\r' or '\n'. Empty digits read as 0.
+### :param chars: The code points.
+### :param radix: The radix, 2 to 64.
+### :returns: The value and whether the text was an integer (when it wasn't, the value means nothing). The value is zero
+### and the flag true for an exhausted call.
+secret routine bigint_parse(chars: @[U32], radix: U64) -> (IntV, Bool)
+    if radix < 2 or radix > 64
+        return (bigint_zero(), false)
+    count: U64 = chars.count()
+    cp: @U32 = chars.to[@U32]()
+    neg: Bool = count > 0 and cp.peek() == 45
+    chunk: RadixChunk = radix_chunk(radix)
+    if not scratch_admit(limbs: count * 6 // 64 + 2)
+        return (bigint_zero(), true)
+    mant: @U64 = alloc_limbs(n: count * 6 // 64 + 2)
+    until i >= count with i: U64 = bit_of(flag: neg), mlen: U64 = 0, cur: U64 = 0, cur_pow: U64 = 1, cnt: U64 = 0
+        d: U64 = bigint_digit_value(cp: cp.stride(i).peek(), radix)
+        if d >= radix
+            break
+        if cnt + 1 == chunk.digits
+            continue with i: i + 1, mlen: parse_fold(mant, mlen, power: cur_pow * radix,
+                cur: cur * radix + d), cur: 0, cur_pow: 1, cnt: 0
+        continue with i: i + 1, mlen: mlen, cur: cur * radix + d, cur_pow: cur_pow * radix, cnt: cnt + 1
+    then
+        final_len: U64 = when
+            cnt > 0 => parse_fold(mant, mlen, power: cur_pow, cur)
+            else => mlen
+        if i < count
+            stop: U32 = cp.stride(i).peek()
+            if stop != 13 and stop != 10
+                return (bigint_zero(), false)
+        return (bigint_make(neg, tab: mant, len: final_len), true)
+
+# ── scratch estimates ─────────────────────────────────────────────────────────────────────────────
+
+### A scratch size for a product of `a_len` × `b_len` limbs: what `bigint_mul` admits.
+### :param a_len: The first factor's limbs.
+### :param b_len: The second factor's limbs.
+### :returns: The limbs.
+secret routine bigint_mul_scratch(a_len: U64, b_len: U64) -> U64
+    return a_len +% b_len +% limbs_mul_scratch(a_len, b_len)
+
+### A scratch size for the Euclidean division of an `a_len`-limb value by a `b_len`-limb one: the magnitudes' division and
+### the step away from zero.
+### :param a_len: The dividend's limbs.
+### :param b_len: The divisor's limbs.
+### :returns: The limbs.
+secret routine bigint_divmod_scratch(a_len: U64, b_len: U64) -> U64
+    if a_len < b_len
+        return 2 *% b_len +% 4
+    nq: U64 = a_len - b_len + 1
+    return nq +% b_len +% limbs_divmod_scratch(na: a_len, nb: b_len) +% nq +% b_len +% 4
+
+### A scratch size for `a^e` with `a` of `a_len` limbs and `bits` significant bits: every square and product along the
+### way, each at most the final size.
+### :param a_len: The base's limbs.
+### :param bits: The base's significant bits.
+### :param e: The exponent.
+### :returns: The limbs.
+secret routine bigint_pow_scratch(a_len: U64, bits: U64, e: U64) -> U64
+    if a_len == 0 or e == 0
+        return 1
+    total_bits: U128 = bits.mul_wide(e)
+    if total_bits > 1099511627776
+        # beyond any memory: ask for it anyway, the allocation reports it
+        return U64.MAX // 16
+    final: U64 = total_bits.to_wrap[U64]() // 64 +% 2
+    steps: U64 = 2 *% (64 -% e.leading_zeros()) +% 1
+    return steps *% bigint_mul_scratch(a_len: final, b_len: final)
+
+### A scratch size for the integer square root of an `a_len`-limb value.
+### :param a_len: The value's limbs.
+### :returns: The limbs.
+secret routine bigint_isqrt_scratch(a_len: U64) -> U64
+    n: U64 = (a_len +% 1) // 2
+    return 5 *% n +% limbs_sqrt_rem_scratch(n) +% bigint_mul_scratch(a_len: n,
+        b_len: n) +% a_len +% 4
+
+### A scratch size for gcd(a, b) of `a_len` and `b_len` limbs: the Euclid steps (each a division of the operands at most)
+### and the binary GCD.
+### :param a_len: The first value's limbs.
+### :param b_len: The second value's limbs.
+### :returns: The limbs.
+secret routine bigint_gcd_scratch(a_len: U64, b_len: U64) -> U64
+    longer: U64 = a_len.max(b_len)
+    shorter: U64 = a_len.min(b_len)
+    steps: U64 = when
+        longer > shorter +% 1 => 4
+        else => 1
+    return steps *% bigint_divmod_scratch(a_len: longer, b_len: shorter) +% 4 *% longer +% 2

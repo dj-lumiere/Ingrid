@@ -26,15 +26,12 @@ pattern and searches text in time that grows with the text's length), the librar
 arithmetic and the text of the binary floats and decimals (writing and reading), the math of the complex
 numbers, quaternions, and the 2x2, 3x3, and 4x4 matrices (their inverses and A x = b by Gaussian elimination with partial pivoting), and the decimal floats D32, D64, and D128 (`tessera/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
-widths), and the arbitrary-precision Int (`tessera/generated/numerics.te`, with the scratch arena
-the engine takes its temporaries from in `tessera/scratch.te`). More
+widths), and the arbitrary-precision Int (`tessera/integer/`, with the scratch arena the engine takes its
+temporaries from in `tessera/integer/scratch.te`, and its exports in `tessera/integer_exports/`). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
-It is written in Tessera here, except the big numeric engine whose source stays RazorForge (the arbitrary-precision
-Int), which is written into `tessera/generated/` by RazorForge's Tessera backend: `RazorForge export-ingrid`
-builds each export file of RazorForge's `IngridExport/` and writes its `ingrid_*` routines, with everything they
-reach, as one Tessera file, committed and shipped like the rest.
+It is written in Tessera here, and shipped as source with the rest.
 
 The standard library owns the language-facing API; Ingrid supplies what sits under it.
 
@@ -44,7 +41,7 @@ The standard library owns the language-facing API; Ingrid supplies what sits und
 runtime-tessera/  # The runtime library (module Ingrid::Runtime)
 tessera/          # Linked into every RazorForge and Suflae module
 ├── decimal/      # The decimal floats D32, D64, and D128
-└── generated/    # Written by `RazorForge export-ingrid`: Int (numerics.te)
+└── integer/      # The arbitrary-precision Int: limb layer, NTT multiply, division, square root, text
 tests/            # Golden tests of tessera/, run by the Tessera builder
 native/
 ├── CMakeLists.txt

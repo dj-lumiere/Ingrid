@@ -1,0 +1,731 @@
+# The number theoretic transform multiply of the Int engine, a port of LibBF's fft_mul with the 64-bit limb
+# configuration (see THIRD-PARTY-NOTICES.md). The operands are cut into digits of `dpl` bits, each digit is reduced
+# modulo the top few of five primes near 2^62, the products are cyclic convolutions modulo each prime, and the
+# Chinese remainder theorem puts the digits of the product back together.
+#
+# The five primes are k × 2^51 + 1, so every one has the 2^51-th roots of unity a transform of up to 2^51 digits
+# needs. A value in a transform stays below 2m or m, as each routine says. Every buffer comes from the call's
+# scratch arena, and the `_scratch` routines say how many limbs a transform takes.
+
+module Ingrid/Integer
+
+### How many primes there are.
+secret preset NTT_MODS_COUNT: U64 = 5
+
+### The five NTT primes.
+secret preset NTT_MODS: Items[U64, 5] = [0x28D8000000000001, 0x2A88000000000001, 0x2ED8000000000001,
+    0x3508000000000001, 0x3AA8000000000001]
+
+### floor(2^125 / m) for each prime, the reciprocal `mod_fast` reduces a 125-bit product with (LibBF
+### init_mul_mod_fast).
+secret preset NTT_MOD_INVS: Items[U64, 5] = [0xC891B9E10D83D1C1, 0xC09C7F274FF0F3C1,
+    0xAEE116B6BC333BED, 0x9A7996B41EC63902, 0x8BA941E015D27248]
+
+### The bits of integer a transform modulo the top 1 to 5 primes can carry (LibBF ntt_int_bits, 64-bit limbs).
+secret preset NTT_INT_BITS: Items[U64, 5] = [307, 246, 185, 123, 61]
+
+### The ten constants of the Chinese remainder step (LibBF ntt_mods_cr), in the order the pairs of primes (j, k) with
+### j < k come in, across all five primes.
+secret preset NTT_CR: Items[U64, 10] = [0x08A9ED097B425EEA, 0x18A44AAAAAAAAAB3, 0x2493F57F57F57F5D,
+    0x126B8D0649A7F8D4, 0x09D80ED7303B5CCC, 0x25B8BCF3CF3CF3D5, 0x2CE6CE63398CE638,
+    0x0E31FAD40A57EB59, 0x02A3529FD4A7F52F, 0x3A5493E93E93E94A]
+
+### The index k of the larger prime of the pair each Chinese remainder constant belongs to.
+secret preset NTT_CR_K: Items[U64, 10] = [1, 2, 3, 4, 2, 3, 4, 3, 4, 4]
+
+### floor(cr × 2^64 / m) for each Chinese remainder constant and the prime its pair names (LibBF ntt_static_init).
+secret preset NTT_CR_INVS: Items[U64, 10] = [0x3425ED097B425F68, 0x86AAAAAAAAAAAAD5,
+    0xB0930930930930A8, 0x50649A7F8D0649B6, 0x35CC0ED7303B5CFC, 0xB618618618618630,
+    0xC3F80FE03F80FE13, 0x448676F31219DBF5, 0x0B8362E0D8B83643, 0xFE93E93E93E93EC1]
+
+### A primitive 2^51-th root of unity modulo each prime, for the forward transform.
+secret preset NTT_PROOT_FORWARD: Items[U64, 5] = [0x1B8EA61034A2BEA7, 0x21A9762DE58206FB,
+    0x02CA782F0756A8EA, 0x278384537A3E50A1, 0x106E13FEE74CE0AB]
+
+### The inverse of each forward root, for the inverse transform.
+secret preset NTT_PROOT_INVERSE: Items[U64, 5] = [0x233513AF133E13B8, 0x1D13140D1C6F75F1,
+    0x12CDE57F97E3EEDA, 0x0D6149E23CBE654F, 0x36CD204F522A1379]
+
+### The largest k a transform of 2^k digits is done in one piece for: bigger ones are cut into rows and columns.
+secret preset NTT_TRIG_K_MAX: U64 = 19
+
+### The exponent of the roots of unity: the primes are k × 2^51 + 1.
+secret preset NTT_PROOT_2EXP: U64 = 51
+
+# ── modular arithmetic ────────────────────────────────────────────────────────────────────────────
+
+### The prime with index `idx`.
+### :param idx: 0 to 4.
+### :returns: The prime.
+@inline
+secret routine ntt_mod(idx: U64) -> U64
+    return NTT_MODS.getitem(idx)
+
+### a + b modulo m, for operands that need only one conditional fix (LibBF add_mod).
+### :param a: The first operand.
+### :param b: The second operand.
+### :param m: The modulus.
+### :returns: The sum, below m when the operands were.
+@inline
+secret routine add_mod(a: U64, b: U64, m: U64) -> U64
+    r: U64 = a +% b
+    return if r >= m then r -% m else r
+
+### a - b modulo m, for operands that need only one conditional fix (LibBF sub_mod).
+### :param a: The first operand.
+### :param b: The second operand.
+### :param m: The modulus.
+### :returns: The difference, below m when the operands were.
+@inline
+secret routine sub_mod(a: U64, b: U64, m: U64) -> U64
+    r: U64 = a -% b
+    return if r > a then r +% m else r
+
+### Arithmetic shift right by one of a limb read as signed: the all-ones or all-zeros mask `mod_fast` corrects with.
+### :param x: The limb.
+### :returns: The limb with its top bit copied down.
+@inline
+secret routine asr1(x: U64) -> U64
+    return (x.to_wrap[S64]() >> 1).to_wrap[U64]()
+
+### Reduces a 125-bit value modulo m with the reciprocal of m, Barrett style with two conditional add-backs of m
+### taken from a sign mask (LibBF mod_fast).
+### :param r: The value, below 2^125.
+### :param m: The modulus.
+### :param m_inv: The reciprocal of m from `NTT_MOD_INVS`.
+### :returns: r modulo m.
+@inline
+secret routine mod_fast(r: U128, m: U64, m_inv: U64) -> U64
+    a1: U64 = (r >> 61).to_wrap[U64]()
+    q: U64 = (a1.mul_wide(m_inv) >> 64).to_wrap[U64]()
+    reduced: U128 = r -% q.mul_wide(m) -% (m.to[U128]() << 1)
+    mask: U64 = asr1(x: (reduced >> 64).to_wrap[U64]())
+    folded: U128 = reduced +% (m & mask).to[U128]()
+    return folded.to_wrap[U64]() +% (m & (folded >> 64).to_wrap[U64]())
+
+### a × b modulo m, for operands whose product is below 2^125 (LibBF mul_mod_fast).
+### :param a: The first factor.
+### :param b: The second factor.
+### :param m: The modulus.
+### :param m_inv: The reciprocal of m from `NTT_MOD_INVS`.
+### :returns: a × b modulo m.
+@inline
+secret routine mul_mod_fast(a: U64, b: U64, m: U64, m_inv: U64) -> U64
+    return mod_fast(r: a.mul_wide(b), m, m_inv)
+
+### floor(b × 2^64 / m), the reciprocal for multiplying by the constant b (LibBF init_mul_mod_fast2).
+### :param b: The constant factor, below m.
+### :param m: The modulus.
+### :returns: floor(b × 2^64 / m).
+secret routine init_mul_mod_fast2(b: U64, m: U64) -> U64
+    return ((b.to[U128]() << 64) // m.to[U128]()).to_wrap[U64]()
+
+### a × b modulo m for a constant b with b_inv = init_mul_mod_fast2(b, m), fully reduced (LibBF mul_mod_fast2).
+### :param a: The factor that varies.
+### :param b: The constant factor.
+### :param m: The modulus.
+### :param b_inv: The reciprocal of b.
+### :returns: a × b modulo m.
+@inline
+secret routine mul_mod_fast2(a: U64, b: U64, m: U64, b_inv: U64) -> U64
+    q: U64 = (a.mul_wide(b_inv) >> 64).to_wrap[U64]()
+    r: U64 = a *% b -% q *% m
+    return if r >= m then r -% m else r
+
+### Like `mul_mod_fast2`, but the result is r or r + m: the butterflies of a transform allow one extra m (LibBF
+### mul_mod_fast3).
+### :param a: The factor that varies.
+### :param b: The constant factor.
+### :param m: The modulus.
+### :param b_inv: The reciprocal of b.
+### :returns: a × b modulo m, or that plus m.
+@inline
+secret routine mul_mod_fast3(a: U64, b: U64, m: U64, b_inv: U64) -> U64
+    q: U64 = (a.mul_wide(b_inv) >> 64).to_wrap[U64]()
+    return a *% b -% q *% m
+
+### The 2^(51 - k)-th power of the transform's root modulo prime j: a primitive 2^k-th root of unity.
+### :param j: The prime's index.
+### :param inverse: 0 for the forward transform, 1 for the inverse.
+### :param k: The log2 of the root's order, 0 to 51.
+### :returns: The root.
+secret routine ntt_proot_pow(j: U64, inverse: U64, k: U64) -> U64
+    m: U64 = ntt_mod(idx: j)
+    m_inv: U64 = NTT_MOD_INVS.getitem(j)
+    root: U64 = when inverse
+        0 => NTT_PROOT_FORWARD.getitem(j)
+        else => NTT_PROOT_INVERSE.getitem(j)
+    for i in 0 til NTT_PROOT_2EXP -% k with c: U64 = root
+        continue with c: mul_mod_fast(a: c, b: c, m, m_inv)
+    then
+        return c
+
+### (1/2)^k modulo prime j: the inverse of 2^k, which scales the inverse transform back.
+### :param j: The prime's index.
+### :param k: The power.
+### :returns: The inverse of 2^k modulo the prime.
+secret routine ntt_len_inv(j: U64, k: U64) -> U64
+    m: U64 = ntt_mod(idx: j)
+    m_inv: U64 = NTT_MOD_INVS.getitem(j)
+    half: U64 = (m +% 1) // 2
+    for i in 0 til k with c: U64 = 1
+        continue with c: mul_mod_fast(a: c, b: half, m, m_inv)
+    then
+        return c
+
+# ── choosing the transform ────────────────────────────────────────────────────────────────────────
+
+### The shape of the transform that multiplies two numbers.
+secret record NttPlan
+    ### log2 of the transform's length.
+    fft_len_log2: U64
+    ### The width of a digit in bits.
+    dpl: U64
+    ### How many primes the transform runs modulo.
+    nb_mods: U64
+
+### One transform of a plan: its length, its direction and its prime.
+secret record NttJob
+    ### log2 of the transform's length.
+    log2: U64
+    ### 0 for the forward transform, 1 for the inverse.
+    inverse: U64
+    ### The index of the prime.
+    m_idx: U64
+
+### A transform too long for one piece, cut into rows and columns (LibBF ntt_fft_partial).
+secret record NttCut
+    ### log2 of the length of a row done in one piece.
+    k1: U64
+    ### log2 of the number of rows, 0 for a transform done in one piece.
+    k2: U64
+    ### 0 for the forward transform, 1 for the inverse.
+    inverse: U64
+    ### The index of the prime.
+    m_idx: U64
+
+### One pass of the transform: the blocks it runs and how they are laid out.
+secret record NttLevel
+    ### How many blocks.
+    blocks: U64
+    ### The butterflies in a block.
+    per_block: U64
+    ### The distance between the two values of a butterfly in the input.
+    stride_in: U64
+    ### The modulus.
+    m: U64
+
+### One digit of an operand, ready to be reduced modulo each prime.
+secret record NttDigit
+    ### The digit, or its top 125 bits when it has more.
+    high: U128
+    ### The lowest 63 bits of a digit of more than 125 bits.
+    low: U64
+    ### Whether the digit has more than 125 bits.
+    wide: Bool
+
+### The length of the transform.
+### :returns: 2^fft_len_log2.
+@inline
+secret routine NttPlan.fft_len() -> U64
+    return 1 << me.fft_len_log2
+
+### The index of the first of the primes the transform uses: the top `nb_mods` of the five.
+### :returns: 5 - nb_mods.
+@inline
+secret routine NttPlan.first_m_idx() -> U64
+    return 5 - me.nb_mods
+
+### Where this set of primes starts among the Chinese remainder constants.
+### :returns: 10 - nb_mods × (nb_mods - 1) / 2.
+@inline
+secret routine NttPlan.cr_off() -> U64
+    return 10 - me.nb_mods * (me.nb_mods - 1) // 2
+
+### ceil(log2(a)), the bit length of a - 1 (LibBF ceil_log2).
+### :param a: The number.
+### :returns: ceil(log2(a)), 0 for a <= 1.
+secret routine ceil_log2(a: U64) -> U64
+    if a <= 1
+        return 0
+    return 64 - (a - 1).leading_zeros()
+
+### The cheapest transform with `nb_mods` primes for a product of `len` limbs: digits as wide as the primes allow,
+### stepping down until the transform's length and the digits fit the integer bits.
+### :param len: The limbs of the product.
+### :param nb_mods: How many primes, 3 to 5.
+### :returns: The cost, the digit width and log2 of the transform's length. The cost is U64.MAX when there is none.
+secret routine fft_with_mods(len: U64, nb_mods: U64) -> (U64, U64, U64)
+    int_bits: U64 = NTT_INT_BITS.getitem(5 - nb_mods)
+    # at most 2 × 64 + 2 × 61 - 62 bits per digit, and half the integer bits less 4 beyond that
+    start: U64 = ((int_bits - 4) // 2).min(188)
+    until dpl == 0 with dpl: U64 = start
+        fll: U64 = ceil_log2(a: (len * 64 + dpl - 1) // dpl)
+        if fll > NTT_PROOT_2EXP
+            return (U64.MAX, 0, 0)
+        if fll + 2 * dpl <= int_bits
+            return (((fll + 1) << fll) * nb_mods, dpl, fll)
+        continue with dpl: dpl - 1
+    then
+        return (U64.MAX, 0, 0)
+
+### Chooses the transform for a product of `len` limbs (LibBF bf_get_fft_size).
+### :param len: The limbs of the product.
+### :returns: The plan.
+secret routine fft_size(len: U64) -> NttPlan
+    for nb_mods: U64 in 3 to 5 with best: NttPlan = (fft_len_log2: 0, dpl: 0, nb_mods: 4), best_cost: U64 = U64.MAX
+        cost, dpl, fll = fft_with_mods(len, nb_mods)
+        if cost < best_cost
+            continue with best: (fft_len_log2: fll, dpl: dpl, nb_mods: nb_mods), best_cost: cost
+        continue with best: best, best_cost: best_cost
+    then
+        # a digit of more than 125 bits is cut in two reductions: not worth it when the transform is long enough anyway
+        if best.dpl > 125 and (125 << best.fft_len_log2) >= len * 64
+            return (fft_len_log2: best.fft_len_log2, dpl: 125, nb_mods: best.nb_mods)
+        return best
+
+# ── digits in and out ─────────────────────────────────────────────────────────────────────────────
+
+### The limb at index i, or 0 at or past `len`.
+### :param tab: The limbs.
+### :param len: How many there are.
+### :param i: The index.
+### :returns: The limb or 0.
+@inline
+secret routine limb_or_zero(tab: @U64, len: U64, i: U64) -> U64
+    if i < len
+        return limb(tab, i)
+    return 0
+
+### The mask of the low `dpl mod 64` bits of a digit's top word, all ones when that is 0.
+### :param dpl: The digit width in bits.
+### :returns: The mask.
+@inline
+secret routine digit_mask(dpl: U64) -> U64
+    shift: U64 = dpl & 63
+    if shift == 0
+        return U64.MAX
+    return (1 << shift) - 1
+
+### Bits [pos, pos + 64) of a limb buffer, 0 past its end (LibBF get_bits).
+### :param tab: The limbs.
+### :param len: How many there are.
+### :param pos: The bit position.
+### :returns: The 64 bits.
+secret routine get_bits(tab: @U64, len: U64, pos: U64) -> U64
+    i: U64 = pos >> 6
+    p: U64 = pos & 63
+    a0: U64 = limb_or_zero(tab, len, i)
+    if p == 0
+        return a0
+    a1: U64 = limb_or_zero(tab, len, i: i + 1)
+    return (a0 >> p) | (a1 << (64 - p))
+
+### ORs the bits of `val` into the buffer at bit position `pos` (LibBF put_bits).
+### :param tab: The limbs.
+### :param len: How many there are.
+### :param pos: The bit position of val's lowest bit.
+### :param val: The 64 bits.
+secret routine put_bits(tab: @U64, len: U64, pos: U64, val: U64) -> None
+    i: U64 = pos >> 6
+    p: U64 = pos & 63
+    if i < len
+        set_limb(tab, i, value: limb(tab, i) | (val << p))
+    if p != 0 and i + 1 < len
+        set_limb(tab, i: i + 1, value: limb(tab, i: i + 1) | (val >> (64 - p)))
+    return
+
+### The digit `i` of a number cut into digits of `plan.dpl` bits.
+### :param a: The number.
+### :param plan: The plan.
+### :param i: The digit's index.
+### :returns: The digit.
+secret routine ntt_digit(a: @[U64], plan: NttPlan, i: U64) -> NttDigit
+    dpl: U64 = plan.dpl
+    tab: @U64 = a.to[@U64]()
+    len: U64 = a.count()
+    pos: U64 = i * dpl
+    mask: U64 = digit_mask(dpl)
+    a0: U64 = get_bits(tab, len, pos)
+    if dpl <= 64
+        return (high: (a0 & mask).to[U128](), low: 0, wide: false)
+    a1: U64 = get_bits(tab, len, pos: pos + 64)
+    if dpl <= 125
+        return (high: a0.to[U128]() | ((a1 & mask).to[U128]() << 64), low: 0, wide: false)
+    # more than 125 bits: the top 125 are reduced first, then the lowest 63 are folded in
+    a1_top: U64 = when
+        dpl > 128 => a1
+        else => a1 & mask
+    a2: U64 = when
+        dpl > 128 => get_bits(tab, len, pos: pos + 128) & mask
+        else => 0
+    top: U128 = (a0 >> 63).to[U128]() | (a1_top.to[U128]() << 1) | (a2.to[U128]() << 65)
+    return (high: top, low: a0 & (U64.MAX >> 1), wide: true)
+
+### Reduces one digit modulo each prime and stores the residues (the inner loop of `limb_to_ntt`).
+### :param tabr: The residues.
+### :param digit: The digit.
+### :param i: The digit's index.
+### :param plan: The plan.
+secret routine digit_to_ntt(tabr: @U64, digit: NttDigit, i: U64, plan: NttPlan) -> None
+    for j in 0 til plan.nb_mods
+        idx: U64 = plan.first_m_idx() + j
+        m: U64 = ntt_mod(idx)
+        m_inv: U64 = NTT_MOD_INVS.getitem(idx)
+        r: U64 = mod_fast(r: digit.high, m, m_inv)
+        if digit.wide
+            folded: U64 = mod_fast(r: (r.to[U128]() << 63) | digit.low.to[U128](), m, m_inv)
+            set_limb(tab: tabr, i: i + j * plan.fft_len(), value: folded)
+        else
+            set_limb(tab: tabr, i: i + j * plan.fft_len(), value: r)
+    return
+
+### Cuts a number into digits of `plan.dpl` bits and reduces each modulo the top primes, laid out as tabr[i + j × fft_len]
+### for digit i and prime j (LibBF limb_to_ntt).
+### :param tabr: The residues, fft_len × nb_mods limbs, zeroed here.
+### :param a: The number.
+### :param plan: The plan.
+secret routine limb_to_ntt(tabr: @U64, a: @[U64], plan: NttPlan) -> None
+    zero_limbs(tab: tabr, n: plan.fft_len() * plan.nb_mods)
+    ndig: U64 = (a.count() * 64 + plan.dpl - 1) // plan.dpl
+    for i in 0 til plan.fft_len().min(ndig)
+        digit_to_ntt(tabr, digit: ntt_digit(a, plan, i), i, plan)
+    return
+
+### A residue below 2m, reduced once.
+### :param a: The residue.
+### :param m: The modulus.
+### :returns: The residue below m.
+@inline
+secret routine ntt_limb_to_int(a: U64, m: U64) -> U64
+    return if a >= m then a -% m else a
+
+### Folds the mixed-radix digit jj into the digits above it.
+### :param y: The digits.
+### :param jj: The digit.
+### :param l: Where the constants of this column start, counted from the plan's.
+### :param plan: The plan.
+### :returns: Where the constants of the next column start.
+secret routine crt_column(y: @U64, jj: U64, l: U64, plan: NttPlan) -> U64
+    for kk in jj + 1 til plan.nb_mods with at: U64 = l
+        m: U64 = ntt_mod(idx: plan.first_m_idx() + kk)
+        diff: U64 = limb(tab: y, i: kk) -% limb(tab: y, i: jj) +% m
+        c: U64 = NTT_CR.getitem(plan.cr_off() + at)
+        c_inv: U64 = NTT_CR_INVS.getitem(plan.cr_off() + at)
+        set_limb(tab: y, i: kk, value: mul_mod_fast2(a: diff, b: c, m, b_inv: c_inv))
+        continue with at: at + 1
+    then
+        return at
+
+### The first half of the Chinese remainder step: turns the residues y[0..nb_mods) into mixed-radix digits in place.
+### :param y: The residues.
+### :param plan: The plan.
+secret routine crt_mixed_radix(y: @U64, plan: NttPlan) -> None
+    for jj in 0 til plan.nb_mods - 1 with l: U64 = 0
+        continue with l: crt_column(y, jj, l, plan)
+    then
+        return
+
+### u[0..ll) = u × factor + add, going up the limbs.
+### :param u: The number.
+### :param ll: How many limbs it has.
+### :param factor: The factor.
+### :param add: The word added.
+### :returns: The limb carried out of the top.
+secret routine crt_multiply_add(u: @U64, ll: U64, factor: U64, add: U64) -> U64
+    for k in 0 til ll with r: U64 = add
+        t: U128 = limb(tab: u, i: k).mul_wide(factor) +% r.to[U128]()
+        set_limb(tab: u, i: k, value: t.to_wrap[U64]())
+        continue with r: (t >> 64).to_wrap[U64]()
+    then
+        return r
+
+### The second half of the Chinese remainder step: turns the mixed-radix digits into the number they stand for, and adds
+### the carry of the digits below.
+### :param u: The number, nb_mods limbs.
+### :param y: The mixed-radix digits.
+### :param carry: The carry, added in.
+### :param plan: The plan.
+secret routine crt_normal(u: @U64, y: @U64, carry: @U64, plan: NttPlan) -> None
+    nb_mods: U64 = plan.nb_mods
+    set_limb(tab: u, i: 0, value: limb(tab: y, i: nb_mods - 1))
+    until jd < 1 with jd: U64 = nb_mods - 2, ll: U64 = 1
+        mjd: U64 = ntt_mod(idx: plan.first_m_idx() + jd)
+        top: U64 = crt_multiply_add(u, ll, factor: mjd, add: limb(tab: y, i: jd))
+        set_limb(tab: u, i: ll, value: top)
+        continue with jd: jd - 1, ll: ll + 1
+    then
+        # the last step folds in the carry and uses the first prime
+        m0: U64 = ntt_mod(idx: plan.first_m_idx())
+        for k in 0 til ll with r: U64 = limb(tab: y, i: 0)
+            t: U128 = limb(tab: u,
+                i: k).mul_wide(m0) +% r.to[U128]() +% limb(tab: carry, i: k).to[U128]()
+            set_limb(tab: u, i: k, value: t.to_wrap[U64]())
+            continue with r: (t >> 64).to_wrap[U64]()
+        then
+            set_limb(tab: u, i: ll, value: r +% limb(tab: carry, i: ll))
+            return
+
+### Moves what is above the low dpl bits of the digit in `u` down into `carry` (the number shifted right by dpl bits).
+### :param carry: The carry for the next position, nb_mods limbs.
+### :param u: The reconstructed digit and what is above it.
+### :param plan: The plan.
+secret routine carry_shift_down(carry: @U64, u: @U64, plan: NttPlan) -> None
+    n_limb1: U64 = (plan.dpl - 1) // 64
+    shift: U64 = plan.dpl & 63
+    nb_mods: U64 = plan.nb_mods
+    if shift == 0
+        for jc in n_limb1 + 1 til nb_mods
+            set_limb(tab: carry, i: jc - (n_limb1 + 1), value: limb(tab: u, i: jc))
+        return
+    for jc in n_limb1 til nb_mods - 1
+        set_limb(
+            tab: carry,
+            i: jc - n_limb1,
+            value: (limb(tab: u, i: jc) >> shift) | (limb(tab: u, i: jc + 1) << (64 - shift)),
+        )
+    set_limb(tab: carry, i: nb_mods - 1 - n_limb1, value: limb(tab: u, i: nb_mods - 1) >> shift)
+    return
+
+### Puts the digits of a convolution back together by the Chinese remainder theorem, adding each reconstructed digit at
+### its bit position with the carry of the digits below (LibBF ntt_to_limb).
+### :param tabr: The product, zeroed here.
+### :param buf: The residues, fft_len × nb_mods limbs.
+### :param plan: The plan.
+secret routine ntt_to_limb(tabr: @[U64], buf: @U64, plan: NttPlan) -> None
+    dpl: U64 = plan.dpl
+    r_len: U64 = tabr.count()
+    out: @U64 = tabr.to[@U64]()
+    base_mask1: U64 = digit_mask(dpl)
+    n_limb1: U64 = (dpl - 1) // 64
+    y: @U64 = alloc_limbs(n: 5)
+    u: @U64 = alloc_limbs(n: 5)
+    carry: @U64 = alloc_limbs(n: 5)
+    zero_limbs(tab: out, n: r_len)
+    fft_len: U64 = plan.fft_len()
+    ndig: U64 = (r_len * 64 + dpl - 1) // dpl
+    for i in 0 til fft_len.min(ndig)
+        for j in 0 til plan.nb_mods
+            residue: U64 = limb(tab: buf, i: i + fft_len * j)
+            set_limb(tab: y, i: j,
+                value: ntt_limb_to_int(a: residue, m: ntt_mod(idx: plan.first_m_idx() + j)))
+        crt_mixed_radix(y, plan)
+        crt_normal(u, y, carry, plan)
+        # the reconstructed digit is dpl bits: write it at its position
+        pos: U64 = i * dpl
+        for jw in 0 til n_limb1
+            put_bits(tab: out, len: r_len, pos: pos + jw * 64, val: limb(tab: u, i: jw))
+        put_bits(tab: out, len: r_len, pos: pos + n_limb1 * 64,
+            val: limb(tab: u, i: n_limb1) & base_mask1)
+        # what is left above the digit is the carry into the next position
+        carry_shift_down(carry, u, plan)
+    return
+
+# ── the transform ─────────────────────────────────────────────────────────────────────────────────
+
+### The twiddle table of level k: pairs (c, floor(c × 2^64 / m)) for c = w^0, w^1, ... with w the primitive 2^k-th
+### root, 2^(k-1) pairs in 2^k limbs (LibBF get_trig).
+### :param k: The level.
+### :param inverse: 0 for the forward transform, 1 for the inverse.
+### :param m_idx: The prime's index.
+### :returns: The table, taken from the scratch arena.
+secret routine get_trig(k: U64, inverse: U64, m_idx: U64) -> @U64
+    n2: U64 = 1 << (k - 1)
+    m: U64 = ntt_mod(idx: m_idx)
+    tab: @U64 = alloc_limbs(n: n2 * 2)
+    root: U64 = ntt_proot_pow(j: m_idx, inverse, k)
+    root_inv: U64 = init_mul_mod_fast2(b: root, m)
+    for i in 0 til n2 with c: U64 = 1
+        set_limb(tab, i: 2 * i, value: c)
+        set_limb(tab, i: 2 * i + 1, value: init_mul_mod_fast2(b: c, m))
+        continue with c: mul_mod_fast2(a: c, b: root, m, b_inv: root_inv)
+    then
+        return tab
+
+### One pass of the transform: the butterflies of its blocks.
+### :param tab_in: The values read.
+### :param tab_out: The values written.
+### :param trig: The level's twiddle table.
+### :param level: The blocks of the pass.
+secret routine ntt_pass(tab_in: @U64, tab_out: @U64, trig: @U64, level: NttLevel) -> None
+    m: U64 = level.m
+    m2: U64 = 2 * m
+    per_block: U64 = level.per_block
+    for i in 0 til level.blocks
+        c: U64 = limb(tab: trig, i: 2 * i)
+        c_inv: U64 = limb(tab: trig, i: 2 * i + 1)
+        kk: U64 = i * per_block
+        p: U64 = 2 * i * per_block
+        for jb in 0 til per_block
+            a0: U64 = limb(tab: tab_in, i: kk + jb)
+            a1: U64 = limb(tab: tab_in, i: kk + jb + level.stride_in)
+            b1: U64 = mul_mod_fast3(a: a0 -% a1 +% m2, b: c, m, b_inv: c_inv)
+            set_limb(tab: tab_out, i: p + jb, value: add_mod(a: a0, b: a1, m: m2))
+            set_limb(tab: tab_out, i: p + jb + per_block, value: b1)
+    return
+
+### The transform of 2^k values modulo a prime, ping-ponging between `in_buf` and `tmp_buf`, the last level into
+### `out_buf`. Values stay below 2m throughout (LibBF ntt_fft).
+### :param out_buf: The result, which may be `in_buf`.
+### :param in_buf: The values.
+### :param tmp_buf: Scratch for 2^k values.
+### :param job: The length, direction and prime.
+secret routine ntt_fft(out_buf: @U64, in_buf: @U64, tmp_buf: @U64, job: NttJob) -> None
+    m: U64 = ntt_mod(idx: job.m_idx)
+    m2: U64 = 2 * m
+    stride_in: U64 = (1 << job.log2) // 2
+    until blocks == 2 with blocks: U64 = 1 << job.log2, per_block: U64 = 1, tab_in: @U64 = in_buf, tab_out: @U64 = tmp_buf, l: U64 = job.log2
+        trig: @U64 = get_trig(k: l, inverse: job.inverse, m_idx: job.m_idx)
+        ntt_pass(tab_in, tab_out, trig,
+            level: (blocks: blocks >> 1, per_block: per_block, stride_in: stride_in, m: m))
+        continue with blocks: blocks >> 1, per_block: per_block << 1, tab_in: tab_out, tab_out: tab_in, l: l - 1
+    then
+        # the last level has no twiddle
+        for k2 in 0 til stride_in
+            a0: U64 = limb(tab: tab_in, i: k2)
+            a1: U64 = limb(tab: tab_in, i: k2 + stride_in)
+            set_limb(tab: out_buf, i: k2, value: add_mod(a: a0, b: a1, m: m2))
+            set_limb(tab: out_buf, i: k2 + stride_in, value: sub_mod(a: a0, b: a1, m: m2))
+        return
+
+### tab1 *= tab2 pointwise modulo a prime, scaled by 1/2^k_tot (LibBF ntt_vec_mul).
+### :param tab1: The first transform, changed in place.
+### :param tab2: The second transform.
+### :param job: The length and prime.
+### :param k_tot: The log2 to scale by.
+secret routine ntt_vec_mul(tab1: @U64, tab2: @U64, job: NttJob, k_tot: U64) -> None
+    m: U64 = ntt_mod(idx: job.m_idx)
+    m_inv: U64 = NTT_MOD_INVS.getitem(job.m_idx)
+    norm: U64 = ntt_len_inv(j: job.m_idx, k: k_tot)
+    norm_inv: U64 = init_mul_mod_fast2(b: norm, m)
+    for i: U64 in 0 til 1 << job.log2
+        a: U64 = limb(tab: tab1, i)
+        product: U64 = mul_mod_fast(a: ntt_limb_to_int(a, m), b: limb(tab: tab2, i), m, m_inv)
+        set_limb(tab: tab1, i, value: mul_mod_fast3(a: product, b: norm, m, b_inv: norm_inv))
+    return
+
+### buf[i] *= c_mul^i modulo a prime (LibBF mul_trig, for the cut transform of a very long product).
+### :param buf: The values, changed in place.
+### :param n: How many.
+### :param c_mul: The step.
+### :param m_idx: The prime's index.
+secret routine mul_trig(buf: @U64, n: U64, c_mul: U64, m_idx: U64) -> None
+    m: U64 = ntt_mod(idx: m_idx)
+    m_inv: U64 = NTT_MOD_INVS.getitem(m_idx)
+    c_mul_inv: U64 = init_mul_mod_fast2(b: c_mul, m)
+    for i in 0 til n with c0: U64 = 1
+        set_limb(tab: buf, i, value: mul_mod_fast(a: limb(tab: buf, i), b: c0, m, m_inv))
+        continue with c0: mul_mod_fast2(a: c0, b: c_mul, m, b_inv: c_mul_inv)
+    then
+        return
+
+### Transforms the 16 columns of a strip, twisting each by its power of the root.
+### :param buf2: The strip, 16 columns of n1 values.
+### :param buf3: Scratch for n1 values.
+### :param cut: How the transform is cut.
+### :param c_mul: The twist of the first column.
+### :returns: The twist of the next strip's first column.
+secret routine ntt_strip(buf2: @U64, buf3: @U64, cut: NttCut, c_mul: U64) -> U64
+    n1: U64 = 1 << cut.k1
+    m: U64 = ntt_mod(idx: cut.m_idx)
+    m_inv: U64 = NTT_MOD_INVS.getitem(cut.m_idx)
+    c0: U64 = ntt_proot_pow(j: cut.m_idx, inverse: cut.inverse, k: cut.k1 + cut.k2)
+    job: NttJob = (log2: cut.k1, inverse: cut.inverse, m_idx: cut.m_idx)
+    for l2: U64 in 0 til 16 with twist: U64 = c_mul
+        column: @U64 = buf2.stride(l2 * n1)
+        if cut.inverse != 0
+            mul_trig(buf: column, n: n1, c_mul: twist, m_idx: cut.m_idx)
+        ntt_fft(out_buf: column, in_buf: column, tmp_buf: buf3, job)
+        if cut.inverse == 0
+            mul_trig(buf: column, n: n1, c_mul: twist, m_idx: cut.m_idx)
+        continue with twist: mul_mod_fast(a: twist, b: c0, m, m_inv)
+    then
+        return twist
+
+### A 2^(k1 + k2) transform stored row-major as n1 × n2: with k2 = 0 the plain transform, otherwise the columns in strips
+### of 16 (LibBF ntt_fft_partial). The cut form is used only above 2^19 values.
+### :param buf1: The values, changed in place.
+### :param cut: How the transform is cut.
+secret routine ntt_fft_partial(buf1: @U64, cut: NttCut) -> None
+    n1: U64 = 1 << cut.k1
+    n2: U64 = 1 << cut.k2
+    buf3: @U64 = alloc_limbs(n: n1)
+    if cut.k2 == 0
+        ntt_fft(out_buf: buf1, in_buf: buf1, tmp_buf: buf3,
+            job: (log2: cut.k1, inverse: cut.inverse, m_idx: cut.m_idx))
+        return
+    buf2: @U64 = alloc_limbs(n: n1 * 16)
+    until j >= n2 with j: U64 = 0, c_mul: U64 = 1
+        for i in 0 til n1
+            for l: U64 in 0 til 16
+                set_limb(tab: buf2, i: i + l * n1, value: limb(tab: buf1, i: i * n2 + (j + l)))
+        next_c_mul: U64 = ntt_strip(buf2, buf3, cut, c_mul)
+        for i2 in 0 til n1
+            for l3: U64 in 0 til 16
+                set_limb(tab: buf1, i: i2 * n2 + (j + l3), value: limb(tab: buf2, i: i2 + l3 * n1))
+        continue with j: j + 16, c_mul: next_c_mul
+    then
+        return
+
+### How a 2^k transform is cut: log2 of the row length done in one piece.
+### :param k: log2 of the transform's length.
+### :returns: k itself up to NTT_TRIG_K_MAX, else half of k capped at NTT_TRIG_K_MAX.
+secret routine ntt_split(k: U64) -> U64
+    if k <= NTT_TRIG_K_MAX
+        return k
+    return (k // 2).min(NTT_TRIG_K_MAX)
+
+### The cyclic convolution buf1 = buf1 ⊛ buf2 modulo a prime: both transformed forward, multiplied pointwise, the
+### product transformed back (LibBF ntt_conv).
+### :param buf1: The first operand's residues, replaced by the product's.
+### :param buf2: The second operand's residues, destroyed.
+### :param job: The length (log2) and the prime.
+### :param k_tot: log2 of the whole transform, which the product is scaled by.
+secret routine ntt_conv(buf1: @U64, buf2: @U64, job: NttJob, k_tot: U64) -> None
+    k1: U64 = ntt_split(k: job.log2)
+    k2: U64 = job.log2 - k1
+    n2: U64 = 1 << k2
+    forward: NttCut = (k1: k1, k2: k2, inverse: 0, m_idx: job.m_idx)
+    ntt_fft_partial(buf1, cut: forward)
+    ntt_fft_partial(buf1: buf2, cut: forward)
+    if k2 == 0
+        ntt_vec_mul(tab1: buf1, tab2: buf2, job, k_tot)
+    else
+        for i: U64 in 0 til 1 << k1
+            ntt_conv(buf1: buf1.stride(i * n2), buf2: buf2.stride(i * n2),
+                job: (log2: k2, inverse: 0, m_idx: job.m_idx), k_tot)
+    ntt_fft_partial(buf1, cut: (k1: k1, k2: k2, inverse: 1, m_idx: job.m_idx))
+    return
+
+# ── scratch ───────────────────────────────────────────────────────────────────────────────────────
+
+### The most limbs one `ntt_fft` of a 2^k transform takes: a twiddle table per level.
+### :param k: log2 of the transform's length.
+### :returns: The limbs.
+@inline
+secret routine ntt_fft_scratch(k: U64) -> U64
+    return 2 << k
+
+### The most limbs one `ntt_fft_partial` of a 2^(k1 + k2) transform takes.
+### :param k1: log2 of the row length done in one piece.
+### :param k2: log2 of the row count.
+### :returns: The limbs.
+secret routine ntt_fft_partial_scratch(k1: U64, k2: U64) -> U64
+    n1: U64 = 1 << k1
+    if k2 == 0
+        return n1 + ntt_fft_scratch(k: k1)
+    # buf3, buf2's 16 strips, and a transform of each column (strips of 16 columns, at least one strip)
+    n2: U64 = 1 << k2
+    return 17 * n1 + (n2 + 16) * ntt_fft_scratch(k: k1)
+
+### The most limbs one `ntt_conv` of a 2^k transform takes.
+### :param k: log2 of the transform's length.
+### :returns: The limbs.
+secret routine ntt_conv_scratch(k: U64) -> U64
+    k1: U64 = ntt_split(k)
+    k2: U64 = k - k1
+    # two forward transforms and the inverse
+    own: U64 = 3 * ntt_fft_partial_scratch(k1, k2)
+    if k2 == 0
+        return own
+    return own + (1 << k1) * ntt_conv_scratch(k: k2)

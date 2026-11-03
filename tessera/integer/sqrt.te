@@ -1,0 +1,162 @@
+# The integer square root of limb numbers by Zimmermann's Karatsuba square root (LibBF's mp_sqrtrem_rec): the root of
+# the top half of the digits comes from the same method on half the length, the lower half of the root from one
+# division, and a correction step settles the last unit. The recursion ends on two limbs, whose root is built from
+# the root of one limb in two doubling steps.
+
+module Ingrid/Integer
+
+### The bits a doubling step of the root takes in.
+secret record SqrtBits
+    ### How many bits the root grows by.
+    ext: U64
+    ### The next `ext` bits of the number, which extend the remainder before the division.
+    hi: U64
+    ### The `ext` bits after them, which extend the remainder after it.
+    lo: U64
+
+### floor(sqrt(x)) for x < 2^16, which seeds the root of a limb (it replaces LibBF's table of 192 roots).
+### :param x: The number, below 2^16.
+### :returns: The root.
+secret routine isqrt_small(x: U64) -> U64
+    until (s + 1) * (s + 1) > x with s: U64 = 0
+        continue with s: s + 1
+    then
+        return s
+
+### One doubling step of the root: the root s1 of the top bits and its remainder r1 grow by `bits.ext` bits of the number.
+### :param s1: The root so far.
+### :param r1: The remainder so far.
+### :param bits: The bits of the number the root grows by.
+### :returns: The new root and remainder.
+secret routine sqrt_double(s1: U64, r1: U64, bits: SqrtBits) -> (U64, U64)
+    num: U64 = (r1 << bits.ext) | bits.hi
+    q: U64 = num // (2 *% s1)
+    u: U64 = num -% q *% (2 *% s1)
+    s: U64 = (s1 << bits.ext) +% q
+    r: U64 = ((u << bits.ext) | bits.lo) -% q *% q
+    if (r >> 63) != 0
+        lower: U64 = s -% 1
+        return (lower, r +% (2 *% lower +% 1))
+    return (s, r)
+
+### floor(sqrt(a)) and the remainder for one normalized limb (a >= 2^62).
+### :param a: The limb.
+### :returns: The root and a - root^2.
+secret routine limbs_sqrt_word(a: U64) -> (U64, U64)
+    seed: U64 = isqrt_small(x: (a >> 56) << 8)
+    first: U64 = (a >> 48) -% seed *% seed
+    stepped: (U64, U64) = when
+        first > 2 *% seed => (seed + 1, first -% (2 *% seed +% 1))
+        else => (seed, first)
+    s1, r1 = stepped
+    # 8 bits of root to 16, then to 32
+    s2, r2 = sqrt_double(s1, r1, bits: (ext: 8, hi: (a >> 40) & 0xFF, lo: (a >> 32) & 0xFF))
+    return sqrt_double(s1: s2, r1: r2, bits: (ext: 16, hi: (a >> 16) & 0xFFFF, lo: a & 0xFFFF))
+
+### floor(sqrt) of a normalized value of two limbs: writes the root to tabs[0] and the low limb of the remainder to
+### taba[0].
+### :param tabs: The root, one limb.
+### :param taba: The two limbs, then the low limb of the remainder.
+### :returns: The high limb of the remainder.
+secret routine limbs_sqrt_2word(tabs: @U64, taba: @U64) -> U64
+    a0: U64 = limb(tab: taba, i: 0)
+    s1, r1 = limbs_sqrt_word(a: limb(tab: taba, i: 1))
+    s1x2: U128 = (2 *% s1).to[U128]()
+    num: U128 = (r1.to[U128]() << 32) | (a0 >> 32).to[U128]()
+    q: U128 = num // s1x2
+    u: U128 = num -% q *% s1x2
+    s: U128 = (s1.to[U128]() << 32) +% q
+    low: U128 = (u << 32) | (a0 & 0xFFFFFFFF).to[U128]()
+    # q can be a bit over 2^32 (the estimate was too big by one), and then q^2 would not fit: the remainder is exact
+    two64: U128 = 18446744073709551616
+    r: U128 = when
+        (q >> 32).to_wrap[U64]() != 0 => low -% two64
+        else => low -% q *% q
+    if ((r >> 64).to_wrap[U64]() >> 63) != 0
+        lower: U128 = s -% 1
+        set_limb(tab: tabs, i: 0, value: lower.to_wrap[U64]())
+        fixed: U128 = r +% (2 *% lower +% 1)
+        set_limb(tab: taba, i: 0, value: fixed.to_wrap[U64]())
+        return (fixed >> 64).to_wrap[U64]()
+    set_limb(tab: tabs, i: 0, value: s.to_wrap[U64]())
+    set_limb(tab: taba, i: 0, value: r.to_wrap[U64]())
+    return (r >> 64).to_wrap[U64]()
+
+### The recursive Karatsuba root: taba has 2n limbs with a top limb of at least 2^62. Writes floor(sqrt(a)) to
+### tabs[0..n) and the remainder to taba[0..n) (LibBF mp_sqrtrem_rec).
+### :param tabs: The root, n limbs.
+### :param taba: The number, then the low limbs of the remainder.
+### :param n: Half the number's limbs.
+### :param tmp_buf: Scratch for n / 2 + 1 limbs.
+### :returns: The high limb of the remainder.
+secret routine limbs_sqrt_rec(tabs: @U64, taba: @U64, n: U64, tmp_buf: @U64) -> U64
+    if n == 1
+        return limbs_sqrt_2word(tabs, taba)
+    l: U64 = n // 2
+    h: U64 = n - l
+    qh0: U64 = limbs_sqrt_rec(tabs: tabs.stride(l), taba: taba.stride(2 * l), n: h, tmp_buf)
+    if qh0 != 0
+        limbs_sub(res: taba.stride(2 * l), op1: taba.stride(2 * l), op2: tabs.stride(l), n: h)
+    limbs_divmod_norm(tabq: tmp_buf, a: limbs_span(tab: taba.stride(l), n),
+        b: limbs_span(tab: tabs.stride(l), n: h))
+    qh1: U64 = qh0 +% limb(tab: tmp_buf, i: l)
+    limbs_copy(dst: tabs, src: tmp_buf, n: l)
+    ql: U64 = limbs_shr(tab_r: tabs, tab: tabs, n: l, shift: 1)
+    # the low bit of the quotient's top limb shifts into the top bit of the half
+    if (qh1 & 1) != 0
+        set_limb(tab: tabs, i: l - 1, value: limb(tab: tabs, i: l - 1) | 0x8000000000000000)
+    qh: U64 = qh1 >> 1
+    rh0: U64 = when
+        ql != 0 => limbs_add(res: taba.stride(l), op1: taba.stride(l), op2: tabs.stride(l), n: h)
+        else => 0
+    limbs_add_word(tab: tabs.stride(l), b: qh, n: h)
+    c: U64 = sqrt_subtract_square(taba, tabs, n, qh)
+    rh1: U64 = rh0 -% limbs_sub_word(tab: taba.stride(2 * l), b: c, n: n - 2 * l)
+    if (rh1 >> 63) != 0
+        # the remainder went negative: the root was one too big
+        limbs_sub_word(tab: tabs, b: 1, n)
+        rh2: U64 = rh1 +% limbs_addmul_word(tabr: taba, taba: tabs, n, b: 2)
+        return rh2 +% limbs_add_word(tab: taba, b: 1, n)
+    return rh1
+
+### Takes the square of the low half of the root off the remainder's low limbs, unless the quotient's carry stands for
+### it.
+### :param taba: The remainder, 2n limbs of room, changed in place.
+### :param tabs: The root, n limbs.
+### :param n: The root's limbs.
+### :param qh: The carry of the quotient.
+### :returns: The borrow to take off the limbs above.
+secret routine sqrt_subtract_square(taba: @U64, tabs: @U64, n: U64, qh: U64) -> U64
+    if qh != 0
+        return qh
+    l: U64 = n // 2
+    limbs_mul(result: taba.stride(n), a: limbs_span(tab: tabs, n: l),
+        b: limbs_span(tab: tabs, n: l))
+    return limbs_sub(res: taba, op1: taba, op2: taba.stride(n), n: 2 * l)
+
+### floor(sqrt(a)) of a number of 2n limbs whose top limb is at least 2^62; the root goes to tabs and the remainder
+### replaces the low limbs of a.
+### :param tabs: The root, n limbs.
+### :param taba: The number.
+### :param n: Half the number's limbs.
+### :returns: The high limb of the remainder.
+secret routine limbs_sqrt_rem(tabs: @U64, taba: @U64, n: U64) -> U64
+    tmp_buf: @U64 = alloc_limbs(n: n // 2 + 1)
+    return limbs_sqrt_rec(tabs, taba, n, tmp_buf)
+
+### The most limbs `limbs_sqrt_rec` of 2n limbs takes.
+### :param n: Half the number's limbs.
+### :returns: The limbs.
+secret routine limbs_sqrt_rec_scratch(n: U64) -> U64
+    if n <= 1
+        return 0
+    l: U64 = n // 2
+    h: U64 = n - l
+    return limbs_sqrt_rec_scratch(n: h) + limbs_divmod_norm_scratch(na: n,
+        nb: h) + limbs_mul_scratch(a_len: l, b_len: l)
+
+### The most limbs `limbs_sqrt_rem` of 2n limbs takes.
+### :param n: Half the number's limbs.
+### :returns: The limbs.
+secret routine limbs_sqrt_rem_scratch(n: U64) -> U64
+    return n // 2 + 1 + limbs_sqrt_rec_scratch(n)

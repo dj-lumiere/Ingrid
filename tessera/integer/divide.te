@@ -1,0 +1,252 @@
+# Dividing limb numbers. A divisor with its top bit set (normalized) is divided into the dividend by one of three
+# methods: a single limb by word division, a short quotient or divisor by the quadratic schoolbook method (Knuth's
+# algorithm D with a two-by-one word division for each quotient digit), and a long one by Newton's reciprocal
+# (LibBF's mp_divnorm_large and mp_recip). A divisor that is not normalized is shifted up first and the remainder
+# shifted back (limbs_divmod).
+#
+# Every temporary comes from the call's scratch arena, and the `_scratch` routines say how many limbs a division
+# takes.
+
+module Ingrid/Integer
+
+### Where Newton's method takes over from the quadratic one: the shorter of the quotient and the divisor has this many
+### limbs. LibBF switches at 50 limbs, but measured here the quadratic path wins up to about 2000 × 2000 limbs (twice
+### as fast at 1000 limbs) and Newton wins from about 2500.
+secret preset DIV_NEWTON_THRESHOLD: U64 = 2300
+
+### A normalized divisor with what the quadratic division needs of it.
+secret record NormDivisor
+    ### The divisor's limbs.
+    tab: @U64
+    ### How many there are.
+    nb: U64
+    ### The top limb, with its top bit set.
+    top: U64
+    ### `div_2by1_prepare(top)`: the reciprocal on targets that need it.
+    top_inv: U64
+
+### r = floor(B^(2n) / a) for a normalized a of n >= 1 limbs, by Newton doubling (LibBF mp_recip).
+### :param tabr: The reciprocal, n + 1 limbs (the top one is 1).
+### :param taba: The divisor, with its top bit set.
+### :param n: Its limbs.
+secret routine limbs_reciprocal(tabr: @U64, taba: @U64, n: U64) -> None
+    if n <= 2
+        tabu: @U64 = alloc_limbs(n: 2 * n + 1)
+        tabt: @U64 = alloc_limbs(n: n + 2)
+        zero_limbs(tab: tabu, n: 2 * n)
+        set_limb(tab: tabu, i: 2 * n, value: 1)
+        limbs_divmod_norm(tabq: tabt, a: limbs_span(tab: tabu, n: 2 * n + 1),
+            b: limbs_span(tab: taba, n))
+        limbs_copy(dst: tabr, src: tabt, n: n + 1)
+        if limbs_any_nonzero(tab: tabu, n) == 0
+            limbs_sub_word(tab: tabr, b: 1, n: n + 1)
+        return
+    l: U64 = (n - 1) // 2
+    h: U64 = n - l
+    tabt: @U64 = alloc_limbs(n: n + h + 1)
+    tabu: @U64 = alloc_limbs(n: n + 2 * h - l + 2)
+    tabxh: @U64 = tabr.stride(l)
+    limbs_reciprocal(tabr: tabxh, taba: taba.stride(l), n: h)
+    limbs_mul(result: tabt, a: limbs_span(tab: taba, n), b: limbs_span(tab: tabxh, n: h + 1))
+    until limb(tab: tabt, i: n + h) == 0
+        limbs_sub_word(tab: tabxh, b: 1, n: h + 1)
+        borrow: U64 = limbs_sub(res: tabt, op1: tabt, op2: taba, n)
+        limbs_sub_word(tab: tabt.stride(n), b: borrow, n: h + 1)
+    # T = B^(n+h) - T
+    limbs_neg(res: tabt, op2: tabt, n: n + h + 1)
+    set_limb(tab: tabt, i: n + h, value: limb(tab: tabt, i: n + h) +% 1)
+    limbs_mul(result: tabu, a: limbs_span(tab: tabt.stride(l), n: n + h + 1 - l),
+        b: limbs_span(tab: tabxh, n: h + 1))
+    limbs_copy(dst: tabr, src: tabu.stride(2 * h - l), n: l)
+    limbs_add(res: tabr.stride(l), op1: tabr.stride(l), op2: tabu.stride(2 * h), n: h)
+    return
+
+### Divides by Newton's reciprocal: a (na limbs) / b (nb limbs, normalized) with nq = na - nb >= 1, the quotient into
+### `tabq` (nq + 1 limbs) and the remainder left in a[0..nb) (LibBF mp_divnorm_large).
+### :param tabq: The quotient.
+### :param a: The dividend, which the remainder replaces.
+### :param b: The divisor, with its top bit set.
+secret routine limbs_divmod_newton(tabq: @U64, a: @[U64], b: @[U64]) -> None
+    taba: @U64 = a.to[@U64]()
+    tabb: @U64 = b.to[@U64]()
+    na: U64 = a.count()
+    nb: U64 = b.count()
+    nq: U64 = na - nb
+    n: U64 = nq + bit_of(flag: nq < nb)
+    tabb_inv: @U64 = alloc_limbs(n: n + 1)
+    tabt: @U64 = alloc_limbs(n: 2 * (n + 1))
+    if n >= nb
+        # the divisor padded with zeros below
+        for i in 0 til nb
+            set_limb(tab: tabt, i: i + n - nb, value: limb(tab: tabb, i))
+        limbs_reciprocal(tabr: tabb_inv, taba: tabt, n)
+    else
+        # the top n limbs of the divisor plus one: the reciprocal of something at least as big
+        limbs_copy(dst: tabt, src: tabb.stride(nb - n), n)
+        if limbs_add_word(tab: tabt, b: 1, n) != 0
+            set_limb(tab: tabb_inv, i: n, value: 1)
+        else
+            limbs_reciprocal(tabr: tabb_inv, taba: tabt, n)
+    # Q = A × B^-1
+    limbs_mul(result: tabt, a: limbs_span(tab: tabb_inv, n: n + 1),
+        b: limbs_span(tab: taba.stride(na - (n + 1)), n: n + 1))
+    limbs_copy(dst: tabq, src: tabt.stride(2 * (n + 1) - (nq + 1)), n: nq + 1)
+    # R = A - B × Q
+    tabt2: @U64 = alloc_limbs(n: na + 1)
+    limbs_mul(result: tabt2, a: limbs_span(tab: tabq, n: nq + 1), b)
+    limbs_sub(res: taba, op1: taba, op2: tabt2, n: nb + 1)
+    # the approximate quotient is at most the exact one, so step it up while the remainder is still at least B
+    loop
+        if limb(tab: taba, i: nb) == 0 and limbs_cmp(a: taba, b: tabb, n: nb) < 0
+            break
+        borrow: U64 = limbs_sub(res: taba, op1: taba, op2: tabb, n: nb)
+        set_limb(tab: taba, i: nb, value: limb(tab: taba, i: nb) -% borrow)
+        limbs_add_word(tab: tabq, b: 1, n: nq + 1)
+    return
+
+### The divisor `b` (nb >= 2 limbs, its top bit set) prepared for the quadratic division.
+### :param b: The divisor.
+### :returns: The divisor with its top limb and that limb's reciprocal.
+secret routine norm_divisor(b: @[U64]) -> NormDivisor
+    tab: @U64 = b.to[@U64]()
+    top: U64 = limb(tab, i: b.count() - 1)
+    return (tab: tab, nb: b.count(), top: top, top_inv: div_2by1_prepare(top))
+
+### One quotient limb of the quadratic division: estimates it from the top limbs, subtracts the divisor times it from
+### the dividend's limbs i .. i + nb, and adds the divisor back while the estimate was too big.
+### :param taba: The dividend, changed in place.
+### :param d: The divisor.
+### :param i: The quotient limb's index.
+### :returns: The quotient limb.
+@inline
+secret routine quotient_limb(taba: @U64, d: NormDivisor, i: U64) -> U64
+    nb: U64 = d.nb
+    top: U64 = limb(tab: taba, i: i + nb)
+    estimate: U64 = when
+        top >= d.top => U64.MAX
+        else => div_2by1(u1: top, u0: limb(tab: taba, i: i + nb - 1), d: d.top,
+            v: d.top_inv).quotient
+    borrow: U64 = limbs_submul_word(tabr: taba.stride(i), taba: d.tab, n: nb, b: estimate)
+    shortened: U64 = top -% borrow
+    set_limb(tab: taba, i: i + nb, value: shortened)
+    if shortened <= top
+        return estimate
+    return quotient_add_back(taba, d, i, estimate)
+
+### Adds the divisor back into the dividend's limbs i .. i + nb until the remainder is no longer negative, stepping the
+### quotient limb down each time.
+### :param taba: The dividend, changed in place.
+### :param d: The divisor.
+### :param i: The quotient limb's index.
+### :param estimate: The quotient limb that was too big.
+### :returns: The corrected quotient limb.
+secret routine quotient_add_back(taba: @U64, d: NormDivisor, i: U64, estimate: U64) -> U64
+    loop with qq: U64 = estimate
+        lower: U64 = qq -% 1
+        carry: U64 = limbs_add(res: taba.stride(i), op1: taba.stride(i), op2: d.tab, n: d.nb)
+        if carry != 0
+            t: U64 = limb(tab: taba, i: i + d.nb) +% 1
+            set_limb(tab: taba, i: i + d.nb, value: t)
+            if t == 0
+                return lower
+        continue with qq: lower
+
+### Divides a (na limbs) by a normalized b (nb limbs, its top bit set) with na >= nb: the quotient into `tabq` (na - nb +
+### 1 limbs) and the remainder left in a[0..nb) (LibBF mp_divnorm). A one-limb divisor is word division, a long quotient
+### and divisor go to Newton's method, the rest is quadratic.
+### :param tabq: The quotient.
+### :param a: The dividend, which the remainder replaces.
+### :param b: The divisor, with its top bit set.
+secret routine limbs_divmod_norm(tabq: @U64, a: @[U64], b: @[U64]) -> None
+    taba: @U64 = a.to[@U64]()
+    na: U64 = a.count()
+    nb: U64 = b.count()
+    if nb == 1
+        set_limb(tab: taba, i: 0,
+            value: limbs_divmod_word(tabr: tabq, taba, n: na, b: limb(tab: b.to[@U64](), i: 0)))
+        return
+    n: U64 = na - nb
+    if n.min(nb) >= DIV_NEWTON_THRESHOLD
+        limbs_divmod_newton(tabq, a, b)
+        return
+    d: NormDivisor = norm_divisor(b)
+    # the first quotient limb is 0 or 1
+    q: U64 = bit_of(flag: limbs_cmp(a: taba.stride(n), b: d.tab, n: nb) >= 0)
+    set_limb(tab: tabq, i: n, value: q)
+    if q != 0
+        limbs_sub(res: taba.stride(n), op1: taba.stride(n), op2: d.tab, n: nb)
+    until left == 0 with left: U64 = n
+        i: U64 = left - 1
+        set_limb(tab: tabq, i, value: quotient_limb(taba, d, i))
+        continue with left: i
+    then
+        return
+
+# ── a divisor that is not normalized ──────────────────────────────────────────────────────────────
+
+### q = a / b and r = a mod b for any divisor with na >= nb and a nonzero top limb: shifts b up until its top bit is
+### set, shifts a the same, divides and shifts the remainder back.
+### :param q: The quotient, na - nb + 1 limbs.
+### :param r: The remainder, nb limbs.
+### :param a: The dividend.
+### :param b: The divisor.
+secret routine limbs_divmod(q: @U64, r: @U64, a: @[U64], b: @[U64]) -> None
+    na: U64 = a.count()
+    nb: U64 = b.count()
+    shift: U64 = limb(tab: b.to[@U64](), i: nb - 1).leading_zeros()
+    bn: @U64 = alloc_limbs(n: nb)
+    limbs_shl(dst: bn, src: b.to[@U64](), n: nb, shift)
+    an: @U64 = alloc_limbs(n: na + 1)
+    set_limb(tab: an, i: na, value: limbs_shl(dst: an, src: a.to[@U64](), n: na, shift))
+    qq: @U64 = alloc_limbs(n: na + 2 - nb)
+    limbs_divmod_norm(tabq: qq, a: limbs_span(tab: an, n: na + 1), b: limbs_span(tab: bn, n: nb))
+    limbs_copy(dst: q, src: qq, n: na + 1 - nb)
+    if shift == 0
+        limbs_copy(dst: r, src: an, n: nb)
+    else
+        limbs_shr(tab_r: r, tab: an, n: nb, shift)
+    return
+
+# ── scratch ───────────────────────────────────────────────────────────────────────────────────────
+
+### The most limbs `limbs_divmod_norm` takes dividing na limbs by nb: Newton's buffers, 0 on the quadratic path.
+### :param na: The dividend's limbs.
+### :param nb: The divisor's limbs.
+### :returns: The limbs.
+secret routine limbs_divmod_norm_scratch(na: U64, nb: U64) -> U64
+    if nb == 1
+        return 0
+    if (na - nb).min(nb) >= DIV_NEWTON_THRESHOLD
+        return limbs_divmod_newton_scratch(na, nb)
+    return 0
+
+### The most limbs `limbs_divmod_newton` takes dividing na limbs by nb.
+### :param na: The dividend's limbs.
+### :param nb: The divisor's limbs.
+### :returns: The limbs.
+secret routine limbs_divmod_newton_scratch(na: U64, nb: U64) -> U64
+    nq: U64 = na - nb
+    n: U64 = nq + bit_of(flag: nq < nb)
+    own: U64 = (n + 1) + 2 * (n + 1) + (na + 1)
+    return own + limbs_reciprocal_scratch(n) + limbs_mul_scratch(a_len: n + 1,
+        b_len: n + 1) + limbs_mul_scratch(a_len: nq + 1, b_len: nb)
+
+### The most limbs `limbs_reciprocal` of n limbs takes.
+### :param n: The divisor's limbs.
+### :returns: The limbs.
+secret routine limbs_reciprocal_scratch(n: U64) -> U64
+    if n <= 2
+        return (2 * n + 1) + (n + 2) + limbs_divmod_norm_scratch(na: 2 * n + 1, nb: n)
+    l: U64 = (n - 1) // 2
+    h: U64 = n - l
+    own: U64 = (n + h + 1) + (n + 2 * h - l + 2)
+    return own + limbs_reciprocal_scratch(n: h) + limbs_mul_scratch(a_len: n,
+        b_len: h + 1) + limbs_mul_scratch(a_len: n + h + 1 - l, b_len: h + 1)
+
+### The most limbs `limbs_divmod` takes dividing na limbs by nb: its normalized copies and quotient, and the division
+### under them.
+### :param na: The dividend's limbs.
+### :param nb: The divisor's limbs.
+### :returns: The limbs.
+secret routine limbs_divmod_scratch(na: U64, nb: U64) -> U64
+    return nb + (na + 1) + (na + 2 - nb) + limbs_divmod_norm_scratch(na: na + 1, nb)
