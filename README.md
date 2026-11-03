@@ -89,7 +89,7 @@ checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 
 ```bash
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll test tests
-dotnet ../Tessera/bin/Debug/net10.0/tessera.dll check runtime-tessera/*.te   # also tessera/*.te tessera/decimal/*.te tessera/generated/*.te, --target <triple>
+dotnet ../Tessera/bin/Debug/net10.0/tessera.dll check runtime-tessera/*.te   # also tessera/*.te tessera/decimal/*.te tessera/integer/*.te tessera/integer_exports/*.te, --target <triple>
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll fmt --check runtime-tessera tessera tests
 dotnet ../Tessera/bin/Debug/net10.0/tessera.dll lint runtime-tessera tessera tests
 ```
