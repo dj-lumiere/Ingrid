@@ -151,10 +151,53 @@ secret routine drop_count(header: @RoamHeader) -> Bool
     remaining.poke_into(header.count)
     return remaining == 0
 
+### How many destroy_entity calls are nested on this thread. Past DESTROY_NEST_LIMIT a destroy waits in DESTROY_QUEUE for
+### the call at the bottom, so a chain of a million entities ends in a loop and not in a million nested calls.
+@threadlocal
+global DESTROY_NEST: &U64
+
+### The headers whose last strong handle went too deep in the nesting, linked through their `depth` field (an entity with no
+### strong handle left has no holder of its lock), the next one to destroy first. Null when none waits.
+@threadlocal
+global DESTROY_QUEUE: &Addr
+
+### How many destroys may nest before the next one waits. A destroy and the drop hook it runs take a few frames, so this
+### keeps the deepest nesting to a small part of the stack.
+preset DESTROY_NEST_LIMIT: U64 = 256
+
 ### The last strong handle went: destroys the entity, frees the header unless a weak observer still holds it, and
-### leaves the shared lock the release entered. What the entity kept alive is let go after that, outside the lock.
+### leaves the shared lock the release entered. What the entity kept alive is let go after that, outside the lock. Past
+### DESTROY_NEST_LIMIT nested destroys, the header waits and the destroy at the bottom runs it.
 ### :param header: The entity's header.
 secret routine destroy_entity(header: @RoamHeader) -> None
+    nest: U64 = DESTROY_NEST.load()
+    if nest >= DESTROY_NEST_LIMIT
+        # A buffered candidate leaves the buffer first, so the collector never reaches a header that waits.
+        if header.buffered_at.peek() != 0
+            remove_candidate(header)
+        # No strong handle is left, so the entity counts as gone for the weak observers from here.
+        header.dead.poke_unbroken(1)
+        link: U64 = ptrtoint[Addr, U64](DESTROY_QUEUE.load())
+        link.poke_into(header.depth)
+        DESTROY_QUEUE.store(header.to[Addr]())
+        world_leave()
+        return
+    (nest + 1).poke_into(DESTROY_NEST)
+    destroy_now(header)
+    # The destroy at the bottom runs the ones that waited: each starts a nesting of its own.
+    if nest == 0
+        until ptrtoint[Addr, U64](DESTROY_QUEUE.load()) == 0
+            waiting: @RoamHeader = DESTROY_QUEUE.load().to[@RoamHeader]()
+            next: U64 = waiting.depth.peek()
+            DESTROY_QUEUE.store(inttoptr[U64, Addr](next))
+            world_enter()
+            destroy_now(waiting)
+    nest.poke_into(DESTROY_NEST)
+    return
+
+### Destroys the entity of a header whose last strong handle went, and leaves the shared lock the release entered.
+### :param header: The entity's header.
+secret routine destroy_now(header: @RoamHeader) -> None
     escaped: Bool = header.escaped.peek_unbroken() == 1
     # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
     if header.buffered_at.peek() != 0
