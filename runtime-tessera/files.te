@@ -427,6 +427,38 @@ routine rf_file_read_line(fd: S32) -> @Byte?
     else
         return out.fail()
 
+### One word: the bytes up to the next space, tab, '\n' or '\r', after skipping those. At the end of the file the word
+### is empty.
+### :param fd: The handle.
+### :returns: The word, or null (length 0) for a handle not open or when the buffer can't grow.
+@export("rf_file_read_word")
+routine rf_file_read_word(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    if found.is_absent()
+        return no_result()
+    of: @OpenFile = found.unwrap()
+    if out.start(64)
+        until of.start.peek() >= of.end.peek() and not of.refill()
+            at: U64 = of.start.peek()
+            cursor: @Byte = of.buffer.peek().stride(at)
+            c: Byte = cursor.peek()
+            space: Bool = c == b' ' or c == b'\t' or c == b'\n' or c == b'\r'
+            if space and out.len.peek() > 0
+                return out.finish()
+            of.start.poke(at + 1)
+            if space
+                continue
+            if not out.room(1)
+                return out.fail()
+            out.byte(c)
+            continue
+        then
+            return out.finish()
+    else
+        return out.fail()
+
 ### Up to count bytes: fewer only at the end of the file.
 ### :param fd: The handle.
 ### :param count: The most bytes to read.
@@ -492,7 +524,8 @@ routine rf_file_flush(fd: S32) -> None
     of.drain()
     return
 
-### Whether a read has reached the end of the file and nothing it read is left.
+### Whether the reader is at the end of the file: nothing it read is left and the file has nothing more. It reads
+### ahead into the buffer when the buffer is empty.
 ### :param fd: The handle.
 ### :returns: True at the end, or for a handle not open.
 @export("rf_file_is_eof")
@@ -501,7 +534,11 @@ routine rf_file_is_eof(fd: S32) -> Bool
     if found.is_absent()
         return true
     of: @OpenFile = found.unwrap()
-    return of.eof.peek() and (of.start.peek() >= of.end.peek())
+    if of.start.peek() < of.end.peek()
+        return false
+    if of.eof.peek()
+        return true
+    return not of.refill()
 
 # -- whole files, for the I/O threads (io.te) ---------------------------------------
 
