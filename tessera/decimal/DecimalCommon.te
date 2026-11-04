@@ -249,6 +249,53 @@ secret routine dec_exact_places(value: DecExact, places: U64, mode: U32, f: DecF
         return (ok: false, d: dec_nan())
     return (ok: true, d: t)
 
+### `value` (an exact sum, product, or quotient) rounded once to the nearest value of at most f.digits significant
+### digits by `mode` (dec_rule_mode), and never below f.qmin: `add`, `subtract`, `multiply`, and `divide` without
+### `places`. A carry out of the top digit (99...9 moved up) gives 10^(digits - 1) one exponent higher. Not ok when the
+### rounded value is past f.qmax. A sum's or quotient's sticky unit sits at least two digits below the last digit kept,
+### so it only says that something was dropped.
+### :param value: The exact value.
+### :param mode: The rounding (dec_rule_mode).
+### :param f: The format the result takes.
+### :returns: The rounded value, or not ok.
+secret routine dec_exact_sig(value: DecExact, mode: U32, f: DecFormat) -> DecTry
+    neg: Bool = value.neg
+    c: U256 = value.coeff
+    if c == 0
+        return (ok: true, d: dec_num(neg: false, coeff: 0, exp: 0))
+    nd: S64 = dec_digits256(c)
+    dropped: S64 = (nd - f.digits).max(f.qmin - value.exp)
+    if dropped <= 0
+        return dec_pad_to_qmax(d: dec_num(neg, coeff: c.to[U128](), exp: value.exp), f)
+    parts: (U256, Bool, Bool, Bool) = when
+        dropped > 77 => (0, true, false, false)
+        else =>
+            unit: U256 = dec_p10(dropped)
+            q: U256 = dec_div_p10_256(x: c, k: dropped)
+            r: U256 = c - q *% unit
+            other: U256 = unit - r
+            becomes (q, r != 0, r == other, r > other)
+    q, rest, half, above = parts
+    odd: Bool = q & 1 == 1
+    cut: DecDroppedFraction = (rest: rest, nearest: above or half, even: above or (half and odd), half_up: above or (half and not neg))
+    t: Dec = dec_round_tail(x: dec_num(neg, coeff: q.to_wrap[U128](), exp: value.exp + dropped), cut, mode)
+    result: Dec = when
+        t.coeff >= dec_p10_128(f.digits) => dec_num(neg, coeff: dec_p10_128(f.digits - 1), exp: t.exp + 1)
+        else => t
+    return dec_pad_to_qmax(d: result, f)
+
+### `d` (finite, nonzero) with an exponent above f.qmax padded with zeros down to it, not ok when the digits have no room.
+### :param d: The decimal.
+### :param f: The format.
+### :returns: The decimal at an exponent within f, or not ok.
+secret routine dec_pad_to_qmax(d: Dec, f: DecFormat) -> DecTry
+    if d.exp <= f.qmax
+        return (ok: true, d: d)
+    spread: S64 = d.exp - f.qmax
+    if dec_digits(d.coeff) + spread > f.digits
+        return (ok: false, d: dec_nan())
+    return (ok: true, d: dec_num(neg: d.neg, coeff: d.coeff * dec_p10_128(spread), exp: f.qmax))
+
 ### x (its digits past the place already dropped) moved up by one unit when `mode` rounds `cut` up (a half-up zero is
 ### +0, as in dec_round_int).
 ### :param x: The value kept, at the exponent of the place.
