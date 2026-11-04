@@ -1,0 +1,135 @@
+# The cycle collector while other threads work: four worker threads each make two-entity cycles and let go of them,
+# and share and release a private entity between rounds, while the main thread runs pass after pass. Every cycle
+# must be freed exactly once, and no worker may touch an entity a pass is tracing (a pass stops the world through
+# each thread's slot).
+#
+# roam.lpa calls routines of the Revare runtime library, defined here so the program links: the current agent's
+# id, the scheduler's yield, and the AccessManager's record of a wait.
+
+import Hosted
+
+### How many entities the collector has freed.
+global FREED: &U64
+### How many workers have finished.
+global DONE: &U64
+
+preset WORKERS: U64 = 4
+preset ROUNDS: U64 = 20000
+
+### An entity: the header of the entity its one Roamed field holds (null for none).
+record Node
+    child: Addr
+
+@export("rf_access_flow_id")
+routine stub_current_task_id() -> U64
+    return 1
+
+@export("rf_coro_yield")
+routine stub_coro_yield() -> None
+    return
+
+@export("rf_access_wait_begin")
+routine stub_access_wait_begin(lock: Addr, holder: @U64) -> None
+    return
+
+@export("rf_access_wait_end")
+routine stub_access_wait_end() -> None
+    return
+
+### The entity type's trace routine: hands the collector the header its Roamed field holds.
+### :param subject: The node.
+routine trace_node(subject: Addr) -> None
+    node: @Node = subject.to[@Node]()
+    child: Addr = node.child.peek()
+    if child.is_hollow()
+        return
+    visit_child(child)
+    return
+
+### The entity type's collector free routine: counts the node and frees it.
+### :param subject: The node.
+routine free_node(subject: Addr) -> None
+    before: U64 = FREED.fetch_add_unbroken(1)
+    manager: @MemoryManager = C_HEAP
+    deallocate(data: subject.to[@Node](), manager)
+    return
+
+### The entity type's destroy routine, for the last strong release: frees the node without counting it.
+### :param subject: The node.
+routine drop_node(subject: Addr) -> None
+    manager: @MemoryManager = C_HEAP
+
+    deallocate(data: subject.to[@Node](), manager)
+    return
+
+### A new local entity with one strong handle.
+### :returns: Its header.
+routine new_entity() -> @RoamHeader
+    manager: @MemoryManager = C_HEAP
+
+    node: @Node = allocate[Node](count: 1, manager).to[@Node]().to[@Node]()
+    header: @RoamHeader = allocate[RoamHeader](count: 1,
+        manager).to[@RoamHeader]().to[@RoamHeader]()
+    node.child.zeroinit(1)
+    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+        holder_task: 0, depth: 0, state: 0, buffered_at: 0, trace_hook: trace_node.addr(),
+        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0,
+        kept: Addr.zero()))
+    return header
+
+### Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
+### :param owner: The entity whose field is set.
+### :param target: The entity it points at.
+routine link(owner: @RoamHeader, target: @RoamHeader) -> None
+    node: @Node = owner.data.peek().to[@Node]()
+    roam_hold(target)
+    node.child.poke(target)
+    return
+
+### A worker: ROUNDS times, makes a cycle of two and lets go of it, then shares and releases its private entity.
+### :param unused: Nothing.
+routine worker(unused: @U64) -> None
+    mine: @RoamHeader = new_entity()
+
+    for i in 0 til ROUNDS
+        a: @RoamHeader = new_entity()
+        b: @RoamHeader = new_entity()
+        link(owner: a, target: b)
+        link(owner: b, target: a)
+        roam_unhold(b)
+        roam_unhold(a)
+        roam_hold(mine)
+        roam_unhold(mine)
+    then
+        roam_unhold(mine)
+        before: U64 = DONE.fetch_add_unbroken(1)
+        return
+
+### Starts the workers on threads of their own, as the Revare runtime's worker threads that reach the collector
+### through its C calls, and runs passes until they have all finished. The workers lock the roots buffer with the
+### collector's own lock, which a ticket's work could not show the build, so they are not a ticket's work.
+routine run_workers() -> None
+    unused: &U64 <- 0
+    for i in 0 til WORKERS
+        DEFAULT_THREADS.launch_unwatched(entry: worker.to[Callable](), arg: unused)
+    until DONE.peek_unbroken() == WORKERS
+        freed: U64 = collect()
+    then
+        return
+
+### Runs passes until one frees nothing.
+routine collect_the_rest() -> None
+    until collect() == 0
+        nothing
+    then
+        return
+
+routine start() -> None
+    run_workers()
+    collect_the_rest()
+    freed: U64 = FREED.peek_unbroken()
+    expected: U64 = WORKERS.mul(ROUNDS) * 2
+    all: Bool = freed == expected
+    left: U64 = ROOTS.count.peek()
+    Console.show("every cycle freed once: {all}, candidates left {left}")
+    return

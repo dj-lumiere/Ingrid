@@ -18,7 +18,7 @@ projects, their copyright notices and license terms are retained here as require
 
 ## TLFloat — IEEE 754 binary128 / binary256 / binary512 software floating point
 
-Used by the Revare software `B128` (`Standard/Revare/Core/Numerics/B128.rr`): its
+Used by the Revare software `B128` (`Standard/Revare/Core/Numerics/B128.rvr`): its
 arithmetic cores (add, subtract, multiply, divide, square root and rounding to integers) are a
 port and extension of TLFloat.
 
@@ -56,8 +56,8 @@ DEALINGS IN THE SOFTWARE.
 
 ## LibBF — tiny arbitrary-precision floating-point library
 
-Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (the engine in `bigint.li`, built on the
-limb layer in `limbs.li`, `multiply.li`, `ntt.li`, `divide.li` and `sqrt.li`). The limb primitives, the NTT
+Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (the engine in `bigint.lpa`, built on the
+limb layer in `limbs.lpa`, `multiply.lpa`, `ntt.lpa`, `divide.lpa` and `sqrt.lpa`). The limb primitives, the NTT
 multiplication over five ~2^62 primes, and Newton-reciprocal division and square root are ports of LibBF (64-bit
 limb configuration), written by hand in Lapila.
 
@@ -91,7 +91,7 @@ THE SOFTWARE.
 
 ## LibTomMath — multiple-precision integer library
 
-Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (`bigint.li`). The engine replaced the
+Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (`bigint.lpa`). The engine replaced the
 LibTomMath-backed runtime and follows its integer semantics and algorithms: sign-magnitude values,
 Euclidean division, binary GCD, two's-complement bitwise operations on negative values, and the radix
 text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36).

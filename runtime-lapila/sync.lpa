@@ -1,0 +1,183 @@
+# What the rest of Ingrid's runtime code shares: the C library and runtime routines it calls, the clock, the
+# identity of the calling thread, and the crash handler of the Lapila code in this library. Threads wait on
+# Hosted's exclusive access and SignalCaster.
+#
+# The runtime library is shared (revare_runtime.dll / .so / .dylib), and this code is compiled into it, so a
+# routine Revare calls is exported under its C name (#export), and calls into the rest of the library (the crash
+# report) go through the C library.
+
+module Ingrid/Runtime
+
+import Hosted
+
+# -- the C library -------------------------------------------------------------------
+
+### C's `calloc`: allocates `count` zeroed objects of `size` bytes each.
+### :param count: The number of objects.
+### :param size: The size of one object in bytes.
+### :returns: The zeroed block, or null when the allocation fails.
+@external("c")
+@symbol("calloc")
+routine c_calloc(count: CSize, size: CSize) -> Addr
+
+### C's `realloc`: resizes the block at `ptr` to `size` bytes, keeping its contents up to the smaller size.
+### :param ptr: The block to resize, or null to allocate a new one.
+### :param size: The new size in bytes.
+### :returns: The resized block (possibly moved), or null when the allocation fails.
+@external("c")
+@symbol("realloc")
+routine c_realloc(ptr: Addr, size: CSize) -> Addr
+
+### C's `malloc`: allocates `size` uninitialized bytes.
+### :param size: The size in bytes.
+### :returns: The block, or null when the allocation fails.
+@external("c")
+@symbol("malloc")
+routine c_malloc(size: CSize) -> Addr
+
+### C's `free`: gives back a block from the C heap.
+### :param ptr: The block to free, or null to do nothing.
+@external("c")
+@symbol("free")
+routine c_free(ptr: Addr) -> None
+
+### C's `getenv`: the value of an environment variable.
+### :param name: The variable's name.
+### :returns: The NUL-terminated value, or null when the variable is unset.
+@external("c")
+@symbol("getenv")
+routine c_getenv(name: CStrView) -> @Byte?
+
+# -- the rest of the runtime library -------------------------------------------------
+
+### Frees a block from rf_allocate_dynamic (Ingrid/lapila/memory.lpa, in the program): a result box. A C heap block,
+### so free reclaims it here too.
+### :param ptr: The block to free.
+@expensive("frees heap memory")
+routine rf_invalidate(ptr: Addr) -> None
+    c_free(ptr)
+    return
+
+### Allocates `count` zeroed `T`s from the C heap.
+### :typeparam T: The element type.
+### :param count: The number of elements.
+### :param what: The message of the error raised when the allocation fails.
+### :returns: The first of the zeroed elements.
+### :throws: Crashes with `OutOfMemoryError` (message `what`) when `calloc` fails.
+routine zeroed[T](count: U64, what: CStrView) -> @T
+    p: Addr = c_calloc(count.to[CSize](), sizeof[T]().to[CSize]())
+    if p.is_hollow()
+        rf_throw(error_type: "OutOfMemoryError", message: what)
+    else
+        return p.to[@T]()
+
+# -- the clock and the calling thread ------------------------------------------------
+
+### The monotonic nanosecond clock the scheduler's timers use, for the timed-await bridge.
+### :returns: The current monotonic time in nanoseconds.
+@export("rf_monotonic_now_ns")
+routine rf_monotonic_now_ns() -> U64
+    return ns_of(Clock.monotonic())
+
+### Clock.monotonic() for Revare and Mielia's Clock.monotonic().
+### :returns: The reading.
+@export("rf_clock_monotonic")
+routine rf_clock_monotonic() -> Duration
+    return Clock.monotonic()
+
+### CpuClock.now() for Revare and Mielia's CpuClock.now().
+### :returns: The processor time the process has used.
+@export("rf_cpu_clock_now")
+routine rf_cpu_clock_now() -> Duration
+    return CpuClock.now()
+
+### A count of nanoseconds, as the C side passes a wait or a deadline, as a Duration.
+### :param ns: The nanoseconds.
+### :returns: The duration, at most the largest S64 count of nanoseconds (about 292 years).
+routine of_ns(ns: U64) -> Duration
+    return Duration.from_nanoseconds(ns.to_clamp[S64]())
+
+### A Duration as a count of nanoseconds, as the scheduler's timers keep them: 0 for a negative one.
+### :param d: The duration.
+### :returns: The nanoseconds.
+routine ns_of(d: Duration) -> U64
+    return d.max(0s).nanoseconds_clamp().to[U64]()
+
+### Win32's `GetCurrentThreadId`: the calling thread's identifier.
+### :returns: The thread identifier.
+@external("c")
+@symbol("GetCurrentThreadId")
+@callconv("stdcall")
+@target(os: "windows")
+routine c_get_current_thread_id() -> U32
+
+### POSIX `pthread_self`: the calling thread's handle.
+### :returns: The thread handle.
+@external("c")
+@symbol("pthread_self")
+@target(os: not "windows")
+routine c_pthread_self() -> Addr
+
+### A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
+### detecting a re-entrant claim).
+### :returns: The Win32 thread identifier, widened to U64.
+@export("rf_current_thread_id")
+@target(os: "windows")
+routine rf_current_thread_id() -> U64
+    return c_get_current_thread_id().to[U64]()
+
+### A stable identifier of the calling OS thread: only equality across calls on one thread matters (a lock policy
+### detecting a re-entrant claim).
+### :returns: The `pthread_self` handle as a U64.
+@export("rf_current_thread_id")
+@target(os: not "windows")
+routine rf_current_thread_id() -> U64
+    return ptrtoint[Addr, U64](c_pthread_self())
+
+### The environment variable name as a positive integer, or 0 when it is unset, empty, not a number, or not
+### positive. Only the leading decimal digits count, and a value too large saturates at U64's maximum.
+### :param name: The variable's name.
+### :returns: The parsed value, or 0.
+routine env_positive(name: CStrView) -> U64
+    text_or_none: @Byte? = c_getenv(name)
+    value: &U64 <- 0
+
+    if text_or_none.is_absent()
+        return 0
+    text: @Byte = text_or_none.unwrap()
+    loop with i: U64 = 0
+        digit_byte2: Byte = text.stride(i).peek()
+        c2: U8 = digit_byte2.to[U8]()
+        if c2 >= 48 and c2 <= 57
+            next: U64 = value.load() *^ 10 +^ (c2 - 48).to[U64]()
+            next.poke_into(value)
+            continue with i: i + 1
+        return value.load()
+
+# -- the crash handler of this library's Lapila code --------------------------------
+
+### A crash in this library's Lapila code (a broken stdlib contract) is a Revare runtime error, with the same
+### crash report and exit status as any other: the crash's name is the error type. The name is cut to 127 bytes and
+### the message to 1023. rf_runtime_init puts it in the Crash service's slot.
+### :param name: The kind of failure, which becomes the error type.
+### :param message: What happened.
+### :param place: Where the crash was raised, or null for no place.
+@untraced
+routine runtime_crash_handler(name: @[Byte], message: @CrashMessage, place: @SourceLocation) -> None
+    kind: &Items[Byte, 128]
+    kind_ptr: @Byte = kind.getview().to[@Byte]()
+    buffer: &Items[Byte, 1024]
+    lateinit out: &SliceWriter
+    kind_out: &SliceWriter <- SliceWriter.construct(data: kind.getview().to[@Byte](), capacity: 127)
+
+    write_str(out: kind_out, text: name)
+    kind_text: @[Byte] = kind_out.getview()
+    kind_ptr.stride(kind_text.count).poke(0x00)
+    out.store(SliceWriter.construct(data: buffer.getview().to[@Byte](), capacity: 1023))
+    write_str(out, text: message.text())
+
+    # The name and the text both end in a NUL for report_crash.
+    text: @[Byte] = out.getview()
+    text_ptr: @Byte = buffer.getview().to[@Byte]()
+    text_ptr.stride(text.count).poke(0x00)
+    report_crash(error_type: kind_ptr.to[CStrView](), message: text_ptr.to[CStrView](), place)

@@ -27,7 +27,7 @@ arithmetic and the text of the binary floats and decimals (writing and reading),
 numbers, quaternions, and the 2x2, 3x3, and 4x4 matrices (their inverses and A x = b by Gaussian elimination with partial pivoting), and the decimal floats D32, D64, and D128 (`lapila/decimal/`: their
 arithmetic, rounding, conversions, DPD encoding, and correctly rounded transcendentals, one engine for the three
 widths), and the arbitrary-precision Int (`lapila/integer/`, with the scratch arena the engine takes its
-temporaries from in `lapila/integer/scratch.li`, and its exports in `lapila/integer_exports/`). More
+temporaries from in `lapila/integer/scratch.lpa`, and its exports in `lapila/integer_exports/`). More
 math, hashing, cryptography, and algorithms move here next, written once so that both languages build on one
 implementation.
 
@@ -80,7 +80,7 @@ transcendentals against mpmath, Int through its C calls (and the scratch and res
 against what Revare's engines computed, the word division on its edge cases, the text patterns through their C calls (compiling a pattern, searching, the
 capture slots and the messages of patterns that don't compile), the Roamed counts and lock, the cycle
 collector, the heap calls, and the crash report, and from
-`runtime-lapila/` the SignalCaster (`monitor.li`), the channels' last-handle drop, the per-thread file results, the
+`runtime-lapila/` the SignalCaster (`monitor.lpa`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
 The routines a test reaches in the Revare runtime library (`rf_crash_exit`, the trace, the current task, the
@@ -89,7 +89,7 @@ checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 
 ```bash
 dotnet ../Lapila/bin/Debug/net10.0/lapila.dll test tests
-dotnet ../Lapila/bin/Debug/net10.0/lapila.dll check runtime-lapila/*.li   # also lapila/*.li lapila/decimal/*.li lapila/integer/*.li lapila/integer_exports/*.li, --target <triple>
+dotnet ../Lapila/bin/Debug/net10.0/lapila.dll check runtime-lapila/*.lpa   # also lapila/*.lpa lapila/decimal/*.lpa lapila/integer/*.lpa lapila/integer_exports/*.lpa, --target <triple>
 dotnet ../Lapila/bin/Debug/net10.0/lapila.dll fmt --check runtime-lapila lapila tests
 dotnet ../Lapila/bin/Debug/net10.0/lapila.dll lint runtime-lapila lapila tests
 ```

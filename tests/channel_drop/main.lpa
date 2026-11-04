@@ -1,0 +1,147 @@
+# Revare's channels (channel.lpa) without the rest of the runtime library: the last producer handle and the
+# last consumer handle are dropped at the same moment on two threads, many times over, and the channel (its buffer
+# and itself) is freed exactly once each time. Deciding to free after giving the lock back let both threads see
+# both counts at 0 and free it twice.
+#
+# The test's c_free counts instead of freeing, so a second free shows up in the count instead of corrupting the heap.
+
+module Ingrid/Runtime
+
+import Hosted
+
+### The blocks c_free was handed.
+global FREES: &U64
+
+### Rounds of the race.
+preset ROUNDS: U32 = 100000
+
+### The scheduler a coroutine runs on: not used, every wait here is on a plain thread.
+record Sched
+    id: U32
+
+### A coroutine: not used.
+record Coro
+    id: U32
+
+### What the main thread and the two droppers share: the channel of the current round, the round the droppers may
+### start, and how many drops are done.
+record Race
+    chan: @Channel?
+    round: U32
+    done: U32
+
+### One dropper: its side of the channel and the race.
+record Dropper
+    race: @Race
+    producer: Bool
+
+# -- what channel.lpa calls in the rest of the runtime library ----------------------
+
+### The tasks still running (task.lpa): none, every wait here is on a plain thread.
+global LIVE_TASKS: &U64
+
+# The thread's start_here() jobs (sched.lpa): none here, so a wait never runs one and sleeps its full slice.
+preset HERE_POLL: Duration = 1ms
+
+@external("c")
+@symbol("calloc")
+routine c_calloc(count: CSize, size: CSize) -> Addr
+
+### Counts the block instead of freeing it.
+routine c_free(ptr: Addr) -> None
+    if ptr.is_hollow()
+        return
+    discard_previous: U64 = FREES.fetch_add_unbroken(1)
+    return
+
+### count zeroed Ts.
+routine zeroed[T](count: U64, what: CStrView) -> @T
+    p: Addr = c_calloc(count.to[CSize](), sizeof[T]().to[CSize]())
+    return p.to[@T]()
+
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
+
+@noreturn
+routine rf_throw(error_type: CStrView, message: CStrView) -> None
+    Console.show("rf_throw")
+    exit(1)
+
+routine rf_sched_current() -> @Sched?
+    return None()
+
+routine current_coro() -> @Coro?
+    return None()
+
+routine rf_sched_wake(s: @Sched, c: @Coro) -> None
+    return
+
+routine rf_sched_park_external() -> None
+    return
+
+routine rf_cancel_requested() -> U32
+    return 0
+
+routine run_here_ready() -> Bool
+    return false
+
+routine here_has_live() -> Bool
+    return false
+
+routine rf_coro_cancel_at_wait() -> U32
+    return rf_cancel_requested()
+
+# -- the race ------------------------------------------------------------------------
+
+### Drops one side of each round's channel as soon as the round starts. It gets its Dropper as an Addr, which the
+### build doesn't follow: the channel guards what it changes.
+### :param at: The Dropper.
+routine drop_each_round(at: Addr) -> None
+    dropper: @Dropper = at.to[@Dropper]()
+    race: @Race = dropper.race.peek()
+
+    until round > ROUNDS with round: U32 = 1
+        if not (race.round.peek_unbroken() >= round)
+            continue with round: round
+        else
+            chan: @Channel = race.chan.peek_unbroken().unwrap()
+            if dropper.producer.peek()
+                rf_channel_drop_feeder(chan)
+            else
+                rf_channel_drop_consumer(chan)
+            discard_previous: U32 = race.done.fetch_add_unbroken(1)
+            continue with round: round + 1
+    then
+        return
+
+routine start() -> None
+    race: &Race <- Race(chan: None(), round: 0, done: 0)
+    producer: &Dropper <- Dropper(race: race, producer: true)
+    consumer: &Dropper <- Dropper(race: race, producer: false)
+    a: Thread[None] <- get_thread[None]()
+    b: Thread[None] <- get_thread[None]()
+
+    work_a: Work[None] = drop_each_round.to[Work](at: producer.to[Addr]())
+    a.put_work(work_a)
+    work_b: Work[None] = drop_each_round.to[Work](at: consumer.to[Addr]())
+    b.put_work(work_b)
+
+    for n in 1 to ROUNDS
+        chan: @Channel = rf_channel_create(1).unwrap()
+        race.chan.poke_unbroken(chan)
+        race.round.poke_unbroken(n)
+
+        until race.done.peek_unbroken() == n * 2
+            nothing
+        then
+            continue
+    a.retrieve()
+    drop a
+    b.retrieve()
+    drop b
+    expected: U64 = ROUNDS.to[U64]() * 2
+    frees: U64 = FREES.peek_unbroken()
+    Console.show("rounds: {ROUNDS}, frees as expected: {frees.eq(expected)}")
+    return

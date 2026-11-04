@@ -1,0 +1,374 @@
+# The 64-bit limb layer of the arbitrary-precision Int engine: add, subtract, shifts, compare, the word multiplies
+# and the word divisions, over little-endian U64 limbs. The routines follow LibBF's mp_* functions (see
+# THIRD-PARTY-NOTICES.md). Like the engine above them they allocate nothing: every temporary comes from the call's
+# scratch arena (scratch.lpa).
+#
+# A number is a pointer to its first limb and a count. Most routines take the buffers as `@U64` and write through
+# them, so a result buffer may be one of the operands where the routine says so.
+
+module Ingrid/Integer
+
+### One unused limb that a zero value points at. A zero has no limbs, so nothing reads or writes through it.
+secret global NO_LIMBS: &Items[U64, 1]
+
+### Limb `i` of a buffer.
+### :param tab: The first limb.
+### :param i: The index.
+### :returns: The limb.
+@inline
+secret routine limb(tab: @U64, i: U64) -> U64
+    return tab.stride(i).peek()
+
+### Sets limb `i` of a buffer.
+### :param tab: The first limb.
+### :param i: The index.
+### :param value: The new limb.
+@inline
+secret routine set_limb(tab: @U64, i: U64, value: U64) -> None
+    value.poke_into(tab.stride(i))
+    return
+
+### The address of limb `i`.
+### :param tab: The first limb.
+### :param i: The index.
+### :returns: The address of limb `i`.
+@inline
+secret routine limbs_at(tab: @U64, i: U64) -> @U64
+    return tab.stride(i)
+
+### 1 for true, 0 for false.
+### :param flag: The flag.
+### :returns: 1 for true, 0 for false.
+@inline
+secret routine bit_of(flag: Bool) -> U64
+    return if flag then 1 else 0
+
+### The place a zero value points at.
+### :returns: The address of an unused limb.
+secret routine no_limbs() -> @U64
+    return NO_LIMBS.getview().to[@U64]()
+
+### The `n` limbs at `tab` as a span.
+### :param tab: The first limb.
+### :param n: How many limbs.
+### :returns: The span.
+@inline
+secret routine limbs_span(tab: @U64, n: U64) -> @[U64]
+    return @[U64].construct(data: tab, count: n)
+
+### Takes `n` zeroed limbs from the call's scratch arena. An admission covering them comes first.
+### :param n: How many limbs.
+### :param scratch: The call's arena.
+### :returns: The first of them.
+@inline
+secret routine alloc_limbs(n: U64, scratch: @Arena) -> @U64
+    return scratch.take(limbs: n)
+
+### Sets `n` limbs to zero.
+### :param tab: The first limb.
+### :param n: How many limbs.
+secret routine zero_limbs(tab: @U64, n: U64) -> None
+    for i in 0 til n
+        set_limb(tab, i, value: 0)
+    return
+
+### Copies `n` limbs from `src` to `dst`, front to back (so `dst` may sit below `src` in one buffer).
+### :param dst: The first limb written.
+### :param src: The first limb read.
+### :param n: How many limbs.
+secret routine limbs_copy(dst: @U64, src: @U64, n: U64) -> None
+    for i in 0 til n
+        set_limb(tab: dst, i, value: limb(tab: src, i))
+    return
+
+# ── add and subtract ──────────────────────────────────────────────────────────────────────────────
+
+### res[0..n) = op1 + op2 (LibBF mp_add).
+### :param res: The sum, which may be `op1` or `op2`.
+### :param op1: The first addend.
+### :param op2: The second addend.
+### :param n: How many limbs each has.
+### :returns: The carry out, 0 or 1.
+secret routine limbs_add(res: @U64, op1: @U64, op2: @U64, n: U64) -> U64
+    for i in 0 til n with k: U64 = 0
+        x: U64 = limb(tab: op1, i)
+        sum: U64 = x +% limb(tab: op2, i)
+        total: U64 = sum +% k
+        set_limb(tab: res, i, value: total)
+        # a carry comes from x + y or, when that wrapped to the top, from adding k: never both
+        continue with k: bit_of(flag: sum < x or total < sum)
+    then
+        return k
+
+### tab[0..n) += b, carrying on up the limbs and stopping once the carry dies (LibBF mp_add_ui).
+### :param tab: The number, changed in place.
+### :param b: The word added.
+### :param n: How many limbs the number has.
+### :returns: The carry out of the top limb.
+secret routine limbs_add_word(tab: @U64, b: U64, n: U64) -> U64
+    for i in 0 til n with k: U64 = b
+        if k == 0
+            return 0
+        v: U64 = limb(tab, i)
+        sum: U64 = v +% k
+        set_limb(tab, i, value: sum)
+        continue with k: bit_of(flag: sum < v)
+    then
+        return k
+
+### res[0..n) = op1 - op2 (LibBF mp_sub).
+### :param res: The difference, which may be `op1` or `op2`.
+### :param op1: The minuend.
+### :param op2: The subtrahend.
+### :param n: How many limbs each has.
+### :returns: The borrow out, 0 or 1.
+secret routine limbs_sub(res: @U64, op1: @U64, op2: @U64, n: U64) -> U64
+    for i in 0 til n with borrow: U64 = 0
+        a: U64 = limb(tab: op1, i)
+        b: U64 = limb(tab: op2, i)
+        d: U64 = a -% b
+        set_limb(tab: res, i, value: d -% borrow)
+        # a borrow comes from a < b or, when a == b, from the incoming borrow: never both
+        continue with borrow: bit_of(flag: a < b or d < borrow)
+    then
+        return borrow
+
+### tab[0..n) -= b, borrowing on up the limbs and stopping once the borrow dies (LibBF mp_sub_ui).
+### :param tab: The number, changed in place.
+### :param b: The word subtracted.
+### :param n: How many limbs the number has.
+### :returns: The borrow out of the top limb.
+secret routine limbs_sub_word(tab: @U64, b: U64, n: U64) -> U64
+    for i in 0 til n with k: U64 = b
+        v: U64 = limb(tab, i)
+        diff: U64 = v -% k
+        set_limb(tab, i, value: diff)
+        if diff <= v
+            return 0
+        continue with k: 1
+    then
+        return k
+
+### res = 0 - op2 over n limbs (LibBF mp_neg).
+### :param res: The result, which may be `op2`.
+### :param op2: The number negated.
+### :param n: How many limbs.
+### :returns: The final borrow.
+secret routine limbs_neg(res: @U64, op2: @U64, n: U64) -> U64
+    for i in 0 til n with k: U64 = 0
+        a: U64 = 0 -% limb(tab: op2, i)
+        k1: U64 = bit_of(flag: a > 0)
+        vv: U64 = a -% k
+        set_limb(tab: res, i, value: vv)
+        continue with k: k1 | bit_of(flag: vv > a)
+    then
+        return k
+
+### Whether any of tab[0..n) is nonzero (LibBF mp_scan_nz).
+### :param tab: The limbs.
+### :param n: How many.
+### :returns: 1 when a limb is nonzero, else 0.
+secret routine limbs_any_nonzero(tab: @U64, n: U64) -> U64
+    for i in 0 til n
+        if limb(tab, i) != 0
+            return 1
+    return 0
+
+### Compares two n-limb magnitudes (LibBF mp_cmp).
+### :param a: The first number.
+### :param b: The second number.
+### :param n: How many limbs each has.
+### :returns: -1, 0 or 1 as a is below, equal to or above b.
+secret routine limbs_cmp(a: @U64, b: @U64, n: U64) -> S64
+    until left == 0 with left: U64 = n
+        i: U64 = left - 1
+        av: U64 = limb(tab: a, i)
+        bv: U64 = limb(tab: b, i)
+        if av != bv
+            return if av < bv then -1 else 1
+        continue with left: i
+    then
+        return 0
+
+# ── shifts ────────────────────────────────────────────────────────────────────────────────────────
+
+### tab_r[0..n) = tab >> shift, going from the top limb down (LibBF mp_shr).
+### :param tab_r: The result, which may be `tab`.
+### :param tab: The number.
+### :param n: How many limbs it has.
+### :param shift: The shift, from 1 to 63.
+### :returns: The shifted-out bits, below 2^shift.
+secret routine limbs_shr(tab_r: @U64, tab: @U64, n: U64, shift: U64) -> U64
+    until left == 0 with left: U64 = n, carry: U64 = 0
+        i: U64 = left - 1
+        a: U64 = limb(tab, i)
+        set_limb(tab: tab_r, i, value: (a >> shift) | (carry << (64 -% shift)))
+        continue with left: i, carry: a
+    then
+        return carry & ((1 << shift) -% 1)
+
+### dst[0..n) = src << shift bits.
+### :param dst: The result, which may be `src`.
+### :param src: The number.
+### :param n: How many limbs it has.
+### :param shift: The shift, from 0 to 63.
+### :returns: The bits shifted out of the top limb.
+secret routine limbs_shl(dst: @U64, src: @U64, n: U64, shift: U64) -> U64
+    if shift == 0
+        limbs_copy(dst, src, n)
+        return 0
+    for i in 0 til n with carry: U64 = 0
+        v: U64 = limb(tab: src, i)
+        set_limb(tab: dst, i, value: (v << shift) | carry)
+        continue with carry: v >> (64 -% shift)
+    then
+        return carry
+
+### The trailing zero bits of an n-limb number.
+### :param tab: The limbs.
+### :param n: How many.
+### :returns: The trailing zero bits, 64 × n for a zero.
+secret routine limbs_ctz(tab: @U64, n: U64) -> U64
+    for i in 0 til n
+        v: U64 = limb(tab, i)
+        if v != 0
+            return i *% 64 +% v.trailing_zeros()
+    return n *% 64
+
+### tab[0..n) >>= bits, in place.
+### :param tab: The number.
+### :param n: How many limbs it has.
+### :param bits: The shift.
+### :returns: The length without the zero limbs at the top.
+secret routine limbs_shr_in_place(tab: @U64, n: U64, bits: U64) -> U64
+    limb_shift: U64 = bits // 64
+    if limb_shift >= n
+        return 0
+    m: U64 = n -% limb_shift
+    if limb_shift > 0
+        for i in 0 til m
+            set_limb(tab, i, value: limb(tab, i +% limb_shift))
+    bit_shift: U64 = bits % 64
+    if bit_shift != 0
+        limbs_shr(tab_r: tab, tab, n: m, shift: bit_shift)
+    return limbs_trim(tab, n: m)
+
+### The length of a number without the zero limbs at its top.
+### :param tab: The limbs.
+### :param n: How many there are.
+### :returns: The length with a nonzero top limb, 0 for a zero.
+secret routine limbs_trim(tab: @U64, n: U64) -> U64
+    until m == 0 or limb(tab, i: m - 1) != 0 with m: U64 = n
+        continue with m: m - 1
+    then
+        return m
+
+### a[0..na) -= b[0..nb) in place, for a >= b.
+### :param a: The minuend, changed in place.
+### :param na: Its limbs.
+### :param b: The subtrahend.
+### :param nb: Its limbs, at most `na`.
+### :returns: The length of the difference without the zero limbs at its top.
+secret routine limbs_sub_in_place(a: @U64, na: U64, b: @U64, nb: U64) -> U64
+    first: U64 = limbs_sub(res: a, op1: a, op2: b, n: nb)
+    until borrow == 0 or i >= na with i: U64 = nb, borrow: U64 = first
+        v: U64 = limb(tab: a, i)
+        set_limb(tab: a, i, value: v -% borrow)
+        continue with i: i +% 1, borrow: bit_of(flag: v < borrow)
+    then
+        return limbs_trim(tab: a, n: na)
+
+# ── multiplying by a word ─────────────────────────────────────────────────────────────────────────
+
+### tabr[0..n) = taba × b (LibBF mp_mul1).
+### :param tabr: The product, which may be `taba`.
+### :param taba: The number.
+### :param n: How many limbs it has.
+### :param b: The factor.
+### :returns: The limb carried out of the top.
+secret routine limbs_mul_word(tabr: @U64, taba: @U64, n: U64, b: U64) -> U64
+    for i in 0 til n with carry: U128 = 0
+        t: U128 = limb(tab: taba, i).mul_wide(b) +% carry
+        set_limb(tab: tabr, i, value: t.to_wrap[U64]())
+        continue with carry: t >> 64
+    then
+        return carry.to_wrap[U64]()
+
+### tab[0..n) = tab × b + l in place (LibBF mp_mul1 with a carry in).
+### :param tab: The number, changed in place.
+### :param n: How many limbs it has.
+### :param b: The factor.
+### :param l: The word added.
+### :returns: The limb carried out of the top.
+secret routine limbs_mul_add_word(tab: @U64, n: U64, b: U64, l: U64) -> U64
+    for i in 0 til n with carry: U128 = l.to[U128]()
+        t: U128 = limb(tab, i).mul_wide(b) +% carry
+        set_limb(tab, i, value: t.to_wrap[U64]())
+        continue with carry: t >> 64
+    then
+        return carry.to_wrap[U64]()
+
+### tabr[0..n) += taba × b (LibBF mp_add_mul1).
+### :param tabr: The number added to, changed in place.
+### :param taba: The number multiplied.
+### :param n: How many limbs each has.
+### :param b: The factor.
+### :returns: The limb carried out of the top.
+secret routine limbs_addmul_word(tabr: @U64, taba: @U64, n: U64, b: U64) -> U64
+    for i in 0 til n with carry: U128 = 0
+        t: U128 = limb(tab: taba, i).mul_wide(b) +% carry +% limb(tab: tabr, i).to[U128]()
+        set_limb(tab: tabr, i, value: t.to_wrap[U64]())
+        continue with carry: t >> 64
+    then
+        return carry.to_wrap[U64]()
+
+### tabr[0..n) -= taba × b (LibBF mp_sub_mul1).
+### :param tabr: The number subtracted from, changed in place.
+### :param taba: The number multiplied.
+### :param n: How many limbs each has.
+### :param b: The factor.
+### :returns: The limb to subtract from the limb above the top.
+secret routine limbs_submul_word(tabr: @U64, taba: @U64, n: U64, b: U64) -> U64
+    for i in 0 til n with l: U64 = 0
+        t: U128 = limb(tab: tabr, i).to[U128]() -% limb(tab: taba, i).mul_wide(b) -% l.to[U128]()
+        set_limb(tab: tabr, i, value: t.to_wrap[U64]())
+        continue with l: 0 -% (t >> 64).to_wrap[U64]()
+    then
+        return l
+
+# ── dividing by a word ────────────────────────────────────────────────────────────────────────────
+
+### tabr[0..n) = taba / b with the remainder returned, for a normalized b (its top bit set), from the top limb down
+### (LibBF mp_div1norm). The word division is the standard library's: the hardware divide on x86-64, a reciprocal
+### elsewhere.
+### :param tabr: The quotient, which may be `taba`.
+### :param taba: The dividend.
+### :param n: How many limbs it has.
+### :param b: The divisor, with its top bit set.
+### :returns: The remainder.
+secret routine limbs_divmod_word(tabr: @U64, taba: @U64, n: U64, b: U64) -> U64
+    b_inv: U64 = div_2by1_prepare(b)
+    until left == 0 with left: U64 = n, r: U64 = 0
+        i: U64 = left - 1
+        qr: Div2By1 = div_2by1(u1: r, u0: limb(tab: taba, i), d: b, v: b_inv)
+        set_limb(tab: tabr, i, value: qr.quotient)
+        continue with left: i, r: qr.remainder
+    then
+        return r
+
+### tabr[0..n) = taba / b for any nonzero word b, with the remainder returned.
+### :param tabr: The quotient, which may be `taba`.
+### :param taba: The dividend.
+### :param n: How many limbs it has.
+### :param b: The divisor, nonzero.
+### :returns: The remainder.
+secret routine limbs_divmod_word_any(tabr: @U64, taba: @U64, n: U64, b: U64) -> U64
+    bb: U128 = b.to[U128]()
+    until left == 0 with left: U64 = n, r: U64 = 0
+        i: U64 = left - 1
+        cur: U128 = (r.to[U128]() << 64) | limb(tab: taba, i).to[U128]()
+        q: U128 = cur // bb
+        set_limb(tab: tabr, i, value: q.to_wrap[U64]())
+        continue with left: i, r: (cur -% q *% bb).to_wrap[U64]()
+    then
+        return r

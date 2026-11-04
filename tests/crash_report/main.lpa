@@ -1,0 +1,79 @@
+# The crash handler of every Revare and Mielia program (crash.lpa), called the way System's crash calls
+# it, with a place: the report is the crash's name and message, the place, and the trace, most recent frame first,
+# between the color codes. Standard output is flushed first, and the handler exits through rf_crash_exit.
+#
+# The handler reads the Revare runtime library's routines, which this program defines itself: the flush (it
+# says so on standard output, to show it comes before the report), the crash exit (status 82, as the runtime's),
+# and a trace of two frames. The report goes to standard error, and the test runner compares standard output, so
+# the program first points standard error at standard output.
+
+import Hosted
+
+global FRAMES: &Items[Frame, 32]
+
+### A trace frame as the runtime keeps it.
+record Frame
+    routine_name: Addr
+    file: Addr
+    line: S32
+    column: S32
+
+@external("c")
+@symbol("dup2")
+@target(os: ("linux", "macos"))
+routine c_dup2(from: CInt, to: CInt) -> CInt
+
+@external("c")
+@symbol("GetStdHandle")
+@callconv("stdcall")
+@target(os: "windows")
+routine win_get_std_handle(which: U32) -> Addr
+
+@external("c")
+@symbol("SetStdHandle")
+@callconv("stdcall")
+@target(os: "windows")
+routine win_set_std_handle(which: U32, handle: Addr) -> CInt
+
+@export("rf_flush_output")
+routine stub_flush_output() -> None
+    Console.show("[standard output flushed]")
+    return
+
+@export("rf_crash_exit")
+@noreturn
+routine stub_crash_exit() -> None
+    ProcessManager.exit_process(82)
+
+@export("_rf_trace_get_depth_shared")
+routine stub_trace_depth() -> S32
+    return 2
+
+@export("_rf_trace_get_frames_shared")
+routine stub_trace_frames() -> @Frame
+    return FRAMES.getview().to[@Frame]()
+
+### Points standard error at standard output.
+@target(os: ("linux", "macos"))
+routine merge_error_into_output() -> None
+    c_dup2(1, 2)
+    return
+
+@target(os: "windows")
+routine merge_error_into_output() -> None
+    # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+    output: Addr = win_get_std_handle(0xFFFFFFF5)
+    win_set_std_handle(0xFFFFFFF4, output)
+    return
+
+routine start() -> None
+    merge_error_into_output()
+    FRAMES.setitem(index: 0,
+        value: Frame(routine_name: "start", file: "probe.rvr", line: 3, column: 5))
+    FRAMES.setitem(index: 1,
+        value: Frame(routine_name: "compute", file: "probe.rvr", line: 12, column: 9))
+    Console.show("before the crash")
+    place: &SourceLocation <- SourceLocation(file: "probe.rvr", line: 12, column: 17)
+    message: &CrashMessage <- CrashMessage.of_text("Arithmetic overflowed.")
+    crash_handler(name: "IntegerOverflowError", message, place)
+    return
