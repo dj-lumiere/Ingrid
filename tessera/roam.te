@@ -173,7 +173,7 @@ secret routine destroy_entity(header: @RoamHeader) -> None
     nest: U64 = DESTROY_NEST.load()
     if nest >= DESTROY_NEST_LIMIT
         # A buffered candidate leaves the buffer first, so the collector never reaches a header that waits.
-        if header.buffered_at.peek() != 0
+        if header.buffered_at.peek_unbroken() != 0
             remove_candidate(header)
         # No strong handle is left, so the entity counts as gone for the weak observers from here.
         header.dead.poke_unbroken(1)
@@ -200,7 +200,7 @@ secret routine destroy_entity(header: @RoamHeader) -> None
 secret routine destroy_now(header: @RoamHeader) -> None
     escaped: Bool = header.escaped.peek_unbroken() == 1
     # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
-    if header.buffered_at.peek() != 0
+    if header.buffered_at.peek_unbroken() != 0
         remove_candidate(header)
     run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
     header.dead.poke_unbroken(1)
@@ -258,7 +258,7 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
         else => header.weak.peek()
     if count == 1 and weak == 0
         data: Addr = header.data.peek()
-        if header.buffered_at.peek() != 0
+        if header.buffered_at.peek_unbroken() != 0
             remove_candidate(header)
         free_header_memory(header)
         world_leave()
@@ -273,7 +273,7 @@ routine roam_release_inner(header: @RoamHeader) -> Addr
 secret routine mark_candidate(header: @RoamHeader) -> None
     if header.trace_hook.peek().is_hollow()
         return
-    if header.buffered_at.peek() != 0
+    if header.buffered_at.peek_unbroken() != 0
         return
     SUSPECTED.poke_into(header.state)
     add_candidate(header)
@@ -449,6 +449,40 @@ routine roam_store_end() -> None
     then
         drop reported
         return
+
+### The sharing invariant: every handle an escaped entity holds is escaped too, or the other task that reaches the entity
+### reaches the handle without its lock. A debug build asks this after it takes the entity's lock. Looks at what the
+### entity's trace routine reports, and at the entity it keeps alive. Only the outermost hold is checked: a block that
+### holds the lock across several statements (replacing a member variable's handle) is half done in between.
+### :param header: The entity's header, whose lock the caller holds.
+### :returns: The header of a handle that has not escaped, or null when the entity is local, dead, held again by
+###     the agent that holds it, or all it holds has escaped.
+### :throws: Crashes with `OutOfMemoryError` when the list of reported handles cannot grow.
+@export("ingrid_roam_unshared_child")
+routine roam_unshared_child(header: @RoamHeader) -> Addr
+    none: Addr = inttoptr[U64, Addr](0)
+    if header.escaped.peek_unbroken() != 1 or header.dead.peek_unbroken() == 1
+        return none
+    if header.depth.peek() != 1
+        return none
+    manager: @MemoryManager = C_HEAP
+    kids: &List[Addr] <- .construct(manager)
+    children(header, kids)
+    kept: Addr = header.kept.peek()
+    if ptrtoint[Addr, U64](kept) != 0
+        kids.add_last(kept)
+
+    n: U64 = kids.count()
+
+    for i in 0 til n
+        child: @RoamHeader = kids[i].to[@RoamHeader]()
+        if child.dead.peek_unbroken() != 1 and child.escaped.peek_unbroken() != 1
+            found: Addr = kids[i]
+            drop kids
+            return found
+    then
+        drop kids
+        return none
 
 # ── The agent-keyed reentrant lock ──────────────────────────────────────────
 
