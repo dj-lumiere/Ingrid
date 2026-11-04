@@ -1,0 +1,56 @@
+# Small things the standard library binds: a cryptographically random word (from Lapila's entropy_key), the
+# wall-clock time, and two helpers the FFI tests call with a struct holding a callback.
+
+module Ingrid/Runtime
+
+import Hosted
+
+# -- a random word -------------------------------------------------------------------
+
+### 64 cryptographically random bits from the operating system, from the source Lapila's hash key comes from
+### (`entropy_key()`: getrandom on Linux, arc4random_buf on macOS, ProcessPrng on Windows), drawn anew on every call.
+### :returns: The random word.
+### :throws: Crashes with `InvalidValueError` when the operating system gives no random bytes (getrandom failing on
+###     Linux, no ProcessPrng before Windows 10), instead of handing back a word that isn't random.
+@export("rf_random_u64")
+routine rf_random_u64() -> U64
+    key: SipKey = entropy_key()
+    return key.k0
+
+# -- the wall clock ------------------------------------------------------------------
+
+### The current date and time: the seconds since 1970-01-01 UTC and the nanoseconds past them, negative seconds before
+### 1970.
+### :returns: The moment.
+@export("rf_moment_now")
+routine rf_moment_now() -> Moment
+    return Clock.now()
+
+# -- FFI test helpers ----------------------------------------------------------------
+#
+# A C API that keeps a callback and its userdata in a struct and calls cb(arg, ud): Revare's routine value is
+# the pair { fn, bound }, which lays out as that struct, so a record with a Routine field goes to such an API as it
+# is. These two exist only for the tests that check it.
+
+record CallbackInfo
+    cb: Callable[(S32, Addr), S32]
+    ud: Addr
+
+### Calls the callback in `info` with `arg` and the userdata in `info`, for the FFI tests.
+### :param info: The callback and its userdata.
+### :param arg: The first argument of the callback.
+### :returns: What the callback returns.
+@export("rf_test_invoke_cbinfo")
+routine rf_test_invoke_cbinfo(info: @CallbackInfo, arg: S32) -> S32
+    cb: Callable[(S32, Addr), S32] = info.cb.peek()
+    return cb.call(arg, info.ud.peek())
+
+### Calls the callback in `info` with `arg` and the userdata in `info`, for the FFI tests. The struct is passed by
+### value.
+### :param info: The callback and its userdata.
+### :param arg: The first argument of the callback.
+### :returns: What the callback returns.
+@export("rf_test_invoke_cbinfo_byval")
+routine rf_test_invoke_cbinfo_byval(info: CallbackInfo, arg: S32) -> S32
+    cb: Callable[(S32, Addr), S32] = info.cb
+    return cb.call(arg, info.ud)

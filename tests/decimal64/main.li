@@ -1,0 +1,81 @@
+# D64 arithmetic (Ingrid/lapila/decimal/) against Revare's own engine before the move: each line is two
+# operands and their sum, difference, product, quotient (as BID bits), and their order, which decimal64.expected
+# holds as Revare computed them before the arithmetic moved here. The operands come from splitmix64: raw bits
+# (every encoding, canonical or not), finite values near exponent 0 and anywhere in range with 0 to 16 digits,
+# zeros with any exponent, infinities, and quiet and signaling NaNs. Five lines differ from Revare's results,
+# where Revare was wrong: zero plus a 17-digit (non-canonical) coefficient came back unrounded.
+
+module Ingrid/Decimal/Check
+
+import Hosted
+import Ingrid/Abi
+import Ingrid/Decimal
+import Ingrid/Decimal/Exports
+import Random
+
+global STATE: &U64 <- 0x0123456789ABCDEF
+
+preset PAIRS: U64 = 1500
+
+### 10 to the power n.
+### :param n: The power.
+### :returns: 10^n.
+routine pow10(n: U64) -> U64
+    power: &U64 <- 1
+
+    for i in 0 til n
+        (power.load() * 10).poke_into(power)
+    then
+        return power.load()
+
+### An operand from two random words: raw bits, a finite value near exponent 0 or anywhere in range, or a special.
+### :param r: A random word.
+### :param s: A random word.
+### :returns: The operand's bits.
+routine operand(r: U64, s: U64) -> U64
+    sign: U64 = ((r >> 40) & 1) << 63
+    spread: U64 = r >> 16
+    kind: U64 = r % 4
+
+    when kind
+        0 => return s
+        3 =>
+            which: U64 = (r >> 24) % 4
+            when which
+                0 =>
+                    biased: U64 = spread % 768
+                    return sign | (biased << 53)
+                1 => return sign | 0x7800000000000000
+                2 => return 0x7C00000000000000
+                else => return 0x7E00000000000000
+        else =>
+            digits: U64 = (r >> 8) % 17
+            coeff: U64 = s % pow10(digits) & 0x1FFFFFFFFFFFFF
+            near: Bool = kind == 1
+            biased: U64 = when
+                near => spread % 41 + 378
+                else => spread % 768
+            return sign | (biased << 53) | coeff
+
+### The next word of the generator, as Revare's C/ingrid_splitmix64 steps it.
+### :returns: The next word.
+routine draw() -> U64
+    next: U64 = splitmix64(STATE.load())
+    next.poke_into(STATE)
+    return next
+
+### Prints the lines.
+routine start() -> None
+    for i in 0 til PAIRS
+        r1: U64 = draw()
+        s1: U64 = draw()
+        r2: U64 = draw()
+        s2: U64 = draw()
+        a: U64 = operand(r: r1, s: s1)
+        b: U64 = operand(r: r2, s: s2)
+        Console.show(
+            "{a} {b} {ingrid_d64_add(a, b)} {ingrid_d64_sub(a, b)} {ingrid_d64_mul(a, b)} ",
+            end: "")
+        Console.show("{ingrid_d64_div(a, b)} {ingrid_d64_order(a, b)}")
+    then
+        return

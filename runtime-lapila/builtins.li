@@ -1,0 +1,138 @@
+# What the in-process JIT resolves from this library that a native build gets from compiler-rt: emulated thread-local
+# storage (__emutls_get_address). The JIT looks it up in this library's exports. (The B16 and BF16 conversions come
+# from Lapila's standard library, which exports them on Windows.) 128-bit division isn't here: the standard
+# libraries divide U128 and S128 on U64 limbs, so no LLVM 128-bit divide (and no __udivti3) is left to resolve, and
+# a native build that still has one gets compiler-rt's.
+
+module Ingrid/Runtime
+
+import Hosted
+
+# -- emulated thread-local storage ---------------------------------------------------
+#
+# LLVM's JIT lowers thread_local globals to the emulated-TLS ABI, which calls __emutls_get_address with the
+# variable's control block. A native build gets it from compiler-rt. The JIT gets this one, compiler-rt's accessor
+# redone, with this library's own (real) thread-locals for each thread's objects.
+
+@threadlocal
+global EMUTLS: &(@EmutlsArray?)
+global EMUTLS_GUARD: &U8
+global EMUTLS_NEXT: &U64
+
+### compiler-rt's control block: the object's size and alignment, its 1-based slot (0 until first use), and its
+### initial value or null for zeros.
+record EmutlsControl
+    size: U64
+    align: U64
+    index: U64
+    value: Addr
+
+### One thread's objects, by slot.
+record EmutlsArray
+    size: U64
+    data: @Addr
+
+### The C runtime's `_aligned_malloc` on Windows: `size` bytes aligned to `align`.
+### :param size: The size in bytes.
+### :param align: The alignment, a power of two.
+### :returns: The block, or null when the allocation fails.
+@external("c")
+@symbol("_aligned_malloc")
+@target(os: "windows")
+routine c_aligned_malloc(size: CSize, align: CSize) -> Addr
+
+### POSIX `posix_memalign`: allocates `size` bytes aligned to `align` and stores the block in `out`.
+### :param out: Where the block's address goes.
+### :param align: The alignment, a power of two and a multiple of the pointer size.
+### :param size: The size in bytes.
+### :returns: 0 on success, an error number otherwise.
+@external("c")
+@symbol("posix_memalign")
+@target(os: not "windows")
+routine c_posix_memalign(out: @Addr, align: CSize, size: CSize) -> CInt
+
+### C's `memset`: fills `n` bytes at `dst` with the low byte of `value`.
+### :param dst: The memory to fill.
+### :param value: The byte value to fill with.
+### :param n: The number of bytes.
+### :returns: `dst`.
+@external("c")
+@symbol("memset")
+routine c_memset(dst: Addr, value: CInt, n: CSize) -> Addr
+
+### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `_aligned_malloc`.
+### :param size: The size in bytes.
+### :param align: The wanted alignment.
+### :returns: The block, or null when the allocation fails.
+@target(os: "windows")
+routine aligned_alloc(size: U64, align: U64) -> Addr
+    return c_aligned_malloc(size.to[CSize](), align.max(sizeof[Addr]()).to[CSize]())
+
+### Allocates `size` bytes aligned to `align`, raised to at least the pointer size, through `posix_memalign`.
+### :param size: The size in bytes.
+### :param align: The wanted alignment.
+### :returns: The block, or null when the allocation fails.
+@target(os: not "windows")
+routine aligned_alloc(size: U64, align: U64) -> Addr
+    p: &Addr
+
+    if c_posix_memalign(p, align.max(sizeof[Addr]()).to[CSize](), size.to[CSize]()) == 0
+        return p.load()
+    return Addr.zero()
+
+### This thread's object for `control`, made (from its initial value, or zeroed) on the thread's first use. The
+### first use of `control` on any thread gives it the next free slot.
+### :param control: The thread-local variable's control block.
+### :returns: The calling thread's copy of the variable.
+### :throws: Crashes with `OutOfMemoryError` when the thread's slot table, its growth, or the object can't be
+###     allocated.
+@export("__emutls_get_address")
+routine emutls_get_address(control: @EmutlsControl) -> Addr
+    seen: U64 = control.index.peek_unbroken()
+    index: U64 = when
+        seen == 0 =>
+            held: Authorized[U8] <- EMUTLS_GUARD.get_exclusive_access()
+            current: U64 = control.index.peek()
+            assigned: U64 = when
+                current != 0 => current
+                else =>
+                    next: U64 = EMUTLS_NEXT.load() + 1
+                    EMUTLS_NEXT.store(next)
+                    control.index.poke_unbroken(next)
+                    becomes next
+            drop held
+            becomes assigned
+        else => seen
+    known: @EmutlsArray? = EMUTLS.load()
+    arr: @EmutlsArray = when
+        known.is_absent() =>
+            fresh: @EmutlsArray = zeroed[EmutlsArray](count: 1,
+                what: "Failed to allocate thread-local storage")
+            EMUTLS.store(fresh)
+            becomes fresh
+        else => known.unwrap()
+    have: U64 = arr.size.peek()
+    if have < index
+        grown: Addr = c_realloc(arr.data.peek(), (index * sizeof[Addr]()).to[CSize]())
+        if grown.is_hollow()
+            rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow thread-local storage")
+        c_memset(grown.to[@Byte]().stride(have * sizeof[Addr]()), 0,
+            ((index - have) * sizeof[Addr]()).to[CSize]())
+        arr.data.poke(grown.to[@Addr]())
+        arr.size.poke(index)
+    slot: @Addr = arr.data.peek().stride(index - 1)
+    obj: Addr = slot.peek()
+    if not obj.is_hollow()
+        return obj
+    size: U64 = control.size.peek()
+    made: Addr = aligned_alloc(size, align: control.align.peek())
+    if made.is_hollow()
+        rf_throw(error_type: "OutOfMemoryError",
+            message: "Failed to allocate a thread-local variable")
+    init: Addr = control.value.peek()
+    if init.is_hollow()
+        c_memset(made, 0, size.to[CSize]())
+    else
+        c_memcpy(made, init, size.to[CSize]())
+    slot.poke(made)
+    return made

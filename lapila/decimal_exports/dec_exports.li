@@ -1,0 +1,1155 @@
+# The decimal routines Revare and Mielia call: D32, D64, and D128 (decimal32, decimal64, and decimal128 in BID).
+#
+# A D32 crosses the C ABI as its 32 BID bits in a U32 and a D64 as its 64 bits in a U64. A D128 goes in as its low
+# and high 64 bits (a 128-bit value crosses Win64 by pointer from Lapila but by value from Revare, so neither
+# side passes one whole) and comes back in Words (words.li): `w0` its low bits, `w1` its high bits. A flag is a
+# U32 (0 or 1). Each routine is the raw IEEE operation (an infinity or a NaN passes through), so the checked
+# operators keep their crash in Revare, where it gets Revare's crash trace. An order is -1, 0, or 1 as a is
+# below, equal to, or above b (+0 and -0 equal, the members of a cohort equal), and 2 when either is a NaN.
+#
+# D32 and D64 run the D128 engine: the same exact (or sticky) intermediate, rounded once to their own width.
+
+module Ingrid/Decimal/Exports
+
+import Ingrid/Abi
+import Ingrid/Decimal
+
+### The D128 whose BID bits are high × 2^64 + low.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The D128 whose BID bits are high × 2^64 + low.
+@inline
+routine dec_halves(low: U64, high: U64) -> Dec
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from128(bits)
+
+### A D128 handed back: its low 64 bits in w0, its high 64 bits in w1.
+### :returns: A D128 handed back.
+@inline
+routine Dec.words() -> Words
+    bits: U128 = me.to128()
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: 0, w3: 0)
+
+### Two halves handed back as they came.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: Two halves handed back as they came.
+@inline
+routine dec_same_words(low: U64, high: U64) -> Words
+    return (w0: low, w1: high, w2: 0, w3: 0)
+
+# ── D32 ────────────────────────────────────────────────────────────────────────────────────────────
+
+### `a + b`, rounded half to even to 7 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a + b`, rounded half to even to 7 digits.
+@export("ingrid_d32_add")
+routine ingrid_d32_add(a: U32, b: U32) -> U32
+    r: Dec = dec_add(a: dec_from32(a), b: dec_from32(b), f: dec_format32())
+    return r.to32()
+
+### `a - b`, rounded half to even to 7 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a - b`, rounded half to even to 7 digits.
+@export("ingrid_d32_sub")
+routine ingrid_d32_sub(a: U32, b: U32) -> U32
+    r: Dec = dec_add(a: dec_from32(a), b: dec_from32(b).negate(), f: dec_format32())
+    return r.to32()
+
+### `a * b`, rounded half to even to 7 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a * b`, rounded half to even to 7 digits.
+@export("ingrid_d32_mul")
+routine ingrid_d32_mul(a: U32, b: U32) -> U32
+    r: Dec = dec_mul(a: dec_from32(a), b: dec_from32(b), f: dec_format32())
+    return r.to32()
+
+### `a / b`, rounded half to even to 7 digits: a nonzero value over zero is an infinity, zero over zero a NaN.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a / b`, rounded half to even to 7 digits.
+@export("ingrid_d32_div")
+routine ingrid_d32_div(a: U32, b: U32) -> U32
+    r: Dec = dec_div(a: dec_from32(a), b: dec_from32(b), f: dec_format32())
+    return r.to32()
+
+### The order of a and b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The order of a and b.
+@export("ingrid_d32_order")
+routine ingrid_d32_order(a: U32, b: U32) -> S64
+    return dec_order(a: dec_from32(a), b: dec_from32(b))
+
+### `a * b + c` rounded once to 7 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :param c: The third operand.
+### :returns: `a * b + c` rounded once to 7 digits.
+@export("ingrid_d32_mul_add")
+routine ingrid_d32_mul_add(a: U32, b: U32, c: U32) -> U32
+    r: Dec = dec_mul_add(a: dec_from32(a), b: dec_from32(b), c: dec_from32(c), f: dec_format32())
+    return r.to32()
+
+### The square root, correctly rounded and reduced (NaN for a negative number).
+### :param x: The operand.
+### :returns: The square root, correctly rounded and reduced (NaN for a negative number).
+@export("ingrid_d32_sqrt")
+routine ingrid_d32_sqrt(x: U32) -> U32
+    r: Dec = dec_sqrt(x: dec_from32(x), f: dec_format32())
+    return r.to32()
+
+### 1 / sqrt(x), correctly rounded and reduced (NaN below zero, an infinity of x's sign at zero).
+### :param x: The operand.
+### :returns: 1 / sqrt(x), correctly rounded and reduced.
+@export("ingrid_d32_rsqrt")
+routine ingrid_d32_rsqrt(x: U32) -> U32
+    r: Dec = dec_rsqrt(x: dec_from32(x), f: dec_format32())
+    return r.to32()
+
+### sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+### :param x: The operand.
+### :param y: The second operand.
+### :returns: sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+@export("ingrid_d32_hypot")
+routine ingrid_d32_hypot(x: U32, y: U32) -> U32
+    r: Dec = dec_hypot(x: dec_from32(x), y: dec_from32(y), z: dec_num(neg: false, coeff: 0, exp: 0),
+        f: dec_format32())
+    return r.to32()
+
+### sqrt(x^2 + y^2 + z^2), correctly rounded.
+### :param x: The operand.
+### :param y: The second operand.
+### :param z: The argument.
+### :returns: sqrt(x^2 + y^2 + z^2), correctly rounded.
+@export("ingrid_d32_hypot3")
+routine ingrid_d32_hypot3(x: U32, y: U32, z: U32) -> U32
+    r: Dec = dec_hypot(x: dec_from32(x), y: dec_from32(y), z: dec_from32(z), f: dec_format32())
+    return r.to32()
+
+### x rounded to an integral value: mode 0 toward zero, 1 down, 2 up, 3 nearest with ties away from zero, 4 nearest with ties to even. A special, a zero, or a value without a fraction comes back as it is.
+### :param x: The operand.
+### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
+### :returns: x rounded to an integral value.
+@export("ingrid_d32_round_int")
+routine ingrid_d32_round_int(x: U32, mode: U32) -> U32
+    d: Dec = dec_from32(x)
+
+    if dec_is_integral_as_is(d)
+        return x
+    return dec_round_int(x: d, mode, f: dec_format32()).to32()
+
+### x rounded to `places` digits after the point by the rounding `mode` (5 half up, 4 to even, 3 away from zero, 1
+### down, 2 up, 0 toward zero). A special, a zero, or a value without a digit past that place comes back as it is.
+### :param x: The operand.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The rounded value.
+@export("ingrid_d32_round_places")
+routine ingrid_d32_round_places(x: U32, places: U64, mode: U32) -> U32
+    return dec_round_places(d: dec_from32(x), places, mode, f: dec_format32()).to32()
+
+### a with b's exponent, rounded half to even (NaN when that needs more than the digits there are). a comes back as it is when the exponents match or both are infinite.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: a with b's exponent, rounded half to even (NaN when that needs more than the digits there are).
+@export("ingrid_d32_quantize")
+routine ingrid_d32_quantize(a: U32, b: U32) -> U32
+    x: Dec = dec_from32(a)
+    y: Dec = dec_from32(b)
+
+    if dec_is_quantize_identity(a: x, b: y)
+        return a
+    return dec_quantize(a: x, b: y, f: dec_format32()).to32()
+
+### The remainder of a truncated division, exact, with a's sign: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The remainder of a truncated division, exact, with a's sign.
+@export("ingrid_d32_mod_trunc")
+routine ingrid_d32_mod_trunc(a: U32, b: U32) -> U32
+    x: Dec = dec_from32(a)
+    y: Dec = dec_from32(b)
+
+    if dec_is_mod_identity(x, y)
+        return a
+    return dec_mod(x, y, near: false).to32()
+
+### The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact.
+@export("ingrid_d32_rem")
+routine ingrid_d32_rem(a: U32, b: U32) -> U32
+    x: Dec = dec_from32(a)
+    y: Dec = dec_from32(b)
+
+    if dec_is_mod_identity(x, y)
+        return a
+    return dec_mod(x, y, near: true).to32()
+
+### The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+### :param x: The operand.
+### :returns: The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+@export("ingrid_d32_normalize")
+routine ingrid_d32_normalize(x: U32) -> U32
+    d: Dec = dec_from32(x)
+
+    if d.is_finite()
+        return dec_normalize(x: d, f: dec_format32()).to32()
+    return x
+
+### x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+### :param x: The operand.
+### :param n: The power of ten.
+### :returns: x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+@export("ingrid_d32_scaleb")
+routine ingrid_d32_scaleb(x: U32, n: S64) -> U32
+    d: Dec = dec_from32(x)
+
+    if not d.is_finite() or d.coeff == 0
+        return x
+    return dec_scaleb(x: d, n, f: dec_format32()).to32()
+
+### The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+### :param x: The operand.
+### :returns: The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+@export("ingrid_d32_logb")
+routine ingrid_d32_logb(x: U32) -> U32
+    r: Dec = dec_logb(x: dec_from32(x), f: dec_format32())
+    return r.to32()
+
+### (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 7 digits with exp as the preferred exponent.
+### :param neg: 1 for a negative value, else 0.
+### :param c_low: The low 64 bits of c.
+### :param c_high: The high 64 bits of c.
+### :param exp: The exponent, also the preferred one.
+### :returns: (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 7 digits with exp as the preferred exponent.
+@export("ingrid_d32_from_parts")
+routine ingrid_d32_from_parts(neg: U32, c_low: U64, c_high: U64, exp: S64) -> U32
+    c: U256 = (c_high.to[U256]() << 64) | c_low.to[U256]()
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: c, exp: exp, pref: exp),
+        f: dec_format32())
+    return r.to32()
+
+### The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 7 digits, exponent 0 when it fits.
+### :param neg: 1 for a negative value, else 0.
+### :param m0: The lowest 64 bits of the magnitude.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits.
+### :returns: The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 7 digits, exponent 0 when it fits.
+@export("ingrid_d32_from_integer")
+routine ingrid_d32_from_integer(neg: U32, m0: U64, m1: U64, m2: U64, m3: U64) -> U32
+    m: U256 = dec_u256(l0: m0, l1: m1, l2: m2, l3: m3)
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: m, exp: 0, pref: 0),
+        f: dec_format32())
+    return r.to32()
+
+### x in the DPD interchange encoding.
+### :param x: The operand.
+### :returns: x in the DPD interchange encoding.
+@export("ingrid_d32_to_dpd")
+routine ingrid_d32_to_dpd(x: U32) -> U32
+    return dec_to_dpd(x: dec_from32(x), width: 32).to_wrap[U32]()
+
+### The D32 whose DPD interchange encoding is bits.
+### :param bits: The DPD encoding.
+### :returns: The D32 whose DPD interchange encoding is bits.
+@export("ingrid_d32_from_dpd")
+routine ingrid_d32_from_dpd(bits: U32) -> U32
+    return dec_from_dpd(bits: bits.to[U128](), width: 32).to32()
+
+### The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 7 digits and reduced.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 7 digits and reduced.
+@export("ingrid_d32_from_binary")
+routine ingrid_d32_from_binary(low: U64, high: U64) -> U32
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from_binary(bits, f: dec_format32()).to32()
+
+### The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x: w0 the low 64 bits, w1 the high ones.
+### :param x: The operand.
+### :param which: The binary float's width in bits: 16, 32, 64, or 128.
+### :returns: The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x.
+@export("ingrid_d32_to_binary")
+routine ingrid_d32_to_binary(x: U32, which: U32) -> Words
+    bits: U128 = dec_to_binary(x: dec_from32(x), which)
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: 0, w3: 0)
+
+# ── D64 ────────────────────────────────────────────────────────────────────────────────────────────
+
+### `a + b`, rounded half to even to 16 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a + b`, rounded half to even to 16 digits.
+@export("ingrid_d64_add")
+routine ingrid_d64_add(a: U64, b: U64) -> U64
+    r: Dec = dec_add(a: dec_from64(a), b: dec_from64(b), f: dec_format64())
+    return r.to64()
+
+### `a - b`, rounded half to even to 16 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a - b`, rounded half to even to 16 digits.
+@export("ingrid_d64_sub")
+routine ingrid_d64_sub(a: U64, b: U64) -> U64
+    r: Dec = dec_add(a: dec_from64(a), b: dec_from64(b).negate(), f: dec_format64())
+    return r.to64()
+
+### `a * b`, rounded half to even to 16 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a * b`, rounded half to even to 16 digits.
+@export("ingrid_d64_mul")
+routine ingrid_d64_mul(a: U64, b: U64) -> U64
+    r: Dec = dec_mul(a: dec_from64(a), b: dec_from64(b), f: dec_format64())
+    return r.to64()
+
+### `a / b`, rounded half to even to 16 digits: a nonzero value over zero is an infinity, zero over zero a NaN.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: `a / b`, rounded half to even to 16 digits.
+@export("ingrid_d64_div")
+routine ingrid_d64_div(a: U64, b: U64) -> U64
+    r: Dec = dec_div(a: dec_from64(a), b: dec_from64(b), f: dec_format64())
+    return r.to64()
+
+### The order of a and b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The order of a and b.
+@export("ingrid_d64_order")
+routine ingrid_d64_order(a: U64, b: U64) -> S64
+    return dec_order(a: dec_from64(a), b: dec_from64(b))
+
+### `a * b + c` rounded once to 16 digits.
+### :param a: The first operand.
+### :param b: The second operand.
+### :param c: The third operand.
+### :returns: `a * b + c` rounded once to 16 digits.
+@export("ingrid_d64_mul_add")
+routine ingrid_d64_mul_add(a: U64, b: U64, c: U64) -> U64
+    r: Dec = dec_mul_add(a: dec_from64(a), b: dec_from64(b), c: dec_from64(c), f: dec_format64())
+    return r.to64()
+
+### The square root, correctly rounded and reduced (NaN for a negative number).
+### :param x: The operand.
+### :returns: The square root, correctly rounded and reduced (NaN for a negative number).
+@export("ingrid_d64_sqrt")
+routine ingrid_d64_sqrt(x: U64) -> U64
+    r: Dec = dec_sqrt(x: dec_from64(x), f: dec_format64())
+    return r.to64()
+
+### 1 / sqrt(x), correctly rounded and reduced (NaN below zero, an infinity of x's sign at zero).
+### :param x: The operand.
+### :returns: 1 / sqrt(x), correctly rounded and reduced.
+@export("ingrid_d64_rsqrt")
+routine ingrid_d64_rsqrt(x: U64) -> U64
+    r: Dec = dec_rsqrt(x: dec_from64(x), f: dec_format64())
+    return r.to64()
+
+### sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+### :param x: The operand.
+### :param y: The second operand.
+### :returns: sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+@export("ingrid_d64_hypot")
+routine ingrid_d64_hypot(x: U64, y: U64) -> U64
+    r: Dec = dec_hypot(x: dec_from64(x), y: dec_from64(y), z: dec_num(neg: false, coeff: 0, exp: 0),
+        f: dec_format64())
+    return r.to64()
+
+### sqrt(x^2 + y^2 + z^2), correctly rounded.
+### :param x: The operand.
+### :param y: The second operand.
+### :param z: The argument.
+### :returns: sqrt(x^2 + y^2 + z^2), correctly rounded.
+@export("ingrid_d64_hypot3")
+routine ingrid_d64_hypot3(x: U64, y: U64, z: U64) -> U64
+    r: Dec = dec_hypot(x: dec_from64(x), y: dec_from64(y), z: dec_from64(z), f: dec_format64())
+    return r.to64()
+
+### x rounded to an integral value: mode 0 toward zero, 1 down, 2 up, 3 nearest with ties away from zero, 4 nearest with ties to even. A special, a zero, or a value without a fraction comes back as it is.
+### :param x: The operand.
+### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
+### :returns: x rounded to an integral value.
+@export("ingrid_d64_round_int")
+routine ingrid_d64_round_int(x: U64, mode: U32) -> U64
+    d: Dec = dec_from64(x)
+
+    if dec_is_integral_as_is(d)
+        return x
+    return dec_round_int(x: d, mode, f: dec_format64()).to64()
+
+### x rounded to `places` digits after the point by the rounding `mode` (5 half up, 4 to even, 3 away from zero, 1
+### down, 2 up, 0 toward zero). A special, a zero, or a value without a digit past that place comes back as it is.
+### :param x: The operand.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The rounded value.
+@export("ingrid_d64_round_places")
+routine ingrid_d64_round_places(x: U64, places: U64, mode: U32) -> U64
+    return dec_round_places(d: dec_from64(x), places, mode, f: dec_format64()).to64()
+
+### a with b's exponent, rounded half to even (NaN when that needs more than the digits there are). a comes back as it is when the exponents match or both are infinite.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: a with b's exponent, rounded half to even (NaN when that needs more than the digits there are).
+@export("ingrid_d64_quantize")
+routine ingrid_d64_quantize(a: U64, b: U64) -> U64
+    x: Dec = dec_from64(a)
+    y: Dec = dec_from64(b)
+
+    if dec_is_quantize_identity(a: x, b: y)
+        return a
+    return dec_quantize(a: x, b: y, f: dec_format64()).to64()
+
+### The remainder of a truncated division, exact, with a's sign: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The remainder of a truncated division, exact, with a's sign.
+@export("ingrid_d64_mod_trunc")
+routine ingrid_d64_mod_trunc(a: U64, b: U64) -> U64
+    x: Dec = dec_from64(a)
+    y: Dec = dec_from64(b)
+
+    if dec_is_mod_identity(x, y)
+        return a
+    return dec_mod(x, y, near: false).to64()
+
+### The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a: The first operand.
+### :param b: The second operand.
+### :returns: The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact.
+@export("ingrid_d64_rem")
+routine ingrid_d64_rem(a: U64, b: U64) -> U64
+    x: Dec = dec_from64(a)
+    y: Dec = dec_from64(b)
+
+    if dec_is_mod_identity(x, y)
+        return a
+    return dec_mod(x, y, near: true).to64()
+
+### The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+### :param x: The operand.
+### :returns: The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+@export("ingrid_d64_normalize")
+routine ingrid_d64_normalize(x: U64) -> U64
+    d: Dec = dec_from64(x)
+
+    if d.is_finite()
+        return dec_normalize(x: d, f: dec_format64()).to64()
+    return x
+
+### x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+### :param x: The operand.
+### :param n: The power of ten.
+### :returns: x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+@export("ingrid_d64_scaleb")
+routine ingrid_d64_scaleb(x: U64, n: S64) -> U64
+    d: Dec = dec_from64(x)
+
+    if not d.is_finite() or d.coeff == 0
+        return x
+    return dec_scaleb(x: d, n, f: dec_format64()).to64()
+
+### The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+### :param x: The operand.
+### :returns: The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+@export("ingrid_d64_logb")
+routine ingrid_d64_logb(x: U64) -> U64
+    r: Dec = dec_logb(x: dec_from64(x), f: dec_format64())
+    return r.to64()
+
+### (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 16 digits with exp as the preferred exponent.
+### :param neg: 1 for a negative value, else 0.
+### :param c_low: The low 64 bits of c.
+### :param c_high: The high 64 bits of c.
+### :param exp: The exponent, also the preferred one.
+### :returns: (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 16 digits with exp as the preferred exponent.
+@export("ingrid_d64_from_parts")
+routine ingrid_d64_from_parts(neg: U32, c_low: U64, c_high: U64, exp: S64) -> U64
+    c: U256 = (c_high.to[U256]() << 64) | c_low.to[U256]()
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: c, exp: exp, pref: exp),
+        f: dec_format64())
+    return r.to64()
+
+### The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 16 digits, exponent 0 when it fits.
+### :param neg: 1 for a negative value, else 0.
+### :param m0: The lowest 64 bits of the magnitude.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits.
+### :returns: The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 16 digits, exponent 0 when it fits.
+@export("ingrid_d64_from_integer")
+routine ingrid_d64_from_integer(neg: U32, m0: U64, m1: U64, m2: U64, m3: U64) -> U64
+    m: U256 = dec_u256(l0: m0, l1: m1, l2: m2, l3: m3)
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: m, exp: 0, pref: 0),
+        f: dec_format64())
+    return r.to64()
+
+### x in the DPD interchange encoding.
+### :param x: The operand.
+### :returns: x in the DPD interchange encoding.
+@export("ingrid_d64_to_dpd")
+routine ingrid_d64_to_dpd(x: U64) -> U64
+    return dec_to_dpd(x: dec_from64(x), width: 64).to_wrap[U64]()
+
+### The D64 whose DPD interchange encoding is bits.
+### :param bits: The DPD encoding.
+### :returns: The D64 whose DPD interchange encoding is bits.
+@export("ingrid_d64_from_dpd")
+routine ingrid_d64_from_dpd(bits: U64) -> U64
+    return dec_from_dpd(bits: bits.to[U128](), width: 64).to64()
+
+### The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 16 digits and reduced.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 16 digits and reduced.
+@export("ingrid_d64_from_binary")
+routine ingrid_d64_from_binary(low: U64, high: U64) -> U64
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from_binary(bits, f: dec_format64()).to64()
+
+### The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x: w0 the low 64 bits, w1 the high ones.
+### :param x: The operand.
+### :param which: The binary float's width in bits: 16, 32, 64, or 128.
+### :returns: The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x.
+@export("ingrid_d64_to_binary")
+routine ingrid_d64_to_binary(x: U64, which: U32) -> Words
+    bits: U128 = dec_to_binary(x: dec_from64(x), which)
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: 0, w3: 0)
+
+# ── D128 ───────────────────────────────────────────────────────────────────────────────────────────
+
+### `a + b`, rounded half to even to 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a + b`, rounded half to even to 34 digits.
+@export("ingrid_d128_add")
+routine ingrid_d128_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: dec_format128())
+    return r.words()
+
+### `a - b`, rounded half to even to 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a - b`, rounded half to even to 34 digits.
+@export("ingrid_d128_sub")
+routine ingrid_d128_sub(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high).negate(), f: dec_format128())
+    return r.words()
+
+### `a * b`, rounded half to even to 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a * b`, rounded half to even to 34 digits.
+@export("ingrid_d128_mul")
+routine ingrid_d128_mul(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_mul(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: dec_format128())
+    return r.words()
+
+### A Decimal result handed back with whether it is exact: `w2` is 1 when rounding it to 34 digits lost a digit, and
+### the value is in Decimal's one form (dec_normalized). A special (an infinity or a NaN among the operands) is handed
+### back as the raw operation gives it.
+### :param value: The result before its rounding.
+### :returns: The result rounded to 34 digits, `w2` 1 when that lost a digit.
+routine decimal_exact_words(value: DecExact) -> Words
+    f: DecFormat = decimal_format()
+    bits: U128 = dec_normalized(dec_finish(value, f)).to128()
+    lost: U64 = (not dec_exact_in(value, f)).to[U64]()
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: lost, w3: 0)
+
+### `a + b` for Decimal, with `w2` 1 when the exact sum needs more than 34 digits (`Decimal`'s `+`, which stops there
+### instead of rounding).
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a + b` in Decimal's one form, `w2` 1 when it lost a digit.
+@export("ingrid_decimal_add_exact")
+routine ingrid_decimal_add_exact(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high)
+    if not (a.is_finite() and b.is_finite())
+        return dec_add_special(a, b).words()
+    return decimal_exact_words(value: dec_sum(a, b))
+
+### `a - b` for Decimal, with `w2` 1 when the exact difference needs more than 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a - b` in Decimal's one form, `w2` 1 when it lost a digit.
+@export("ingrid_decimal_sub_exact")
+routine ingrid_decimal_sub_exact(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high).negate()
+    if not (a.is_finite() and b.is_finite())
+        return dec_add_special(a, b).words()
+    return decimal_exact_words(value: dec_sum(a, b))
+
+### `a * b` for Decimal, with `w2` 1 when the exact product needs more than 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a * b` in Decimal's one form, `w2` 1 when it lost a digit.
+@export("ingrid_decimal_mul_exact")
+routine ingrid_decimal_mul_exact(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high)
+    if not (a.is_finite() and b.is_finite())
+        return dec_mul_special(a, b).words()
+    return decimal_exact_words(value: dec_product(a, b))
+
+### `a / b`, rounded half to even to 34 digits: a nonzero value over zero is an infinity, zero over zero a NaN.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: `a / b`, rounded half to even to 34 digits.
+@export("ingrid_d128_div")
+routine ingrid_d128_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_div(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: dec_format128())
+    return r.words()
+
+### The order of a and b.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The order of a and b.
+@export("ingrid_d128_order")
+routine ingrid_d128_order(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> S64
+    return dec_order(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high))
+
+### `a * b + c` rounded once to 34 digits.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :param c_low: The low 64 bits of c.
+### :param c_high: The high 64 bits of c.
+### :returns: `a * b + c` rounded once to 34 digits.
+@export("ingrid_d128_mul_add")
+routine ingrid_d128_mul_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64, c_low: U64,
+    c_high: U64) -> Words
+    r: Dec = dec_mul_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), c: dec_halves(low: c_low, high: c_high),
+        f: dec_format128())
+    return r.words()
+
+### The square root, correctly rounded and reduced (NaN for a negative number).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The square root, correctly rounded and reduced (NaN for a negative number).
+@export("ingrid_d128_sqrt")
+routine ingrid_d128_sqrt(x_low: U64, x_high: U64) -> Words
+    r: Dec = dec_sqrt(x: dec_halves(low: x_low, high: x_high), f: dec_format128())
+    return r.words()
+
+### 1 / sqrt(x), correctly rounded and reduced (NaN below zero, an infinity of x's sign at zero).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: 1 / sqrt(x), correctly rounded and reduced.
+@export("ingrid_d128_rsqrt")
+routine ingrid_d128_rsqrt(x_low: U64, x_high: U64) -> Words
+    r: Dec = dec_rsqrt(x: dec_halves(low: x_low, high: x_high), f: dec_format128())
+    return r.words()
+
+### sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param y_low: The low 64 bits of y.
+### :param y_high: The high 64 bits of y.
+### :returns: sqrt(x^2 + y^2), correctly rounded (+infinity when either is infinite).
+@export("ingrid_d128_hypot")
+routine ingrid_d128_hypot(x_low: U64, x_high: U64, y_low: U64, y_high: U64) -> Words
+    r: Dec = dec_hypot(x: dec_halves(low: x_low, high: x_high),
+        y: dec_halves(low: y_low, high: y_high), z: dec_num(neg: false, coeff: 0, exp: 0),
+        f: dec_format128())
+    return r.words()
+
+### sqrt(x^2 + y^2 + z^2), correctly rounded.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param y_low: The low 64 bits of y.
+### :param y_high: The high 64 bits of y.
+### :param z_low: The z low.
+### :param z_high: The z high.
+### :returns: sqrt(x^2 + y^2 + z^2), correctly rounded.
+@export("ingrid_d128_hypot3")
+routine ingrid_d128_hypot3(x_low: U64, x_high: U64, y_low: U64, y_high: U64, z_low: U64,
+    z_high: U64) -> Words
+    r: Dec = dec_hypot(x: dec_halves(low: x_low, high: x_high),
+        y: dec_halves(low: y_low, high: y_high), z: dec_halves(low: z_low, high: z_high),
+        f: dec_format128())
+    return r.words()
+
+### x rounded to an integral value: mode 0 toward zero, 1 down, 2 up, 3 nearest with ties away from zero, 4 nearest with ties to even. A special, a zero, or a value without a fraction comes back as it is.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param mode: The rounding: 0 toward zero, 1 down, 2 up, 3 nearest with ties away, 4 nearest with ties to even.
+### :returns: x rounded to an integral value.
+@export("ingrid_d128_round_int")
+routine ingrid_d128_round_int(x_low: U64, x_high: U64, mode: U32) -> Words
+    d: Dec = dec_halves(low: x_low, high: x_high)
+
+    if dec_is_integral_as_is(d)
+        return dec_same_words(low: x_low, high: x_high)
+    return dec_round_int(x: d, mode, f: dec_format128()).words()
+
+### x rounded to `places` digits after the point by the rounding `mode` (5 half up, 4 to even, 3 away from zero, 1
+### down, 2 up, 0 toward zero). A special, a zero, or a value without a digit past that place comes back as it is.
+### :param x_low: The low 64 bits of the operand.
+### :param x_high: The high 64 bits of the operand.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The rounded value, in Words.
+@export("ingrid_d128_round_places")
+routine ingrid_d128_round_places(x_low: U64, x_high: U64, places: U64, mode: U32) -> Words
+    return dec_round_places(d: dec_halves(low: x_low, high: x_high), places, mode,
+        f: dec_format128()).words()
+
+### a with b's exponent, rounded half to even (NaN when that needs more than the digits there are). a comes back as it is when the exponents match or both are infinite.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: a with b's exponent, rounded half to even (NaN when that needs more than the digits there are).
+@export("ingrid_d128_quantize")
+routine ingrid_d128_quantize(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    x: Dec = dec_halves(low: a_low, high: a_high)
+    y: Dec = dec_halves(low: b_low, high: b_high)
+
+    if dec_is_quantize_identity(a: x, b: y)
+        return dec_same_words(low: a_low, high: a_high)
+    return dec_quantize(a: x, b: y, f: dec_format128()).words()
+
+### The remainder of a truncated division, exact, with a's sign: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The remainder of a truncated division, exact, with a's sign.
+@export("ingrid_d128_mod_trunc")
+routine ingrid_d128_mod_trunc(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    x: Dec = dec_halves(low: a_low, high: a_high)
+    y: Dec = dec_halves(low: b_low, high: b_high)
+
+    if dec_is_mod_identity(x, y)
+        return dec_same_words(low: a_low, high: a_high)
+    return dec_mod(x, y, near: false).words()
+
+### The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact: NaN for a NaN, an infinite a, or a zero b; a as it is for an infinite b.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The IEEE remainder a - n b, n the integer nearest a / b (ties to even), exact.
+@export("ingrid_d128_rem")
+routine ingrid_d128_rem(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    x: Dec = dec_halves(low: a_low, high: a_high)
+    y: Dec = dec_halves(low: b_low, high: b_high)
+
+    if dec_is_mod_identity(x, y)
+        return dec_same_words(low: a_low, high: a_high)
+    return dec_mod(x, y, near: true).words()
+
+### The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The simplest member of x's cohort (trailing zeros stripped, a zero with exponent 0); a special comes back as it is.
+@export("ingrid_d128_normalize")
+routine ingrid_d128_normalize(x_low: U64, x_high: U64) -> Words
+    d: Dec = dec_halves(low: x_low, high: x_high)
+
+    if d.is_finite()
+        return dec_normalize(x: d, f: dec_format128()).words()
+    return dec_same_words(low: x_low, high: x_high)
+
+### x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param n: The power of ten.
+### :returns: x × 10^n by the exponent alone (an infinity above the range, a zero below it); a special or a zero comes back as it is.
+@export("ingrid_d128_scaleb")
+routine ingrid_d128_scaleb(x_low: U64, x_high: U64, n: S64) -> Words
+    d: Dec = dec_halves(low: x_low, high: x_high)
+
+    if not d.is_finite() or d.coeff == 0
+        return dec_same_words(low: x_low, high: x_high)
+    return dec_scaleb(x: d, n, f: dec_format128()).words()
+
+### The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The exponent e with 10^e <= |x| < 10^(e + 1) (-infinity for a zero).
+@export("ingrid_d128_logb")
+routine ingrid_d128_logb(x_low: U64, x_high: U64) -> Words
+    r: Dec = dec_logb(x: dec_halves(low: x_low, high: x_high), f: dec_format128())
+    return r.words()
+
+### (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 34 digits with exp as the preferred exponent.
+### :param neg: 1 for a negative value, else 0.
+### :param c_low: The low 64 bits of c.
+### :param c_high: The high 64 bits of c.
+### :param exp: The exponent, also the preferred one.
+### :returns: (-1)^neg × coeff × 10^exp, coeff = c_high × 2^64 + c_low, rounded half to even to 34 digits with exp as the preferred exponent.
+@export("ingrid_d128_from_parts")
+routine ingrid_d128_from_parts(neg: U32, c_low: U64, c_high: U64, exp: S64) -> Words
+    c: U256 = (c_high.to[U256]() << 64) | c_low.to[U256]()
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: c, exp: exp, pref: exp),
+        f: dec_format128())
+    return r.words()
+
+### The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 34 digits, exponent 0 when it fits.
+### :param neg: 1 for a negative value, else 0.
+### :param m0: The lowest 64 bits of the magnitude.
+### :param m1: The next 64 bits.
+### :param m2: The next 64 bits.
+### :param m3: The highest 64 bits.
+### :returns: The integer (-1)^neg × (m3 m2 m1 m0, 64 bits each, m0 lowest), rounded half to even to 34 digits, exponent 0 when it fits.
+@export("ingrid_d128_from_integer")
+routine ingrid_d128_from_integer(neg: U32, m0: U64, m1: U64, m2: U64, m3: U64) -> Words
+    m: U256 = dec_u256(l0: m0, l1: m1, l2: m2, l3: m3)
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: m, exp: 0, pref: 0),
+        f: dec_format128())
+    return r.words()
+
+### x in the DPD interchange encoding.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: x in the DPD interchange encoding.
+@export("ingrid_d128_to_dpd")
+routine ingrid_d128_to_dpd(x_low: U64, x_high: U64) -> Words
+    bits: U128 = dec_to_dpd(x: dec_halves(low: x_low, high: x_high), width: 128)
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: 0, w3: 0)
+
+### The D128 whose DPD interchange encoding is high × 2^64 + low.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The D128 whose DPD interchange encoding is high × 2^64 + low.
+@export("ingrid_d128_from_dpd")
+routine ingrid_d128_from_dpd(low: U64, high: U64) -> Words
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from_dpd(bits, width: 128).words()
+
+### The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 34 digits and reduced.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The B128 high × 2^64 + low (a narrower binary float widened to B128 first, which is exact), rounded once to 34 digits and reduced.
+@export("ingrid_d128_from_binary")
+routine ingrid_d128_from_binary(low: U64, high: U64) -> Words
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_from_binary(bits, f: dec_format128()).words()
+
+### The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x: w0 the low 64 bits, w1 the high ones.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param which: The binary float's width in bits: 16, 32, 64, or 128.
+### :returns: The bits of the binary float of `which` bits (16, 32, 64, or 128) nearest x.
+@export("ingrid_d128_to_binary")
+routine ingrid_d128_to_binary(x_low: U64, x_high: U64, which: U32) -> Words
+    bits: U128 = dec_to_binary(x: dec_halves(low: x_low, high: x_high), which)
+    return (w0: bits.to_wrap[U64](), w1: (bits >> 64).to_wrap[U64](), w2: 0, w3: 0)
+
+# ── between the widths ────────────────────────────────────────────────────────────────────────────
+
+### A D32 as a D128 (exact).
+### :param x: The operand.
+### :returns: A D32 as a D128 (exact).
+@export("ingrid_d128_from_d32")
+routine ingrid_d128_from_d32(x: U32) -> Words
+    return dec_from32(x).words()
+
+### A D64 as a D128 (exact).
+### :param x: The operand.
+### :returns: A D64 as a D128 (exact).
+@export("ingrid_d128_from_d64")
+routine ingrid_d128_from_d64(x: U64) -> Words
+    return dec_from64(x).words()
+
+### A D32 as a D64 (exact).
+### :param x: The operand.
+### :returns: A D32 as a D64 (exact).
+@export("ingrid_d64_from_d32")
+routine ingrid_d64_from_d32(x: U32) -> U64
+    return dec_from32(x).narrow(dec_format64()).to64()
+
+### A D128 rounded half to even to 16 digits, its exponent kept when the digits allow.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: A D128 rounded half to even to 16 digits, its exponent kept when the digits allow.
+@export("ingrid_d64_from_d128")
+routine ingrid_d64_from_d128(x_low: U64, x_high: U64) -> U64
+    return dec_halves(low: x_low, high: x_high).narrow(dec_format64()).to64()
+
+### A D64 rounded half to even to 7 digits and reduced.
+### :param x: The operand.
+### :returns: A D64 rounded half to even to 7 digits and reduced.
+@export("ingrid_d32_from_d64")
+routine ingrid_d32_from_d64(x: U64) -> U32
+    d: Dec = dec_from64(x)
+    return dec_reduced(d, f: dec_format32()).to32()
+
+### A D128 rounded half to even to 7 digits and reduced.
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: A D128 rounded half to even to 7 digits and reduced.
+@export("ingrid_d32_from_d128")
+routine ingrid_d32_from_d128(x_low: U64, x_high: U64) -> U32
+    d: Dec = dec_halves(low: x_low, high: x_high)
+    return dec_reduced(d, f: dec_format32()).to32()
+
+# ── Decimal: D128's encoding, rounded the way Decimal rounds a tie (decimal_format), every result in Decimal's one
+# form (dec_normalized: no trailing zeros in the coefficient, a zero +0) ──────────────────────────────────────────
+
+### `a + b` rounded to 34 digits, a tie the way Decimal rounds one.
+### :param a_low: The low 64 bits of the first operand.
+### :param a_high: The high 64 bits of the first operand.
+### :param b_low: The low 64 bits of the second operand.
+### :param b_high: The high 64 bits of the second operand.
+### :returns: The sum, in Words.
+@export("ingrid_decimal_add")
+routine ingrid_decimal_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return dec_normalized(r).words()
+
+### `a / b` rounded to 34 digits, a tie the way Decimal rounds one: a nonzero value over zero is an infinity, zero
+### over zero a NaN.
+### :param a_low: The low 64 bits of the dividend.
+### :param a_high: The high 64 bits of the dividend.
+### :param b_low: The low 64 bits of the divisor.
+### :param b_high: The high 64 bits of the divisor.
+### :returns: The quotient, in Words.
+@export("ingrid_decimal_div")
+routine ingrid_decimal_div(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    r: Dec = dec_div(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), f: decimal_format())
+    return dec_normalized(r).words()
+
+### `a * b + c` rounded once to 34 digits, a tie the way Decimal rounds one.
+### :param a_low: The low 64 bits of the first factor.
+### :param a_high: The high 64 bits of the first factor.
+### :param b_low: The low 64 bits of the second factor.
+### :param b_high: The high 64 bits of the second factor.
+### :param c_low: The low 64 bits of the addend.
+### :param c_high: The high 64 bits of the addend.
+### :returns: The result, in Words.
+@export("ingrid_decimal_mul_add")
+routine ingrid_decimal_mul_add(a_low: U64, a_high: U64, b_low: U64, b_high: U64, c_low: U64,
+    c_high: U64) -> Words
+    r: Dec = dec_mul_add(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), c: dec_halves(low: c_low, high: c_high),
+        f: decimal_format())
+    return dec_normalized(r).words()
+
+### (-1)^neg × c × 10^exp rounded to 34 digits, a tie the way Decimal rounds one.
+### :param neg: 1 for a negative value, else 0.
+### :param c_low: The low 64 bits of the coefficient.
+### :param c_high: The high 64 bits of the coefficient.
+### :param exp: The exponent.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_parts")
+routine ingrid_decimal_from_parts(neg: U32, c_low: U64, c_high: U64, exp: S64) -> Words
+    c: U256 = (c_high.to[U256]() << 64) | c_low.to[U256]()
+    r: Dec = dec_finish(value: DecExact(neg: neg == 1, coeff: c, exp: exp, pref: exp),
+        f: decimal_format())
+    return dec_normalized(r).words()
+
+### An integer of up to 256 bits rounded to 34 digits, a tie the way Decimal rounds one.
+### :param neg: 1 for a negative integer, else 0.
+### :param m0: Bits 0 to 63 of the magnitude.
+### :param m1: Bits 64 to 127 of the magnitude.
+### :param m2: Bits 128 to 191 of the magnitude.
+### :param m3: Bits 192 to 255 of the magnitude.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_integer")
+routine ingrid_decimal_from_integer(neg: U32, m0: U64, m1: U64, m2: U64, m3: U64) -> Words
+    r: Dec = dec_of_integer(neg: neg == 1, magnitude: dec_u256(l0: m0, l1: m1, l2: m2, l3: m3),
+        f: decimal_format())
+    return dec_normalized(r).words()
+
+### A binary float (as B128 bits) rounded once to 34 digits and reduced, a tie the way Decimal rounds one.
+### :param low: The low 64 bits.
+### :param high: The high 64 bits.
+### :returns: The value, in Words.
+@export("ingrid_decimal_from_binary")
+routine ingrid_decimal_from_binary(low: U64, high: U64) -> Words
+    bits: U128 = (high.to[U128]() << 64) | low.to[U128]()
+    return dec_normalized(dec_from_binary(bits, f: decimal_format())).words()
+
+### x in Decimal's one form: no trailing zeros in the coefficient, a zero +0 at exponent 0 (a special as it is).
+### :param x_low: The low 64 bits of the operand.
+### :param x_high: The high 64 bits of the operand.
+### :returns: x in Decimal's one form, in Words.
+@export("ingrid_decimal_normalize")
+routine ingrid_decimal_normalize(x_low: U64, x_high: U64) -> Words
+    return dec_normalized(dec_halves(low: x_low, high: x_high)).words()
+
+### x rounded to `places` digits after the point by the rounding `mode` (5 half up, 4 to even, 3 away from zero, 1
+### down, 2 up, 0 toward zero), in Decimal's one form.
+### :param x_low: The low 64 bits of the operand.
+### :param x_high: The high 64 bits of the operand.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The rounded value, in Words.
+@export("ingrid_decimal_round_places")
+routine ingrid_decimal_round_places(x_low: U64, x_high: U64, places: U64, mode: U32) -> Words
+    d: Dec = dec_round_places(d: dec_halves(low: x_low, high: x_high), places, mode,
+        f: decimal_format())
+    return dec_normalized(d).words()
+
+### `a / b` rounded once to `places` digits after the point by the rounding `mode` (as ingrid_decimal_round_places
+### takes it), in Decimal's one form, for finite a and b with b nonzero: `w2` is 1 when the quotient at that place
+### needs more than 34 digits.
+### :param a_low: The low 64 bits of the dividend.
+### :param a_high: The high 64 bits of the dividend.
+### :param b_low: The low 64 bits of the divisor.
+### :param b_high: The high 64 bits of the divisor.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The quotient in Words, `w2` 1 when it doesn't fit.
+@export("ingrid_decimal_divide")
+routine ingrid_decimal_divide(a_low: U64, a_high: U64, b_low: U64, b_high: U64, places: U64,
+    mode: U32) -> Words
+    r: DecTry = dec_divide_places(a: dec_halves(low: a_low, high: a_high),
+        b: dec_halves(low: b_low, high: b_high), places, mode)
+    if not r.ok
+        return (w0: 0, w1: 0, w2: 1, w3: 0)
+    return dec_normalized(r.d).words()
+
+### The Euclidean remainder of Decimal values (0 <= r < |b|), exact, in Decimal's one form: `w2` 1 when it needs more than 34 digits, 2 when b is zero.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The remainder in Words, `w2` 1 when it doesn't fit and 2 for a zero b.
+@export("ingrid_decimal_rem")
+routine ingrid_decimal_rem(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high)
+    if b.is_zero()
+        return (w0: 0, w1: 0, w2: 2, w3: 0)
+    r: DecTry = dec_euclid_remainder(a, b)
+    if not r.ok
+        return (w0: 0, w1: 0, w2: 1, w3: 0)
+    return dec_normalized(r.d).words()
+
+### The square root rounded half up to 34 digits, in Decimal's one form (NaN for a negative number).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: The square root, in Words.
+@export("ingrid_decimal_sqrt")
+routine ingrid_decimal_sqrt(x_low: U64, x_high: U64) -> Words
+    return dec_normalized(dec_sqrt(x: dec_halves(low: x_low, high: x_high),
+        f: decimal_format())).words()
+
+### 1 / sqrt(x) rounded half up to 34 digits, in Decimal's one form (NaN for zero or a negative number).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :returns: 1 / sqrt(x), in Words.
+@export("ingrid_decimal_rsqrt")
+routine ingrid_decimal_rsqrt(x_low: U64, x_high: U64) -> Words
+    x: Dec = dec_halves(low: x_low, high: x_high)
+    if x.neg or x.coeff == 0
+        return dec_normalized(dec_nan()).words()
+    return dec_normalized(dec_rsqrt(x, f: decimal_format())).words()
+
+### sqrt(x^2 + y^2 + z^2) rounded half up to 34 digits, in Decimal's one form (z 0 for the two-value hypot).
+### :param x_low: The low 64 bits of x.
+### :param x_high: The high 64 bits of x.
+### :param y_low: The low 64 bits of y.
+### :param y_high: The high 64 bits of y.
+### :param z_low: The low 64 bits of z.
+### :param z_high: The high 64 bits of z.
+### :returns: The norm, in Words.
+@export("ingrid_decimal_hypot")
+routine ingrid_decimal_hypot(x_low: U64, x_high: U64, y_low: U64, y_high: U64, z_low: U64,
+    z_high: U64) -> Words
+    r: Dec = dec_hypot(x: dec_halves(low: x_low, high: x_high),
+        y: dec_halves(low: y_low, high: y_high), z: dec_halves(low: z_low, high: z_high),
+        f: decimal_format())
+    return dec_normalized(r).words()
+
+### a with b's exponent, a tie rounded half up, in Decimal's one form (NaN when that needs more than 34 digits).
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :returns: The value, in Words.
+@export("ingrid_decimal_quantize")
+routine ingrid_decimal_quantize(a_low: U64, a_high: U64, b_low: U64, b_high: U64) -> Words
+    x: Dec = dec_halves(low: a_low, high: a_high)
+    y: Dec = dec_halves(low: b_low, high: b_high)
+    if dec_is_quantize_identity(a: x, b: y)
+        return dec_normalized(x).words()
+    return dec_normalized(dec_quantize(a: x, b: y, f: decimal_format())).words()
+
+### `a + b` (op 0), `a - b` (op 1), or `a × b` (op 2) computed exactly, then rounded once to `places` digits after the
+### point by the rounding `mode` (as ingrid_decimal_round_places takes it), in Decimal's one form, for finite a and b:
+### `w2` is 1 when even the rounded value needs more than 34 digits.
+### :param op: 0 add, 1 subtract, 2 multiply.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :param places: The digits after the point kept.
+### :param mode: The rounding.
+### :returns: The result in Words, `w2` 1 when it doesn't fit.
+@export("ingrid_decimal_places_op")
+routine ingrid_decimal_places_op(op: U32, a_low: U64, a_high: U64, b_low: U64, b_high: U64,
+    places: U64, mode: U32) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high)
+    exact: DecExact = when op
+        0 => dec_sum(a, b)
+        1 => dec_sum(a, b: b.negate())
+        else => dec_product(a, b)
+    r: DecTry = dec_exact_places(value: exact, places, mode, f: decimal_format())
+    if not r.ok
+        return (w0: 0, w1: 0, w2: 1, w3: 0)
+    return dec_normalized(r.d).words()
+
+### `a + b` (op 0), `a - b` (op 1), `a × b` (op 2), or `a / b` (op 3, b nonzero) computed exactly, then rounded once to
+### the nearest value of at most 34 significant digits by the rounding `mode` (as ingrid_decimal_round_places takes it),
+### in Decimal's one form, for finite a and b: `w2` is 1 when the rounded value is past Decimal's range.
+### :param op: 0 add, 1 subtract, 2 multiply, 3 divide.
+### :param a_low: The low 64 bits of a.
+### :param a_high: The high 64 bits of a.
+### :param b_low: The low 64 bits of b.
+### :param b_high: The high 64 bits of b.
+### :param mode: The rounding.
+### :returns: The result in Words, `w2` 1 when it is out of range.
+@export("ingrid_decimal_sig_op")
+routine ingrid_decimal_sig_op(op: U32, a_low: U64, a_high: U64, b_low: U64, b_high: U64,
+    mode: U32) -> Words
+    a: Dec = dec_halves(low: a_low, high: a_high)
+    b: Dec = dec_halves(low: b_low, high: b_high)
+    exact: DecExact = when op
+        0 => dec_sum(a, b)
+        1 => dec_sum(a, b: b.negate())
+        2 => dec_product(a, b)
+        else => dec_quotient_exact(a, b)
+    r: DecTry = dec_exact_sig(value: exact, mode, f: decimal_format())
+    if not r.ok
+        return (w0: 0, w1: 0, w2: 1, w3: 0)
+    return dec_normalized(r.d).words()

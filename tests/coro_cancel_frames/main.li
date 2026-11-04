@@ -1,0 +1,84 @@
+# Revare coroutines (coro.li) without running one: the test makes a coroutine control block the running one
+# and works its cancellation shadow stack. Two frames push and pop in order, an unbalanced pop leaves the stack as
+# it is, and a pop of a hollow frame (which push never links) on the empty stack does nothing. It used to read the
+# hollow frame's link, since the empty stack's top is hollow too.
+
+module Ingrid/Runtime
+
+import Hosted
+
+# -- what coro.li calls in the rest of the runtime library -------------------------
+
+### The scheduler a coroutine was spawned on (sched.li): only named here, through the control block's `home`.
+record Sched
+    id: U64
+
+@external("c")
+@symbol("calloc")
+routine c_calloc(count: CSize, size: CSize) -> Addr
+
+@external("c")
+@symbol("free")
+routine c_free(ptr: Addr) -> None
+
+@external("c")
+@symbol("realloc")
+routine c_realloc(ptr: Addr, size: CSize) -> Addr
+
+### count zeroed Ts.
+routine zeroed[T](count: U64, what: CStrView) -> @T
+    p: Addr = c_calloc(count.to[CSize](), sizeof[T]().to[CSize]())
+    return p.to[@T]()
+
+@external("c")
+@symbol("exit")
+@noreturn
+routine exit(status: CInt) -> None
+
+@noreturn
+routine rf_throw(error_type: CStrView, message: CStrView) -> None
+    Console.show("rf_throw")
+    exit(1)
+
+routine rf_current_thread_id() -> U64
+    return 1
+
+# -- the shadow stack ----------------------------------------------------------------
+
+### The depth of the running coroutine's shadow stack.
+routine depth(coro: @Coro) -> U64
+    found: &U64 <- 0
+
+    until f.is_absent() with f: @CancelFrame? = coro.cf_top.peek().to[@CancelFrame?]()
+        (found.load() + 1).poke_into(found)
+        continue with f: f.unwrap().prev.peek()
+    then
+        return found.load()
+
+### Destroys nothing: the frames' values are never abandoned here.
+routine keep(value: Addr) -> None
+    return
+
+routine start() -> None
+    coro: @Coro = zeroed[Coro](count: 1, what: "coroutine")
+    first: &CancelFrame
+    second: &CancelFrame
+
+    CURRENT_CORO.store(coro.to[Addr]())
+    rf_coro_cf_pop(None())
+    Console.show("pop of a hollow frame on the empty stack: depth {depth(coro)}")
+    rf_coro_cf_push(frame_or_none: first, value_ptr: Addr.zero(), destroy_fn: keep.to[Callable]())
+    rf_coro_cf_push(frame_or_none: second, value_ptr: Addr.zero(), destroy_fn: keep.to[Callable]())
+    Console.show("after two pushes: depth {depth(coro)}")
+    rf_coro_cf_pop(first)
+    Console.show("after an unbalanced pop: depth {depth(coro)}")
+    rf_coro_cf_pop(None())
+    Console.show("after a pop of a hollow frame: depth {depth(coro)}")
+    rf_coro_cf_pop(second)
+    rf_coro_cf_pop(first)
+    Console.show("after both pops: depth {depth(coro)}")
+    rf_coro_cf_pop(None())
+    Console.show("pop of a hollow frame on the empty stack again: depth {depth(coro)}")
+    CURRENT_CORO.zeroinit(1)
+    c_free(coro)
+    return

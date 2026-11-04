@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-echo Building RazorForge Native Libraries...
+echo Building Revare Native Libraries...
 
 if not exist build mkdir build
 cd build
@@ -11,20 +11,20 @@ echo Configuring with CMake...
 REM Prefer the clang on PATH (CI installs LLVM 20 there; matches the toolchain
 REM the compiler itself shells out to). Fall back to the default LLVM install
 REM location for dev machines whose PATH lacks clang.
-set "RF_CLANG=clang"
-set "RF_CLANGXX=clang++"
+set "RA_CLANG=clang"
+set "RA_CLANGXX=clang++"
 where clang >nul 2>nul
 if %ERRORLEVEL% neq 0 (
-    set "RF_CLANG=C:/Program Files/LLVM/bin/clang.exe"
-    set "RF_CLANGXX=C:/Program Files/LLVM/bin/clang++.exe"
+    set "RA_CLANG=C:/Program Files/LLVM/bin/clang.exe"
+    set "RA_CLANGXX=C:/Program Files/LLVM/bin/clang++.exe"
 )
 
-REM TESSERA_DLL (set by the RazorForge build) is the Tessera builder that compiles ..\runtime-tessera; without it
-REM CMake looks for the checkout's own Tessera build.
-set "RF_TESSERA="
-if not "%TESSERA_DLL%"=="" set "RF_TESSERA=-DTESSERA_DLL=%TESSERA_DLL%"
+REM LAPILA_DLL (set by the Revare build) is the Lapila builder that compiles ..\runtime-lapila; without it
+REM CMake looks for the checkout's own Lapila build.
+set "RA_LAPILA="
+if not "%LAPILA_DLL%"=="" set "RA_LAPILA=-DLAPILA_DLL=%LAPILA_DLL%"
 
-cmake .. -G "Ninja" -DCMAKE_C_COMPILER="%RF_CLANG%" -DCMAKE_CXX_COMPILER="%RF_CLANGXX%" -DCMAKE_BUILD_TYPE=Release %RF_TESSERA%
+cmake .. -G "Ninja" -DCMAKE_C_COMPILER="%RA_CLANG%" -DCMAKE_CXX_COMPILER="%RA_CLANGXX%" -DCMAKE_BUILD_TYPE=Release %RA_LAPILA%
 
 if %ERRORLEVEL% neq 0 (
     echo CMake configuration failed!

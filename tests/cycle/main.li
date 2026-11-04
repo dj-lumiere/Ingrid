@@ -1,0 +1,162 @@
+# The cycle collector (ingrid_cyclic_collect) on one thread: a pass stops the world, which here has no other mutator.
+# Entities are nodes with one Roamed field. Their trace routine reports the field's header, their free routine says
+# which node the collector freed. A cycle held only by itself is freed whole. A cycle that something outside still
+# holds is left alone with its counts restored. An entity whose release was reported but which is no cycle is
+# dropped from the candidates without being freed. A weak observer keeps a collected entity's header as a
+# tombstone.
+#
+# roam.li calls routines of the Revare runtime library, defined here so the program links: the current agent's
+# id, the scheduler's yield, and the AccessManager's record of a wait (none of them runs on one thread).
+
+import Hosted
+
+### An entity: an id, and the header of the entity its one Roamed field holds (null for none).
+record Node
+    id: U64
+    child: Addr
+
+@export("rf_access_flow_id")
+routine stub_current_task_id() -> U64
+    return 1
+
+@export("rf_coro_yield")
+routine stub_coro_yield() -> None
+    return
+
+@export("rf_access_wait_begin")
+routine stub_access_wait_begin(lock: Addr, holder: @U64) -> None
+    return
+
+@export("rf_access_wait_end")
+routine stub_access_wait_end() -> None
+    return
+
+### The entity type's trace routine: hands the collector the header its Roamed field holds.
+routine trace_node(subject: Addr) -> None
+    node: @Node = subject.to[@Node]()
+    child: Addr = node.child.peek()
+    if child.is_hollow()
+        return
+    visit_child(child)
+    return
+
+### The entity type's collector free routine: reports which node went and frees it (its Roamed field is the
+### collector's to account for).
+routine free_node(subject: Addr) -> None
+    node: @Node = subject.to[@Node]()
+    id: U64 = node.id.peek()
+    Console.show("  freed node {id}")
+    manager: @MemoryManager = C_HEAP
+    deallocate(data: node, manager)
+    return
+
+### The entity type's destroy routine, for the last strong release.
+routine drop_node(subject: Addr) -> None
+    node: @Node = subject.to[@Node]()
+    id: U64 = node.id.peek()
+    Console.show("  destroyed node {id}")
+    manager: @MemoryManager = C_HEAP
+    deallocate(data: node, manager)
+    return
+
+### A new entity with one strong handle and no Roamed field yet, from the C heap as the runtime frees it.
+routine new_entity(id: U64) -> @RoamHeader
+    manager: @MemoryManager = C_HEAP
+
+    node: @Node = allocate[Node](count: 1, manager).to[@Node]().to[@Node]()
+    header: @RoamHeader = allocate[RoamHeader](count: 1,
+        manager).to[@RoamHeader]().to[@RoamHeader]()
+    id.poke_into(node.id)
+    node.child.zeroinit(1)
+    header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
+        holder_task: 0, depth: 0, state: 0, buffered_at: 0, trace_hook: trace_node.addr(),
+        free_hook: free_node.addr(), drop_hook: drop_node.addr(), shape_users: 0,
+        kept: Addr.zero()))
+    return header
+
+### Stores `target` in `owner`'s Roamed field, which holds one more strong handle to it.
+routine link(owner: @RoamHeader, target: @RoamHeader) -> None
+    node: @Node = owner.data.peek().to[@Node]()
+    roam_hold(target)
+    node.child.poke(target)
+    return
+
+routine collect_and_show(label: @[Byte]) -> None
+    freed: U64 = collect()
+    roots: U64 = ROOTS.count.peek()
+    Console.show("{label}: freed {freed}, candidates left {roots}")
+    return
+
+routine show_count(label: @[Byte], header: @RoamHeader) -> None
+    strong: U64 = roam_strong_count(header)
+    state: S32 = header.state.peek()
+    Console.show("{label}: strong {strong}, state {state}")
+    return
+
+### a <-> b, the program's own handles dropped: the pair is garbage.
+routine orphaned_cycle() -> None
+    Console.show("orphaned cycle")
+    a: @RoamHeader = new_entity(1)
+    b: @RoamHeader = new_entity(2)
+    link(owner: a, target: b)
+    link(owner: b, target: a)
+    roam_unhold(b)
+    roam_unhold(a)
+    collect_and_show("pass")
+    collect_and_show("second pass")
+    return
+
+### c <-> d with the program still holding d: nothing is freed and the counts come back. Once d's handle goes too,
+### the pair is freed.
+routine held_cycle() -> None
+    Console.show("held cycle")
+    c: @RoamHeader = new_entity(3)
+    d: @RoamHeader = new_entity(4)
+    link(owner: c, target: d)
+    link(owner: d, target: c)
+    roam_unhold(c)
+    collect_and_show("pass")
+    show_count(label: "c", header: c)
+    show_count(label: "d", header: d)
+    roam_unhold(d)
+    collect_and_show("after the last handle")
+    return
+
+### e -> f, no cycle: the candidate e is left alone. Releasing e destroys it the ordinary way.
+routine no_cycle() -> None
+    Console.show("no cycle")
+    e: @RoamHeader = new_entity(5)
+    f: @RoamHeader = new_entity(6)
+    link(owner: e, target: f)
+    roam_unhold(f)
+    roam_hold(e)
+    roam_unhold(e)
+    collect_and_show("pass")
+    show_count(label: "e", header: e)
+    show_count(label: "f", header: f)
+    roam_unhold(e)
+    roam_unhold(f)
+    return
+
+### g <-> h, observed weakly: collected, but g's header stays as a dead tombstone until the observer goes.
+routine observed_cycle() -> None
+    Console.show("observed cycle")
+    g: @RoamHeader = new_entity(7)
+    h: @RoamHeader = new_entity(8)
+    link(owner: g, target: h)
+    link(owner: h, target: g)
+    roam_observe(g)
+    roam_unhold(h)
+    roam_unhold(g)
+    collect_and_show("pass")
+    destroyed: Bool = roam_is_destroyed(g)
+    Console.show("g destroyed {destroyed}")
+    roam_unobserve(g)
+    return
+
+routine start() -> None
+    orphaned_cycle()
+    held_cycle()
+    no_cycle()
+    observed_cycle()
+    return

@@ -1,0 +1,299 @@
+# The decimal operations past + - * / (fused multiply-add, square root, hypot, rounding to an integer, quantize,
+# the remainders, normalize, scaleb, logb, DPD, the binary conversions, integers, and the narrowing conversions)
+# on operands shaped for the hard cases: coefficients next to powers of ten and halves, repeated digits, full
+# width; exponents near each other and near the ends of the range; infinities and NaNs now and then. Each line is
+# "width op a b c result" (BID bits as decimal integers, unused operands 0). decimal_ops.expected was checked line
+# by line against exact rational references in Python that follow Revare's rules (the preferred exponent of
+# each operation, function results reduced, the special cases of each).
+
+module Ingrid/Decimal/Check
+
+import Hosted
+import Ingrid/Abi
+import Ingrid/Decimal
+import Ingrid/Decimal/Exports
+import Random
+
+global STATE: &U64 <- 0x2545F4914F6CDD1D
+
+### The three operands' bits of one line (0 for an operand the operation doesn't take).
+record Operands
+    a: U128
+    b: U128
+    c: U128
+
+### The next word of the generator.
+### :returns: The next word.
+routine draw() -> U64
+    next: U64 = splitmix64(STATE.load())
+    next.poke_into(STATE)
+    return next
+
+### A coefficient of at most p digits, shaped for hard cases.
+### :param p: The digits of the format.
+### :returns: The coefficient.
+routine coefficient(p: S64) -> U128
+    r: U64 = draw()
+    s: U64 = draw()
+    t: U64 = draw()
+    kk: U64 = (r >> 8) % p.to[U64]()
+    k: S64 = kk.to[S64]() + 1
+    small: U128 = (s % 1000).to[U128]()
+    wide: U128 = (s.to[U128]() << 64) | t.to[U128]()
+
+    mode: U64 = r % 8
+    when mode
+        0 => return wide % dec_p10_128(k)
+        1 =>
+            m: U128 = dec_p10_128(k)
+            return m - 1 - small % m
+        2 =>
+            m: U128 = dec_p10_128(k - 1)
+            return m + small % m
+        3 =>
+            u: U128 = dec_p10_128(k - 1) * 5
+            up: Bool = t & 1 == 1
+            less: U128 = small.min(u)
+            if up
+                return u + small % u
+            else
+                return u - less
+        4 =>
+            m: U128 = dec_p10_128(p - 1)
+            span: U128 = m * 9
+            return m + wide % span
+        5 => return small + 1
+        6 => return 0
+        else =>
+            top: U128 = dec_p10_128(k) - 1
+            ones: U128 = top // 9
+            digit: U128 = (t % 9 + 1).to[U128]()
+            return ones * digit
+
+### An exponent for an operand of format f: near base, small, anywhere, or at an end of the range.
+### :param f: The format.
+### :param base: An exponent the operand is drawn near.
+### :returns: The exponent.
+routine exponent(f: DecFormat, base: S64) -> S64
+    r: U64 = draw()
+    span: U64 = (f.qmax - f.qmin + 1).to[U64]()
+
+    mode: U64 = r % 8
+    width: U64 = (f.digits * 2 + 11).to[U64]()
+    when mode
+        0, 1, 2 =>
+            k: S64 = ((r >> 8) % width).to[S64]()
+            e: S64 = base + (k - f.digits - 5)
+            return e.max(f.qmin).min(f.qmax)
+        3 =>
+            k: S64 = ((r >> 8) % 41).to[S64]()
+            return k - 20
+        4 => return f.qmin + ((r >> 8) % span).to[S64]()
+        5 => return f.qmin + ((r >> 8) % 40).to[S64]()
+        6 => return f.qmax - ((r >> 8) % 60).to[S64]()
+        else => return base
+
+### A finite operand most of the time, a special now and then.
+### :param f: The format.
+### :param base: An exponent the operand is drawn near.
+### :returns: The operand's bits.
+routine operand(f: DecFormat, base: S64) -> Dec
+    r: U64 = draw()
+    neg: Bool = r & 1 == 1
+
+    sel: U64 = (r >> 1) % 40
+    when sel
+        0 => return dec_inf(neg)
+        1 => return dec_nan()
+        else =>
+            c: U128 = coefficient(f.digits)
+            e: S64 = exponent(f, base)
+            return dec_num(neg, coeff: c, exp: e)
+
+### Prints one line.
+### :param width: The width in bits.
+### :param op: The operation's name.
+### :param operands: The operands' bits.
+### :param r: The result's bits.
+routine show(width: U64, op: @[Byte], operands: Operands, r: U128) -> None
+    a: U128 = operands.a
+    b: U128 = operands.b
+    c: U128 = operands.c
+    Console.show("{width} {op} {a} {b} {c} {r}")
+    return
+
+### The 128 bits a D128 export hands back in Words.
+### :param w: The words an export hands back.
+### :returns: The 128 bits.
+routine wbits(w: Words) -> U128
+    return (w.w1.to[U128]() << 64) | w.w0.to[U128]()
+
+### Prints the D64 lines.
+### :param n: The power.
+routine run64(n: U64) -> None
+    for i in 0 til n
+        f: DecFormat = dec_format64()
+        base: S64 = exponent(f, base: 0)
+        a: U64 = operand(f, base).to64()
+        b: U64 = operand(f, base).to64()
+        c: U64 = operand(f, base).to64()
+        mode: U32 = (draw() % 5).to[U32]()
+        kr: U64 = draw() % 60
+        k: S64 = kr.to[S64]() - 30
+        show(width: 64, op: "fma",
+            operands: Operands(a: a.to[U128](), b: b.to[U128](), c: c.to[U128]()),
+            r: ingrid_d64_mul_add(a, b, c).to[U128]())
+        show(width: 64, op: "sqrt", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_sqrt(a).to[U128]())
+        show(width: 64, op: "hypot", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d64_hypot(x: a, y: b).to[U128]())
+        show(width: 64, op: "hypot3",
+            operands: Operands(a: a.to[U128](), b: b.to[U128](), c: c.to[U128]()),
+            r: ingrid_d64_hypot3(x: a, y: b, z: c).to[U128]())
+        show(width: 64, op: "round_int",
+            operands: Operands(a: a.to[U128](), b: mode.to[U128](), c: 0),
+            r: ingrid_d64_round_int(x: a, mode).to[U128]())
+        show(width: 64, op: "quantize", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d64_quantize(a, b).to[U128]())
+        show(width: 64, op: "fmod", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d64_mod_trunc(a, b).to[U128]())
+        show(width: 64, op: "remainder", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d64_rem(a, b).to[U128]())
+        show(width: 64, op: "normalize", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_normalize(a).to[U128]())
+        kk: U128 = k.to_wrap[U64]().to[U128]()
+        show(width: 64, op: "scaleb", operands: Operands(a: a.to[U128](), b: kk, c: 0),
+            r: ingrid_d64_scaleb(x: a, n: k).to[U128]())
+        show(width: 64, op: "logb", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_logb(a).to[U128]())
+        show(width: 64, op: "to_dpd", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_to_dpd(a).to[U128]())
+        dpd: U64 = draw()
+        show(width: 64, op: "from_dpd", operands: Operands(a: dpd.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_from_dpd(dpd).to[U128]())
+        bin: U64 = draw()
+        b64: B64 = B64.from_bits(bin)
+        wide_bits: U128 = b64.to[B128]().bits()
+        lo: U64 = wide_bits.to_wrap[U64]()
+        hi: U64 = (wide_bits >> 64).to_wrap[U64]()
+        show(width: 64, op: "from_b64", operands: Operands(a: bin.to[U128](), b: 0, c: 0),
+            r: ingrid_d64_from_binary(low: lo, high: hi).to[U128]())
+        show(width: 64, op: "to_b64", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: wbits(ingrid_d64_to_binary(x: a, which: 64)))
+        show(width: 64, op: "to_b32", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: wbits(ingrid_d64_to_binary(x: a, which: 32)))
+        m0: U64 = draw()
+        m1: U64 = draw() >> (draw() % 64).to[U64]()
+        neg: U32 = (draw() & 1).to[U32]()
+        show(width: 64, op: "from_integer",
+            operands: Operands(a: neg.to[U128](), b: m0.to[U128](), c: m1.to[U128]()),
+            r: ingrid_d64_from_integer(neg, m0, m1, m2: 0, m3: 0).to[U128]())
+        show(width: 64, op: "to_d32", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d32_from_d64(a).to[U128]())
+    then
+        return
+
+### Prints the D32 lines.
+### :param n: The power.
+routine run32(n: U64) -> None
+    for i in 0 til n
+        f: DecFormat = dec_format32()
+        base: S64 = exponent(f, base: 0)
+        a: U32 = operand(f, base).to32()
+        b: U32 = operand(f, base).to32()
+        c: U32 = operand(f, base).to32()
+        mode: U32 = (draw() % 5).to[U32]()
+        show(width: 32, op: "fma",
+            operands: Operands(a: a.to[U128](), b: b.to[U128](), c: c.to[U128]()),
+            r: ingrid_d32_mul_add(a, b, c).to[U128]())
+        show(width: 32, op: "sqrt", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d32_sqrt(a).to[U128]())
+        show(width: 32, op: "hypot", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d32_hypot(x: a, y: b).to[U128]())
+        show(width: 32, op: "round_int",
+            operands: Operands(a: a.to[U128](), b: mode.to[U128](), c: 0),
+            r: ingrid_d32_round_int(x: a, mode).to[U128]())
+        show(width: 32, op: "quantize", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d32_quantize(a, b).to[U128]())
+        show(width: 32, op: "fmod", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d32_mod_trunc(a, b).to[U128]())
+        show(width: 32, op: "remainder", operands: Operands(a: a.to[U128](), b: b.to[U128](), c: 0),
+            r: ingrid_d32_rem(a, b).to[U128]())
+        show(width: 32, op: "to_dpd", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: ingrid_d32_to_dpd(a).to[U128]())
+        dpd: U32 = draw().to_wrap[U32]()
+        show(width: 32, op: "from_dpd", operands: Operands(a: dpd.to[U128](), b: 0, c: 0),
+            r: ingrid_d32_from_dpd(dpd).to[U128]())
+        show(width: 32, op: "to_b16", operands: Operands(a: a.to[U128](), b: 0, c: 0),
+            r: wbits(ingrid_d32_to_binary(x: a, which: 16)))
+        bin: U32 = draw().to_wrap[U32]()
+        b32: B32 = B32.from_bits(bin)
+        wide_bits: U128 = b32.to[B128]().bits()
+        lo: U64 = wide_bits.to_wrap[U64]()
+        hi: U64 = (wide_bits >> 64).to_wrap[U64]()
+        show(width: 32, op: "from_b32", operands: Operands(a: bin.to[U128](), b: 0, c: 0),
+            r: ingrid_d32_from_binary(low: lo, high: hi).to[U128]())
+    then
+        return
+
+### Prints the D128 lines.
+### :param n: The power.
+routine run128(n: U64) -> None
+    for i in 0 til n
+        f: DecFormat = dec_format128()
+        base: S64 = exponent(f, base: 0)
+        a: U128 = operand(f, base).to128()
+        b: U128 = operand(f, base).to128()
+        c: U128 = operand(f, base).to128()
+        al: U64 = a.to_wrap[U64]()
+        ah: U64 = (a >> 64).to_wrap[U64]()
+        bl: U64 = b.to_wrap[U64]()
+        bh: U64 = (b >> 64).to_wrap[U64]()
+        cl: U64 = c.to_wrap[U64]()
+        ch: U64 = (c >> 64).to_wrap[U64]()
+        mode: U32 = (draw() % 5).to[U32]()
+        show(width: 128, op: "fma", operands: Operands(a: a, b: b, c: c),
+            r: wbits(ingrid_d128_mul_add(a_low: al, a_high: ah, b_low: bl, b_high: bh, c_low: cl, c_high: ch)))
+        show(width: 128, op: "sqrt", operands: Operands(a: a, b: 0, c: 0),
+            r: wbits(ingrid_d128_sqrt(x_low: al, x_high: ah)))
+        show(width: 128, op: "hypot", operands: Operands(a: a, b: b, c: 0),
+            r: wbits(ingrid_d128_hypot(x_low: al, x_high: ah, y_low: bl, y_high: bh)))
+        show(width: 128, op: "hypot3", operands: Operands(a: a, b: b, c: c),
+            r: wbits(ingrid_d128_hypot3(x_low: al, x_high: ah, y_low: bl, y_high: bh, z_low: cl, z_high: ch)))
+        show(width: 128, op: "round_int", operands: Operands(a: a, b: mode.to[U128](), c: 0),
+            r: wbits(ingrid_d128_round_int(x_low: al, x_high: ah, mode)))
+        show(width: 128, op: "quantize", operands: Operands(a: a, b: b, c: 0),
+            r: wbits(ingrid_d128_quantize(a_low: al, a_high: ah, b_low: bl, b_high: bh)))
+        show(width: 128, op: "fmod", operands: Operands(a: a, b: b, c: 0),
+            r: wbits(ingrid_d128_mod_trunc(a_low: al, a_high: ah, b_low: bl, b_high: bh)))
+        show(width: 128, op: "remainder", operands: Operands(a: a, b: b, c: 0),
+            r: wbits(ingrid_d128_rem(a_low: al, a_high: ah, b_low: bl, b_high: bh)))
+        show(width: 128, op: "to_dpd", operands: Operands(a: a, b: 0, c: 0),
+            r: wbits(ingrid_d128_to_dpd(x_low: al, x_high: ah)))
+        show(width: 128, op: "to_b128", operands: Operands(a: a, b: 0, c: 0),
+            r: wbits(ingrid_d128_to_binary(x_low: al, x_high: ah, which: 128)))
+        show(width: 128, op: "to_b64", operands: Operands(a: a, b: 0, c: 0),
+            r: wbits(ingrid_d128_to_binary(x_low: al, x_high: ah, which: 64)))
+        show(width: 128, op: "to_d64", operands: Operands(a: a, b: 0, c: 0),
+            r: ingrid_d64_from_d128(x_low: al, x_high: ah).to[U128]())
+        show(width: 128, op: "to_d32", operands: Operands(a: a, b: 0, c: 0),
+            r: ingrid_d32_from_d128(x_low: al, x_high: ah).to[U128]())
+        bl2: U64 = draw()
+        bh2: U64 = draw()
+        show(width: 128, op: "from_b128",
+            operands: Operands(a: (bh2.to[U128]() << 64) | bl2.to[U128](), b: 0, c: 0),
+            r: wbits(ingrid_d128_from_binary(low: bl2, high: bh2)))
+        bin: U64 = draw()
+        b64: B64 = B64.from_bits(bin)
+        wide_bits: U128 = b64.to[B128]().bits()
+        show(width: 128, op: "from_b64", operands: Operands(a: bin.to[U128](), b: 0, c: 0),
+            r: wbits(ingrid_d128_from_binary(low: wide_bits.to_wrap[U64](), high: (wide_bits >> 64).to_wrap[U64]())))
+    then
+        return
+
+### Prints the lines.
+routine start() -> None
+    run64(300)
+    run32(300)
+    run128(200)
+    return

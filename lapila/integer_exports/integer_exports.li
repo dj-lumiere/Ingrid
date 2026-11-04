@@ -1,0 +1,432 @@
+# The arbitrary-precision Int routines Revare and Mielia call. A value crosses the C ABI as its parts: an Int as
+# (neg, len, tab), a sign as a U64 (1 when negative), `tab` the little-endian limbs. The caller allocates and frees
+# every buffer: the inputs, the result buffer `out` (`out_cap` limbs, or characters for text), and `scratch`
+# (`scratch_cap` limbs), the room the engine takes its temporaries from (integer/scratch.li). The engine allocates
+# nothing. Each routine that takes scratch has a `_scratch_size` routine that says how much to hand over.
+#
+# A result comes back in Words. `w0` is the status: 0 done, 1 the scratch was too small (`w1` is the room the call needs
+# at least: retry with more), 2 the result buffer was too small (`w1` is the limbs or characters it needs: retry with
+# that). When done, an Int is `w1` limbs long and negative when `w2` is 1. Failures that throw in the caller's
+# language (a division by zero) are the caller's to check.
+
+module Ingrid/Integer/Exports
+
+import Ingrid/Abi
+import Ingrid/Integer
+
+# ── the call protocol ─────────────────────────────────────────────────────────────────────────────
+
+### An engine integer from its parts as they cross the C ABI. A zero is never negative, whatever sign word a caller passes
+### with no limbs: the engine assumes a zero is positive.
+### :param neg: 1 when negative.
+### :param len: The limbs.
+### :param tab: The first limb.
+### :returns: The value.
+@inline
+routine abi_intv(neg: U64, len: U64, tab: @U64) -> IntV
+    return (neg: neg != 0 and len != 0, len: len, tab: tab)
+
+### The words of a status other than done: 1 (scratch) or 2 (result buffer), with the room needed.
+### :param status: 1 or 2.
+### :param need: The room needed.
+### :returns: The words.
+@inline
+routine words_need(status: U64, need: U64) -> Words
+    return (w0: status, w1: need, w2: 0, w3: 0)
+
+### Closes the call's scratch arena and hands back integer result `r` in `out`.
+### :param r: The result.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The call's arena.
+### :returns: The words of the call.
+routine integer_done(r: IntV, out: @U64, out_cap: U64, scratch: @Arena) -> Words
+    need: U64 = scratch.close()
+    if need != 0
+        return words_need(status: 1, need)
+    if r.len > out_cap
+        return words_need(status: 2, need: r.len)
+    limbs_copy(dst: out, src: r.tab, n: r.len)
+    return (w0: 0, w1: r.len, w2: bit_of(flag: r.neg), w3: 0)
+
+# ── Int ───────────────────────────────────────────────────────────────────────────────────────────
+
+### a + b into `out` (at least max(a_len, b_len) + 1 limbs). Takes no scratch.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_add")
+routine ingrid_integer_add(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+    a: IntV = abi_intv(neg: a_neg, len: a_len, tab: a_tab)
+    b: IntV = abi_intv(neg: b_neg, len: b_len, tab: b_tab)
+    cap: U64 = bigint_add_capacity(a, b)
+    if out_cap < cap
+        return words_need(status: 2, need: cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_add_into(a, b, r: out), out, out_cap, scratch: arena)
+
+### a * b.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_mul")
+routine ingrid_integer_mul(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_mul(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
+
+### The scratch `integer_mul` takes for a_len x b_len limbs.
+### :param a_len: a's limbs.
+### :param b_len: b's limbs.
+### :returns: The scratch limbs.
+@export("ingrid_integer_mul_scratch_size")
+routine ingrid_integer_mul_scratch_size(a_len: U64, b_len: U64) -> U64
+    return bigint_mul_scratch(a_len, b_len)
+
+### The Euclidean quotient and remainder of a / b (b nonzero): the quotient into `q_out`, the remainder (never negative)
+### into `r_out`. Done: `w1` the quotient's length, `w2` its sign, `w3` the remainder's length. Status 2: `w1` and `w2` the
+### quotient's and the remainder's lengths needed.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param q_out: The quotient buffer.
+### :param q_cap: Its limbs.
+### :param r_out: The remainder buffer.
+### :param r_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status, the lengths and the quotient's sign.
+@export("ingrid_integer_divmod")
+routine ingrid_integer_divmod(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64,
+    b_tab: @U64, q_out: @U64, q_cap: U64, r_out: @U64, r_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    q, r = bigint_divmod(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), scratch: arena)
+    need: U64 = arena.close()
+    if need != 0
+        return words_need(status: 1, need)
+    if q.len > q_cap or r.len > r_cap
+        return (w0: 2, w1: q.len, w2: r.len, w3: 0)
+    limbs_copy(dst: q_out, src: q.tab, n: q.len)
+    limbs_copy(dst: r_out, src: r.tab, n: r.len)
+    return (w0: 0, w1: q.len, w2: bit_of(flag: q.neg), w3: r.len)
+
+### The scratch `integer_divmod` takes dividing a_len limbs by b_len.
+### :param a_len: a's limbs.
+### :param b_len: b's limbs.
+### :returns: The scratch limbs.
+@export("ingrid_integer_divmod_scratch_size")
+routine ingrid_integer_divmod_scratch_size(a_len: U64, b_len: U64) -> U64
+    return bigint_divmod_scratch(a_len, b_len)
+
+### a * 2^bits into `out` (at least a_len + bits / 64 + 1 limbs). Takes no scratch.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param bits: The shift.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_shift_left")
+routine ingrid_integer_shift_left(a_neg: U64, a_len: U64, a_tab: @U64, bits: U64, out: @U64,
+    out_cap: U64) -> Words
+    a: IntV = abi_intv(neg: a_neg, len: a_len, tab: a_tab)
+    cap: U64 = bigint_shl_capacity(a, bits)
+    if out_cap < cap
+        return words_need(status: 2, need: cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_shl_into(a, bits, r: out), out, out_cap, scratch: arena)
+
+### floor(a / 2^bits), the arithmetic shift of the two's-complement form, into `out` (at least a_len - bits / 64 + 1
+### limbs, and 1). Takes no scratch.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param bits: The shift.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_shift_right")
+routine ingrid_integer_shift_right(a_neg: U64, a_len: U64, a_tab: @U64, bits: U64, out: @U64,
+    out_cap: U64) -> Words
+    a: IntV = abi_intv(neg: a_neg, len: a_len, tab: a_tab)
+    cap: U64 = bigint_shr_capacity(a, bits)
+    if out_cap < cap
+        return words_need(status: 2, need: cap)
+    arena: &Arena <- .construct(base: out, limbs: 0)
+    return integer_done(r: bigint_shr_into(a, bits, r: out), out, out_cap, scratch: arena)
+
+### One two's-complement bitwise operation (0 AND, 1 OR, 2 XOR) into `out`.
+### :param a: The first value.
+### :param b: The second value.
+### :param op: 0, 1 or 2.
+### :param out: The result buffer, as many limbs as it has.
+### :returns: The status and the result's length and sign.
+routine integer_bitop(a: IntV, b: IntV, op: U64, out: @[U64]) -> Words
+    cap: U64 = bigint_bitop_capacity(a, b)
+    if out.count() < cap
+        return words_need(status: 2, need: cap)
+    arena: &Arena <- .construct(base: out.to[@U64](), limbs: 0)
+    return integer_done(r: bigint_bitop_into(a, b, op, r: out.to[@U64]()), out: out.to[@U64](),
+        out_cap: out.count(), scratch: arena)
+
+### a AND b over the two's-complement forms, into `out` (at least max(a_len, b_len) + 1 limbs). Takes no scratch.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_and")
+routine ingrid_integer_and(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+    return integer_bitop(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), op: 0,
+        out: limbs_span(tab: out, n: out_cap))
+
+### a OR b over the two's-complement forms, like `integer_and`.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_or")
+routine ingrid_integer_or(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+    return integer_bitop(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), op: 1,
+        out: limbs_span(tab: out, n: out_cap))
+
+### a XOR b over the two's-complement forms, like `integer_and`.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_xor")
+routine ingrid_integer_xor(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64, b_tab: @U64,
+    out: @U64, out_cap: U64) -> Words
+    return integer_bitop(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab), op: 2,
+        out: limbs_span(tab: out, n: out_cap))
+
+### a^e by square and multiply (0^0 = 1).
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param e: The exponent.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_pow")
+routine ingrid_integer_pow(a_neg: U64, a_len: U64, a_tab: @U64, e: U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_pow(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), e, scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
+
+### The scratch `integer_pow` takes for an a_len-limb base of `a_bits` significant bits and exponent `e`.
+### :param a_len: a's limbs.
+### :param a_bits: a's significant bits.
+### :param e: The exponent.
+### :returns: The scratch limbs.
+@export("ingrid_integer_pow_scratch_size")
+routine ingrid_integer_pow_scratch_size(a_len: U64, a_bits: U64, e: U64) -> U64
+    return bigint_pow_scratch(a_len, bits: a_bits, e)
+
+### floor(sqrt(a)) of a non-negative a.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_sqrt")
+routine ingrid_integer_sqrt(a_len: U64, a_tab: @U64, out: @U64, out_cap: U64, scratch: @U64,
+    scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_isqrt(a: abi_intv(neg: 0, len: a_len, tab: a_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
+
+### s = floor(sqrt(a)) into `s_out` and a - s*s into `r_out`, for a non-negative a. Done: `w1` the root's length, `w3` the
+### remainder's. Status 2: `w1` and `w2` the root's and the remainder's lengths needed.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param s_out: The root buffer.
+### :param s_cap: Its limbs.
+### :param r_out: The remainder buffer.
+### :param r_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the lengths.
+@export("ingrid_integer_sqrtrem")
+routine ingrid_integer_sqrtrem(a_len: U64, a_tab: @U64, s_out: @U64, s_cap: U64, r_out: @U64,
+    r_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    a: IntV = abi_intv(neg: 0, len: a_len, tab: a_tab)
+    s: IntV = bigint_isqrt(a, scratch: arena)
+    r: IntV = bigint_sub(a, b: bigint_mul(a: s, b: s, scratch: arena), scratch: arena)
+    need: U64 = arena.close()
+    if need != 0
+        return words_need(status: 1, need)
+    if s.len > s_cap or r.len > r_cap
+        return (w0: 2, w1: s.len, w2: r.len, w3: 0)
+    limbs_copy(dst: s_out, src: s.tab, n: s.len)
+    limbs_copy(dst: r_out, src: r.tab, n: r.len)
+    return (w0: 0, w1: s.len, w2: 0, w3: r.len)
+
+### The scratch `integer_sqrt` and `integer_sqrtrem` take for an a_len-limb value.
+### :param a_len: a's limbs.
+### :returns: The scratch limbs.
+@export("ingrid_integer_sqrt_scratch_size")
+routine ingrid_integer_sqrt_scratch_size(a_len: U64) -> U64
+    return bigint_isqrt_scratch(a_len)
+
+### gcd(|a|, |b|), with gcd(0, 0) = 0.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_gcd")
+routine ingrid_integer_gcd(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64,
+    out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_gcd(a: abi_intv(neg: 0, len: a_len, tab: a_tab),
+        b: abi_intv(neg: 0, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
+
+### lcm(|a|, |b|), 0 when either is 0.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the result's length and sign.
+@export("ingrid_integer_lcm")
+routine ingrid_integer_lcm(a_len: U64, a_tab: @U64, b_len: U64, b_tab: @U64, out: @U64,
+    out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    r: IntV = bigint_lcm(a: abi_intv(neg: 0, len: a_len, tab: a_tab),
+        b: abi_intv(neg: 0, len: b_len, tab: b_tab), scratch: arena)
+    return integer_done(r, out, out_cap, scratch: arena)
+
+### The scratch `integer_gcd` and `integer_lcm` take for a_len and b_len limbs.
+### :param a_len: a's limbs.
+### :param b_len: b's limbs.
+### :returns: The scratch limbs.
+@export("ingrid_integer_gcd_scratch_size")
+routine ingrid_integer_gcd_scratch_size(a_len: U64, b_len: U64) -> U64
+    return bigint_gcd_scratch(a_len, b_len) +% bigint_mul_scratch(a_len, b_len)
+
+### -1, 0 or 1 as a is below, equal to or above b.
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param b_neg: 1 when b is negative.
+### :param b_len: b's limbs.
+### :param b_tab: b's first limb.
+### :returns: -1, 0 or 1.
+@export("ingrid_integer_compare")
+routine ingrid_integer_compare(a_neg: U64, a_len: U64, a_tab: @U64, b_neg: U64, b_len: U64,
+    b_tab: @U64) -> S64
+    return bigint_cmp(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab),
+        b: abi_intv(neg: b_neg, len: b_len, tab: b_tab))
+
+### The most characters `integer_to_text` writes for an a_len-limb value in `radix` (2 to 64).
+### :param a_len: a's limbs.
+### :param radix: The radix.
+### :returns: The characters.
+@export("ingrid_integer_text_capacity")
+routine ingrid_integer_text_capacity(a_len: U64, radix: U64) -> U64
+    return bigint_text_capacity(len: a_len, radix)
+
+### `a` in `radix` (2 to 64) into the characters at `out`: an optional '-' then the digits (0-9, A-Z, a-z, '+', '/'), "0"
+### for zero. Takes a_len limbs of scratch. Done: `w1` the character count. Status 2: `w1` the characters needed
+### (`integer_text_capacity`).
+### :param a_neg: 1 when a is negative.
+### :param a_len: a's limbs.
+### :param a_tab: a's first limb.
+### :param radix: The radix.
+### :param out: The characters, one code point each.
+### :param out_cap: Their count.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status and the character count.
+@export("ingrid_integer_to_text")
+routine ingrid_integer_to_text(a_neg: U64, a_len: U64, a_tab: @U64, radix: U64, out: @U32,
+    out_cap: U64, scratch: @U64, scratch_cap: U64) -> Words
+    cap: U64 = bigint_text_capacity(len: a_len, radix)
+    if out_cap < cap
+        return words_need(status: 2, need: cap)
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    count: U64 = bigint_to_text_into(a: abi_intv(neg: a_neg, len: a_len, tab: a_tab), radix, out,
+        scratch: arena)
+    need: U64 = arena.close()
+    if need != 0
+        return words_need(status: 1, need)
+    return (w0: 0, w1: count, w2: 0, w3: 0)
+
+### Reads the `count` characters at `chars` in `radix` (2 to 64): an optional leading '-', then digits up to the first
+### character outside the radix, where the text must end or hold a '\r' or '\n'. Empty digits read as 0. Takes
+### count * 6 / 64 + 2 limbs of scratch and of result. Done: the value as for an Int, and `w3` 1 when the text is an integer
+### (0 when it isn't, the value then meaning nothing).
+### :param chars: The code points.
+### :param count: Their count.
+### :param radix: The radix.
+### :param out: The result buffer.
+### :param out_cap: Its limbs.
+### :param scratch: The scratch buffer.
+### :param scratch_cap: Its limbs.
+### :returns: The status, the value and whether the text was an integer.
+@export("ingrid_integer_parse")
+routine ingrid_integer_parse(chars: @U32, count: U64, radix: U64, out: @U64, out_cap: U64,
+    scratch: @U64, scratch_cap: U64) -> Words
+    arena: &Arena <- .construct(base: scratch, limbs: scratch_cap)
+    value, ok = bigint_parse(chars: @[U32].construct(data: chars, count), radix, scratch: arena)
+    w: Words = integer_done(r: value, out, out_cap, scratch: arena)
+    if w.w0 != 0
+        return w
+    return (w0: 0, w1: w.w1, w2: w.w2, w3: bit_of(flag: ok))

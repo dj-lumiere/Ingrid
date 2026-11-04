@@ -1,0 +1,621 @@
+# The runtime behind a Roamed entity, shared by the Revare and Mielia standard libraries: the reference count,
+# the one-way promotion to unbroken counting when the entity reaches another task, the task-keyed reentrant lock, weak
+# observers, and the candidate reports to the cycle collector. Each language keeps a thin generic wrapper
+# (Revare's `RoamManager[T]`) whose methods call these routines on the controller's address.
+#
+# The cycle collector itself, with its buffers and the world lock, is in cycle.li. The only native calls left are
+# the runtime's own: the agent running now and yielding (the scheduler's), and the AccessManager, which records a
+# wait for the lock and looks for pieces of work that wait on each other.
+
+import Collections
+import Hosted
+
+### The state every handle to one Roamed entity shares. The layout is the one Revare's `RoamManager[T]`
+### entity has, field for field (a test compares the two), so the generic wrapper passes its own address here.
+record RoamHeader
+    ### Strong handles. Plain while the entity is local to its task, unbroken once escaped.
+    count: U64
+    ### Weak observers. They keep the header (as a tombstone) alive, not the entity.
+    weak: U64
+    ### 1 once the entity's data has been freed, by the last strong release or by the cycle collector.
+    dead: U8
+    ### 1 once the entity has reached another task. Flipped once, never back.
+    escaped: U8
+    ### The entity.
+    data: Addr
+    ### The exclusive lock (0 free, 1 held). Used only once escaped.
+    locked: U8
+    ### The agent holding the lock (its AccessManager id), 0 when free. Keyed to the agent, not the thread, since
+    ### agents migrate.
+    holder_task: U64
+    ### How many times the holder has entered the lock.
+    depth: U64
+    ### The cycle collector's mark for this entity (LIVE, SCANNING, GARBAGE, SUSPECTED).
+    state: S32
+    ### Where this header sits in the collector's candidate buffer, as its index plus one, or 0 when it is not in the
+    ### buffer. Removing it then needs no search.
+    buffered_at: U32
+    ### The entity type's trace routine (visits its Roamed fields), or null for a type that cannot form a cycle.
+    trace_hook: Addr
+    ### The entity type's collector free routine (tears down its fields other than Roamed ones, frees it).
+    free_hook: Addr
+    ### The entity type's destroy routine, run when the last strong handle goes.
+    drop_hook: Addr
+    ### How many loops and element accesses are using the entity's element positions (Mielia's shape use).
+    shape_users: U64
+    ### The header of another entity this one keeps alive (one strong handle to it), or 0. An emitter adapter keeps
+    ### the collection it walks this way, wherever the adapter is stored. The last strong release lets it go.
+    kept: Addr
+
+### Makes a `RoamHeader` from its fields.
+### :param count: Its `count`.
+### :param weak: Its `weak`.
+### :param dead: Its `dead`.
+### :param escaped: Its `escaped`.
+### :param data: Its `data`.
+### :param locked: Its `locked`.
+### :param holder_task: Its `holder_task`.
+### :param depth: Its `depth`.
+### :param state: Its `state`.
+### :param buffered_at: Its `buffered_at`.
+### :param trace_hook: Its `trace_hook`.
+### :param free_hook: Its `free_hook`.
+### :param drop_hook: Its `drop_hook`.
+### :param shape_users: Its `shape_users`.
+### :param kept: Its `kept`.
+### :returns: The new value.
+common routine RoamHeader.construct(count: U64, weak: U64, dead: U8, escaped: U8, data: Addr,
+    locked: U8, holder_task: U64, depth: U64, state: S32, buffered_at: U32, trace_hook: Addr,
+    free_hook: Addr, drop_hook: Addr, shape_users: U64, kept: Addr) -> Me
+    return Me(count, weak, dead, escaped, data, locked, holder_task, depth, state, buffered_at,
+        trace_hook, free_hook, drop_hook, shape_users, kept)
+
+# ── The task scheduler (native) ──────────────────────────────────────────
+
+### The id of the agent running now, the AccessManager's (the runtime library's): what the lock keeps of its holder.
+### :returns: The current agent's id.
+@external("c")
+@symbol("rf_access_flow_id")
+secret routine current_task_id() -> U64
+
+### Records with the AccessManager that the running agent waits for the lock at `lock`, whose holder's id `holder`
+### keeps, and looks for a deadlock when the program's check is on.
+### :param lock: The entity's header.
+### :param holder: Its `holder_task`.
+### :throws: Crashes with `DeadlockError` when pieces of work wait on each other.
+@external("c")
+@symbol("rf_access_wait_begin")
+secret routine access_wait_begin(lock: Addr, holder: @U64) -> None
+
+### Records with the AccessManager that the running agent no longer waits.
+@external("c")
+@symbol("rf_access_wait_end")
+secret routine access_wait_end() -> None
+
+### Yields the running task to the native scheduler, so another task can run on this worker.
+@external("c")
+@symbol("rf_coro_yield")
+secret routine coro_yield() -> None
+
+### Frees a header's memory. Controllers are allocated from the C heap (calloc), which the heap memory manager frees.
+### :param header: The header to free.
+routine free_header_memory(header: @RoamHeader) -> None
+    manager: @MemoryManager = C_HEAP
+
+    deallocate(data: header, manager)
+    return
+
+# ── Reference counting ─────────────────────────────────────────────────────
+
+### How many destroy_entity calls are nested on this thread. Past DESTROY_NEST_LIMIT a destroy waits in DESTROY_QUEUE for
+### the call at the bottom, so a chain of a million entities ends in a loop and not in a million nested calls.
+@threadlocal
+global DESTROY_NEST: &U64
+
+### The headers whose last strong handle went too deep in the nesting, linked through their `depth` field (an entity with no
+### strong handle left has no holder of its lock), the next one to destroy first. Null when none waits.
+@threadlocal
+global DESTROY_QUEUE: &Addr
+
+### How many destroys may nest before the next one waits. A destroy and the drop hook it runs take a few frames, so this
+### keeps the deepest nesting to a small part of the stack.
+preset DESTROY_NEST_LIMIT: U64 = 256
+
+### Adds a strong handle. The count changes inside the collector's shared lock, so a collection pass (which
+### adjusts counts while it traces) never races it.
+### :param header: The entity's header.
+@export("ingrid_roam_hold")
+@inline
+routine roam_hold(header: @RoamHeader) -> None
+    world_enter()
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.count.fetch_add_unbroken(1)
+    else
+        next_count: U64 = header.count.peek() + 1
+        next_count.poke_into(header.count)
+    world_leave()
+    return
+
+### Drops a strong handle. The last one destroys the entity (deterministic teardown) and frees the header unless a
+### weak observer still holds it. Any other release reports the entity to the cycle collector as a possible root.
+### All of it runs inside the collector's shared lock, so a pass never frees a header it is tracing.
+### :param header: The entity's header.
+### :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity's count is already 0.
+@export("ingrid_roam_unhold")
+@inline
+routine roam_unhold(header: @RoamHeader) -> None
+    world_enter()
+    if not drop_count(header)
+        mark_candidate(header)
+        world_leave()
+        return
+    destroy_entity(header)
+    return
+
+### Takes one from the strong count, inside the shared lock.
+### :param header: The entity's header.
+### :returns: True when that was the last strong handle.
+### :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity's count is already 0.
+@inline
+secret routine drop_count(header: @RoamHeader) -> Bool
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.count.fetch_sub_unbroken(1)
+        return previous == 1
+    remaining: U64 = header.count.peek() - 1
+    remaining.poke_into(header.count)
+    return remaining == 0
+
+### The last strong handle went: destroys the entity, frees the header unless a weak observer still holds it, and
+### leaves the shared lock the release entered. What the entity kept alive is let go after that, outside the lock. Past
+### DESTROY_NEST_LIMIT nested destroys, the header waits and the destroy at the bottom runs it.
+### :param header: The entity's header.
+secret routine destroy_entity(header: @RoamHeader) -> None
+    nest: U64 = DESTROY_NEST.load()
+    if nest >= DESTROY_NEST_LIMIT
+        # A buffered candidate leaves the buffer first, so the collector never reaches a header that waits.
+        if header.buffered_at.peek_unbroken() != 0
+            remove_candidate(header)
+        # No strong handle is left, so the entity counts as gone for the weak observers from here.
+        header.dead.poke_unbroken(1)
+        link: U64 = ptrtoint[Addr, U64](DESTROY_QUEUE.load())
+        link.poke_into(header.depth)
+        DESTROY_QUEUE.store(header.to[Addr]())
+        world_leave()
+        return
+    (nest + 1).poke_into(DESTROY_NEST)
+    destroy_now(header)
+    # The destroy at the bottom runs the ones that waited: each starts a nesting of its own.
+    if nest == 0
+        until ptrtoint[Addr, U64](DESTROY_QUEUE.load()) == 0
+            waiting: @RoamHeader = DESTROY_QUEUE.load().to[@RoamHeader]()
+            next: U64 = waiting.depth.peek()
+            DESTROY_QUEUE.store(inttoptr[U64, Addr](next))
+            world_enter()
+            destroy_now(waiting)
+    nest.poke_into(DESTROY_NEST)
+    return
+
+### Destroys the entity of a header whose last strong handle went, and leaves the shared lock the release entered.
+### :param header: The entity's header.
+secret routine destroy_now(header: @RoamHeader) -> None
+    escaped: Bool = header.escaped.peek_unbroken() == 1
+    # A buffered candidate leaves the buffer first, so the collector never reaches a freed header.
+    if header.buffered_at.peek_unbroken() != 0
+        remove_candidate(header)
+    run_hook(hook: header.drop_hook.peek(), subject: header.data.peek())
+    header.dead.poke_unbroken(1)
+    kept: Addr = header.kept.peek()
+    weak: U64 = when
+        escaped => header.weak.peek_unbroken()
+        else => header.weak.peek()
+    if weak == 0
+        free_header_memory(header)
+    world_leave()
+    if ptrtoint[Addr, U64](kept) != 0
+        let_go(kept)
+    return
+
+### Drops the strong handle an entity kept to another one (its `kept`), the way `roam_unhold` drops one. Not inlined,
+### so a chain of kept entities releases one after another.
+### :param kept: The kept entity's header.
+secret routine let_go(kept: Addr) -> None
+    header: @RoamHeader = kept.to[@RoamHeader]()
+    world_enter()
+    if not drop_count(header)
+        mark_candidate(header)
+        world_leave()
+        return
+    destroy_entity(header)
+    return
+
+### Makes the entity keep another one alive: one more strong handle to `kept`, let go when the entity's last strong
+### handle goes. A kept entity it held before is let go now.
+### :param header: The entity's header.
+### :param kept: The header of the entity to keep.
+@export("ingrid_roam_keep")
+routine roam_keep(header: @RoamHeader, kept: Addr) -> None
+    roam_hold(header: kept.to[@RoamHeader]())
+    before: Addr = header.kept.peek()
+    kept.poke_into(header.kept)
+    if ptrtoint[Addr, U64](before) != 0
+        let_go(before)
+    return
+
+### Takes the entity out of its only handle: frees the header and hands back the entity's address, so a new handle
+### can own it. Only an entity nothing else reaches can leave, one strong handle and no weak observer. Anything more
+### and the entity stays where it is and 0 comes back, for the caller to report.
+### :param header: The entity's header.
+### :returns: The entity's address, or 0 when another handle or an observer still reaches it.
+@export("ingrid_roam_release_inner")
+routine roam_release_inner(header: @RoamHeader) -> Addr
+    world_enter()
+    escaped: Bool = header.escaped.peek_unbroken() == 1
+    count: U64 = when
+        escaped => header.count.peek_unbroken()
+        else => header.count.peek()
+    weak: U64 = when
+        escaped => header.weak.peek_unbroken()
+        else => header.weak.peek()
+    if count == 1 and weak == 0
+        data: Addr = header.data.peek()
+        if header.buffered_at.peek_unbroken() != 0
+            remove_candidate(header)
+        free_header_memory(header)
+        world_leave()
+        return data
+    world_leave()
+    none: Addr = inttoptr[U64, Addr](0)
+    return none
+
+### Reports the entity to the cycle collector as a possible cycle root, once. A type that cannot form a cycle (no
+### trace routine) is never reported. Runs inside the shared lock, so it never starts a pass itself.
+### :param header: The entity's header.
+secret routine mark_candidate(header: @RoamHeader) -> None
+    if header.trace_hook.peek().is_hollow()
+        return
+    if header.buffered_at.peek_unbroken() != 0
+        return
+    SUSPECTED.poke_into(header.state)
+    add_candidate(header)
+    return
+
+### Calls an entity type's hook (destroy, trace or free) on the entity. An `Addr` is not callable, so the code
+### address goes through a slot read back as the Callable.
+### :param hook: The hook's code address, a routine taking the entity's `Addr`.
+### :param subject: The entity to pass it.
+routine run_hook(hook: Addr, subject: Addr) -> None
+    slot: &Addr <- hook
+
+    callee: Callable[(Addr,), None] = slot.to[@Callable[(Addr,), None]]().peek()
+    callee.call(subject)
+    return
+
+### The number of strong handles, a snapshot.
+### :param header: The entity's header.
+### :returns: The strong handle count.
+@export("ingrid_roam_strong_count")
+@inline
+routine roam_strong_count(header: @RoamHeader) -> U64
+    escaped: Bool = header.escaped.peek_unbroken() == 1
+    count: U64 = when
+        escaped => header.count.peek_unbroken()
+        else => header.count.peek()
+    return count
+
+# ── Weak observers ─────────────────────────────────────────────────────────
+
+### Adds a weak observer. Only ever called through a handle already held, so the header is alive.
+### :param header: The entity's header.
+@export("ingrid_roam_observe")
+routine roam_observe(header: @RoamHeader) -> None
+    world_enter()
+    if header.escaped.peek_unbroken() == 1
+        previous: U64 = header.weak.fetch_add_unbroken(1)
+    else
+        next_weak: U64 = header.weak.peek() + 1
+        next_weak.poke_into(header.weak)
+    world_leave()
+    return
+
+### Drops a weak observer. The last one leaving a dead entity frees the header.
+### :param header: The entity's header.
+### :throws: Crashes with `IntegerOverflowError` when a local (not escaped) entity has no weak observer.
+@export("ingrid_roam_unobserve")
+routine roam_unobserve(header: @RoamHeader) -> None
+    world_enter()
+    escaped: Bool = header.escaped.peek_unbroken() == 1
+    last: Bool = when
+        escaped =>
+            previous: U64 = header.weak.fetch_sub_unbroken(1)
+            becomes previous == 1
+        else =>
+            remaining: U64 = header.weak.peek() - 1
+            remaining.poke_into(header.weak)
+            becomes remaining == 0
+    if last and header.dead.peek_unbroken() == 1
+        free_header_memory(header)
+    world_leave()
+    return
+
+### Whether the entity's data has been freed. Safe on a tombstone: it reads only the `dead` flag.
+### :param header: The entity's header.
+### :returns: True when the `dead` flag is set.
+@export("ingrid_roam_is_destroyed")
+@inline
+routine roam_is_destroyed(header: @RoamHeader) -> Bool
+    return header.dead.peek_unbroken() == 1
+
+### The collector's finalizer, after the free hook has torn the entity down: marks it dead and frees the header
+### unless a weak observer remains. Runs under the collector's exclusive lock, so it takes no lock itself.
+### :param header: The entity's header.
+@export("ingrid_roam_cyclic_finalize")
+routine roam_cyclic_finalize(header: @RoamHeader) -> None
+    header.dead.poke_unbroken(1)
+    escaped: Bool = header.escaped.peek_unbroken() == 1
+    weak: U64 = when
+        escaped => header.weak.peek_unbroken()
+        else => header.weak.peek()
+    if weak == 0
+        free_header_memory(header)
+        return
+    return
+
+# ── Escape ─────────────────────────────────────────────────────────────────
+
+### Whether the entity has reached another task.
+### :param header: The entity's header.
+### :returns: True when the `escaped` flag is set.
+@export("ingrid_roam_is_escaped")
+@inline
+routine roam_is_escaped(header: @RoamHeader) -> Bool
+    return header.escaped.peek_unbroken() == 1
+
+### Promotes the entity, and every entity reachable from it through Roamed fields, to escaped: unbroken counting and
+### the lock from now on. Runs on the owner before the handle is published, so nothing races the flip. Escape is a
+### property of the graph, since whatever the entity reaches the other task reaches too. Iterative over an explicit
+### worklist (a deep graph would overflow the stack), and already-escaped headers end the walk, so cycles terminate.
+### :param header: The entity's header.
+### :throws: Crashes with `OutOfMemoryError` when the worklist cannot grow.
+@export("ingrid_roam_promote")
+routine roam_promote(header: @RoamHeader) -> None
+    manager: @MemoryManager = C_HEAP
+    work: &List[Addr] <- .construct(manager)
+    kids: &List[Addr] <- .construct(manager)
+
+    if header.escaped.peek_unbroken() == 1
+        drop work
+        drop kids
+        return
+    work.add_last(header)
+
+    until work.is_empty()
+        node: @RoamHeader = work.remove_last().to[@RoamHeader]()
+        if node.escaped.peek_unbroken() == 1
+            continue
+        node.holder_task.poke_unbroken(0)
+        0.poke_into(node.depth)
+        node.escaped.poke_unbroken(1)
+        children(node, kids)
+        # What the entity keeps alive is reached through it too.
+        kept: Addr = node.kept.peek()
+        if ptrtoint[Addr, U64](kept) != 0
+            work.add_last(kept)
+
+        n: U64 = kids.count()
+
+        for i in 0 til n
+            work.add_last(kids[i])
+        then
+            continue
+    then
+        drop work
+        drop kids
+        return
+
+### Starts a store of a value into something the entity of `holder` keeps (the places of a container, a member
+### variable): when the holder has escaped, the entity the value reaches has to escape before the store is visible,
+### and this opens the scratch buffer the value's trace routine reports its handles into. The caller then runs the
+### value's trace routine and ends with `roam_store_end`. A holder that is local (or hollow) has nothing to do.
+### :param holder: The holder entity's header, or null.
+### :returns: True when the caller must trace the value and call `roam_store_end`.
+@export("ingrid_roam_store_begin")
+routine roam_store_begin(holder: Addr) -> Bool
+    if holder.is_hollow()
+        return false
+    header: @RoamHeader = holder.to[@RoamHeader]()
+    if header.escaped.peek_unbroken() != 1
+        return false
+    lock_scratch()
+    buffer_clear(SCRATCH)
+    return true
+
+### Ends a store opened by `roam_store_begin` that returned true: promotes every entity the value's trace routine
+### reported, and everything those reach.
+### :throws: Crashes with `OutOfMemoryError` when the list of reported handles cannot grow.
+@export("ingrid_roam_store_end")
+routine roam_store_end() -> None
+    manager: @MemoryManager = C_HEAP
+    reported: &List[Addr] <- .construct(manager)
+
+    n: U64 = SCRATCH.count.peek()
+
+    for i in 0 til n
+        reported.add_last(buffer_at(buffer: SCRATCH, i))
+    then
+        unlock_scratch()
+
+    for i in 0 til n
+        roam_promote(header: reported[i].to[@RoamHeader]())
+    then
+        drop reported
+        return
+
+### The sharing invariant: every handle an escaped entity holds is escaped too, or the other task that reaches the entity
+### reaches the handle without its lock. A debug build asks this after it takes the entity's lock. Looks at what the
+### entity's trace routine reports, and at the entity it keeps alive. Only the outermost hold is checked: a block that
+### holds the lock across several statements (replacing a member variable's handle) is half done in between.
+### :param header: The entity's header, whose lock the caller holds.
+### :returns: The header of a handle that has not escaped, or null when the entity is local, dead, held again by
+###     the agent that holds it, or all it holds has escaped.
+### :throws: Crashes with `OutOfMemoryError` when the list of reported handles cannot grow.
+@export("ingrid_roam_unshared_child")
+routine roam_unshared_child(header: @RoamHeader) -> Addr
+    none: Addr = inttoptr[U64, Addr](0)
+    if header.escaped.peek_unbroken() != 1 or header.dead.peek_unbroken() == 1
+        return none
+    if header.depth.peek() != 1
+        return none
+    manager: @MemoryManager = C_HEAP
+    kids: &List[Addr] <- .construct(manager)
+    children(header, kids)
+    kept: Addr = header.kept.peek()
+    if ptrtoint[Addr, U64](kept) != 0
+        kids.add_last(kept)
+
+    n: U64 = kids.count()
+
+    for i in 0 til n
+        child: @RoamHeader = kids[i].to[@RoamHeader]()
+        if child.dead.peek_unbroken() != 1 and child.escaped.peek_unbroken() != 1
+            found: Addr = kids[i]
+            drop kids
+            return found
+    then
+        drop kids
+        return none
+
+# ── The agent-keyed reentrant lock ──────────────────────────────────────────
+
+### Enters the entity's lock when it has escaped (a local entity has no contention). Only the check is inlined into
+### every statement that reaches the entity, so a local entity costs one load: the escaped path is its own routine.
+### :param header: The entity's header.
+@export("ingrid_roam_lock_enter")
+@inline
+routine roam_lock_enter(header: @RoamHeader) -> None
+    if header.escaped.peek_unbroken() == 1
+        roam_lock_enter_escaped(header)
+    return
+
+### Enters the lock of an entity that has escaped. Re-entry by the holding agent only deepens the hold: the builder
+### brackets each statement, so a member routine called inside one enters again. A contended entry records the wait
+### with the AccessManager, which looks for pieces of work waiting on each other when the program's deadlock check is on, and
+### yields to the scheduler instead of spinning, so a holder parked on this worker can run.
+### :param header: The entity's header.
+@noinline
+routine roam_lock_enter_escaped(header: @RoamHeader) -> None
+    task: U64 = current_task_id()
+
+    until header.locked.peek_unbroken() == 1 and header.holder_task.peek_unbroken() == task with waited: Bool = false
+        taken: Optional[U8] = header.locked.compare_exchange_unbroken(expected: 0, new: 1)
+        when taken
+            is None =>
+                header.holder_task.poke_unbroken(task)
+                1.poke_into(header.depth)
+                if waited
+                    access_wait_end()
+                return
+            is U8 =>
+                if not waited
+                    access_wait_begin(lock: header, holder: header.holder_task)
+                coro_yield()
+                continue with waited: true
+    then
+        next_depth: U64 = header.depth.peek() + 1
+        next_depth.poke_into(header.depth)
+        return
+
+### Leaves one level of the lock of an entity that has escaped, and does nothing for a local one. Only the check is
+### inlined, as in `roam_lock_enter`.
+### :param header: The entity's header.
+@export("ingrid_roam_lock_exit")
+@inline
+routine roam_lock_exit(header: @RoamHeader) -> None
+    if header.escaped.peek_unbroken() == 1
+        roam_lock_exit_escaped(header)
+    return
+
+### Leaves one level of the lock of an entity that has escaped. The outermost exit frees it, clearing the holder
+### before the flag so a waiter never sees the old holder.
+### :param header: The entity's header.
+### :throws: Crashes with `IntegerOverflowError` when the lock depth is already 0.
+@noinline
+routine roam_lock_exit_escaped(header: @RoamHeader) -> None
+    depth: U64 = header.depth.peek() - 1
+    depth.poke_into(header.depth)
+    if depth == 0
+        header.holder_task.poke_unbroken(0)
+        header.locked.poke_unbroken(0)
+    return
+
+# ── Layout check ───────────────────────────────────────────────────────────
+
+### The byte offset of RoamHeader's field `i` (in declaration order), for the test that compares this layout with
+### Revare's `RoamManager[T]`, or 0xFFFFFFFFFFFFFFFF past the last field.
+### :param i: The field's position, from 0.
+### :returns: The field's byte offset from the start of the header, or `U64.MAX` when `i` is past the last field.
+@export("ingrid_roam_field_offset")
+routine roam_field_offset(i: U64) -> U64
+    header: &RoamHeader
+
+    when i
+        0 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.count)
+            return place - base
+        1 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.weak)
+            return place - base
+        2 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.dead)
+            return place - base
+        3 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.escaped)
+            return place - base
+        4 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.data.to[Addr]())
+            return place - base
+        5 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.locked)
+            return place - base
+        6 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.holder_task)
+            return place - base
+        7 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.depth)
+            return place - base
+        8 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.state)
+            return place - base
+        9 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.buffered_at)
+            return place - base
+        10 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.trace_hook.to[Addr]())
+            return place - base
+        11 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.free_hook.to[Addr]())
+            return place - base
+        12 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.drop_hook.to[Addr]())
+            return place - base
+        13 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.shape_users)
+            return place - base
+        14 =>
+            base: U64 = ptrtoint[Addr, U64](header)
+            place: U64 = ptrtoint[Addr, U64](header.kept.to[Addr]())
+            return place - base
+        else => return U64.MAX

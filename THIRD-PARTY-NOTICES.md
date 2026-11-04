@@ -1,24 +1,24 @@
 # Third-Party Notices
 
-RazorForge itself is distributed under the MIT License (see [LICENSE](LICENSE)).
+Revare itself is distributed under the MIT License (see [LICENSE](LICENSE)).
 
-Portions of the RazorForge standard library — specifically the pure-RazorForge
+Portions of the Revare standard library — specifically the pure-Revare
 software floating-point and decimal engines under
-`Standard/RazorForge/Core/Numerics/` and the arbitrary-precision engines under
-`Standard/RazorForge/Numeric/` — are **ports and extensions** of the
+`Standard/Revare/Core/Numerics/` and the arbitrary-precision engines under
+`Standard/Revare/Numeric/` — are **ports and extensions** of the
 algorithms, table data, and bit-layouts of the third-party projects credited
-below. The RazorForge code was written by reading the upstream source and
+below. The Revare code was written by reading the upstream source and
 following its structure faithfully (so it is a derivative work — a port), and then
 extended beyond the originals (e.g. wider precisions and additional routines). No
 third-party source code is shipped (the original C/C++ libraries were removed once
-the RazorForge engines reached parity), but because the engines derive from those
+the Revare engines reached parity), but because the engines derive from those
 projects, their copyright notices and license terms are retained here as required.
 
 ---
 
 ## TLFloat — IEEE 754 binary128 / binary256 / binary512 software floating point
 
-Used by the RazorForge software `B128` (`Standard/RazorForge/Core/Numerics/B128.rf`): its
+Used by the Revare software `B128` (`Standard/Revare/Core/Numerics/B128.rr`): its
 arithmetic cores (add, subtract, multiply, divide, square root and rounding to integers) are a
 port and extension of TLFloat.
 
@@ -56,10 +56,10 @@ DEALINGS IN THE SOFTWARE.
 
 ## LibBF — tiny arbitrary-precision floating-point library
 
-Used by the arbitrary-precision **`Int`** engine in `tessera/integer/` (the engine in `bigint.te`, built on the
-limb layer in `limbs.te`, `multiply.te`, `ntt.te`, `divide.te` and `sqrt.te`). The limb primitives, the NTT
+Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (the engine in `bigint.li`, built on the
+limb layer in `limbs.li`, `multiply.li`, `ntt.li`, `divide.li` and `sqrt.li`). The limb primitives, the NTT
 multiplication over five ~2^62 primes, and Newton-reciprocal division and square root are ports of LibBF (64-bit
-limb configuration), written by hand in Tessera.
+limb configuration), written by hand in Lapila.
 
 - Project: **LibBF** — https://bellard.org/libbf/
 - Copyright © 2017-2025 Fabrice Bellard.
@@ -91,7 +91,7 @@ THE SOFTWARE.
 
 ## LibTomMath — multiple-precision integer library
 
-Used by the arbitrary-precision **`Int`** engine in `tessera/integer/` (`bigint.te`). The engine replaced the
+Used by the arbitrary-precision **`Int`** engine in `lapila/integer/` (`bigint.li`). The engine replaced the
 LibTomMath-backed runtime and follows its integer semantics and algorithms: sign-magnitude values,
 Euclidean division, binary GCD, two's-complement bitwise operations on negative values, and the radix
 text conversion with its digit map (`0-9 A-Z a-z + /`, case-insensitive up to radix 36).
@@ -131,8 +131,8 @@ For more information, please refer to <https://unlicense.org/>
 
 ## CORE-MATH — correctly rounded mathematical functions
 
-Used by the RazorForge `B16`, `B32`, and `B64` math routines under
-`Standard/RazorForge/Core/Numerics/CoreMath/` (acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, cos,
+Used by the Revare `B16`, `B32`, and `B64` math routines under
+`Standard/Revare/Core/Numerics/CoreMath/` (acos, acosh, asin, asinh, atan, atan2, atanh, cbrt, cos,
 cosh, cospi, erf, erfc, exp, exp10, exp2, expm1, hypot, lgamma, log, log10, log1p, log2, pow, rsqrt, sin,
 sinh, sinpi, tan, tanh, tanpi, tgamma), by the `BF16` rsqrt, and by the `B128` routines acos, asin, atan,
 atan2, cbrt, cos, exp, exp10, exp2, expm1, hypot, log, rsqrt, sin and sqrt (the binary128 functions
@@ -174,7 +174,7 @@ SOFTWARE.
 
 ## Intel® Decimal Floating-Point Math Library (BID / "libbid")
 
-Used by the RazorForge IEEE 754-2008 decimal engines: **`Decimal`** (decimal256)
+Used by the Revare IEEE 754-2008 decimal engines: **`Decimal`** (decimal256)
 and **`D32` / `D64` / `D128`** (decimal32 / 64 / 128), including their `*Trans`
 transcendental files. The Binary-Int-Decimal (BID) encoding/decoding, the
 rounding (round-half-to-even) and exponent-clamping rules, and the

@@ -1,0 +1,1235 @@
+# Files and the filesystem for Revare and Mielia: open / read / write / close by handle, memory-mapped views, and
+# the filesystem operations (existence, directories, copy, move, remove, listing, metadata, paths, permissions).
+#
+# The OS work is Lapila's Hosted. This file is the rf_* boundary over it. A routine that returns bytes returns
+# a malloc'd, NUL-terminated buffer (the caller frees it with rf_invalidate) and its length through
+# rf_get_result_len, as Revare takes no out parameter here. Paths come as a pointer and a byte count, UTF-8. A
+# routine that fails records why for rf_fs_last_error, so Revare and Mielia throw the crashable for the reason.
+
+module Ingrid/Runtime
+
+import Hosted
+
+### The length of the last buffer a routine here returned on this thread. Per thread: the caller reads it right after
+### the call, with no yield in between, so another thread's call can't overwrite it.
+@threadlocal
+global RESULT_LEN: &U64
+
+### From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
+### requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping. Per thread, like
+### RESULT_LEN.
+@threadlocal
+global MAP_DELTA: &U64
+
+### Why the last file system call on this thread failed, a code of {reason_code}: 0 when it didn't. Per thread, like
+### RESULT_LEN.
+@threadlocal
+global LAST_ERROR: &S32
+
+### The code Revare and Mielia read for an FsError: 1 another reason, 2 nothing is there, 3 not allowed (a
+### read-only file system too), 4 the device is full, 5 the device failed to read or write, 6 something is already
+### there, 7 the path or name isn't one the OS takes.
+### :param error: The reason.
+### :returns: The code.
+routine reason_code(error: FsError) -> S32
+    return when error
+        is NotFoundError => 2
+        is NotEnoughPermissionError, is ReadOnlyError => 3
+        is NotEnoughSpaceError => 4
+        is StorageFaultError => 5
+        is AlreadyExistsError => 6
+        is InvalidPathError, is NameTooLongError => 7
+        else => 1
+
+### Records why a call failed, for {rf_fs_last_error}.
+### :param error: The reason.
+### :returns: -1, a failure's status.
+routine failed(error: FsError) -> S32
+    LAST_ERROR.store(reason_code(error))
+    return -1
+
+### Why this thread's last file system call failed, see {reason_code}: 0 when it didn't fail.
+### :returns: The reason code.
+@export("rf_fs_last_error")
+routine rf_fs_last_error() -> S32
+    return LAST_ERROR.load()
+
+### The length of the last buffer a routine here returned.
+### :returns: The length in bytes, 0 after a failure.
+@export("rf_get_result_len")
+routine rf_get_result_len() -> U64
+    return RESULT_LEN.load().to[U64]()
+
+### The offset from the last sub-range mapping's base to the byte asked for, 0 for a whole-file mapping.
+### :returns: The delta in bytes.
+@export("rf_file_map_delta")
+routine rf_file_map_delta() -> U64
+    return MAP_DELTA.load().to[U64]()
+
+### A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
+### :returns: The address 1.
+routine empty_map() -> @Byte
+    return inttoptr[U64, Addr](1).to[@Byte]()
+
+### A failure: no buffer, length 0.
+### :returns: Null.
+routine no_result() -> @Byte?
+    RESULT_LEN.store(0)
+    return None()
+
+### A failure for the reason `error`: no buffer, length 0, the reason recorded.
+### :param error: The reason.
+### :returns: Null.
+routine failed_result(error: FsError) -> @Byte?
+    LAST_ERROR.store(reason_code(error))
+    return no_result()
+
+### Records `len` as the result's length and hands `buf` back.
+### :param buf: The result buffer.
+### :param len: Its length.
+### :returns: `buf`.
+routine result(buf: @Byte, len: U64) -> @Byte?
+    RESULT_LEN.store(len)
+    return buf
+
+### `len` bytes at `s`, copied into a malloc'd, NUL-terminated buffer, as the result.
+### :param s: The bytes.
+### :param len: The number of bytes.
+### :returns: The buffer, or null (length 0) when the allocation fails.
+routine bytes_result(s: Addr, len: U64) -> @Byte?
+    buf: Addr = c_malloc((len + 1).to[CSize]())
+    if buf.is_hollow()
+        return no_result()
+    c_memcpy(buf, s, len.to[CSize]())
+    terminator: @Byte = buf.to[@Byte]().stride(len)
+    terminator.poke(0x00)
+    return result(buf: buf.to[@Byte](), len)
+
+### A Directory's path copied into a malloc'd, NUL-terminated buffer, as the result. The directory's own memory is
+### dropped.
+### :param r: The directory, or the failure.
+### :returns: The path, or null (length 0) on a failure.
+routine path_result(r: Check[Directory]) -> @Byte?
+    when steal r
+        is Directory as d =>
+            path: @[Byte] = d.path.peek()
+            copied: @Byte? = bytes_result(s: path.data, len: path.count)
+            drop d
+            return copied
+        is FsError as error => return failed_result(error)
+
+### A File's path copied into a malloc'd, NUL-terminated buffer, as the result. The file's own memory is dropped.
+### :param r: The file, or the error that stopped it.
+### :returns: The copied path, or null on a failure.
+routine file_path_result(r: Check[File]) -> @Byte?
+    when steal r
+        is File as f =>
+            path: @[Byte] = f.path.peek()
+            copied: @Byte? = bytes_result(s: path.data, len: path.count)
+            drop f
+            return copied
+        is FsError as error => return failed_result(error)
+
+### The malloc heap's MemoryManager, so what Hosted hands back is freed by rf_invalidate.
+### :returns: The C heap's memory manager.
+routine heap() -> @MemoryManager
+    return C_HEAP
+
+### A counted path as @[Byte], borrowed. A negative `len` gives an empty path.
+### :param path: The path's bytes.
+### :param len: The path's length.
+### :returns: The path.
+routine path_of(path: @Byte, len: S32) -> @[Byte]
+    return @[Byte].construct(data: path, count: len.max(0).to[U64]())
+
+### 0 for a success, -1 for a failure.
+### :param r: The outcome.
+### :returns: 0 or -1.
+routine status(r: Check[None]) -> S32
+    when r
+        is None => return 0
+        is FsError as error => return failed(error)
+
+### Whole seconds from nanoseconds since 1970, rounded toward zero.
+### :param ns: The nanoseconds.
+### :returns: The seconds.
+routine seconds(ns: S64) -> S64
+    return ns.div_trunc(1000000000)
+
+# -- a growing NUL-terminated buffer, for results -------------------------------------
+
+record ResultBuffer
+    buf: Addr
+    len: U64
+    cap: U64
+
+### Starts an empty buffer with room for `cap` bytes (at least 16).
+### :param cap: The starting capacity.
+### :returns: False when the allocation fails.
+routine @ResultBuffer.start(cap: U64) -> Bool
+    buf: Addr = c_malloc(cap.max(16).to[CSize]())
+    me.buf.poke(buf)
+    me.len.poke(0)
+    me.cap.poke(cap.max(16))
+    return buf.is_not_hollow()
+
+### Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
+### :param n: The bytes about to be added.
+### :returns: True when there is room.
+routine @ResultBuffer.room(n: U64) -> Bool
+    filled: U64 = me.len.peek() + n
+    need: U64 = filled + 1
+    current_cap: U64 = me.cap.peek()
+    if need > current_cap
+        cap: U64 = (current_cap * 2).max(need)
+        bigger: Addr = c_realloc(me.buf.peek(), cap.to[CSize]())
+        if bigger.is_hollow()
+            return false
+        me.buf.poke(bigger)
+        me.cap.poke(cap)
+        return true
+    return true
+
+### Appends `n` bytes, for which {ResultBuffer.room} made room.
+### :param data: The bytes.
+### :param n: The number of bytes.
+routine @ResultBuffer.add_bytes(data: @Byte, n: U64) -> None
+    c_memcpy(me.buf.peek().to[@Byte]().stride(me.len.peek()), data, n.to[CSize]())
+    next_len: U64 = me.len.peek() + n
+    next_len.poke_into(me.len)
+    return
+
+### Appends one byte, for which {ResultBuffer.room} made room.
+### :param b: The byte.
+routine @ResultBuffer.byte(b: Byte) -> None
+    slot: @Byte = me.buf.peek().to[@Byte]().stride(me.len.peek())
+    slot.poke(b)
+    next_len: U64 = me.len.peek() + 1
+    next_len.poke_into(me.len)
+    return
+
+### NUL-terminates the buffer and hands it over as the result.
+### :returns: The buffer, its length recorded as the result's.
+routine @ResultBuffer.finish() -> @Byte?
+    n: U64 = me.len.peek()
+    terminator: @Byte = me.buf.peek().to[@Byte]().stride(n)
+    terminator.poke(0x00)
+    return result(buf: me.buf.peek().to[@Byte](), len: n)
+
+### Frees the buffer and records a failure.
+### :returns: Null.
+routine @ResultBuffer.fail() -> @Byte?
+    c_free(me.buf.peek())
+    return no_result()
+
+# -- files by handle -----------------------------------------------------------------
+
+### The open files by handle.
+lateinit global FILE_TABLE: &Items[OpenFile, 256]
+
+preset MAX_OPEN_FILES: U64 = 256
+preset FILE_BUFFER: U64 = 8192
+
+### An open file: a reader's read-ahead, or a writer's bytes not written yet, in buffer[start, end).
+record OpenFile
+    file: FileHandle
+    used: Bool
+    writer: Bool
+    eof: Bool
+    buffer: @Byte
+    start: U64
+    end: U64
+
+### Makes a `OpenFile` from its fields.
+### :param file: Its `file`.
+### :param used: Its `used`.
+### :param writer: Its `writer`.
+### :param eof: Its `eof`.
+### :param buffer: Its `buffer`.
+### :param start: Its `start`.
+### :param end: Its `end`.
+### :returns: The new value.
+common routine OpenFile.construct(file: FileHandle, used: Bool, writer: Bool, eof: Bool,
+    buffer: @Byte, start: U64, end: U64) -> Me
+    return Me(file, used, writer, eof, buffer, start, end)
+
+### Releases nothing: a `OpenFile` holds no memory of its own.
+routine @OpenFile.destruct() -> None
+    return
+
+### The open file for a handle, or null.
+### :param fd: The handle.
+### :returns: The open file, or null when `fd` is out of range or not open.
+routine open_file(fd: S32) -> @OpenFile?
+    if fd < 0 or fd >= 256
+        return None()
+    of: @OpenFile = FILE_TABLE.getview().to[@OpenFile]().stride(fd.to[U64]())
+    if of.used.peek()
+        return of
+    return None()
+
+### Opens the file at `path` for reading (mode 0), writing, emptied first (1), or appending (2).
+### :param path: The file's path.
+### :param mode: 0, 1, or 2.
+### :returns: The open handle.
+### :throws: Throws the FsError the OS reported.
+routine open_in_mode(path: @[Byte], mode: S32) -> FileHandle
+    if mode == 0
+        return when check OsFileManager.open_read(at: File.at(path))
+            is FileHandle as f => f
+    if mode == 1
+        return when check OsFileManager.open_write(at: File.at(path))
+            is FileHandle as f => f
+    return when check OsFileManager.open_append(at: File.at(path))
+        is FileHandle as f => f
+
+### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or -1. No mode makes a
+### missing file: rf_fs_make_file does.
+### :param path: The file's path.
+### :param path_len: The path's length.
+### :param mode: 0 read, 1 write, 2 append.
+### :returns: The handle, or -1 for a bad mode, a missing file or another failure to open, no buffer, or no free
+###     slot (256 at once).
+@export("rf_file_open")
+routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
+    p: @[Byte] = path_of(path, len: path_len)
+    if mode < 0 or mode > 2
+        LAST_ERROR.store(1)
+        return -1
+    writer: Bool = mode != 0
+    f: FileHandle = when check open_in_mode(path: p, mode)
+        is FileHandle as opened => opened
+        is FsError as error => return failed(error)
+    buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
+    if buffer.is_hollow()
+        LAST_ERROR.store(1)
+        c_free(buffer)
+        f2: &FileHandle <- f
+        f2.close()
+        return -1
+    buffer2: @Byte = buffer.to[@Byte]()
+
+    for i in 0 til MAX_OPEN_FILES
+        place: @OpenFile = FILE_TABLE.getview().to[@OpenFile]().stride(i)
+        if place.used.peek()
+            continue
+        place.poke(OpenFile(file: f, used: true, writer: writer, eof: false, buffer: buffer2,
+            start: 0, end: 0))
+        return i.to[S32]()
+    then
+        LAST_ERROR.store(1)
+        c_free(buffer2)
+        f2: &FileHandle <- f
+        f2.close()
+        return -1
+
+### Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
+### :returns: True when nothing was pending or everything was written.
+routine @OpenFile.drain() -> Bool
+    n: U64 = me.end.peek()
+    if not (me.writer.peek() and (n > 0))
+        return true
+    me.end.poke(0)
+    return try me.file.write_all(data: me.buffer.peek(), count: n)
+
+### Reads the next chunk into a reader's buffer: false at the end of the file (or on a failure, which reads as the
+### end).
+### :returns: True when bytes were read.
+routine @OpenFile.refill() -> Bool
+    got: Check[U64] = check me.file.read_bytes(buffer: me.buffer.peek(), count: FILE_BUFFER)
+    n: U64 = when got
+        is U64 as n => n
+        is FsError => 0
+    me.start.poke(0)
+    me.end.poke(n)
+    if n == 0
+        me.eof.poke(true)
+        return false
+    return true
+
+### Writes the pending bytes, closes the file, and frees its handle. A handle not open does nothing.
+### :param fd: The handle.
+@export("rf_file_close")
+routine rf_file_close(fd: S32) -> None
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
+        return
+    of: @OpenFile = found.unwrap()
+    of.drain()
+    of.file.close()
+    c_free(of.buffer.peek())
+    of.used.poke(false)
+    return
+
+### The rest of the file from where the reader is.
+### :param fd: The handle.
+### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't grow.
+@export("rf_file_read_all")
+routine rf_file_read_all(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    if found.is_absent()
+        return no_result()
+    of: @OpenFile = found.unwrap()
+    if not out.start(FILE_BUFFER)
+        return out.fail()
+
+    # What the reader holds, then the rest straight into the result.
+    held: U64 = of.end.peek() - of.start.peek()
+    if not out.room(held)
+        return out.fail()
+    out.add_bytes(data: of.buffer.peek().stride(of.start.peek()), n: held)
+    of.start.poke(of.end.peek())
+
+    until not out.room(FILE_BUFFER)
+        at: @Byte = out.buf.peek().to[@Byte]().stride(out.len.peek())
+        got: Check[U64] = check of.file.read_bytes(buffer: at, count: FILE_BUFFER)
+        n: U64 = when got
+            is U64 as n => n
+            is FsError => 0
+        if n == 0
+            of.eof.poke(true)
+            return out.finish()
+        next_len: U64 = out.len.peek() + n
+        next_len.poke_into(out.len)
+        continue
+    then
+        return out.fail()
+
+### One line, without its '\n' (and any '\r'). At the end of the file the line is empty.
+### :param fd: The handle.
+### :returns: The line, or null (length 0) for a handle not open or when the buffer can't grow.
+@export("rf_file_read_line")
+routine rf_file_read_line(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    if found.is_absent()
+        return no_result()
+    of: @OpenFile = found.unwrap()
+    if out.start(256)
+        until of.start.peek() >= of.end.peek() and not of.refill()
+            at: U64 = of.start.peek()
+            cursor: @Byte = of.buffer.peek().stride(at)
+            c: Byte = cursor.peek()
+            of.start.poke(at + 1)
+            when
+                c == b'\n' => return out.finish()
+                c == b'\r' => continue
+                else =>
+                    if not out.room(1)
+                        return out.fail()
+                    out.byte(c)
+                    continue
+        then
+            return out.finish()
+    else
+        return out.fail()
+
+### One word: the bytes up to the next space, tab, '\n' or '\r', after skipping those. At the end of the file the word
+### is empty.
+### :param fd: The handle.
+### :returns: The word, or null (length 0) for a handle not open or when the buffer can't grow.
+@export("rf_file_read_word")
+routine rf_file_read_word(fd: S32) -> @Byte?
+    found: @OpenFile? = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    if found.is_absent()
+        return no_result()
+    of: @OpenFile = found.unwrap()
+    if out.start(64)
+        until of.start.peek() >= of.end.peek() and not of.refill()
+            at: U64 = of.start.peek()
+            cursor: @Byte = of.buffer.peek().stride(at)
+            c: Byte = cursor.peek()
+            space: Bool = c == b' ' or c == b'\t' or c == b'\n' or c == b'\r'
+            if space and out.len.peek() > 0
+                return out.finish()
+            of.start.poke(at + 1)
+            if space
+                continue
+            if not out.room(1)
+                return out.fail()
+            out.byte(c)
+            continue
+        then
+            return out.finish()
+    else
+        return out.fail()
+
+### Up to count bytes: fewer only at the end of the file.
+### :param fd: The handle.
+### :param count: The most bytes to read.
+### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
+@export("rf_file_read_bytes")
+routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte?
+    found: @OpenFile? = open_file(fd)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    if found.is_absent()
+        return no_result()
+    of: @OpenFile = found.unwrap()
+    if out.start(count + 1)
+        loop
+            wanted2: U64 = count - out.len.peek()
+            if wanted2 == 0
+                return out.finish()
+            if of.start.peek() < of.end.peek() or of.refill()
+                buffered: U64 = of.end.peek() - of.start.peek()
+                n: U64 = buffered.min(wanted2)
+                out.add_bytes(data: of.buffer.peek().stride(of.start.peek()), n: n)
+                next_start: U64 = of.start.peek() + n
+                next_start.poke_into(of.start)
+                continue
+            return out.finish()
+    else
+        return out.fail()
+
+### Writes through the handle's buffer: bytes that fill a whole buffer go straight out.
+### :param fd: The handle.
+### :param ptr: The bytes.
+### :param len: The number of bytes.
+### :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
+@export("rf_file_write")
+routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
+    found: @OpenFile? = open_file(fd)
+
+    if found.is_absent()
+        return 0
+    of: @OpenFile = found.unwrap()
+    needed: U64 = of.end.peek() + len
+    if needed > FILE_BUFFER
+        if not of.drain()
+            return 0
+        if len >= FILE_BUFFER
+            wrote: Bool = try of.file.write_all(data: ptr, count: len)
+            if wrote
+                return len
+            return 0
+    c_memcpy(of.buffer.peek().stride(of.end.peek()), ptr, len.to[CSize]())
+    next_end: U64 = of.end.peek() + len
+    next_end.poke_into(of.end)
+    return len
+
+### Writes a writer's pending bytes. A handle not open does nothing.
+### :param fd: The handle.
+@export("rf_file_flush")
+routine rf_file_flush(fd: S32) -> None
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
+        return
+    of: @OpenFile = found.unwrap()
+    of.drain()
+    return
+
+### Whether the reader is at the end of the file: nothing it read is left and the file has nothing more. It reads
+### ahead into the buffer when the buffer is empty.
+### :param fd: The handle.
+### :returns: True at the end, or for a handle not open.
+@export("rf_file_is_eof")
+routine rf_file_is_eof(fd: S32) -> Bool
+    found: @OpenFile? = open_file(fd)
+    if found.is_absent()
+        return true
+    of: @OpenFile = found.unwrap()
+    if of.start.peek() < of.end.peek()
+        return false
+    if of.eof.peek()
+        return true
+    return not of.refill()
+
+# -- whole files, for the I/O threads (io.li) ---------------------------------------
+
+### The NUL-terminated path's whole file, malloc'd and NUL-terminated, into data: its length, or minus the
+### {reason_code} of the failure. (The I/O threads call it at once, so the length and the reason come back here, not
+### through RESULT_LEN or LAST_ERROR.)
+### :param cpath: The NUL-terminated path.
+### :param data: Where the buffer goes.
+### :returns: The length, or a negative reason code on a failure.
+routine read_whole_file(cpath: @Byte, data: @Addr) -> S64
+    manager: @MemoryManager = heap()
+
+    when check OsFileManager.read_all(at: File.at(cpath.to[CStrView]().getview()), manager)
+        is BorrowedSlice[Byte] as text =>
+            n: U64 = text.count()
+            buf: Addr = c_realloc(Addr.zero(), (n + 1).to[CSize]())
+            if buf.is_hollow()
+                drop text
+                return -1
+            buf.to[@Byte]().copy(src: text.data.peek(), count: n)
+            buf.to[@Byte]().stride(n).poke(0x00)
+            drop text
+            data.poke(buf)
+            return n.to[S64]()
+        is FsError as error => return 0 - reason_code(error).to[S64]()
+
+### `len` bytes of `data` as the whole content of the existing file at the NUL-terminated path: `len`, or minus the
+### {reason_code} of the failure (a missing file included: nothing is made).
+### :param cpath: The NUL-terminated path.
+### :param data: The bytes.
+### :param len: The number of bytes, negative for none.
+### :returns: The bytes written, or a negative reason code on a failure.
+routine write_whole_file(cpath: @Byte, data: Addr, len: S64) -> S64
+    bytes: @[Byte] = when
+        len <= 0 => @[Byte].empty()
+        else => @[Byte].construct(data: data.to[@Byte](), count: len.to[U64]())
+    r: Check[None] = check OsFileManager.write_all(at: File.at(cpath.to[CStrView]().getview()),
+        data: bytes)
+    when r
+        is None => return len.max(0)
+        is FsError as error => return 0 - reason_code(error).to[S64]()
+
+# -- paths (no OS calls) -------------------------------------------------------------
+
+### a + "/" + b (no separator added after one already there, or after an empty a): Revare joins with '/' on
+### every OS.
+### :param a: The first path.
+### :param a_len: Its length.
+### :param b: The second path.
+### :param b_len: Its length.
+### :returns: The joined path, or null (length 0) when the allocation fails.
+@export("rf_fs_join_path")
+routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte?
+    first: @[Byte] = path_of(path: a, len: a_len)
+    second: @[Byte] = path_of(path: b, len: b_len)
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+
+    joined_count: U64 = first.count() + second.count()
+    if not out.start(joined_count + 2)
+        return out.fail()
+    out.add_bytes(data: first.data, n: first.count())
+    if not (first.is_empty() or is_separator(first.byte_at(first.count() - 1).bits()))
+        out.byte(b'/')
+    out.add_bytes(data: second.data, n: second.count())
+    return out.finish()
+
+### The parent directory: "/a/b/c" gives "/a/b", "a/b" gives "a", "file.txt" gives "", and "/" stays the root.
+### :param path: The path.
+### :param len: Its length.
+### :returns: The parent, or null (length 0) when the allocation fails.
+@export("rf_fs_parent_path")
+routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte?
+    file: &File <- File.at(path_of(path, len))
+    parent: &Directory <- file.parent()
+
+    p: @[Byte] = parent.path.peek()
+    copied: @Byte? = bytes_result(s: p.data, len: p.count())
+    drop parent
+    drop file
+    return copied
+
+### The last component: "/a/b/file.txt" gives "file.txt".
+### :param path: The path.
+### :param len: Its length.
+### :returns: The name, or null (length 0) when the allocation fails.
+@export("rf_fs_file_name")
+routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte?
+    file: &File <- File.at(path_of(path, len))
+
+    n: @[Byte] = file.name()
+    copied: @Byte? = bytes_result(s: n.data, len: n.count())
+    drop file
+    return copied
+
+### The name without its extension: "file.txt" gives "file", "archive.tar.gz" gives "archive.tar".
+### :param path: The path.
+### :param len: Its length.
+### :returns: The stem, or null (length 0) when the allocation fails.
+@export("rf_fs_file_stem")
+routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte?
+    file: &File <- File.at(path_of(path, len))
+
+    s: @[Byte] = file.stem()
+    copied: @Byte? = bytes_result(s: s.data, len: s.count())
+    drop file
+    return copied
+
+### The extension without its dot: "file.txt" gives "txt", "file" gives "".
+### :param path: The path.
+### :param len: Its length.
+### :returns: The extension, or null (length 0) when the allocation fails.
+@export("rf_fs_extension")
+routine rf_fs_extension(path: @Byte, len: S32) -> @Byte?
+    file: &File <- File.at(path_of(path, len))
+
+    e: @[Byte] = file.extension()
+    copied: @Byte? = bytes_result(s: e.data, len: e.count())
+    drop file
+    return copied
+
+# -- existence, kind, permissions ------------------------------------------------------
+
+### Whether something is at the path.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True when it exists.
+@export("rf_fs_exists")
+routine rf_fs_exists(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_present(at: File.at(path_of(path, len)))
+
+### Whether the path is a file.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True for a file.
+@export("rf_fs_is_file")
+routine rf_fs_is_file(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_file(at: File.at(path_of(path, len)))
+
+### Whether the path is a directory.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True for a directory.
+@export("rf_fs_is_directory")
+routine rf_fs_is_directory(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_directory(at: Directory.at(path_of(path, len)))
+
+### Whether the path can be read.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True when it is readable.
+@export("rf_fs_can_read")
+routine rf_fs_can_read(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.READ)
+
+### Whether the path can be written.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True when it is writable.
+@export("rf_fs_can_write")
+routine rf_fs_can_write(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.WRITE)
+
+### Whether the path can be executed.
+### :param path: The path.
+### :param len: Its length.
+### :returns: True when it is executable.
+@export("rf_fs_can_execute")
+routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
+    return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.EXECUTE)
+
+### Sets or clears the read-only permission of the path.
+### :param path: The path.
+### :param len: Its length.
+### :param readonly: True to make it read-only.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_set_readonly")
+routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
+    return status(check OsFileManager.set_readonly(at: File.at(path_of(path, len)), readonly))
+
+# -- directories, copy, move, remove ---------------------------------------------------
+
+### Creates a directory, whose parent must exist.
+### :param path: The path.
+### :param len: Its length.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_create_dir")
+routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
+    return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
+        parents: false))
+
+### Creates a directory and its missing parents, like mkdir -p: it already existing is fine.
+### :param path: The path.
+### :param len: Its length.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_create_dir_all")
+routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
+    return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
+        parents: true))
+
+### Removes a file, or an empty directory (a link is removed, not followed).
+### :param path: The path.
+### :param len: Its length.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_remove")
+routine rf_fs_remove(path: @Byte, len: S32) -> S32
+    p: @[Byte] = path_of(path, len)
+
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
+    when m
+        is Metadata as info =>
+            if info.kind == FileKind.DIRECTORY
+                return status(check OsFileManager.delete(at: Directory.at(p)))
+            return status(check OsFileManager.delete(at: File.at(p)))
+        is FsError as error => return failed(error)
+
+### Removes a directory and everything in it (a link is removed, not followed), or a file.
+### :param path: The path.
+### :param len: Its length.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_remove_all")
+routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
+    manager: @MemoryManager = heap()
+
+    return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), manager))
+
+### Copies a file, replacing what is at the destination.
+### :param src: The source path.
+### :param src_len: Its length.
+### :param dst: The destination path.
+### :param dst_len: Its length.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_copy")
+routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+    copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
+        to: File.at(path_of(path: dst, len: dst_len)), replacing: true)
+    when copied
+        is U64 => return 0
+        is FsError as error => return failed(error)
+
+### Copies a file unless something is at the destination.
+### :param src: The source path.
+### :param src_len: Its length.
+### :param dst: The destination path.
+### :param dst_len: Its length.
+### :returns: 0 copied, 1 the destination exists (nothing copied), -1 an error.
+@export("rf_fs_copy_no_replace")
+routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+    copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
+        to: File.at(path_of(path: dst, len: dst_len)), replacing: false)
+    when copied
+        is U64 => return 0
+        is AlreadyExistsError => return 1
+        is Crashables as error =>
+            # A failure that isn't the file system's stops the program here: C has no way to receive it.
+            when error
+                is FsError as fs => return failed(fs)
+
+### Gives the path the name `name`, in the directory it is in: a file, or a directory.
+### :param path: The path.
+### :param path_len: Its length.
+### :param name: The new name.
+### :param name_len: Its length.
+### :param replacing: Whether something already called `name` there is replaced.
+### :returns: 0 renamed, 1 something there has that name and `replacing` is false (nothing renamed), 2 the name isn't a
+###     name (empty, "." or "..", or holding a separator), -1 another error (its reason for {rf_fs_last_error}).
+@export("rf_fs_rename")
+routine rf_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, replacing: Bool) -> S32
+    p: @[Byte] = path_of(path, len: path_len)
+    n: @[Byte] = path_of(path: name, len: name_len)
+
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
+    is_directory: Bool = when m
+        is Metadata as info => info.kind == FileKind.DIRECTORY
+        is FsError as error => return failed(error)
+    when check rename_either(p, n, replacing, is_directory)
+        is None => return 0
+        is AlreadyExistsError as error =>
+            if not replacing
+                return 1
+            return failed(error)
+        is InvalidPathError => return 2
+        is Crashables as error =>
+            # A failure that isn't the file system's stops the program here: C has no way to receive it.
+            when error
+                is FsError as fs => return failed(fs)
+
+### Renames the file or directory at `p` to `n`.
+### :param p: The path.
+### :param n: The new name.
+### :param replacing: Whether something of that name is replaced.
+### :param is_directory: Whether `p` is a directory.
+### :throws: Throws the FsError the OS reported.
+routine rename_either(p: @[Byte], n: @[Byte], replacing: Bool, is_directory: Bool) -> None
+    if is_directory
+        when check OsFileManager.rename(at: Directory.at(p), to: n, replacing)
+            is None => return
+    when check OsFileManager.rename(at: File.at(p), to: n, replacing)
+        is None => return
+
+### Moves the file or directory at `p` into the directory `d`, keeping its name.
+### :param p: The path.
+### :param d: The directory.
+### :param replacing: Whether something of that name in `d` is replaced.
+### :param manager: The memory manager for the child paths of a copied tree.
+### :throws: Throws the FsError the OS reported, or `OriginalKeptError` when the copy is whole and the original is still
+###     there.
+routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, manager: @MemoryManager) -> None
+    m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
+    is_directory: Bool = when m
+        is Metadata as info => info.kind == FileKind.DIRECTORY
+        is FsError as error => throw error
+    if is_directory
+        when check OsFileManager.move(at: Directory.at(p), into: Directory.at(d), replacing,
+            manager)
+            is None => return
+    when check OsFileManager.move(at: File.at(p), into: Directory.at(d), replacing, manager)
+        is None => return
+
+### Puts the path into the directory `into`, keeping its name: renamed by the OS on the same partition, else copied
+### into `into` and then deleted.
+### :param path: The path, a file or a directory.
+### :param path_len: Its length.
+### :param into: The directory it goes into.
+### :param into_len: Its length.
+### :param replacing: Whether something of the same name in `into` is replaced.
+### :returns: 0 moved, 1 something of that name is there and `replacing` is false (nothing moved), -2 the copy was made
+###     but the original couldn't be deleted, -1 another error (the reason for {rf_fs_last_error} in both).
+@export("rf_fs_move_into")
+routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
+    replacing: Bool) -> S32
+    p: @[Byte] = path_of(path, len: path_len)
+    d: @[Byte] = path_of(path: into, len: into_len)
+    manager: @MemoryManager = heap()
+
+    when check move_either(p, d, replacing, manager)
+        is None => return 0
+        is AlreadyExistsError as error =>
+            if not replacing
+                return 1
+            return failed(error)
+        is OriginalKeptError =>
+            LAST_ERROR.store(1)
+            return -2
+        is Crashables as error =>
+            # A failure that isn't the file system's stops the program here: C has no way to receive it.
+            when error
+                is FsError as fs => return failed(fs)
+
+# -- listings --------------------------------------------------------------------------
+
+### Writes `v` in decimal into `out`.
+### :param v: The value.
+### :param out: Where the digits go, room for 20.
+### :returns: The digit count.
+routine decimal(v: U64, out: @Byte) -> U64
+    rev_buffer: &Items[Byte, 24]
+    rev: @Byte = rev_buffer.getview().to[@Byte]()
+
+    loop with remaining: U64 = v, n: U64 = 0
+        digit_value2: U8 = (remaining % 10).to[U8]()
+        rev.stride(n).poke((digit_value2 + 48).bits())
+        rest2: U64 = remaining // 10
+        if rest2 == 0
+            n2: U64 = n + 1
+
+            for i in 0 til n2
+                out.stride(i).poke(rev.stride(n2 - 1 - i).peek())
+            then
+                return n2
+        else
+            continue with remaining: rest2, n: n + 1
+
+### One entry: the name, or for the typed listing `<d|f><mtime> <name>` (mtime in Unix seconds, at least 0), with
+### '\n' before every entry but the first.
+### :param name: The entry's name.
+### :param typed: True for the typed form.
+### :param is_dir: True for a directory (typed only).
+### :param mtime: The modification time in Unix seconds (typed only).
+### :returns: False when the buffer can't grow.
+routine @ResultBuffer.entry(name: @[Byte], typed: Bool, is_dir: Bool, mtime: S64) -> Bool
+    digit_buffer: &Items[Byte, 24]
+    digits: @Byte = digit_buffer.getview().to[@Byte]()
+
+    dl: U64 = when
+        typed => decimal(v: mtime.max(0).to[U64](), out: digits)
+        else => 0
+    sep: U64 = when
+        me.len.peek() > 0 => 1
+        else => 0
+    kind: U64 = when
+        typed => dl + 2
+        else => 0
+    if not me.room(sep + kind + name.count())
+        return false
+    if sep == 1
+        me.byte(b'\n')
+    if typed
+        kind2: Byte = when
+            is_dir => b'd'
+            else => b'f'
+        me.byte(kind2)
+        me.add_bytes(data: digits, n: dl)
+        me.byte(b' ')
+    me.add_bytes(data: name.data, n: name.count())
+    return true
+
+### The entries, with each one's kind and modification time when typed (a link followed where the OS tells).
+### :param path: The directory's path.
+### :param len: Its length.
+### :param typed: True for `<d|f><mtime> <name>` entries, false for names only.
+### :returns: The listing, or null (length 0) when the directory can't be opened or the buffer can't grow.
+routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte?
+    out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
+    iter: &DirEmitter
+
+    # Every exit closes the listing (OsFileManager.list_result, the first step, sets the handle before anything can
+    # fail, so close() is safe on every path) and hands the text back whole or frees it.
+    opened: Bool = try OsFileManager.list(at: Directory.at(path_of(path, len)), iter)
+    if not opened or not out.start(256)
+        iter.close()
+        return out.fail()
+
+    loop
+        e: Optional[DirEntry] = try iter.emit()
+        d: DirEntry = when e
+            is DirEntry as d => d
+            is None =>
+                iter.close()
+                return out.finish()
+        values: (Bool, S64) = when
+            not typed => (false, 0)
+            else =>
+                m: Check[Metadata] = check iter.entry_metadata()
+                when m
+                    is Metadata as info =>
+                        becomes (info.kind == FileKind.DIRECTORY, seconds(info.modified_ns))
+                    is FsError =>
+                        becomes (d.kind == FileKind.DIRECTORY, 0)
+        is_dir, mtime = values
+        if not out.entry(name: d.name, typed, is_dir, mtime)
+            iter.close()
+            return out.fail()
+
+### The entries' names, '\n' between them ("." and ".." left out).
+### :param path: The directory's path.
+### :param len: Its length.
+### :returns: The listing, or null (length 0) on a failure.
+@export("rf_fs_list_dir")
+routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte?
+    return list_directory(path, len, typed: false)
+
+### `<d|f><mtime> <name>` per entry, '\n' between them.
+### :param path: The directory's path.
+### :param len: Its length.
+### :returns: The listing, or null (length 0) on a failure.
+@export("rf_fs_list_dir_typed")
+routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
+    return list_directory(path, len, typed: true)
+
+# -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
+
+global META_SIZE: &S64
+global META_MODIFIED: &S64
+global META_CREATED: &S64
+global META_IS_DIRECTORY: &Bool
+global META_READONLY: &Bool
+
+### The size from the last {rf_fs_metadata}.
+### :returns: The size in bytes.
+@export("rf_fs_meta_size")
+routine rf_fs_meta_size() -> S64
+    return META_SIZE.load()
+
+### The modification time from the last {rf_fs_metadata}.
+### :returns: Unix seconds.
+@export("rf_fs_meta_modified")
+routine rf_fs_meta_modified() -> S64
+    return META_MODIFIED.load()
+
+### The creation time from the last {rf_fs_metadata}.
+### :returns: Unix seconds.
+@export("rf_fs_meta_created")
+routine rf_fs_meta_created() -> S64
+    return META_CREATED.load()
+
+### Whether the last {rf_fs_metadata} was of a directory.
+### :returns: True for a directory.
+@export("rf_fs_meta_is_directory")
+routine rf_fs_meta_is_directory() -> Bool
+    return META_IS_DIRECTORY.load()
+
+### Whether the last {rf_fs_metadata} was of a read-only path.
+### :returns: True when read-only.
+@export("rf_fs_meta_readonly")
+routine rf_fs_meta_readonly() -> Bool
+    return META_READONLY.load()
+
+### Reads the path's metadata for the `rf_fs_meta_` accessors. Where the filesystem doesn't record a creation time,
+### the modification time stands in.
+### :param path: The path.
+### :param len: Its length.
+### :returns: 0, or -1 on a failure (the cached values stay as they were).
+@export("rf_fs_metadata")
+routine rf_fs_metadata(path: @Byte, len: S32) -> S32
+    m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
+    info: Metadata = when m
+        is Metadata as info => info
+        is FsError as error => return failed(error)
+    META_SIZE.store(info.size.to_wrap[S64]())
+    META_MODIFIED.store(seconds(info.modified_ns))
+    META_CREATED.store(seconds(info.created_ns.unwrap_or(info.modified_ns)))
+    META_IS_DIRECTORY.store(info.kind == FileKind.DIRECTORY)
+    META_READONLY.store(info.readonly)
+    return 0
+
+### The size of the file at the path.
+### :param path: The path.
+### :param len: Its length.
+### :returns: The size in bytes, or -1 on a failure.
+@export("rf_fs_file_size")
+routine rf_fs_file_size(path: @Byte, len: S32) -> S64
+    m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
+    when m
+        is Metadata as info => return info.size.to_wrap[S64]()
+        is FsError as error => return failed(error).to[S64]()
+
+# -- the working directory and well-known directories, from the environment -------------
+
+### The working directory.
+### :returns: The path, or null (length 0) on a failure.
+@export("rf_fs_current_dir")
+routine rf_fs_current_dir() -> @Byte?
+    manager: @MemoryManager = heap()
+
+    return path_result(check OsEnvironment.working_directory(manager))
+
+### The directory for temporary files.
+### :returns: The path, or null (length 0) on a failure.
+@export("rf_fs_temp_dir")
+routine rf_fs_temp_dir() -> @Byte?
+    manager: @MemoryManager = heap()
+
+    return path_result(check OsEnvironment.temp_directory(manager))
+
+### The user's home directory, or null when it can't be told.
+### :returns: The path, or null (length 0).
+@export("rf_fs_home_dir")
+routine rf_fs_home_dir() -> @Byte?
+    manager: @MemoryManager = heap()
+
+    return path_result(check OsEnvironment.home_directory(manager))
+
+### Makes an empty file. The directory it goes in must exist.
+### :param path: The path.
+### :param len: Its length.
+### :param replacing: Whether a file already there is emptied. When false, one there is left as it is.
+### :returns: 0 made (or emptied when `replacing`), 1 something is there and `replacing` is false, -1 any other
+###     failure.
+@export("rf_fs_make_file")
+routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
+    made: Check[None] = check OsFileManager.make_file(at: File.at(path_of(path, len)), replacing)
+    when made
+        is None => return 0
+        is AlreadyExistsError as error =>
+            if not replacing
+                return 1
+            return failed(error)
+        is Crashables as error =>
+            # A failure that isn't the file system's stops the program here: C has no way to receive it.
+            when error
+                is FsError as fs => return failed(fs)
+
+### The absolute path by the text alone (links kept).
+### :param path: The path.
+### :param len: Its length.
+### :returns: The absolute path, or null (length 0) on a failure.
+@export("rf_fs_absolute_path")
+routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte?
+    manager: @MemoryManager = heap()
+
+    return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), manager))
+
+### The path with links, ".", and ".." resolved. It must exist.
+### :param path: The path.
+### :param len: Its length.
+### :returns: The canonical path, or null (length 0) on a failure.
+@export("rf_fs_canonical_path")
+routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte?
+    manager: @MemoryManager = heap()
+
+    return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), manager))
+
+### Makes the existing file exactly size bytes, extending it with zeros or cutting it short: 0, or -1 (a missing
+### file included: nothing is made).
+### :param path: The path.
+### :param path_len: Its length.
+### :param size: The new size in bytes.
+### :returns: 0, or -1 on a failure.
+@export("rf_fs_set_size")
+routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
+    return status(check OsFileManager.set_size(at: File.at(path_of(path, len: path_len)), size))
+
+# -- files as storage, mapped ----------------------------------------------------------
+
+### A storage read front to back pages in ahead, and within half the physical memory is read in at once: a bigger one
+### would evict the pages it just read, so it pages in on demand.
+### :param m: The storage.
+routine advise(m: @FileStorage[Byte]) -> None
+    m.advise_sequential()
+    mapped: U64 = m.count().to[U64]()
+    if not (mapped <= physical_memory().bytes() // 2)
+        return
+    m.prefetch()
+    return
+
+### Maps a window of a file, for writing or for reading only.
+### :param path: The path.
+### :param offset: The window's first byte in the file.
+### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: True to map it for writing.
+### :returns: The storage.
+### :throws: Throws the FsError of the mapping.
+routine map_storage(path: @[Byte], offset: U64, count: U64, write: Bool) -> FileStorage[Byte]
+    when check OsFileManager.storage[Byte](at: File.at(path), write, start: offset, count)
+        is FileStorage[Byte] as m => return m
+
+### A window [offset, offset + count) of a file mapped for writing or for reading only, clamped to its end and aligned
+### down for the OS: the base (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker
+### for an empty window, or null.
+### :param path: The path.
+### :param offset: The window's first byte in the file.
+### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: True to map it for writing.
+### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
+routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte?
+    MAP_DELTA.store(0)
+    when check map_storage(path, offset, count, write)
+        is FileStorage[Byte] as m => return handed_on(steal m)
+        is FsError as error => return failed_result(error)
+
+### The window a storage maps, handed on by its base (MAP_DELTA from it to the first byte, the length as the result):
+### {rf_file_unmap} gives it back. An empty storage is the empty-map marker.
+### :param m: The storage.
+### :returns: The base, or the empty-map marker.
+routine handed_on(m: FileStorage[Byte]) -> @Byte?
+    count: U64 = m.count()
+    if count == 0
+        drop m
+        RESULT_LEN.store(0)
+        return empty_map()
+    advise(m)
+    MAP_DELTA.store(m.delta.peek())
+    base: Addr = m.take_mapping()
+    drop m
+    return result(buf: base.to[@Byte](), len: count)
+
+### Maps a window of a file for a storage a block enters: for writing (`modifying`) or for reading only (`viewing`).
+### The window's offset from the base is in {rf_file_map_delta}, its length in {rf_get_result_len}.
+### :param path: The path.
+### :param path_len: Its length.
+### :param offset: The window's first byte in the file.
+### :param count: The window's length, U64.MAX for the rest of the file.
+### :param write: 1 to map it for writing, 0 for reading only.
+### :returns: The base, the empty-map marker for an empty window, or null on a failure (a file that can't be written
+###     mapped for writing fails with the reason "not allowed").
+@export("rf_file_map")
+routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte?
+    return map_window(path: path_of(path, len: path_len), offset, count, write: write != 0)
+
+### Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
+### (the empty marker) does nothing.
+### :param ptr: The mapping's base.
+### :param len: The delta plus the length.
+@export("rf_file_unmap")
+routine rf_file_unmap(ptr: Addr, len: U64) -> None
+    if ptr.is_hollow() or len == 0
+        return
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
+    drop m
+    return
+
+### Writes a mapping's dirty pages back to the file, ignoring a failure. A null view or length 0 does nothing.
+### :param ptr: The mapping's base.
+### :param len: The delta plus the length.
+@export("rf_file_map_flush")
+routine rf_file_map_flush(ptr: Addr, len: U64) -> None
+    if ptr.is_hollow() or len == 0
+        return
+    m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
+    try m.flush()
+    # the mapping stays: rf_file_unmap gives it back
+    m.take_mapping()
+    drop m
+    return

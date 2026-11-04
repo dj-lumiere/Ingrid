@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "Building RazorForge Native Libraries..."
+echo "Building Revare Native Libraries..."
 
 mkdir -p build
 cd build
@@ -14,13 +14,13 @@ if command -v flock >/dev/null 2>&1; then
 fi
 
 echo "Configuring with CMake..."
-# TESSERA_DLL (set by the RazorForge build) is the Tessera builder that compiles ../runtime-tessera; without it CMake
-# looks for the checkout's own Tessera build.
-TESSERA_ARGS=()
-if [[ -n "${TESSERA_DLL:-}" ]]; then
-    TESSERA_ARGS=(-DTESSERA_DLL="$TESSERA_DLL")
+# LAPILA_DLL (set by the Revare build) is the Lapila builder that compiles ../runtime-lapila; without it CMake
+# looks for the checkout's own Lapila build.
+LAPILA_ARGS=()
+if [[ -n "${LAPILA_DLL:-}" ]]; then
+    LAPILA_ARGS=(-DLAPILA_DLL="$LAPILA_DLL")
 fi
-cmake .. -DCMAKE_BUILD_TYPE=Release "${TESSERA_ARGS[@]}"
+cmake .. -DCMAKE_BUILD_TYPE=Release "${LAPILA_ARGS[@]}"
 
 echo "Building libraries..."
 cmake --build . --config Release

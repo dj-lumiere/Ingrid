@@ -1,46 +1,46 @@
 cmake_minimum_required(VERSION 3.20)
-project(RazorForgeNative C)
+project(RevareNative C)
 
 # ============================================================================
-# The runtime library (razorforge_runtime: .dll / .so / .dylib) is Ingrid's Tessera code in
-# ../runtime-tessera, and no C: the Tessera builder compiles it to LLVM IR, and clang compiles that into
+# The runtime library (revare_runtime: .dll / .so / .dylib) is Ingrid's Lapila code in
+# ../runtime-lapila, and no C: the Lapila builder compiles it to LLVM IR, and clang compiles that into
 # the library's one object. The C library and the operating system are called as external libraries.
 # Third-party libraries: none.
 # ============================================================================
 
-# Export every symbol on Windows (the import library RazorForge programs link against, and the export
+# Export every symbol on Windows (the import library Revare programs link against, and the export
 # table the in-process JIT resolves against).
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
-# The Tessera builder: TESSERA_DLL, which the RazorForge build passes in, or a checkout's own Tessera build.
-if(NOT TESSERA_DLL)
+# The Lapila builder: LAPILA_DLL, which the Revare build passes in, or a checkout's own Lapila build.
+if(NOT LAPILA_DLL)
     foreach(config Debug Release)
-        set(candidate "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/bin/${config}/net10.0/tessera.dll")
+        set(candidate "${CMAKE_CURRENT_SOURCE_DIR}/../../Lapila/bin/${config}/net10.0/lapila.dll")
         if(EXISTS "${candidate}")
-            set(TESSERA_DLL "${candidate}")
+            set(LAPILA_DLL "${candidate}")
         endif()
     endforeach()
 endif()
-if(NOT TESSERA_DLL OR NOT EXISTS "${TESSERA_DLL}")
-    message(FATAL_ERROR "The Tessera builder is needed for ../runtime-tessera: build ../../Tessera "
-                        "(dotnet build), or pass -DTESSERA_DLL=<path to tessera.dll>.")
+if(NOT LAPILA_DLL OR NOT EXISTS "${LAPILA_DLL}")
+    message(FATAL_ERROR "The Lapila builder is needed for ../runtime-lapila: build ../../Lapila "
+                        "(dotnet build), or pass -DLAPILA_DLL=<path to lapila.dll>.")
 endif()
-message(STATUS "Tessera builder: ${TESSERA_DLL}")
+message(STATUS "Lapila builder: ${LAPILA_DLL}")
 
-file(GLOB INGRID_RUNTIME_TESSERA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/*.te")
-file(GLOB_RECURSE TESSERA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Tessera/Standard/*.te")
-set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera.ll")
-set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_tessera${CMAKE_C_OUTPUT_EXTENSION}")
-# runtime-tessera/config.toml builds it as a library (no executable): LLVM IR in its build/ folder, every routine keeping
-# a frame record, release mode, no Tessera crash trace (the reasons are in that file). It is copied next to the object.
+file(GLOB INGRID_RUNTIME_LAPILA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila/*.li")
+file(GLOB_RECURSE LAPILA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Lapila/Standard/*.li")
+set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_lapila.ll")
+set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_lapila${CMAKE_C_OUTPUT_EXTENSION}")
+# runtime-lapila/config.toml builds it as a library (no executable): LLVM IR in its build/ folder, every routine keeping
+# a frame record, release mode, no Lapila crash trace (the reasons are in that file). It is copied next to the object.
 add_custom_command(
     OUTPUT "${INGRID_RUNTIME_LL}"
-    COMMAND dotnet "${TESSERA_DLL}" build
-    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/build/ingrid_runtime_tessera.ll"
+    COMMAND dotnet "${LAPILA_DLL}" build
+    COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila/build/ingrid_runtime_lapila.ll"
             "${INGRID_RUNTIME_LL}"
-    DEPENDS ${INGRID_RUNTIME_TESSERA} ${TESSERA_STDLIB} "${TESSERA_DLL}" "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera/config.toml"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-tessera"
-    COMMENT "Compiling Ingrid's runtime Tessera code"
+    DEPENDS ${INGRID_RUNTIME_LAPILA} ${LAPILA_STDLIB} "${LAPILA_DLL}" "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila/config.toml"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila"
+    COMMENT "Compiling Ingrid's runtime Lapila code"
     VERBATIM)
 if(WIN32)
     set(INGRID_RUNTIME_PIC "")
@@ -63,39 +63,39 @@ add_custom_command(
     COMMAND "${INGRID_CLANG}" -c -O2 ${INGRID_RUNTIME_PIC} -Wno-override-module "${INGRID_RUNTIME_LL}"
             -o "${INGRID_RUNTIME_OBJ}"
     DEPENDS "${INGRID_RUNTIME_LL}"
-    COMMENT "Compiling ingrid_runtime_tessera.ll"
+    COMMENT "Compiling ingrid_runtime_lapila.ll"
     VERBATIM)
 set_source_files_properties("${INGRID_RUNTIME_OBJ}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
 
-add_library(razorforge_runtime SHARED "${INGRID_RUNTIME_OBJ}")
-set_target_properties(razorforge_runtime PROPERTIES LINKER_LANGUAGE C)
+add_library(revare_runtime SHARED "${INGRID_RUNTIME_OBJ}")
+set_target_properties(revare_runtime PROPERTIES LINKER_LANGUAGE C)
 
 # The libraries the runtime calls into, beyond the C library.
 if(WIN32)
     # The C runtime (msvcrt brings the UCRT and vcruntime, and the DLL's entry point): with no C source in the
     # library, no object asks for it. dbghelp gives the stack traces, synchronization WaitOnAddress. Random words come
-    # from ProcessPrng, which Tessera's stdlib looks up at run time.
-    target_link_libraries(razorforge_runtime msvcrt dbghelp synchronization)
+    # from ProcessPrng, which Lapila's stdlib looks up at run time.
+    target_link_libraries(revare_runtime msvcrt dbghelp synchronization)
 elseif(APPLE)
     # libSystem has everything
 else()
-    target_link_libraries(razorforge_runtime m pthread)
+    target_link_libraries(revare_runtime m pthread)
 endif()
 
-set_target_properties(razorforge_runtime PROPERTIES
+set_target_properties(revare_runtime PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
-install(TARGETS razorforge_runtime
+install(TARGETS revare_runtime
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
 
 message(STATUS "")
-message(STATUS "RazorForge native runtime: Tessera (../runtime-tessera), no C")
+message(STATUS "Revare native runtime: Lapila (../runtime-lapila), no C")
 message(STATUS "  Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "  Compiler: ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}, LLVM IR compiled by ${INGRID_CLANG}")
 message(STATUS "")

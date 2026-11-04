@@ -1,0 +1,155 @@
+# Conversions between the decimal floats and the binary ones (B16, B32, B64, and B128), each rounded once, half to
+# even, from the exact value: a binary float is m × 2^e, a decimal c × 10^q, and both sides are integers times a
+# power of the other's radix, so the conversion works on big naturals (the standard library's BigNat) and nothing
+# is approximated.
+
+module Ingrid/Decimal
+
+### The bits of the binary float (16, 32, 64, or 128 bits wide, `which`) nearest to x: an infinity keeps its sign,
+### a NaN becomes the positive quiet NaN, and a finite value goes through the standard library's correctly rounded
+### decimal-to-binary conversion (the one its text parsing uses).
+### :param x: The operand.
+### :param which: The binary float's width in bits: 16, 32, 64, or 128.
+### :returns: The bits of the binary float (16, 32, 64, or 128 bits wide, `which`) nearest to x.
+secret routine dec_to_binary(x: Dec, which: U32) -> U128
+    mbits: S64 = dec_binary_mantissa(which)
+    wide: Bool = which == 128
+    emax: U128 = U128.shift_left(1, dec_binary_exponent_bits(which)) - 1
+    sign: U128 = x.neg.to[U128]() << mbits.to[U128]() + dec_binary_exponent_bits(which)
+    inf_bits: U128 = emax << mbits.to[U128]()
+
+    quiet: U128 = U128.shift_left(1, (mbits - 1).to[U128]())
+    when
+        x.is_nan() => return inf_bits | quiet
+        x.is_inf() => return sign | inf_bits
+        wide => return sign | dec_to_b128_magnitude(x)
+        else => return sign | dec_to_narrow_magnitude(x, which)
+
+### The stored mantissa bits of the binary float of `which` bits.
+### :param which: The binary float's width in bits.
+### :returns: The stored mantissa bits of the binary float of `which` bits.
+secret routine dec_binary_mantissa(which: U32) -> S64
+    when which
+        16 => return 10
+        32 => return 23
+        64 => return 52
+        else => return 112
+
+### The exponent field bits of the binary float of `which` bits.
+### :param which: The binary float's width in bits.
+### :returns: The exponent field bits of the binary float of `which` bits.
+secret routine dec_binary_exponent_bits(which: U32) -> U128
+    when which
+        16 => return 5
+        32 => return 8
+        64 => return 11
+        else => return 15
+
+### The parsed-number form decimal_to_bits takes: x's coefficient in digits, value = digits × 10^exponent.
+### :param x: The operand.
+### :returns: The parsed-number form decimal_to_bits takes.
+secret routine dec_parts(x: Dec) -> DecimalParts
+    return (kind: DecimalKind.FINITE, negative: x.neg, kept: dec_digits(x.coeff), exponent: x.exp, sticky: false)
+
+### |x| of a finite x as B128 bits without the sign.
+### :param x: The operand.
+### :returns: |x| of a finite x as B128 bits without the sign.
+secret routine dec_to_b128_magnitude(x: Dec) -> U128
+    digits: &BigNat[320]
+
+    digits.set(x.coeff)
+    return decimal_to_bits(digits, parts: dec_parts(x), format: B128.FORMAT)
+
+### |x| of a finite x as the bits without the sign of the B16, B32, or B64 nearest it (`which`).
+### :param x: The operand.
+### :param which: The binary float's width in bits: 16, 32, or 64.
+### :returns: |x| of a finite x as the bits without the sign of the B16, B32, or B64 nearest it (`which`).
+secret routine dec_to_narrow_magnitude(x: Dec, which: U32) -> U128
+    digits: &BigNat[72]
+
+    digits.set(x.coeff)
+    parts: DecimalParts = dec_parts(x)
+    when which
+        16 => return decimal_to_bits(digits, parts, format: B16.FORMAT)
+        32 => return decimal_to_bits(digits, parts, format: B32.FORMAT)
+        else => return decimal_to_bits(digits, parts, format: B64.FORMAT)
+
+### The B128 with these bits as a decimal of format f, rounded once and reduced (trailing zeros stripped): a NaN
+### becomes the positive quiet NaN, an infinity keeps its sign, a zero is ±0 with exponent 0. A narrower binary float
+### widens to B128 exactly first.
+### :param bits: The encoding.
+### :param f: The format the result rounds to.
+### :returns: The B128 with these bits as a decimal of format f, rounded once and reduced (trailing zeros stripped).
+secret routine dec_from_binary(bits: U128, f: DecFormat) -> Dec
+    neg: Bool = bits >> 127 == 1
+    biased: S64 = ((bits >> 112) & 0x7FFF).to[S64]()
+    fraction: U128 = bits & U128.shift_left(1, 112) - 1
+    big: &BigNat[640]
+    divisor: &BigNat[640]
+    scratch: &BigNat[640]
+
+    top: Bool = biased == 0x7FFF
+    is_nan: Bool = top and fraction != 0
+    if is_nan
+        return dec_nan()
+    if top
+        return dec_inf(neg)
+    if biased == 0 and fraction == 0
+        return dec_num(neg, coeff: 0, exp: 0)
+
+    # |x| = m 2^e: an integer m 2^e for e >= 0, else m 5^-e × 10^e
+    subnormal: Bool = biased == 0
+    hidden: U128 = when
+        subnormal => 0
+        else => U128.shift_left(1, 112)
+    e: S64 = biased.max(1) - 16495
+    big.set(fraction | hidden)
+    q: S64 = when
+        e >= 0 =>
+            big.shift_left(e.to[U64]())
+            becomes 0
+        else =>
+            # times 5^left, 27 fives (5^27 < 2^63) at a time
+            until left == 0 with left: S64 = -e
+                step: S64 = left.min(27)
+                power: U64 = U64.pow(5, step.to[U64]())
+                big.mul_add(m: power, addend: 0)
+                continue with left: left - step
+            becomes e
+
+    # value = big × 10^q: keep p + 2 or p + 3 digits, the rest as a sticky digit
+    width: S64 = big.bit_length().to[S64]()
+    guess: S64 = (width * 1233 >> 12) + 1
+    k: S64 = guess - f.digits - 2
+    if k <= 0
+        low: U128 = big.limbs[0].to[U128]()
+        high: U128 = big.limbs[1].to[U128]()
+        many: Bool = big.count.peek() >= 2
+        upper: U128 = when
+            many => high
+            else => 0
+        some: Bool = big.count.peek() >= 1
+        lower: U128 = when
+            some => low
+            else => 0
+        value: U128 = (upper << 64) | lower
+        return dec_round_reduced(neg, coeff: value.to[U256](), exp: q, f)
+    one: U64 = 1
+    divisor.set(one)
+    divisor.mul_pow10(k.to[U64]())
+    quotient: U128 = big.div_small(divisor, scratch, bits: 127)
+    rest: Bool = not big.is_zero()
+    sticky: U256 = rest.to[U64]().to[U256]()
+    coeff: U256 = quotient.to[U256]() * 10 + sticky
+    return dec_round_reduced(neg, coeff, exp: q + k - 1, f)
+
+### (-1)^neg × coeff × 10^exp rounded to f and then reduced: trailing zeros of the rounded coefficient stripped
+### whether the rounding was exact or not (Revare's form for a function result), as far as qmax allows.
+### :param neg: Whether the result is negative.
+### :param coeff: The coefficient.
+### :param exp: The exponent.
+### :param f: The format the result rounds to.
+### :returns: (-1)^neg × coeff × 10^exp rounded to f and then reduced.
+secret routine dec_round_reduced(neg: Bool, coeff: U256, exp: S64, f: DecFormat) -> Dec
+    r: Dec = dec_finish(value: DecExact(neg: neg, coeff: coeff, exp: exp, pref: exp), f)
+    return r.reduce(f)
