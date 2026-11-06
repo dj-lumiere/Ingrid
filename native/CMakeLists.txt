@@ -27,8 +27,8 @@ if(NOT LAPILA_DLL OR NOT EXISTS "${LAPILA_DLL}")
 endif()
 message(STATUS "Lapila builder: ${LAPILA_DLL}")
 
-file(GLOB INGRID_RUNTIME_LAPILA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila/*.li")
-file(GLOB_RECURSE LAPILA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Lapila/Standard/*.li")
+file(GLOB INGRID_RUNTIME_LAPILA CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../runtime-lapila/*.lpa")
+file(GLOB_RECURSE LAPILA_STDLIB CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../../Lapila/Standard/*.lpa")
 set(INGRID_RUNTIME_LL "${CMAKE_BINARY_DIR}/ingrid_runtime_lapila.ll")
 set(INGRID_RUNTIME_OBJ "${CMAKE_BINARY_DIR}/ingrid_runtime_lapila${CMAKE_C_OUTPUT_EXTENSION}")
 # runtime-lapila/config.toml builds it as a library (no executable): LLVM IR in its build/ folder, every routine keeping

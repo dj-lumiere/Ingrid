@@ -1,0 +1,335 @@
+# The pool behind Revare's `PoolManager` and `Stamped[E]`: entities of many types kept in slots of one reserved range of
+# address space, each slot a 16-byte header (the type id and the slot's generation) and the entity's bytes after it.
+# `add` copies an entity's block into a slot and gives the block back, so a slot's address is the range's start plus the
+# slot's number times 16, and a stamp is the slot and the generation. The slots of one type sit side by side in chunks of
+# 4,096, taken from the range one after the other, so nothing ever moves. The range is reserved when the pool is set up and
+# its pages are committed as it grows. `remove` ends a stamp at once (the generation goes up) and leaves the entity where
+# it is, `sweep` runs the removed entities' destructs and frees their slots, and `end` makes every stamp stale first and then
+# runs each remaining entity's destruct, so a destruct that fetches another pooled entity always sees it ended.
+#
+# The fetch is in Ingrid/lapila/pool.lpa, linked into each program so it inlines. This file exports the globals it reads
+# (`lapila_pool_base`, `lapila_pool_reserved`) and the routines Revare's PoolManager calls. The pool belongs to one thread:
+# nothing here is locked, and the builder refuses a Work that reaches it from another thread.
+#
+# A Revare entity's own destruct frees its block through `rf_invalidate`, which gives nothing back for an address inside the
+# range (Ingrid/lapila/memory.lpa), so the destruct of a pooled entity is the one a block has.
+
+module Ingrid/Runtime
+
+import Hosted
+
+### The start of the reserved range, 0 before the pool is set up. Exported for the fetch and for `rf_invalidate`.
+@export("lapila_pool_base")
+secret global POOL_BASE: &Addr
+### The bytes reserved, 0 before the pool is set up.
+@export("lapila_pool_reserved")
+secret global POOL_RESERVED: &U64
+### The bytes of the range committed so far.
+secret global POOL_COMMITTED: &U64
+### The first 16-byte unit of the range no chunk has taken.
+secret global POOL_TOP: &U64
+### The type table: `POOL_TYPE_ROOM` entries found by type id.
+secret global POOL_TYPES: &Addr
+### The chunks taken so far, and the room for them and their count.
+secret global POOL_CHUNK_LIST: &Addr
+secret global POOL_CHUNK_ROOM: &U64
+secret global POOL_CHUNK_COUNT: &U64
+### The slots removed and not swept yet, and the room for them and their count.
+secret global POOL_REMOVED: &Addr
+secret global POOL_REMOVED_ROOM: &U64
+secret global POOL_REMOVED_COUNT: &U64
+### The highest generation any slot ever reached, in any pool: it survives the end of a pool.
+secret global POOL_HIGH: &U32
+### The generation this pool's fresh slots start at.
+secret global POOL_FIRST: &U32
+
+### How many slots a chunk holds.
+secret preset POOL_CHUNK_SLOTS: U64 = 4096
+### How many entries the type table has.
+secret preset POOL_TYPE_ROOM: U64 = 1024
+### The bytes in front of an entity in its slot.
+secret preset POOL_HEADER: U64 = 16
+### The pages committed at a time.
+secret preset POOL_COMMIT_STEP: U64 = 1048576
+
+### The head of a slot.
+secret record PoolSlotHeader
+    ### The type id of the slot's entity, 0 while it holds none.
+    type_id: U32
+    ### Goes up each time the slot's entity is removed or the pool ends.
+    generation: U32
+    ### Keeps the entity 16-byte aligned.
+    spare: U64
+
+### One chunk of slots.
+secret record PoolChunk
+    ### The chunk's first slot.
+    first: U32
+    ### The type id of its slots.
+    type_id: U32
+
+### One type the pool keeps.
+secret record PoolType
+    ### The type id, 0 for an empty entry.
+    id: U32
+    ### The first free slot, 0 for none.
+    free: U32
+    ### The next slot never used in the type's last chunk.
+    fresh_next: U32
+    ### One past the last slot of the type's last chunk.
+    fresh_end: U32
+    ### Runs the entity's destruct, from the address of its bytes in the slot.
+    destroy: Callable[(Addr,), None]
+    ### The bytes of a slot of this type, a multiple of 16.
+    stride: U64
+
+### The entry of a type: the one with this id, else the empty one it would take.
+### :param id: The type id, not 0.
+### :returns: The entry.
+secret routine pool_type_entry(id: U32) -> @PoolType
+    table: @PoolType = POOL_TYPES.load().to[@PoolType]()
+    mask: U64 = POOL_TYPE_ROOM - 1
+    loop with at: U64 = id.to[U64]() & mask
+        entry: @PoolType = table.stride(at)
+        found: U32 = entry.id.peek()
+        if found == 0 or found == id
+            return entry
+        continue with at: (at + 1) & mask
+
+### The first byte of a slot.
+### :param slot: The slot's number.
+### :returns: Its address.
+@inline
+secret routine pool_slot_at(slot: U32) -> @Byte
+    return bitcast[Addr, @Byte](POOL_BASE.load()).stride(slot.to[U64]() << 4)
+
+### Records a generation a slot reached: the high-water mark only goes up.
+### :param generation: The generation.
+@inline
+secret routine pool_note_generation(generation: U32) -> None
+    if generation > POOL_HIGH.load()
+        POOL_HIGH.store(generation)
+    return
+
+### Sets the pool up: reserves its range and makes its tables.
+### :returns: 0 when it is set up, 1 when a pool lives already, 2 when there is no memory, 3 when the generations of earlier
+###     pools are used up.
+@export("rf_pool_set_up")
+routine rf_pool_set_up() -> S32
+    if not POOL_BASE.load().is_hollow()
+        return 1
+    if POOL_HIGH.load() >= U32.MAX - 1
+        return 3
+    reserved: U64 = when
+        sizeof[Addr]() == 8 => 68719476736
+        else => 268435456
+    base: Addr = PAGES.reserve(reserved)
+    if base.is_hollow()
+        return 2
+    types: Addr = allocate[PoolType](count: POOL_TYPE_ROOM, manager: PAGES)
+    if types.is_hollow()
+        PAGES.release(base, reserved)
+        return 2
+    types.to[@PoolType]().zeroinit(POOL_TYPE_ROOM)
+    if not PAGES.commit(base, POOL_COMMIT_STEP)
+        PAGES.release(base, reserved)
+        PAGES.give_back(types)
+        return 2
+    base.to[@PoolSlotHeader]().generation.poke(1)
+    POOL_RESERVED.store(reserved)
+    POOL_COMMITTED.store(POOL_COMMIT_STEP)
+    POOL_TOP.store(1)
+    POOL_TYPES.store(types)
+    POOL_FIRST.store(POOL_HIGH.load() + 1)
+    POOL_BASE.store(base)
+    return 0
+
+### Appends a chunk to the chunk list.
+### :param first: The chunk's first slot.
+### :param id: The type id of its slots.
+### :returns: False when there is no memory.
+secret routine pool_note_chunk(first: U32, id: U32) -> Bool
+    count: U64 = POOL_CHUNK_COUNT.load()
+    if count == POOL_CHUNK_ROOM.load()
+        grown: U64 = when
+            count == 0 => 64
+            else => count * 2
+        fresh: Addr = allocate[PoolChunk](count: grown, manager: PAGES)
+        if fresh.is_hollow()
+            return false
+        if count > 0
+            fresh.to[@PoolChunk]().copy(src: POOL_CHUNK_LIST.load().to[@PoolChunk](), count)
+            PAGES.give_back(POOL_CHUNK_LIST.load())
+        POOL_CHUNK_LIST.store(fresh)
+        POOL_CHUNK_ROOM.store(grown)
+    entry: @PoolChunk = POOL_CHUNK_LIST.load().to[@PoolChunk]().stride(count)
+    entry.first.poke(first)
+    entry.type_id.poke(id)
+    POOL_CHUNK_COUNT.store(count + 1)
+    return true
+
+### Takes a chunk of slots for a type from the end of the range, committing pages when it reaches past the committed ones.
+### :param entry: The type's entry.
+### :returns: False when the range is full or its pages can't be committed.
+secret routine pool_take_chunk(entry: @PoolType) -> Bool
+    stride: U64 = entry.stride.peek()
+    first: U64 = POOL_TOP.load()
+    end: U64 = first + POOL_CHUNK_SLOTS * stride // 16
+    if (end << 4) > POOL_RESERVED.load() or end >= 4294967296
+        return false
+    committed: U64 = POOL_COMMITTED.load()
+    if (end << 4) > committed
+        step: U64 = ((end << 4) - committed + POOL_COMMIT_STEP - 1) // POOL_COMMIT_STEP * POOL_COMMIT_STEP
+        step_to: U64 = when
+            committed + step > POOL_RESERVED.load() => POOL_RESERVED.load() - committed
+            else => step
+        at: Addr = POOL_BASE.load() +% ByteSize.construct(bytes: committed)
+        if not PAGES.commit(at, step_to)
+            return false
+        POOL_COMMITTED.store(committed + step_to)
+    if not pool_note_chunk(first.to[U32](), entry.id.peek())
+        return false
+    POOL_TOP.store(end)
+    entry.fresh_next.poke(first.to[U32]())
+    entry.fresh_end.poke(end.to[U32]())
+    return true
+
+### Takes a slot of a type: a free one, else the next one never used.
+### :param entry: The type's entry.
+### :returns: The slot, 0 when there is no room.
+secret routine pool_take_slot(entry: @PoolType) -> U32
+    free: U32 = entry.free.peek()
+    if free != 0
+        entry.free.poke(pool_slot_at(free).stride(POOL_HEADER).to[@U32]().peek())
+        return free
+    if entry.fresh_next.peek() == entry.fresh_end.peek()
+        if not pool_take_chunk(entry)
+            return 0
+    next: U32 = entry.fresh_next.peek()
+    entry.fresh_next.poke(next + (entry.stride.peek() // 16).to[U32]())
+    pool_slot_at(next).to[@PoolSlotHeader]().generation.poke(POOL_FIRST.load())
+    return next
+
+### Moves an entity's block into a slot and gives the block back.
+### :param box: The entity's block, from the heap.
+### :param size: The block's bytes.
+### :param id: The entity type's id, not 0.
+### :param destroy: Runs the type's destruct from the address of an entity's bytes.
+### :returns: The slot in the low 32 bits and its generation in the high 32 bits, 0 when there is no room (the block is given
+###     back all the same).
+@export("rf_pool_add")
+routine rf_pool_add(box: Addr, size: U64, id: U32, destroy: Callable[(Addr,), None]) -> U64
+    if POOL_BASE.load().is_hollow()
+        rf_invalidate(box)
+        return 0
+    entry: @PoolType = pool_type_entry(id)
+    if entry.id.peek() == 0
+        entry.id.poke(id)
+        entry.destroy.poke(destroy)
+        entry.stride.poke((POOL_HEADER + size + 15) // 16 * 16)
+    slot: U32 = pool_take_slot(entry)
+    if slot == 0
+        rf_invalidate(box)
+        return 0
+    at: @Byte = pool_slot_at(slot)
+    at.stride(POOL_HEADER).to[@Byte]().copy(src: box.to[@Byte](), count: size)
+    header: @PoolSlotHeader = at.to[@PoolSlotHeader]()
+    header.type_id.poke(id)
+    generation: U32 = header.generation.peek()
+    rf_invalidate(box)
+    return slot.to[U64]() | (generation.to[U64]() << 32)
+
+### Removes the entity of a stamp at once: every fetch of it fails from now on, and nothing is destructed until `sweep`.
+### :param slot: The stamp's slot.
+### :param generation: The stamp's generation.
+### :returns: 0 when it was removed, 1 when the stamp is stale already, 2 when there is no memory for the removed list.
+@export("rf_pool_remove")
+routine rf_pool_remove(slot: U32, generation: U32) -> S32
+    if POOL_BASE.load().is_hollow()
+        return 1
+    header: @PoolSlotHeader = pool_slot_at(slot).to[@PoolSlotHeader]()
+    if header.generation.peek() != generation
+        return 1
+    waiting: U64 = POOL_REMOVED_COUNT.load()
+    if waiting == POOL_REMOVED_ROOM.load()
+        grown: U64 = when
+            waiting == 0 => 64
+            else => waiting * 2
+        fresh: Addr = allocate[U32](count: grown, manager: PAGES)
+        if fresh.is_hollow()
+            return 2
+        if waiting > 0
+            fresh.to[@U32]().copy(src: POOL_REMOVED.load().to[@U32](), count: waiting)
+            PAGES.give_back(POOL_REMOVED.load())
+        POOL_REMOVED.store(fresh)
+        POOL_REMOVED_ROOM.store(grown)
+    POOL_REMOVED.load().to[@U32]().stride(waiting).poke(slot)
+    POOL_REMOVED_COUNT.store(waiting + 1)
+    header.generation.poke(generation + 1)
+    pool_note_generation(generation + 1)
+    return 0
+
+### Runs the destruct of the entity in a slot, makes the slot free (unless its generation is the last) and marks it empty.
+### :param slot: The slot.
+secret routine pool_end_slot(slot: U32) -> None
+    base: @Byte = pool_slot_at(slot)
+    header: @PoolSlotHeader = base.to[@PoolSlotHeader]()
+    entry: @PoolType = pool_type_entry(header.type_id.peek())
+    destroy: Callable[(Addr,), None] = entry.destroy.peek()
+    destroy.call(base.stride(POOL_HEADER).to[Addr]())
+    header.type_id.poke(0)
+    if header.generation.peek() != U32.MAX
+        base.stride(POOL_HEADER).to[@U32]().poke(entry.free.peek())
+        entry.free.poke(slot)
+    return
+
+### Runs the destructs of the entities removed so far and frees their slots.
+@export("rf_pool_sweep")
+routine rf_pool_sweep() -> None
+    loop
+        waiting: U64 = POOL_REMOVED_COUNT.load()
+        if waiting == 0
+            return
+        slot: U32 = POOL_REMOVED.load().to[@U32]().stride(waiting - 1).peek()
+        POOL_REMOVED_COUNT.store(waiting - 1)
+        pool_end_slot(slot)
+
+### Ends the pool: sweeps, makes every stamp stale, runs the destruct of each entity left, and gives the range and the tables
+### back, so another pool can be set up.
+@export("rf_pool_end")
+routine rf_pool_end() -> None
+    if POOL_BASE.load().is_hollow()
+        return
+    rf_pool_sweep()
+    for pass in 0 til 2
+        for number in 0 til POOL_CHUNK_COUNT.load()
+            chunk: @PoolChunk = POOL_CHUNK_LIST.load().to[@PoolChunk]().stride(number)
+            step: U32 = (pool_type_entry(chunk.type_id.peek()).stride.peek() // 16).to[U32]()
+            for index in 0 til POOL_CHUNK_SLOTS
+                slot: U32 = chunk.first.peek() + index.to[U32]() * step
+                header: @PoolSlotHeader = pool_slot_at(slot).to[@PoolSlotHeader]()
+                if header.type_id.peek() != 0
+                    if pass == 0
+                        header.generation.poke(header.generation.peek() + 1)
+                        pool_note_generation(header.generation.peek())
+                    else
+                        pool_end_slot(slot)
+    start: Addr = POOL_BASE.load()
+    POOL_BASE.store(Addr.zero())
+    PAGES.release(start, POOL_RESERVED.load())
+    PAGES.give_back(POOL_TYPES.load())
+    if POOL_CHUNK_ROOM.load() > 0
+        PAGES.give_back(POOL_CHUNK_LIST.load())
+    if POOL_REMOVED_ROOM.load() > 0
+        PAGES.give_back(POOL_REMOVED.load())
+    POOL_RESERVED.store(0)
+    POOL_COMMITTED.store(0)
+    POOL_TOP.store(0)
+    POOL_TYPES.store(Addr.zero())
+    POOL_CHUNK_LIST.store(Addr.zero())
+    POOL_CHUNK_ROOM.store(0)
+    POOL_CHUNK_COUNT.store(0)
+    POOL_REMOVED.store(Addr.zero())
+    POOL_REMOVED_ROOM.store(0)
+    POOL_REMOVED_COUNT.store(0)
+    return
