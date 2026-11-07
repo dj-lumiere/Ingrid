@@ -90,8 +90,8 @@ checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 ```bash
 dotnet ../Lapila/bin/Debug/net10.0/lapila.dll test tests
 dotnet ../Lapila/bin/Debug/net10.0/lapila.dll check runtime-lapila/*.lpa   # also lapila/*.lpa lapila/decimal/*.lpa lapila/integer/*.lpa lapila/integer_exports/*.lpa, --target <triple>
-dotnet ../Lapila/bin/Debug/net10.0/lapila.dll fmt --check runtime-lapila lapila tests
-dotnet ../Lapila/bin/Debug/net10.0/lapila.dll lint runtime-lapila lapila tests
+dotnet ../Lapila/bin/Debug/net10.0/lapila.dll format --check runtime-lapila lapila tests
+dotnet ../Lapila/bin/Debug/net10.0/lapila.dll check runtime-lapila lapila tests
 ```
 
 CI runs these on Linux, Windows, and macOS, beside the workspace build that tests Ingrid through Revare and
