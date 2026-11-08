@@ -1,0 +1,112 @@
+# The shape uses of Revare's containers that the builder could not prove apart. A `for` loop over a container that
+# a change inside the loop may also reach (two token parameters of the same type, a token taken from a link) opens a
+# use of the container's address before the loop and ends it after. A routine that can add to or remove from a
+# container checks first that no use of it is open, and fails with ReshapingWhileInUseError when one is. Only such
+# loops pay: a program without them never calls these routines. The open uses are few at a time (nested loops), so
+# they are kept in one short table, scanned from the start. Nothing here is locked: a loop belongs to one thread.
+
+import Hosted
+
+### C's realloc: resizes the block at `ptr` to `size` bytes.
+### :param ptr: The block, or null.
+### :param size: The new size, in bytes.
+### :returns: The block, maybe moved, or null when the allocation fails.
+@external("c")
+@symbol("realloc")
+secret routine shape_realloc(ptr: Addr, size: CSize) -> Addr
+
+### A runtime error with the crash report and exit status (the runtime library).
+### :param error_type: The error's name.
+### :param message: What went wrong.
+@external("c")
+@symbol("__rf_throw")
+@noreturn
+secret routine shape_throw(error_type: CStrView, message: CStrView) -> None
+
+### One open use: the container's address and how many uses of it are open.
+secret record ShapeEntry
+    ### The container's address.
+    at: Addr
+    ### How many uses of the container are open.
+    uses: U64
+
+### The table of open uses.
+secret global SHAPE_TABLE: &Addr
+### How many entries the table has room for.
+secret global SHAPE_ROOM: &U64
+### How many entries are taken.
+secret global SHAPE_COUNT: &U64
+
+### The entry at `index` of the table.
+### :param index: The entry's index.
+### :returns: The entry.
+@inline
+secret routine shape_entry(index: U64) -> @ShapeEntry
+    return (SHAPE_TABLE.load() +% ByteSize.construct(bytes: index * 16)).to[@ShapeEntry]()
+
+### The index of the entry of the container at `at`, or the count of entries when there is none.
+### :param at: The container's address.
+### :returns: The index.
+secret routine shape_find(at: Addr) -> U64
+    count: U64 = SHAPE_COUNT.load()
+    for i in 0 til count
+        if shape_entry(i).at.peek() === at
+            return i
+    then
+        return count
+
+### Opens one more use of the shape of the container at `at`.
+### :param at: The container's address.
+@export("rf_shape_use_begin")
+routine rf_shape_use_begin(at: Addr) -> None
+    index: U64 = shape_find(at)
+    count: U64 = SHAPE_COUNT.load()
+    if index < count
+        entry: @ShapeEntry = shape_entry(index)
+        entry.uses.poke(entry.uses.peek() + 1)
+        return
+    if count >= SHAPE_ROOM.load()
+        grown: U64 = when
+            count < 8 => 8
+            else => count * 2
+        fresh: Addr = shape_realloc(SHAPE_TABLE.load(), (grown * 16).to[CSize]())
+        if fresh.is_hollow()
+            shape_throw("OutOfMemoryError", "Failed to grow the table of shape uses")
+        SHAPE_TABLE.store(fresh)
+        SHAPE_ROOM.store(grown)
+    entry: @ShapeEntry = shape_entry(count)
+    entry.at.poke(at)
+    entry.uses.poke(1)
+    SHAPE_COUNT.store(count + 1)
+    return
+
+### Ends one use opened by `rf_shape_use_begin`.
+### :param at: The container's address.
+@export("rf_shape_use_end")
+routine rf_shape_use_end(at: Addr) -> None
+    index: U64 = shape_find(at)
+    count: U64 = SHAPE_COUNT.load()
+    if index >= count
+        return
+    entry: @ShapeEntry = shape_entry(index)
+    uses: U64 = entry.uses.peek() - 1
+    if uses != 0
+        entry.uses.poke(uses)
+        return
+    last: @ShapeEntry = shape_entry(count - 1)
+    entry.at.poke(last.at.peek())
+    entry.uses.poke(last.uses.peek())
+    SHAPE_COUNT.store(count - 1)
+    return
+
+### Whether a use of the shape of the container at `at` is open.
+### :param at: The container's address.
+### :returns: 1 while a use is open, else 0.
+@export("rf_shape_in_use")
+@inline
+routine rf_shape_in_use(at: Addr) -> U8
+    if SHAPE_COUNT.load() == 0
+        return 0
+    if shape_find(at) < SHAPE_COUNT.load()
+        return 1
+    return 0
