@@ -1,0 +1,164 @@
+# The slot store behind Revare's links: a `Modifying[T]?` / `Viewing[T]?` kept in a place. An entity type with a link
+# anywhere in the program is retroactive. Each of its entities lives in a slot of the type's own store: a 16-byte header,
+# then the entity's bytes. The header holds the slot's generation, how many tokens taken from links are in use, and the
+# store's number. Ending an entity raises the generation at once, so every link made before reads as none from then on.
+# The slot goes back to its store's free list after the entity's destruct, and is reused only for the same type. Slots
+# are never given back to the heap, so a stale link can always read a header. The builder reads a link's generation from
+# the header itself. This library is llvm-linked into each Revare module, so an optimized build inlines these routines.
+# Nothing here is locked: links belong to one thread.
+
+import Hosted
+
+### C's calloc: `count` zeroed values of `size` bytes each.
+### :param count: How many values.
+### :param size: The size of one value, in bytes.
+### :returns: The memory, or null when the allocation fails.
+@external("c")
+@symbol("calloc")
+secret routine slot_calloc(count: CSize, size: CSize) -> Addr
+
+### C's realloc: resizes the block at `ptr` to `size` bytes.
+### :param ptr: The block, or null.
+### :param size: The new size, in bytes.
+### :returns: The block, maybe moved, or null when the allocation fails.
+@external("c")
+@symbol("realloc")
+secret routine slot_realloc(ptr: Addr, size: CSize) -> Addr
+
+### A runtime error with the crash report and exit status (the runtime library).
+### :param error_type: The error's name.
+### :param message: What went wrong.
+@external("c")
+@symbol("__rf_throw")
+@noreturn
+secret routine slot_throw(error_type: CStrView, message: CStrView) -> None
+
+### The head of a slot, right before the entity's bytes.
+secret record SlotHeader
+    ### Goes up each time the slot's entity ends.
+    generation: U64
+    ### How many tokens taken from links are in use, with the high bit set while a destruct waits for them.
+    uses: U32
+    ### The number of the slot's store in the store table.
+    store: U32
+
+### One type's store: the global the builder makes for each retroactive type.
+secret record SlotStore
+    ### The first free slot's entity address, 0 for none. A free slot keeps the next one in its first 8 bytes.
+    free: Addr
+    ### The store's number in the store table, 0 before its first slot.
+    index: U64
+
+### The store table: the address of each store, by number. Entry 0 is unused.
+secret global SLOT_STORES: &Addr
+### How many entries the store table has room for.
+secret global SLOT_STORE_ROOM: &U64
+### How many entries are taken, entry 0 counted.
+secret global SLOT_STORE_COUNT: &U64
+
+### The bit of `uses` that says a destruct waits for the tokens in use.
+secret preset SLOT_PENDING: U32 = 0x80000000
+
+### The header of the slot an entity is in.
+### :param box: The entity's address.
+### :returns: Its slot's header.
+@inline
+secret routine slot_header(box: Addr) -> @SlotHeader
+    return (box -% ByteSize.construct(bytes: 16)).to[@SlotHeader]()
+
+### Gives a store its number, growing the store table when it is full.
+### :param store: The store.
+secret routine slot_register(store: @SlotStore) -> None
+    count: U64 = when
+        SLOT_STORE_COUNT.load() == 0 => 1
+        else => SLOT_STORE_COUNT.load()
+    if count >= SLOT_STORE_ROOM.load()
+        grown: U64 = when
+            count < 16 => 16
+            else => count * 2
+        fresh: Addr = slot_realloc(SLOT_STORES.load(), (grown * 8).to[CSize]())
+        if fresh.is_hollow()
+            slot_throw("OutOfMemoryError", "Failed to grow the table of link slot stores")
+        SLOT_STORES.store(fresh)
+        SLOT_STORE_ROOM.store(grown)
+    table: @Addr = SLOT_STORES.load().to[@Addr]()
+    table.stride(count).poke(bitcast[@SlotStore, Addr](store))
+    store.index.poke(count)
+    SLOT_STORE_COUNT.store(count + 1)
+    return
+
+### A slot for a new entity of a retroactive type: a free one of the type's store, else a new one from the heap. A new
+### slot starts at generation 1, a reused one keeps the generation its last entity left it with.
+### :param store: The type's store.
+### :param size: The entity's bytes.
+### :returns: The address the entity's bytes go to.
+@export("rf_slot_take")
+routine rf_slot_take(store: Addr, size: U64) -> Addr
+    s: @SlotStore = store.to[@SlotStore]()
+    if s.index.peek() == 0
+        slot_register(s)
+    head: Addr = s.free.peek()
+    if not head.is_hollow()
+        s.free.poke(head.to[@Addr]().peek())
+        return head
+    bytes: U64 = when
+        size < 8 => 24
+        else => (size + 31) // 16 * 16
+    fresh_slot: Addr = slot_calloc(1, bytes.to[CSize]())
+    if fresh_slot.is_hollow()
+        slot_throw("OutOfMemoryError", "Failed to allocate a link slot")
+    header: @SlotHeader = fresh_slot.to[@SlotHeader]()
+    header.generation.poke(1)
+    header.store.poke(s.index.peek().to[U32]())
+    return fresh_slot +% ByteSize.construct(bytes: 16)
+
+### The start of an entity's end, run first in its destruct. The generation goes up at once. When tokens taken from links
+### are in use the destruct waits: this marks it and answers 0, and the last token's end runs it. Run again by that last
+### token, it answers 1 and the destruct goes on.
+### :param box: The entity's address.
+### :returns: 1 when the destruct runs now, 0 when it waits.
+@export("rf_slot_end")
+routine rf_slot_end(box: Addr) -> U8
+    header: @SlotHeader = slot_header(box)
+    uses: U32 = header.uses.peek()
+    if (uses & SLOT_PENDING) != 0
+        header.uses.poke(uses & (SLOT_PENDING ^ 0xFFFFFFFF))
+        return 1
+    header.generation.poke(header.generation.peek() + 1)
+    if uses == 0
+        return 1
+    header.uses.poke(uses | SLOT_PENDING)
+    return 0
+
+### Puts an ended entity's slot on its store's free list, run last in its destruct.
+### :param box: The entity's address.
+@export("rf_slot_give_back")
+routine rf_slot_give_back(box: Addr) -> None
+    index: U64 = slot_header(box).store.peek().to[U64]()
+    table: @Addr = SLOT_STORES.load().to[@Addr]()
+    store: @SlotStore = table.stride(index).peek().to[@SlotStore]()
+    box.to[@Addr]().poke(store.free.peek())
+    store.free.poke(box)
+    return
+
+### A token taken from a link is in use: the entity's destruct waits for it.
+### :param box: The entity's address.
+@export("rf_slot_use_begin")
+@inline
+routine rf_slot_use_begin(box: Addr) -> None
+    header: @SlotHeader = slot_header(box)
+    header.uses.poke(header.uses.peek() + 1)
+    return
+
+### A token taken from a link is no longer in use.
+### :param box: The entity's address.
+### :returns: 1 when it was the last one and the entity's destruct waits for it, so the caller runs it now.
+@export("rf_slot_use_end")
+@inline
+routine rf_slot_use_end(box: Addr) -> U8
+    header: @SlotHeader = slot_header(box)
+    uses: U32 = header.uses.peek() - 1
+    header.uses.poke(uses)
+    if uses == SLOT_PENDING
+        return 1
+    return 0
