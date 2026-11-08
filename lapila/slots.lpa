@@ -37,7 +37,7 @@ secret routine slot_throw(error_type: CStrView, message: CStrView) -> None
 secret record SlotHeader
     ### Goes up each time the slot's entity ends.
     generation: U64
-    ### How many tokens taken from links are in use, with the high bit set while a destruct waits for them.
+    ### How many tokens taken from links are in use, with the ended and returning marks in the two high bits.
     uses: U32
     ### The number of the slot's store in the store table.
     store: U32
@@ -56,8 +56,22 @@ secret global SLOT_STORE_ROOM: &U64
 ### How many entries are taken, entry 0 counted.
 secret global SLOT_STORE_COUNT: &U64
 
-### The bit of `uses` that says a destruct waits for the tokens in use.
-secret preset SLOT_PENDING: U32 = 0x80000000
+### The bit of `uses` that says the slot's entity has ended. It stays set until the slot is taken again.
+secret preset SLOT_ENDED: U32 = 0x80000000
+### The bit of `uses` that says the slot goes back to its store once the last token taken from a link ends.
+secret preset SLOT_RETURNING: U32 = 0x40000000
+### The bits of `uses` that count the tokens taken from links that are in use.
+secret preset SLOT_COUNT: U32 = 0x3FFFFFFF
+
+### Puts a slot on its store's free list.
+### :param box: The entity's address.
+secret routine slot_free(box: Addr) -> None
+    index: U64 = slot_header(box).store.peek().to[U64]()
+    table: @Addr = SLOT_STORES.load().to[@Addr]()
+    store: @SlotStore = table.stride(index).peek().to[@SlotStore]()
+    box.to[@Addr]().poke(store.free.peek())
+    store.free.poke(box)
+    return
 
 ### The header of the slot an entity is in.
 ### :param box: The entity's address.
@@ -100,6 +114,7 @@ routine rf_slot_take(store: Addr, size: U64) -> Addr
     head: Addr = s.free.peek()
     if not head.is_hollow()
         s.free.poke(head.to[@Addr]().peek())
+        slot_header(head).uses.poke(0)
         return head
     bytes: U64 = when
         size < 8 => 24
@@ -112,36 +127,32 @@ routine rf_slot_take(store: Addr, size: U64) -> Addr
     header.store.poke(s.index.peek().to[U32]())
     return fresh_slot +% ByteSize.construct(bytes: 16)
 
-### The start of an entity's end, run first in its destruct. The generation goes up at once. When tokens taken from links
-### are in use the destruct waits: this marks it and answers 0, and the last token's end runs it. Run again by that last
-### token, it answers 1 and the destruct goes on.
+### The start of an entity's end, run first in its destruct: the generation goes up, so every link made before reads as
+### none, and the slot is marked ended, so a token taken from a link that is still in use fails when it is used. The
+### destruct runs at once.
 ### :param box: The entity's address.
-### :returns: 1 when the destruct runs now, 0 when it waits.
 @export("rf_slot_end")
-routine rf_slot_end(box: Addr) -> U8
+routine rf_slot_end(box: Addr) -> None
     header: @SlotHeader = slot_header(box)
-    uses: U32 = header.uses.peek()
-    if (uses & SLOT_PENDING) != 0
-        header.uses.poke(uses & (SLOT_PENDING ^ 0xFFFFFFFF))
-        return 1
     header.generation.poke(header.generation.peek() + 1)
-    if uses == 0
-        return 1
-    header.uses.poke(uses | SLOT_PENDING)
-    return 0
+    header.uses.poke(header.uses.peek() | SLOT_ENDED)
+    return
 
-### Puts an ended entity's slot on its store's free list, run last in its destruct.
+### Puts an ended entity's slot on its store's free list, run last in its destruct. While a token taken from a link is
+### still in use the slot waits, so the token's check of the ended mark stays safe, and the last token's end gives it
+### back.
 ### :param box: The entity's address.
 @export("rf_slot_give_back")
 routine rf_slot_give_back(box: Addr) -> None
-    index: U64 = slot_header(box).store.peek().to[U64]()
-    table: @Addr = SLOT_STORES.load().to[@Addr]()
-    store: @SlotStore = table.stride(index).peek().to[@SlotStore]()
-    box.to[@Addr]().poke(store.free.peek())
-    store.free.poke(box)
+    header: @SlotHeader = slot_header(box)
+    uses: U32 = header.uses.peek()
+    if (uses & SLOT_COUNT) != 0
+        header.uses.poke(uses | SLOT_RETURNING)
+        return
+    slot_free(box)
     return
 
-### A token taken from a link is in use: the entity's destruct waits for it.
+### A token taken from a link is in use: the slot is not reused while it is.
 ### :param box: The entity's address.
 @export("rf_slot_use_begin")
 @inline
@@ -150,15 +161,25 @@ routine rf_slot_use_begin(box: Addr) -> None
     header.uses.poke(header.uses.peek() + 1)
     return
 
-### A token taken from a link is no longer in use.
+### A token taken from a link is no longer in use. The last one gives back the slot of an entity that ended meanwhile.
 ### :param box: The entity's address.
-### :returns: 1 when it was the last one and the entity's destruct waits for it, so the caller runs it now.
 @export("rf_slot_use_end")
 @inline
-routine rf_slot_use_end(box: Addr) -> U8
+routine rf_slot_use_end(box: Addr) -> None
     header: @SlotHeader = slot_header(box)
     uses: U32 = header.uses.peek() - 1
     header.uses.poke(uses)
-    if uses == SLOT_PENDING
+    if (uses & SLOT_COUNT) == 0 and (uses & SLOT_RETURNING) != 0
+        header.uses.poke(SLOT_ENDED)
+        slot_free(box)
+    return
+
+### Whether the entity in a slot has ended.
+### :param box: The entity's address.
+### :returns: 1 once it ended, else 0.
+@export("rf_slot_ended")
+@inline
+routine rf_slot_ended(box: Addr) -> U8
+    if (slot_header(box).uses.peek() & SLOT_ENDED) != 0
         return 1
     return 0
