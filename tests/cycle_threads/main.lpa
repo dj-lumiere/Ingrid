@@ -8,6 +8,9 @@
 
 import Hosted
 
+### The slot store the headers live in, as the runtime gives a header back to its slot.
+global HEADER_STORE: &Items[U64, 4]
+
 ### How many entities the collector has freed.
 global FREED: &U64
 ### How many workers have finished.
@@ -19,6 +22,18 @@ preset ROUNDS: U64 = 20000
 ### An entity: the header of the entity its one Roamed field holds (null for none).
 record Node
     child: Addr
+
+### The slot store (slots.lpa) reports a failed allocation through the runtime's error report: here it writes the
+### error and ends the program.
+### :param error_type: The error's name.
+### :param message: What went wrong.
+@export("__rf_throw")
+@noreturn
+routine stub_rf_throw(error_type: CStrView, message: CStrView) -> None
+    kind: @[Byte] = error_type.getview()
+    text: @[Byte] = message.getview()
+    Console.show("{kind}: {text}")
+    ProcessManager.exit_process(82)
 
 @export("rf_access_flow_id")
 routine stub_current_task_id() -> U64
@@ -68,8 +83,8 @@ routine new_entity() -> @RoamHeader
     manager: @MemoryManager = C_HEAP
 
     node: @Node = allocate[Node](count: 1, manager).to[@Node]().to[@Node]()
-    header: @RoamHeader = allocate[RoamHeader](count: 1,
-        manager).to[@RoamHeader]().to[@RoamHeader]()
+    header: @RoamHeader = rf_slot_take(bitcast[@Items[U64, 4], Addr](HEADER_STORE),
+        256).to[@RoamHeader]()
     node.child.zeroinit(1)
     header.poke(RoamHeader(count: 1, weak: 0, dead: 0, escaped: 0, data: node, locked: 0,
         holder_task: 0, depth: 0, state: 0, buffered_at: 0, trace_hook: trace_node.addr(),

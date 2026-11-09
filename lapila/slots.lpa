@@ -1,61 +1,114 @@
-# The slot store behind Revare's links: a `Modifying[T]?` / `Viewing[T]?` kept in a place. An entity type with a link
-# anywhere in the program is retroactive. Each of its entities lives in a slot of the type's own store: a 16-byte header,
-# then the entity's bytes. The header holds the slot's generation, how many tokens taken from links are in use, and the
-# store's number. Ending an entity raises the generation at once, so every link made before reads as none from then on.
-# The slot goes back to its store's free list after the entity's destruct, and is reused only for the same type. Slots
-# are never given back to the heap, so a stale link can always read a header. The builder reads a link's generation from
-# the header itself. This library is llvm-linked into each Revare module, so an optimized build inlines these routines.
-# Nothing here is locked: links belong to one thread.
+# The slot stores behind Revare's entities. Every entity type has its own store, and each of its entities lives in a
+# slot of that store: an 8-byte header holding the slot's generation, then the entity's bytes. A reference or a link to
+# an entity is its address and the generation its slot had when it was made, so ending an entity raises the generation
+# and every reference and link made before reads as ended from then on. The slot is free again as soon as its entity's
+# destruct is done, and is reused only for the same type.
+#
+# A store keeps its slots in pages of 64 KiB, aligned to their size, so a slot finds its page from its own address. A
+# page whose slots are all free gives its memory back to the operating system, all but its first 4 KiB, which holds the
+# page's own record. The address range stays the store's, so a stale reference can always read a header: it reads the
+# generation it left, or zero, and neither is a live entity's. A page used again starts its slots past every generation
+# it had.
+#
+# The builder reads and compares generations itself (Link.rvr). This library is llvm-linked into each Revare module, so
+# an optimized build inlines these routines. A store is locked while a slot is taken or given back, since entities of
+# one type may be made and ended on several threads.
 
 import Hosted
 
-### The store table: the address of each store, by number. Entry 0 is unused.
-secret global SLOT_STORES: &Addr
-### How many entries the store table has room for.
-secret global SLOT_STORE_ROOM: &U64
-### How many entries are taken, entry 0 counted.
-secret global SLOT_STORE_COUNT: &U64
+### The bytes of a page, which is aligned to them. A slot too big for one gets a page of its own, a multiple of this.
+secret preset SLOT_PAGE_BYTES: U64 = 65536
 
-### The bit of `uses` that says the slot's entity has ended. It stays set until the slot is taken again.
-secret preset SLOT_ENDED: U32 = 0x80000000
+### The bytes at the start of a page that keep their memory when the page is emptied: the page's record and its first
+### slots.
+secret preset SLOT_PAGE_KEPT: U64 = 4096
 
-### The bit of `uses` that says the slot goes back to its store once the last token taken from a link ends.
-secret preset SLOT_RETURNING: U32 = 0x40000000
+### Where a page's first entity starts: the page's record (80 bytes), then 8 spare bytes and the first slot's header, so
+### each entity is 16-byte aligned.
+secret preset SLOT_FIRST_ENTITY: U64 = 96
 
-### The bits of `uses` that count the tokens taken from links that are in use.
-secret preset SLOT_COUNT: U32 = 0x3FFFFFFF
-
-### The head of a slot, right before the entity's bytes.
-secret record SlotHeader
-    ### Goes up each time the slot's entity ends.
-    generation: U64
-    ### How many tokens taken from links are in use, with the ended and returning marks in the two high bits.
-    uses: U32
-    ### The number of the slot's store in the store table.
-    store: U32
-
-### One type's store: the global the builder makes for each retroactive type.
+### One type's store: the zeroed global the builder makes for each entity type.
 secret record SlotStore
-    ### The first free slot's entity address, 0 for none. A free slot keeps the next one in its first 8 bytes.
-    free: Addr
-    ### The store's number in the store table, 0 before its first slot.
-    index: U64
+    ### 0 while no thread is taking or giving back a slot, 1 while one is.
+    lock: U64
+    ### The first page with a free slot or room for a new one, 0 for none.
+    room: Addr
+    ### The bytes from one slot to the next, 0 before the first slot.
+    stride: U64
+    ### Unused, so the store is 32 bytes.
+    spare: U64
 
-### C's calloc: `count` zeroed values of `size` bytes each.
-### :param count: How many values.
-### :param size: The size of one value, in bytes.
+### The record at the start of each page.
+secret record SlotPage
+    ### The store the page belongs to.
+    store: Addr
+    ### The first free slot's entity address, 0 for none. A free slot keeps the next one in its entity's first 8 bytes.
+    free: Addr
+    ### How many slots of the page were ever handed out. The ones past this have never held an entity.
+    used: U64
+    ### How many slots the page has.
+    slots: U64
+    ### How many of its slots hold an entity right now.
+    live: U64
+    ### The least generation a slot of the page starts at: past every generation the page had before it was emptied.
+    floor: U64
+    ### The next page with room, 0 for the last.
+    next: Addr
+    ### The page before in the list of pages with room, 0 for the first.
+    previous: Addr
+    ### 1 while the page is in its store's list of pages with room.
+    listed: U64
+    ### The page's bytes.
+    bytes: U64
+
+### C's aligned_alloc: `size` bytes aligned to `alignment`.
+### :param alignment: The alignment, a power of two.
+### :param size: The bytes, a multiple of the alignment.
 ### :returns: The memory, or null when the allocation fails.
 @external("c")
-@symbol("calloc")
-secret routine slot_calloc(count: CSize, size: CSize) -> Addr
+@symbol("aligned_alloc")
+@target(os: ("linux", "macos"))
+secret routine slot_aligned_alloc(alignment: CSize, size: CSize) -> Addr
 
-### C's realloc: resizes the block at `ptr` to `size` bytes.
-### :param ptr: The block, or null.
-### :param size: The new size, in bytes.
-### :returns: The block, maybe moved, or null when the allocation fails.
+### The Windows C runtime's _aligned_malloc: `size` bytes aligned to `alignment`.
+### :param size: The bytes.
+### :param alignment: The alignment, a power of two.
+### :returns: The memory, or null when the allocation fails.
 @external("c")
-@symbol("realloc")
-secret routine slot_realloc(ptr: Addr, size: CSize) -> Addr
+@symbol("_aligned_malloc")
+@target(os: "windows")
+secret routine slot_aligned_malloc(size: CSize, alignment: CSize) -> Addr
+
+### C's memset: fills `n` bytes at `dst` with the low byte of `value`.
+### :param dst: Where to fill.
+### :param value: The byte to fill with.
+### :param n: How many bytes.
+### :returns: `dst`.
+@external("c")
+@symbol("memset")
+secret routine slot_memset(dst: Addr, value: CInt, n: CSize) -> Addr
+
+### The C `madvise` function: tells the operating system how pages will be used.
+### :param addr: The first page, page aligned.
+### :param length: The bytes.
+### :param advice: The `MADV_*` advice.
+### :returns: 0 on success, -1 otherwise.
+@external("c")
+@symbol("madvise")
+@target(os: ("linux", "macos"))
+secret routine slot_madvise(addr: Addr, length: CSize, advice: CInt) -> CInt
+
+### The Win32 `VirtualAlloc` function, here only to reset pages whose contents are no longer needed.
+### :param addr: The first page.
+### :param size: The bytes.
+### :param type: The `MEM_*` type.
+### :param protect: The `PAGE_*` protection.
+### :returns: The start of the pages, or null.
+@external("c")
+@symbol("VirtualAlloc")
+@callconv("stdcall")
+@target(os: "windows")
+secret routine slot_virtual_alloc(addr: Addr, size: CSize, type: U32, protect: U32) -> Addr
 
 ### A runtime error with the crash report and exit status (the runtime library).
 ### :param error_type: The error's name.
@@ -65,123 +118,245 @@ secret routine slot_realloc(ptr: Addr, size: CSize) -> Addr
 @noreturn
 secret routine slot_throw(error_type: CStrView, message: CStrView) -> None
 
-### Puts a slot on its store's free list.
-### :param box: The entity's address.
-secret routine slot_free(box: Addr) -> None
-    index: U64 = slot_header(box).store.peek().to[U64]()
-    table: @Addr = SLOT_STORES.load().to[@Addr]()
-    store: @SlotStore = table.stride(index).peek().to[@SlotStore]()
-    box.to[@Addr]().poke(store.free.peek())
-    store.free.poke(box)
+### Memory for a page, aligned to the page size.
+### :param bytes: The page's bytes, a multiple of the page size.
+### :returns: The page's memory, or null when there is none.
+@target(os: ("linux", "macos"))
+secret routine slot_page_memory(bytes: U64) -> Addr
+    return slot_aligned_alloc(SLOT_PAGE_BYTES.to[CSize](), bytes.to[CSize]())
+
+### Memory for a page, aligned to the page size.
+### :param bytes: The page's bytes, a multiple of the page size.
+### :returns: The page's memory, or null when there is none.
+@target(os: "windows")
+secret routine slot_page_memory(bytes: U64) -> Addr
+    return slot_aligned_malloc(bytes.to[CSize](), SLOT_PAGE_BYTES.to[CSize]())
+
+### Gives the memory of an emptied page's bytes back to Linux: the range stays mapped and reads as zero from now on.
+### :param at: The first byte, page aligned.
+### :param bytes: How many bytes.
+@target(os: "linux")
+secret routine slot_release(at: Addr, bytes: U64) -> None
+    # MADV_DONTNEED
+    slot_madvise(at, bytes.to[CSize](), 4)
     return
 
-### The header of the slot an entity is in.
-### :param box: The entity's address.
-### :returns: Its slot's header.
-@inline
-secret routine slot_header(box: Addr) -> @SlotHeader
-    return (box -% ByteSize.construct(bytes: 16)).to[@SlotHeader]()
+### Gives the memory of an emptied page's bytes back to macOS: the range stays mapped and its contents may go.
+### :param at: The first byte, page aligned.
+### :param bytes: How many bytes.
+@target(os: "macos")
+secret routine slot_release(at: Addr, bytes: U64) -> None
+    # MADV_FREE
+    slot_madvise(at, bytes.to[CSize](), 5)
+    return
 
-### Gives a store its number, growing the store table when it is full.
+### Gives the memory of an emptied page's bytes back to Windows: the pages stay committed and their contents may go.
+### :param at: The first byte, page aligned.
+### :param bytes: How many bytes.
+@target(os: "windows")
+secret routine slot_release(at: Addr, bytes: U64) -> None
+    # MEM_RESET, PAGE_READWRITE
+    slot_virtual_alloc(at, bytes.to[CSize](), 0x80000, 4)
+    return
+
+### Takes a store's lock, waiting while another thread holds it.
 ### :param store: The store.
-secret routine slot_register(store: @SlotStore) -> None
-    count: U64 = when
-        SLOT_STORE_COUNT.load() == 0 => 1
-        else => SLOT_STORE_COUNT.load()
-    if count >= SLOT_STORE_ROOM.load()
-        grown: U64 = when
-            count < 16 => 16
-            else => count * 2
-        fresh: Addr = slot_realloc(SLOT_STORES.load(), (grown * 8).to[CSize]())
-        if fresh.is_hollow()
-            slot_throw("OutOfMemoryError", "Failed to grow the table of link slot stores")
-        SLOT_STORES.store(fresh)
-        SLOT_STORE_ROOM.store(grown)
-    table: @Addr = SLOT_STORES.load().to[@Addr]()
-    table.stride(count).poke(bitcast[@SlotStore, Addr](store))
-    store.index.poke(count)
-    SLOT_STORE_COUNT.store(count + 1)
+secret routine slot_lock(store: @SlotStore) -> None
+    loop
+        taken: Optional[U64] = store.lock.compare_exchange_unbroken(expected: 0, new: 1)
+        when taken
+            is None => return
+            is U64 => continue
+
+### Leaves a store's lock.
+### :param store: The store.
+@inline
+secret routine slot_unlock(store: @SlotStore) -> None
+    store.lock.poke_unbroken(0)
     return
 
-### A slot for a new entity of a retroactive type: a free one of the type's store, else a new one from the heap. A new
-### slot starts at generation 1, a reused one keeps the generation its last entity left it with.
+### The header (the generation) of the slot an entity is in.
+### :param box: The entity's address.
+### :returns: Its slot's generation.
+@inline
+secret routine slot_generation(box: Addr) -> @U64
+    return (box -% ByteSize.construct(bytes: 8)).to[@U64]()
+
+### The page a slot is in: its address rounded down to the page size.
+### :param box: The entity's address.
+### :returns: The page.
+@inline
+secret routine slot_page(box: Addr) -> @SlotPage
+    at: U64 = ptrtoint[Addr, U64](box) & ~(SLOT_PAGE_BYTES - 1)
+    return inttoptr[U64, Addr](at).to[@SlotPage]()
+
+### The entity address of a page's slot.
+### :param page: The page.
+### :param stride: The bytes from one slot to the next.
+### :param index: The slot's number in the page.
+### :returns: The address the slot's entity starts at.
+@inline
+secret routine slot_at(page: @SlotPage, stride: U64, index: U64) -> Addr
+    return bitcast[@SlotPage, Addr](page) +% ByteSize.construct(bytes: SLOT_FIRST_ENTITY + index * stride)
+
+### Puts a page first in its store's list of pages with room.
+### :param store: The store.
+### :param page: The page.
+secret routine slot_list_first(store: @SlotStore, page: @SlotPage) -> None
+    head: Addr = store.room.peek()
+    page.next.poke(head)
+    page.previous.poke(Addr.zero())
+    if not head.is_hollow()
+        head.to[@SlotPage]().previous.poke(bitcast[@SlotPage, Addr](page))
+    store.room.poke(bitcast[@SlotPage, Addr](page))
+    page.listed.poke(1)
+    return
+
+### Takes a page out of its store's list of pages with room.
+### :param store: The store.
+### :param page: The page.
+secret routine slot_unlist(store: @SlotStore, page: @SlotPage) -> None
+    next: Addr = page.next.peek()
+    previous: Addr = page.previous.peek()
+    if previous.is_hollow()
+        store.room.poke(next)
+    else
+        previous.to[@SlotPage]().next.poke(next)
+    if not next.is_hollow()
+        next.to[@SlotPage]().previous.poke(previous)
+    page.next.poke(Addr.zero())
+    page.previous.poke(Addr.zero())
+    page.listed.poke(0)
+    return
+
+### The last page of a list of pages with room.
+### :param first: The first page.
+### :returns: The last page.
+secret routine slot_last_page(first: Addr) -> Addr
+    loop with at: Addr = first
+        next: Addr = at.to[@SlotPage]().next.peek()
+        if next.is_hollow()
+            return at
+        continue with at: next
+
+### Puts a page last in its store's list of pages with room, so the pages that hold entities are taken from first.
+### :param store: The store.
+### :param page: The page.
+secret routine slot_list_last(store: @SlotStore, page: @SlotPage) -> None
+    if page.listed.peek() == 1
+        slot_unlist(store, page)
+    if store.room.peek().is_hollow()
+        slot_list_first(store, page)
+        return
+    last: Addr = slot_last_page(store.room.peek())
+    last.to[@SlotPage]().next.poke(bitcast[@SlotPage, Addr](page))
+    page.previous.poke(last)
+    page.next.poke(Addr.zero())
+    page.listed.poke(1)
+    return
+
+### A new page for a store, first in its list of pages with room.
+### :param store: The store.
+### :param stride: The bytes from one slot to the next.
+### :returns: The page.
+secret routine slot_new_page(store: @SlotStore, stride: U64) -> @SlotPage
+    bytes: U64 = when
+        SLOT_FIRST_ENTITY + stride <= SLOT_PAGE_BYTES => SLOT_PAGE_BYTES
+        else => (SLOT_FIRST_ENTITY + stride + SLOT_PAGE_BYTES - 1) // SLOT_PAGE_BYTES * SLOT_PAGE_BYTES
+    memory: Addr = slot_page_memory(bytes)
+    if memory.is_hollow()
+        slot_throw("OutOfMemoryError", "Failed to allocate a page of entity slots")
+    slot_memset(memory, 0, SLOT_FIRST_ENTITY.to[CSize]())
+    page: @SlotPage = memory.to[@SlotPage]()
+    page.store.poke(bitcast[@SlotStore, Addr](store))
+    slots: U64 = when
+        bytes == SLOT_PAGE_BYTES => (SLOT_PAGE_BYTES - SLOT_FIRST_ENTITY + 8) // stride
+        else => 1
+    page.slots.poke(slots)
+    page.floor.poke(1)
+    page.bytes.poke(bytes)
+    slot_list_first(store, page)
+    return page
+
+### A slot for a new entity: a free one of the type's store, else a new one. The entity's bytes are zero. The slot keeps
+### the generation its last entity left it with, and a slot never used starts past every generation its page had.
 ### :param store: The type's store.
 ### :param size: The entity's bytes.
 ### :returns: The address the entity's bytes go to.
 @export("rf_slot_take")
 routine rf_slot_take(store: Addr, size: U64) -> Addr
     s: @SlotStore = store.to[@SlotStore]()
-    if s.index.peek() == 0
-        slot_register(s)
-    head: Addr = s.free.peek()
-    if not head.is_hollow()
-        s.free.poke(head.to[@Addr]().peek())
-        slot_header(head).uses.poke(0)
-        return head
-    bytes: U64 = when
-        size < 8 => 24
-        else => (size + 31) // 16 * 16
-    fresh_slot: Addr = slot_calloc(1, bytes.to[CSize]())
-    if fresh_slot.is_hollow()
-        slot_throw("OutOfMemoryError", "Failed to allocate a link slot")
-    header: @SlotHeader = fresh_slot.to[@SlotHeader]()
-    header.generation.poke(1)
-    header.store.poke(s.index.peek().to[U32]())
-    return fresh_slot +% ByteSize.construct(bytes: 16)
+    slot_lock(s)
+    if s.stride.peek() == 0
+        least: U64 = when
+            size < 8 => 8
+            else => size
+        s.stride.poke((least + 8 + 15) // 16 * 16)
+    stride: U64 = s.stride.peek()
+    page: @SlotPage = when
+        s.room.peek().is_hollow() => slot_new_page(s, stride)
+        else => s.room.peek().to[@SlotPage]()
+    box: Addr = when
+        page.free.peek().is_hollow() => slot_at(page, stride, page.used.peek())
+        else => page.free.peek()
+    if page.free.peek().is_hollow()
+        page.used.poke(page.used.peek() + 1)
+    else
+        page.free.poke(box.to[@Addr]().peek())
+    generation: @U64 = slot_generation(box)
+    if generation.peek() < page.floor.peek()
+        generation.poke(page.floor.peek())
+    page.live.poke(page.live.peek() + 1)
+    if page.free.peek().is_hollow() and page.used.peek() == page.slots.peek()
+        slot_unlist(s, page)
+    slot_unlock(s)
+    slot_memset(box, 0, size.to[CSize]())
+    return box
 
-### The start of an entity's end, run first in its destruct: the generation goes up, so every link made before reads as
-### none, and the slot is marked ended, so a token taken from a link that is still in use fails when it is used. The
-### destruct runs at once.
+### The start of an entity's end, run first in its destruct: the generation goes up, so every reference and link made
+### before reads as ended from now on.
 ### :param box: The entity's address.
 @export("rf_slot_end")
+@inline
 routine rf_slot_end(box: Addr) -> None
-    header: @SlotHeader = slot_header(box)
-    header.generation.poke(header.generation.peek() + 1)
-    header.uses.poke(header.uses.peek() | SLOT_ENDED)
+    generation: @U64 = slot_generation(box)
+    generation.poke(generation.peek() + 1)
     return
 
-### Puts an ended entity's slot on its store's free list, run last in its destruct. While a token taken from a link is
-### still in use the slot waits, so the token's check of the ended mark stays safe, and the last token's end gives it
-### back.
+### Empties a page whose slots are all free: it starts its slots past every generation it had, forgets its free slots,
+### and gives back the memory past its first 4 KiB when the store has another page with room.
+### :param store: The store.
+### :param page: The page.
+### :param stride: The bytes from one slot to the next.
+secret routine slot_empty_page(store: @SlotStore, page: @SlotPage, stride: U64) -> None
+    floor: &U64 <- page.floor.peek()
+    for i in 0 til page.used.peek()
+        seen: U64 = slot_generation(slot_at(page, stride, i)).peek()
+        if seen > floor.load()
+            floor.store(seen)
+    page.floor.poke(floor.load())
+    page.free.poke(Addr.zero())
+    page.used.poke(0)
+    if store.room.peek() === bitcast[@SlotPage, Addr](page) and page.next.peek().is_hollow()
+        return
+    slot_list_last(store, page)
+    kept: Addr = bitcast[@SlotPage, Addr](page) +% ByteSize.construct(bytes: SLOT_PAGE_KEPT)
+    slot_release(kept, page.bytes.peek() - SLOT_PAGE_KEPT)
+    return
+
+### Gives an ended entity's slot back to its store, run last in its destruct. The slot can hold a new entity at once.
 ### :param box: The entity's address.
 @export("rf_slot_give_back")
 routine rf_slot_give_back(box: Addr) -> None
-    header: @SlotHeader = slot_header(box)
-    uses: U32 = header.uses.peek()
-    if (uses & SLOT_COUNT) != 0
-        header.uses.poke(uses | SLOT_RETURNING)
-        return
-    slot_free(box)
+    page: @SlotPage = slot_page(box)
+    s: @SlotStore = page.store.peek().to[@SlotStore]()
+    slot_lock(s)
+    box.to[@Addr]().poke(page.free.peek())
+    page.free.poke(box)
+    page.live.poke(page.live.peek() - 1)
+    if page.listed.peek() == 0
+        slot_list_first(s, page)
+    if page.live.peek() == 0
+        slot_empty_page(s, page, s.stride.peek())
+    slot_unlock(s)
     return
-
-### A token taken from a link is in use: the slot is not reused while it is.
-### :param box: The entity's address.
-@export("rf_slot_use_begin")
-@inline
-routine rf_slot_use_begin(box: Addr) -> None
-    header: @SlotHeader = slot_header(box)
-    header.uses.poke(header.uses.peek() + 1)
-    return
-
-### A token taken from a link is no longer in use. The last one gives back the slot of an entity that ended meanwhile.
-### :param box: The entity's address.
-@export("rf_slot_use_end")
-@inline
-routine rf_slot_use_end(box: Addr) -> None
-    header: @SlotHeader = slot_header(box)
-    uses: U32 = header.uses.peek() - 1
-    header.uses.poke(uses)
-    if (uses & SLOT_COUNT) == 0 and (uses & SLOT_RETURNING) != 0
-        header.uses.poke(SLOT_ENDED)
-        slot_free(box)
-    return
-
-### Whether the entity in a slot has ended.
-### :param box: The entity's address.
-### :returns: 1 once it ended, else 0.
-@export("rf_slot_ended")
-@inline
-routine rf_slot_ended(box: Addr) -> U8
-    if (slot_header(box).uses.peek() & SLOT_ENDED) != 0
-        return 1
-    return 0
