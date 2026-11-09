@@ -173,13 +173,11 @@ routine @Deque.push_bottom(c: @Coro) -> None
             me.slot(me.bottom.peek()).poke(c)
             next_bottom: U64 = me.bottom.peek() + 1
             next_bottom.poke_into(me.bottom)
-            drop held
             return
     else
         me.slot(me.bottom.peek()).poke(c)
         next_bottom: U64 = me.bottom.peek() + 1
         next_bottom.poke_into(me.bottom)
-        drop held
         return
 
 ### Pops at the owner's end: the coroutine pushed last, or null.
@@ -196,7 +194,6 @@ routine @Deque.pop_bottom() -> @Coro?
             c: @Coro? = slot.peek()
             slot.poke(None())
             becomes c
-    drop held
     return taken
 
 ### Takes from the thieves' end: the oldest coroutine, or null.
@@ -213,7 +210,6 @@ routine @Deque.steal_top() -> @Coro?
             slot.poke(None())
             me.top.poke(t + 1)
             becomes c
-    drop held
     return taken
 
 ### Takes c out if it is there, closing the gap: whether it was.
@@ -234,10 +230,8 @@ routine @Deque.remove(c: @Coro) -> Bool
                 b: U64 = me.bottom.peek() - 1
                 me.bottom.poke(b)
                 me.slot(b).poke(None())
-                drop held
                 return true
     then
-        drop held
         return false
 
 # -- the injector and the ready routing (callers hold the scheduler lock) ------------
@@ -479,7 +473,6 @@ routine @Sched.spawn(c: @Coro) -> None
         next_live: S64 = me.live.peek() + 1
         next_live.poke_into(me.live)
         me.cond.cast_one()
-    drop held
     return
 
 ### Parks the running coroutine until delay_ns from now. The worker puts it on the timer heap once it is off its
@@ -574,7 +567,6 @@ routine rf_coro_request_cancel(coro_or_none: @Coro?) -> None
     if coro.timer_idx.peek() >= 0 and coro.sched_state.peek_unbroken() == SCHED_IDLE
         s.make_ready(coro)
         s.cond.cast_one()
-    drop held
     return
 
 ### Makes a parked coroutine runnable, from any thread, and wakes an idle worker when it was parked. A null `s` or `c`
@@ -596,7 +588,6 @@ routine @Sched.wake(c: @Coro) -> None
     me.make_ready(c)
     if before == SCHED_IDLE
         me.cond.cast_one()
-    drop held
     return
 
 ### A wake another thread has promised (a threaded task, an I/O call, a cast, a race! competitor): while one is
@@ -610,7 +601,6 @@ routine rf_sched_arm_cross_waker(s_or_none: @Sched?) -> None
     held: Authorized[U8] <- s.guard.get_exclusive_access()
     next_cross_wakers: S64 = s.cross_wakers.peek() + 1
     next_cross_wakers.poke_into(s.cross_wakers)
-    drop held
     return
 
 ### Withdraws one wake another thread had promised, never below 0. A null `s` does nothing.
@@ -624,7 +614,6 @@ routine rf_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
     n: S64 = s.cross_wakers.peek()
     if n > 0
         s.cross_wakers.poke(n - 1)
-    drop held
     return
 
 # -- the workers ---------------------------------------------------------------------
@@ -722,25 +711,20 @@ routine @Sched.run_coro(c: @Coro) -> None
     when
         c.sched_state.peek_unbroken() == SCHED_NOTIFIED =>
             me.enqueue_ready(c)
-            drop held2
             return
         intent == PARK_TIMER and c.cancel_requested.peek_unbroken() != 0 =>
             # Asked to stop while it was parking: its wait ends now.
             me.enqueue_ready(c)
-            drop held2
             return
         intent == PARK_TIMER =>
             me.insert_timer(c)
             c.sched_state.poke_unbroken(SCHED_IDLE)
-            drop held2
             return
         intent == PARK_YIELD =>
             me.enqueue_ready(c)
-            drop held2
             return
         else =>
             c.sched_state.poke_unbroken(SCHED_IDLE)
-            drop held2
             return
 
 ### Ends a coroutine that stopped on a cancel request (rf_coro_cancel_at_wait) the way a completed one ends: it
@@ -848,12 +832,10 @@ routine @Sched.step() -> Bool
                         if not (earliest_wake <= now2)
                             # Nothing ready, no timer: only a wake from another thread can help. Without one promised, with someone
                             # waiting for a coroutine and every other worker idle, it is a deadlock once it persists.
-                            drop held
                             return false
                         me.push_injector(me.timer_pop_min().unwrap())
                         continue
                     then
-                        drop held
                         return false
                 else
                     has_live: Bool = me.live.peek() > 0
@@ -874,7 +856,6 @@ routine @Sched.step() -> Bool
                             me.cond.wait_for(access: held, timeout: DEADLOCK_GRACE)
                             fewer_idle: S64 = me.workers_idle.peek() - 1
                             fewer_idle.poke_into(me.workers_idle)
-                            drop held
                             return false
                     else
                         more_idle: S64 = me.workers_idle.peek() + 1
@@ -882,7 +863,6 @@ routine @Sched.step() -> Bool
                         me.cond.wait(held)
                         fewer_idle: S64 = me.workers_idle.peek() - 1
                         fewer_idle.poke_into(me.workers_idle)
-                        drop held
                         return false
             else
                 drop held
@@ -960,7 +940,6 @@ routine rf_sched_signal(s_or_none: @Sched?) -> None
     held: Authorized[U8] <- s.guard.get_exclusive_access()
     s.block_cond.cast_all()
     s.cond.cast_one()
-    drop held
     return
 
 ### Whether the caller runs in a scheduler-driven coroutine, where a park suspends.
@@ -1076,7 +1055,6 @@ routine here_has_live() -> Bool
     here: @Sched = here_or_none.unwrap()
     held: Authorized[U8] <- here.guard.get_exclusive_access()
     live: Bool = here.live.peek() > 0
-    drop held
     return live
 
 ### Runs one of this thread's start_here() jobs that is ready now, after moving its due timers, without waiting:
@@ -1167,14 +1145,12 @@ routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
                 AccessManager.take_exclusive(at: s.guard, size: 1)
                 remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
-                drop held
                 return
             s.block_wait()
             continue
         then
             remaining_waiters: S64 = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
-            drop held
             return
     else
         this_coro: @Coro = running.unwrap()
@@ -1194,7 +1170,6 @@ routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
             target.awaiter.poke(Addr.zero())
             remaining_waiters: S64 = s.waiters.peek() - 1
             remaining_waiters.poke_into(s.waiters)
-            drop held
             return
 
 ### Takes c out of the injector, the timers, or a deque, and off the live count: whether it was in one. The caller
@@ -1310,7 +1285,6 @@ routine @Sched.dispose(c: @Coro) -> U32
             c.owner_released.poke(true)
             becomes 0
         else => 1
-    drop access
     return caller_frees
 
 ### The number of pool workers (making the pool): coroutines can move between threads only when it is more than 1.

@@ -133,7 +133,6 @@ routine rf_channel_add_feeder(chan_or_none: @Channel?) -> None
     held: Authorized[U8] <- chan.guard.get_exclusive_access()
     next_producer_refs: U32 = chan.producer_refs.peek() + 1
     next_producer_refs.poke_into(chan.producer_refs)
-    drop held
     return
 
 ### Adds a consumer handle, under the lock. A null `chan` does nothing.
@@ -146,7 +145,6 @@ routine rf_channel_add_consumer(chan_or_none: @Channel?) -> None
     held: Authorized[U8] <- chan.guard.get_exclusive_access()
     next_consumer_refs: U32 = chan.consumer_refs.peek() + 1
     next_consumer_refs.poke_into(chan.consumer_refs)
-    drop held
     return
 
 ### Drops a producer handle. The last producer dropping closes the channel: consumers drain what is left, then see it
@@ -200,7 +198,6 @@ routine rf_channel_close(chan_or_none: @Channel?) -> None
         chan.closed.poke(true)
         chan.cast_all(chan.not_empty_head.peek())
         chan.cast_all(chan.not_full_head.peek())
-    drop held
     return
 
 ### Waits once: a coroutine parks with a node on list, a thread waits on the condition variable. The caller holds
@@ -300,7 +297,6 @@ routine @Channel.feed(payload: Addr) -> U32
         me.wait(me.not_full_head)
         continue
     if me.closed.peek() or (me.consumer_refs.peek() == 0)
-        drop held
         return 0
     cap: U64 = me.slot_cap.peek()
     linear_tail: U64 = me.head.peek() + me.count.peek()
@@ -314,10 +310,8 @@ routine @Channel.feed(payload: Addr) -> U32
         until not ((me.count.peek() > 0) and not me.closed.peek() and (me.consumer_refs.peek() > 0)) or not (rf_cancel_requested() == 0)
             me.wait(me.not_full_head)
         then
-            drop held
             return 1
     else
-        drop held
         return 1
 
 ### Sends one payload only when there is room for it now, never waiting: 1 when sent, 2 when the channel is full,
@@ -353,7 +347,6 @@ routine @Channel.offer(payload: Addr) -> U32
                 next_count.poke_into(me.count)
                 me.cast_all(me.not_empty_head.peek())
                 becomes 1
-    drop held
     return result
 
 ### Receives one payload, waiting while the channel is empty: null when it is closed and drained, or when the agent
@@ -391,7 +384,6 @@ routine @Channel.next() -> Addr
     remaining_count: U64 = me.count.peek() - 1
     remaining_count.poke_into(me.count)
     me.cast_all(me.not_full_head.peek())
-    drop held
     return payload
 
 ### The number of items waiting in the channel.
@@ -404,7 +396,6 @@ routine rf_channel_count(chan_or_none: @Channel?) -> U64
     chan: @Channel = chan_or_none.unwrap()
     held: Authorized[U8] <- chan.guard.get_exclusive_access()
     n: U64 = chan.count.peek()
-    drop held
     return n
 
 ### Whether the channel is closed.
