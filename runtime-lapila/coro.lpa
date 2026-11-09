@@ -319,8 +319,10 @@ routine rf_coro_cf_push(frame_or_none: @CancelFrame?, value_ptr: Addr,
     this_coro.cf_top.poke(frame.to[Addr]())
     return
 
-### The value's own destroy ran: frame (the top) is unlinked without firing. An unbalanced pop leaves the stack as
-### it is. Outside a coroutine, or for a null `frame` (which push never linked), nothing happens.
+### The value's own destroy ran, or the value was handed on: frame is unlinked without firing. Usually it is the top.
+### A frame under the top (a value handed on while values pushed after it still live) is unlinked from the frame
+### above it. A frame not on the stack (already popped, or never pushed) leaves the stack as it is. Outside a
+### coroutine, or for a null `frame` (which push never linked), nothing happens.
 ### :param frame_or_none: The node pushed for the value.
 @export("rf_coro_cf_pop")
 routine rf_coro_cf_pop(frame_or_none: @CancelFrame?) -> None
@@ -331,10 +333,20 @@ routine rf_coro_cf_pop(frame_or_none: @CancelFrame?) -> None
     this_coro: @Coro = this_coro_or_none.unwrap()
     when this_coro.cf_top.peek().to[@CancelFrame?]()
         is @CancelFrame as top =>
-            if top !== frame
+            if top === frame
+                this_coro.cf_top.poke(frame.prev.peek().to[Addr]())
                 return
         is None => return
-    this_coro.cf_top.poke(frame.prev.peek().to[Addr]())
+
+    until at.is_absent() with at: @CancelFrame? = this_coro.cf_top.peek().to[@CancelFrame?]()
+        above: @CancelFrame = at.unwrap()
+        when above.prev.peek()
+            is @CancelFrame as below =>
+                if below === frame
+                    above.prev.poke(frame.prev.peek())
+                    return
+            is None => nothing
+        continue with at: above.prev.peek()
     return
 
 ### A parked or never-started coroutine is abandoned: each live value's destroy runs once, top to bottom (reverse
