@@ -98,17 +98,16 @@ secret routine slot_memset(dst: Addr, value: CInt, n: CSize) -> Addr
 @target(os: ("linux", "macos"))
 secret routine slot_madvise(addr: Addr, length: CSize, advice: CInt) -> CInt
 
-### The Win32 `VirtualAlloc` function, here only to reset pages whose contents are no longer needed.
+### The Win32 `DiscardVirtualMemory` function: the pages leave the working set and their contents may go, but they stay
+### committed, so reading them is still allowed.
 ### :param addr: The first page.
 ### :param size: The bytes.
-### :param type: The `MEM_*` type.
-### :param protect: The `PAGE_*` protection.
-### :returns: The start of the pages, or null.
+### :returns: 0 on success, a Win32 error code otherwise.
 @external("c")
-@symbol("VirtualAlloc")
+@symbol("DiscardVirtualMemory")
 @callconv("stdcall")
 @target(os: "windows")
-secret routine slot_virtual_alloc(addr: Addr, size: CSize, type: U32, protect: U32) -> Addr
+secret routine slot_discard_virtual_memory(addr: Addr, size: CSize) -> U32
 
 ### A runtime error with the crash report and exit status (the runtime library).
 ### :param error_type: The error's name.
@@ -150,13 +149,13 @@ secret routine slot_release(at: Addr, bytes: U64) -> None
     slot_madvise(at, bytes.to[CSize](), 5)
     return
 
-### Gives the memory of an emptied page's bytes back to Windows: the pages stay committed and their contents may go.
+### Gives the memory of an emptied page's bytes back to Windows: the pages leave the working set and their contents may
+### go. They stay committed (decommitting would make a stale reference's header read fault), so the commit charge stays.
 ### :param at: The first byte, page aligned.
 ### :param bytes: How many bytes.
 @target(os: "windows")
 secret routine slot_release(at: Addr, bytes: U64) -> None
-    # MEM_RESET, PAGE_READWRITE
-    slot_virtual_alloc(at, bytes.to[CSize](), 0x80000, 4)
+    slot_discard_virtual_memory(at, bytes.to[CSize]())
     return
 
 ### Takes a store's lock, waiting while another thread holds it.
