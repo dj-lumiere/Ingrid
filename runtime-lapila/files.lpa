@@ -2,29 +2,23 @@
 # the filesystem operations (existence, directories, copy, move, remove, listing, metadata, paths, permissions).
 #
 # The OS work is Lapila's Hosted. This file is the rf_* boundary over it. A routine that returns bytes returns
-# a malloc'd, NUL-terminated buffer (the caller frees it with rf_invalidate) and its length through
-# rf_get_result_len, as Revare takes no out parameter here. Paths come as a pointer and a byte count, UTF-8. A
-# routine that fails records why for rf_fs_last_error, so Revare and Mielia throw the crashable for the reason.
+# a malloc'd block (the caller frees it with rf_invalidate): RESULT_HEADER bytes of U64 words, then the bytes and a
+# NUL. Word 0 is why the call failed (a {reason_code}, 0 when it didn't), word 1 the byte count, words 2 to 5 what
+# else the call hands back (a mapping's delta and base, a path's metadata). Paths come as a pointer and a byte count,
+# UTF-8. Nothing a call returns travels through a global, since the fiber that reads it may be on another thread by
+# then. A routine that returns a status returns a failure as minus FAILURE_BASE minus the reason's code, so Revare and
+# Mielia throw the crashable for the reason.
 
 module Ingrid/Runtime
 
 import Hosted
 
-### The length of the last buffer a routine here returned on this thread. Per thread: the caller reads it right after
-### the call, with no yield in between, so another thread's call can't overwrite it.
-@threadlocal
-global RESULT_LEN: &U64
+### The bytes of a result block before its data: six U64 words (why it failed, the byte count, four more).
+preset RESULT_HEADER: U64 = 48
 
-### From a sub-range mapping's base (alignment-rounded) to the offset asked for: the caller adds it to reach the
-### requested byte and gives base and delta + length back at unmap. 0 for a whole-file mapping. Per thread, like
-### RESULT_LEN.
-@threadlocal
-global MAP_DELTA: &U64
-
-### Why the last file system call on this thread failed, a code of {reason_code}: 0 when it didn't. Per thread, like
-### RESULT_LEN.
-@threadlocal
-global LAST_ERROR: &S32
+### A failure status is minus this minus the reason's code, so it stays apart from the small statuses a routine gives
+### for what isn't a failure (1 something is there, 2 not a name, -2 the original is kept).
+preset FAILURE_BASE: S32 = 16
 
 ### The code Revare and Mielia read for an FsError: 1 another reason, 2 nothing is there, 3 not allowed (a
 ### read-only file system too), 4 the device is full, 5 the device failed to read or write, 6 something is already
@@ -41,69 +35,74 @@ routine reason_code(error: FsError) -> S32
         is InvalidPathError, is NameTooLongError => 7
         else => 1
 
-### Records why a call failed, for {rf_fs_last_error}.
+### The status of a failure with the reason code `code`.
+### :param code: A {reason_code}.
+### :returns: Minus FAILURE_BASE minus the code.
+routine failure_status(code: S32) -> S32
+    return 0 - (FAILURE_BASE + code)
+
+### The status of a failure.
 ### :param error: The reason.
-### :returns: -1, a failure's status.
+### :returns: Its failure status.
 routine failed(error: FsError) -> S32
-    LAST_ERROR.store(reason_code(error))
-    return -1
+    return failure_status(reason_code(error))
 
-### Why this thread's last file system call failed, see {reason_code}: 0 when it didn't fail.
-### :returns: The reason code.
-@export("rf_fs_last_error")
-routine rf_fs_last_error() -> S32
-    return LAST_ERROR.load()
+### Sets word `index` of a result block.
+### :param blk: The block.
+### :param index: The word, 0 to 5.
+### :param value: The value.
+routine put_word(blk: Addr, index: U64, value: U64) -> None
+    blk.to[@U64]().stride(index).poke_unaligned(value)
+    return
 
-### The length of the last buffer a routine here returned.
-### :returns: The length in bytes, 0 after a failure.
-@export("rf_get_result_len")
-routine rf_get_result_len() -> U64
-    return RESULT_LEN.load().to[U64]()
+### A result block with room for `data_len` bytes and a NUL after them, every header word 0.
+### :param data_len: The data bytes.
+### :returns: The block, or null when the allocation fails.
+routine new_block(data_len: U64) -> Addr
+    blk: Addr = c_malloc((RESULT_HEADER + data_len + 1).to[CSize]())
+    if blk.is_hollow()
+        return blk
+    put_word(blk, 0, 0)
+    put_word(blk, 1, 0)
+    put_word(blk, 2, 0)
+    put_word(blk, 3, 0)
+    put_word(blk, 4, 0)
+    put_word(blk, 5, 0)
+    blk.to[@Byte]().stride(RESULT_HEADER + data_len).poke(0x00)
+    return blk
 
-### The offset from the last sub-range mapping's base to the byte asked for, 0 for a whole-file mapping.
-### :returns: The delta in bytes.
-@export("rf_file_map_delta")
-routine rf_file_map_delta() -> U64
-    return MAP_DELTA.load().to[U64]()
+### A failed result: no bytes, the reason in word 0.
+### :param code: A {reason_code}.
+### :returns: The block, or null when the allocation fails.
+routine error_block(code: S32) -> @Byte?
+    blk: Addr = new_block(0)
+    if blk.is_hollow()
+        return None()
+    put_word(blk, 0, code.to[U64]())
+    return blk.to[@Byte]()
 
-### A valid empty mapping (an empty file, or a range at or past the end): not null, never read (its length is 0).
-### :returns: The address 1.
-routine empty_map() -> @Byte
-    return inttoptr[U64, Addr](1).to[@Byte]()
-
-### A failure: no buffer, length 0.
-### :returns: Null.
+### A failure with no reason to tell: no bytes, the code of another reason.
+### :returns: The block.
 routine no_result() -> @Byte?
-    RESULT_LEN.store(0)
-    return None()
+    return error_block(1)
 
-### A failure for the reason `error`: no buffer, length 0, the reason recorded.
+### A failure for the reason `error`.
 ### :param error: The reason.
-### :returns: Null.
+### :returns: The block.
 routine failed_result(error: FsError) -> @Byte?
-    LAST_ERROR.store(reason_code(error))
-    return no_result()
+    return error_block(reason_code(error))
 
-### Records `len` as the result's length and hands `buf` back.
-### :param buf: The result buffer.
-### :param len: Its length.
-### :returns: `buf`.
-routine result(buf: @Byte, len: U64) -> @Byte?
-    RESULT_LEN.store(len)
-    return buf
-
-### `len` bytes at `s`, copied into a malloc'd, NUL-terminated buffer, as the result.
+### `len` bytes at `s`, copied into a result block, as the result.
 ### :param s: The bytes.
 ### :param len: The number of bytes.
-### :returns: The buffer, or null (length 0) when the allocation fails.
+### :returns: The block, or null when the allocation fails.
 routine bytes_result(s: Addr, len: U64) -> @Byte?
-    buf: Addr = c_malloc((len + 1).to[CSize]())
-    if buf.is_hollow()
-        return no_result()
-    c_memcpy(buf, s, len.to[CSize]())
-    terminator: @Byte = buf.to[@Byte]().stride(len)
-    terminator.poke(0x00)
-    return result(buf: buf.to[@Byte](), len)
+    blk: Addr = new_block(len)
+    if blk.is_hollow()
+        return None()
+    put_word(blk, 1, len)
+    c_memcpy(blk.to[@Byte]().stride(RESULT_HEADER), s, len.to[CSize]())
+    return blk.to[@Byte]()
 
 ### A Directory's path copied into a malloc'd, NUL-terminated buffer, as the result. The directory's own memory is
 ### dropped.
@@ -163,15 +162,21 @@ record ResultBuffer
     len: U64
     cap: U64
 
-### Starts an empty buffer with room for `cap` bytes (at least 16).
+### Starts an empty result block with room for `cap` bytes (at least 16).
 ### :param cap: The starting capacity.
 ### :returns: False when the allocation fails.
 routine @ResultBuffer.start(cap: U64) -> Bool
-    buf: Addr = c_malloc(cap.max(16).to[CSize]())
-    me.buf.poke(buf)
+    room_bytes: U64 = cap.max(16)
+    blk: Addr = new_block(room_bytes - 1)
+    me.buf.poke(blk)
     me.len.poke(0)
-    me.cap.poke(cap.max(16))
-    return buf.is_not_hollow()
+    me.cap.poke(room_bytes)
+    return blk.is_not_hollow()
+
+### Where the next byte goes.
+### :returns: The address after the bytes added so far.
+routine @ResultBuffer.tail() -> @Byte
+    return me.buf.peek().to[@Byte]().stride(RESULT_HEADER + me.len.peek())
 
 ### Room for `n` more bytes and the NUL, growing to at least double: false if the buffer can't grow.
 ### :param n: The bytes about to be added.
@@ -182,7 +187,7 @@ routine @ResultBuffer.room(n: U64) -> Bool
     current_cap: U64 = me.cap.peek()
     if need > current_cap
         cap: U64 = (current_cap * 2).max(need)
-        bigger: Addr = c_realloc(me.buf.peek(), cap.to[CSize]())
+        bigger: Addr = c_realloc(me.buf.peek(), (RESULT_HEADER + cap).to[CSize]())
         if bigger.is_hollow()
             return false
         me.buf.poke(bigger)
@@ -194,7 +199,7 @@ routine @ResultBuffer.room(n: U64) -> Bool
 ### :param data: The bytes.
 ### :param n: The number of bytes.
 routine @ResultBuffer.add_bytes(data: @Byte, n: U64) -> None
-    c_memcpy(me.buf.peek().to[@Byte]().stride(me.len.peek()), data, n.to[CSize]())
+    c_memcpy(me.tail(), data, n.to[CSize]())
     next_len: U64 = me.len.peek() + n
     next_len.poke_into(me.len)
     return
@@ -202,22 +207,22 @@ routine @ResultBuffer.add_bytes(data: @Byte, n: U64) -> None
 ### Appends one byte, for which {ResultBuffer.room} made room.
 ### :param b: The byte.
 routine @ResultBuffer.byte(b: Byte) -> None
-    slot: @Byte = me.buf.peek().to[@Byte]().stride(me.len.peek())
+    slot: @Byte = me.tail()
     slot.poke(b)
     next_len: U64 = me.len.peek() + 1
     next_len.poke_into(me.len)
     return
 
 ### NUL-terminates the buffer and hands it over as the result.
-### :returns: The buffer, its length recorded as the result's.
+### :returns: The block, its count in word 1.
 routine @ResultBuffer.finish() -> @Byte?
     n: U64 = me.len.peek()
-    terminator: @Byte = me.buf.peek().to[@Byte]().stride(n)
-    terminator.poke(0x00)
-    return result(buf: me.buf.peek().to[@Byte](), len: n)
+    me.tail().poke(0x00)
+    put_word(me.buf.peek(), 1, n)
+    return me.buf.peek().to[@Byte]()
 
-### Frees the buffer and records a failure.
-### :returns: Null.
+### Frees the buffer and gives a failure.
+### :returns: The failed result.
 routine @ResultBuffer.fail() -> @Byte?
     c_free(me.buf.peek())
     return no_result()
@@ -283,30 +288,28 @@ routine open_in_mode(path: @[Byte], mode: S32) -> FileHandle
     return when check OsFileManager.open_append(at: File.at(path))
         is FileHandle as f => f
 
-### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or -1. No mode makes a
+### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or a failure status. No mode makes a
 ### missing file: rf_fs_make_file does.
 ### :param path: The file's path.
 ### :param path_len: The path's length.
 ### :param mode: 0 read, 1 write, 2 append.
-### :returns: The handle, or -1 for a bad mode, a missing file or another failure to open, no buffer, or no free
-###     slot (256 at once).
+### :returns: The handle, or a failure status for a bad mode, a missing file or another failure to open, no buffer, or
+###     no free slot (256 at once).
 @export("rf_file_open")
 routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     if mode < 0 or mode > 2
-        LAST_ERROR.store(1)
-        return -1
+        return failure_status(1)
     writer: Bool = mode != 0
     f: FileHandle = when check open_in_mode(path: p, mode)
         is FileHandle as opened => opened
         is FsError as error => return failed(error)
     buffer: Addr = c_malloc(FILE_BUFFER.to[CSize]())
     if buffer.is_hollow()
-        LAST_ERROR.store(1)
         c_free(buffer)
         f2: &FileHandle <- f
         f2.close()
-        return -1
+        return failure_status(1)
     buffer2: @Byte = buffer.to[@Byte]()
 
     for i in 0 til MAX_OPEN_FILES
@@ -317,11 +320,10 @@ routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
             start: 0, end: 0))
         return i.to[S32]()
     then
-        LAST_ERROR.store(1)
         c_free(buffer2)
         f2: &FileHandle <- f
         f2.close()
-        return -1
+        return failure_status(1)
 
 ### Writes a writer's pending bytes: whether they all went. The pending bytes are dropped either way.
 ### :returns: True when nothing was pending or everything was written.
@@ -383,7 +385,7 @@ routine rf_file_read_all(fd: S32) -> @Byte?
     of.start.poke(of.end.peek())
 
     until not out.room(FILE_BUFFER)
-        at: @Byte = out.buf.peek().to[@Byte]().stride(out.len.peek())
+        at: @Byte = out.tail()
         got: Check[U64] = check of.file.read_bytes(buffer: at, count: FILE_BUFFER)
         n: U64 = when got
             is U64 as n => n
@@ -544,7 +546,7 @@ routine rf_file_is_eof(fd: S32) -> Bool
 
 ### The NUL-terminated path's whole file, malloc'd and NUL-terminated, into data: its length, or minus the
 ### {reason_code} of the failure. (The I/O threads call it at once, so the length and the reason come back here, not
-### through RESULT_LEN or LAST_ERROR.)
+### in a result block.)
 ### :param cpath: The NUL-terminated path.
 ### :param data: Where the buffer goes.
 ### :returns: The length, or a negative reason code on a failure.
@@ -798,7 +800,7 @@ routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 ### :param name_len: Its length.
 ### :param replacing: Whether something already called `name` there is replaced.
 ### :returns: 0 renamed, 1 something there has that name and `replacing` is false (nothing renamed), 2 the name isn't a
-###     name (empty, "." or "..", or holding a separator), -1 another error (its reason for {rf_fs_last_error}).
+###     name (empty, "." or "..", or holding a separator), a failure status for another error.
 @export("rf_fs_rename")
 routine rf_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, replacing: Bool) -> S32
     p: @[Byte] = path_of(path, len: path_len)
@@ -860,7 +862,7 @@ routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, manager: @MemoryMan
 ### :param into_len: Its length.
 ### :param replacing: Whether something of the same name in `into` is replaced.
 ### :returns: 0 moved, 1 something of that name is there and `replacing` is false (nothing moved), -2 the copy was made
-###     but the original couldn't be deleted, -1 another error (the reason for {rf_fs_last_error} in both).
+###     but the original couldn't be deleted, a failure status for another error.
 @export("rf_fs_move_into")
 routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     replacing: Bool) -> S32
@@ -874,9 +876,7 @@ routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
             if not replacing
                 return 1
             return failed(error)
-        is OriginalKeptError =>
-            LAST_ERROR.store(1)
-            return -2
+        is OriginalKeptError => return -2
         is Crashables as error =>
             # A failure that isn't the file system's stops the program here: C has no way to receive it.
             when error
@@ -993,66 +993,39 @@ routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte?
 routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
     return list_directory(path, len, typed: true)
 
-# -- metadata (cached by rf_fs_metadata, read by the accessors) ----------------------
+# -- metadata ------------------------------------------------------------------------
 
-global META_SIZE: &S64
-global META_MODIFIED: &S64
-global META_CREATED: &S64
-global META_IS_DIRECTORY: &Bool
-global META_READONLY: &Bool
-
-### The size from the last {rf_fs_metadata}.
-### :returns: The size in bytes.
-@export("rf_fs_meta_size")
-routine rf_fs_meta_size() -> S64
-    return META_SIZE.load()
-
-### The modification time from the last {rf_fs_metadata}.
-### :returns: Unix seconds.
-@export("rf_fs_meta_modified")
-routine rf_fs_meta_modified() -> S64
-    return META_MODIFIED.load()
-
-### The creation time from the last {rf_fs_metadata}.
-### :returns: Unix seconds.
-@export("rf_fs_meta_created")
-routine rf_fs_meta_created() -> S64
-    return META_CREATED.load()
-
-### Whether the last {rf_fs_metadata} was of a directory.
-### :returns: True for a directory.
-@export("rf_fs_meta_is_directory")
-routine rf_fs_meta_is_directory() -> Bool
-    return META_IS_DIRECTORY.load()
-
-### Whether the last {rf_fs_metadata} was of a read-only path.
-### :returns: True when read-only.
-@export("rf_fs_meta_readonly")
-routine rf_fs_meta_readonly() -> Bool
-    return META_READONLY.load()
-
-### Reads the path's metadata for the `rf_fs_meta_` accessors. Where the filesystem doesn't record a creation time,
-### the modification time stands in.
+### Reads the path's metadata into a result block: word 1 is 1 for a directory plus 2 for a read-only path, word 2 the
+### size in bytes, word 3 the modification time and word 4 the creation time in Unix seconds (as a U64's bits). Where
+### the filesystem doesn't record a creation time, the modification time stands in.
 ### :param path: The path.
 ### :param len: Its length.
-### :returns: 0, or -1 on a failure (the cached values stay as they were).
+### :returns: The block, or null when the allocation fails.
 @export("rf_fs_metadata")
-routine rf_fs_metadata(path: @Byte, len: S32) -> S32
+routine rf_fs_metadata(path: @Byte, len: S32) -> @Byte?
     m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
     info: Metadata = when m
         is Metadata as info => info
-        is FsError as error => return failed(error)
-    META_SIZE.store(info.size.to_wrap[S64]())
-    META_MODIFIED.store(seconds(info.modified_ns))
-    META_CREATED.store(seconds(info.created_ns.unwrap_or(info.modified_ns)))
-    META_IS_DIRECTORY.store(info.kind == FileKind.DIRECTORY)
-    META_READONLY.store(info.readonly)
-    return 0
+        is FsError as error => return failed_result(error)
+    blk: Addr = new_block(0)
+    if blk.is_hollow()
+        return None()
+    directory_bit: U64 = when
+        info.kind == FileKind.DIRECTORY => 1
+        else => 0
+    readonly_bit: U64 = when
+        info.readonly => 2
+        else => 0
+    put_word(blk, 1, directory_bit + readonly_bit)
+    put_word(blk, 2, info.size)
+    put_word(blk, 3, seconds(info.modified_ns).to_wrap[U64]())
+    put_word(blk, 4, seconds(info.created_ns.unwrap_or(info.modified_ns)).to_wrap[U64]())
+    return blk.to[@Byte]()
 
 ### The size of the file at the path.
 ### :param path: The path.
 ### :param len: Its length.
-### :returns: The size in bytes, or -1 on a failure.
+### :returns: The size in bytes, or a failure status.
 @export("rf_fs_file_size")
 routine rf_fs_file_size(path: @Byte, len: S32) -> S64
     m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
@@ -1161,44 +1134,48 @@ routine map_storage(path: @[Byte], offset: U64, count: U64, write: Bool) -> File
         is FileStorage[Byte] as m => return m
 
 ### A window [offset, offset + count) of a file mapped for writing or for reading only, clamped to its end and aligned
-### down for the OS: the base (MAP_DELTA from it to offset, the clamped length as the result), the empty-map marker
-### for an empty window, or null.
+### down for the OS, as a result block (see {handed_on}).
 ### :param path: The path.
 ### :param offset: The window's first byte in the file.
 ### :param count: The window's length, U64.MAX for the rest of the file.
 ### :param write: True to map it for writing.
-### :returns: The base, the empty-map marker, or null on a failure (its reason for {rf_fs_last_error}).
+### :returns: The block: the window, or the reason it failed.
 routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte?
-    MAP_DELTA.store(0)
     when check map_storage(path, offset, count, write)
         is FileStorage[Byte] as m => return handed_on(steal m)
         is FsError as error => return failed_result(error)
 
-### The window a storage maps, handed on by its base (MAP_DELTA from it to the first byte, the length as the result):
-### {rf_file_unmap} gives it back. An empty storage is the empty-map marker.
+### The window a storage maps, handed on in a result block: word 1 the length, word 2 the delta from the base to the
+### first byte, word 3 the base ({rf_file_unmap} gives it back). An empty storage has the empty-map marker as its base.
 ### :param m: The storage.
-### :returns: The base, or the empty-map marker.
+### :returns: The block, or null when the allocation fails.
 routine handed_on(m: FileStorage[Byte]) -> @Byte?
+    blk: Addr = new_block(0)
+    if blk.is_hollow()
+        drop m
+        return None()
     count: U64 = m.count()
     if count == 0
         drop m
-        RESULT_LEN.store(0)
-        return empty_map()
+        put_word(blk, 3, 1)
+        return blk.to[@Byte]()
     advise(m)
-    MAP_DELTA.store(m.delta.peek())
+    put_word(blk, 1, count)
+    put_word(blk, 2, m.delta.peek())
     base: Addr = m.take_mapping()
     drop m
-    return result(buf: base.to[@Byte](), len: count)
+    put_word(blk, 3, ptrtoint[Addr, U64](base))
+    return blk.to[@Byte]()
 
 ### Maps a window of a file for a storage a block enters: for writing (`modifying`) or for reading only (`viewing`).
-### The window's offset from the base is in {rf_file_map_delta}, its length in {rf_get_result_len}.
+### The result block holds the window's length, its offset from the base and the base (see {handed_on}).
 ### :param path: The path.
 ### :param path_len: Its length.
 ### :param offset: The window's first byte in the file.
 ### :param count: The window's length, U64.MAX for the rest of the file.
 ### :param write: 1 to map it for writing, 0 for reading only.
-### :returns: The base, the empty-map marker for an empty window, or null on a failure (a file that can't be written
-###     mapped for writing fails with the reason "not allowed").
+### :returns: The block: the window, or the reason it failed (a file that can't be written mapped for writing fails
+###     with the reason "not allowed").
 @export("rf_file_map")
 routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte?
     return map_window(path: path_of(path, len: path_len), offset, count, write: write != 0)

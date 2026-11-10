@@ -1,7 +1,7 @@
-# Revare files (files.lpa) hand a result's length back through rf_get_result_len and a mapping's delta through
-# rf_file_map_delta, read right after the call that set them. Two threads interleave here, step by step: each makes
-# a result (and records a delta), the other makes its own in between, and each still reads its own length and delta.
-# With one process-wide length and delta, the first thread read the second one's.
+# Revare files (files.lpa) hand a result back as a block that holds its own byte count and mapping delta. Two threads
+# interleave here, step by step: each makes a result with a delta, the other makes its own in between, and each still
+# reads its own length and delta from its own block. A length or delta kept in a global (per thread or not) would be
+# the other one's after a fiber moves between threads.
 
 module Ingrid/Runtime
 
@@ -37,11 +37,18 @@ routine wait_for_step(step: U32) -> None
     then
         return
 
+### Word `index` of a result block.
+### :param blk: The block.
+### :param index: The word.
+### :returns: Its value.
+routine word_of(blk: @Byte, index: U64) -> U64
+    return blk.to[@U64]().stride(index).peek_unaligned()
+
 ### The second thread: makes its result and delta between the first thread's call and its read.
 routine second(unused: @U32) -> None
     wait_for_step(1)
     buf: @Byte = bytes_result(s: "nine byte", len: 9).unwrap()
-    MAP_DELTA.store(900)
+    put_word(buf.to[Addr](), 2, 900)
     c_free(buf)
     STEP.poke_unbroken(2)
     return
@@ -53,11 +60,11 @@ routine start() -> None
     work_other: Work[None] = second.to[Work](unused: unused)
     other.put_work(work_other)
     buf: @Byte = bytes_result(s: "five!", len: 5).unwrap()
-    MAP_DELTA.store(500)
+    put_word(buf.to[Addr](), 2, 500)
     STEP.poke_unbroken(1)
     wait_for_step(2)
-    len: U64 = rf_get_result_len()
-    delta: U64 = rf_file_map_delta()
+    len: U64 = word_of(buf, 1)
+    delta: U64 = word_of(buf, 2)
     other.retrieve()
     drop other
     c_free(buf)

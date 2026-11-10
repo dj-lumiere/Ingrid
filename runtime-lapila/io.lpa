@@ -69,12 +69,6 @@ global IO_HEAD: &Addr
 global IO_TAIL: &Addr
 ### 1 once the I/O threads run. Until then the work runs inline.
 global IO_OK: &U32
-### The length of the last read, set just before rf_io_read_file_all returns and read right after.
-@threadlocal
-global IO_LAST_LEN: &U64
-### Whether this thread's last rf_io_read_file_all or rf_io_write_file_all failed, set just before it returns.
-@threadlocal
-global IO_LAST_FAILED: &Bool
 
 record IoReq
     kind: U32
@@ -88,19 +82,6 @@ record IoReq
     proc: @ProcState?
     call: Callable[(Addr), None]?  # IO_CALL: the routine to run, with call_arg
     call_arg: Addr
-
-### The length of this thread's last {rf_io_read_file_all}.
-### :returns: The bytes read, 0 after an error.
-@export("rf_io_get_result_len")
-routine rf_io_get_result_len() -> U64
-    return IO_LAST_LEN.load()
-
-### Whether this thread's last {rf_io_read_file_all} or {rf_io_write_file_all} failed. It tells an empty file
-### from a failed read, since both give null with length 0.
-### :returns: True when that call failed.
-@export("rf_io_last_failed")
-routine rf_io_last_failed() -> Bool
-    return IO_LAST_FAILED.load()
 
 ### Does a request's work on the calling thread: reads or writes the file, runs the subprocess, or calls the routine,
 ### and stores the results in `req`.
@@ -212,37 +193,41 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     req.path.poke(copy.unwrap())
     return req
 
-### Reads a whole file: a malloc'd, NUL-terminated buffer (the caller frees it) with its length from
-### rf_io_get_result_len, or null (length 0) on an error. {rf_io_last_failed} tells an error from an empty file, and
-### {rf_fs_last_error} why it failed.
+### Reads a whole file into a result block (files.lpa): the bytes, their count in word 1, and the reason in word 0 when
+### it failed, so an empty file is told from an error. The caller frees the block.
 ### :param path: The file's path.
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
-### :returns: The contents, or null.
+### :returns: The block, or null when it can't be allocated.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
 @export("rf_io_read_file_all")
-routine rf_io_read_file_all(path: @Byte, path_len: S32) -> Addr
+routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte?
     req: @IoReq = io_req_new(kind: IO_READ_FILE, path, path_len)
     io_run(req)
     data: Addr = req.data.peek()
     result: S64 = req.result.peek()
     c_free(req.path.peek())
     c_free(req)
-    IO_LAST_FAILED.store(result < 0)
     if result < 0
-        LAST_ERROR.store((0 - result).to[S32]())
-        IO_LAST_LEN.store(0)
-        return Addr.zero()
-    IO_LAST_LEN.store(result.to[U64]())
-    return data
+        return error_block((0 - result).to[S32]())
+    count: U64 = result.to[U64]()
+    blk: Addr = new_block(count)
+    if blk.is_hollow()
+        c_free(data)
+        return None()
+    put_word(blk, 1, count)
+    if count > 0
+        c_memcpy(blk.to[@Byte]().stride(RESULT_HEADER), data, count.to[CSize]())
+    c_free(data)
+    return blk.to[@Byte]()
 
 ### Writes data_len bytes of data as the whole content of the existing file (emptied first): the bytes written, or
 ### -1, a missing file included (nothing is made). The payload is copied, so the caller's buffer needn't outlive the
-### call. A negative `data_len` writes nothing. {rf_io_last_failed} tells whether it failed.
+### call. A negative `data_len` writes nothing. A failure is minus the reason's code.
 ### :param path: The file's path.
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
 ### :param data: The bytes to write.
 ### :param data_len: The number of bytes.
-### :returns: The bytes written, or -1 on an error.
+### :returns: The bytes written, or minus the reason's code on an error.
 ### :throws: Crashes with `OutOfMemoryError` when the request or the copy of the payload can't be allocated.
 @export("rf_io_write_file_all")
 routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
@@ -259,9 +244,6 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
         req.data.poke(buf)
     io_run(req)
     result: S64 = req.result.peek()
-    IO_LAST_FAILED.store(result < 0)
-    if result < 0
-        LAST_ERROR.store((0 - result).to[S32]())
     c_free(req.data.peek())
     c_free(req.path.peek())
     c_free(req)
