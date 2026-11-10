@@ -31,7 +31,7 @@ routine rf_signal_add_ref(sig_or_none: @Monitor?) -> None
     if sig_or_none.is_absent()
         return
     sig: @Monitor = sig_or_none.unwrap()
-    held: Authorized[U8] <- sig.guard.get_exclusive_access()
+    held: @U8 <- sig.guard.get_exclusive_access()
     next_refcount: U32 = sig.refcount.peek() + 1
     next_refcount.poke_into(sig.refcount)
     return
@@ -43,7 +43,7 @@ routine rf_signal_drop(sig_or_none: @Monitor?) -> None
     if sig_or_none.is_absent()
         return
     sig: @Monitor = sig_or_none.unwrap()
-    held: Authorized[U8] <- sig.guard.get_exclusive_access()
+    held: @U8 <- sig.guard.get_exclusive_access()
     refs: U32 = sig.refcount.peek()
     left: U32 = refs -^ 1
     sig.refcount.poke(left)
@@ -86,9 +86,8 @@ routine rf_signal_wait(sig_or_none: @Monitor?) -> None
     if sched_or_none.is_absent() or coro_or_none.is_absent()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
         # a cast may come from another thread: not a deadlock meanwhile
-        # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
-        lock: Authorized[U8] <- Authorized[U8].construct(at: sig.guard)
-        sig.cond.wait(lock)
+        # The lock is held by hand: the wait gives the guard's access back and takes it again.
+        sig.cond.wait(access: sig.guard)
         return
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
@@ -119,9 +118,8 @@ routine rf_signal_wait_deadline(sig_or_none: @Monitor?, timeout_ns: U64) -> U32
     coro_or_none: @Coro? = current_coro()
     if sched_or_none.is_absent() or coro_or_none.is_absent()
         # The node is on the heap while the wait list holds it, so nothing of this routine's frame outlives it.
-        # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
-        lock: Authorized[U8] <- Authorized[U8].construct(at: sig.guard)
-        in_time: Bool = sig.cond.wait_until(access: lock, deadline)
+        # The lock is held by hand: the wait gives the guard's access back and takes it again.
+        in_time: Bool = sig.cond.wait_until(access: sig.guard, deadline)
         return in_time.to[U32]()
     node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
         what: "Failed to allocate a monitor waiter")
@@ -149,7 +147,7 @@ routine rf_signal_cast_one(sig_or_none: @Monitor?) -> None
 
 ### rf_signal_cast_one on a monitor that is there, under its lock.
 routine @Monitor.cast_one() -> None
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     when me.waiters.peek()
         is @ChannelWaiter as w => rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         is None => me.cond.cast_one()
@@ -162,7 +160,7 @@ routine rf_signal_cast_all(sig_or_none: @Monitor?) -> None
     if sig_or_none.is_absent()
         return
     sig: @Monitor = sig_or_none.unwrap()
-    held: Authorized[U8] <- sig.guard.get_exclusive_access()
+    held: @U8 <- sig.guard.get_exclusive_access()
 
     until at.is_absent() with at: @ChannelWaiter? = sig.waiters.peek()
         w: @ChannelWaiter = at.unwrap()

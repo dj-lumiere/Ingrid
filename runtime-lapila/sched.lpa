@@ -155,7 +155,7 @@ routine @Deque.slot(i: U64) -> @(@Coro?)
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when the ring can't grow.
 routine @Deque.push_bottom(c: @Coro) -> None
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     used: U64 = me.bottom.peek() - me.top.peek()
     if used == me.cap.peek()
         n: U64 = me.cap.peek()
@@ -183,7 +183,7 @@ routine @Deque.push_bottom(c: @Coro) -> None
 ### Pops at the owner's end: the coroutine pushed last, or null.
 ### :returns: The coroutine, or null when the deque is empty.
 routine @Deque.pop_bottom() -> @Coro?
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro? = when
         empty => None()
@@ -199,7 +199,7 @@ routine @Deque.pop_bottom() -> @Coro?
 ### Takes from the thieves' end: the oldest coroutine, or null.
 ### :returns: The coroutine, or null when the deque is empty.
 routine @Deque.steal_top() -> @Coro?
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro? = when
         empty => None()
@@ -216,7 +216,7 @@ routine @Deque.steal_top() -> @Coro?
 ### :param c: The coroutine.
 ### :returns: True when it was in the deque.
 routine @Deque.remove(c: @Coro) -> Bool
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     n: U64 = me.bottom.peek() - me.top.peek()
     for i in 0 til n
         top: U64 = me.top.peek()
@@ -465,7 +465,7 @@ routine rf_sched_spawn(s: @Sched?, c: @Coro?) -> None
 ### rf_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
 ### :param c: The coroutine.
 routine @Sched.spawn(c: @Coro) -> None
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     if not c.initial_spawned.peek()
         c.initial_spawned.poke(true)
         c.home.poke(me.to[Addr]())
@@ -563,7 +563,7 @@ routine rf_coro_request_cancel(coro_or_none: @Coro?) -> None
     s: @Sched = home.unwrap()
     # Under the scheduler lock: either the worker parking it has not taken the lock yet and sees the flag, or the
     # coroutine is on the timer heap already and is taken off it here.
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     if coro.timer_idx.peek() >= 0 and coro.sched_state.peek_unbroken() == SCHED_IDLE
         s.make_ready(coro)
         s.cond.cast_one()
@@ -583,7 +583,7 @@ routine rf_sched_wake(s: @Sched?, c: @Coro?) -> None
 ### rf_sched_wake on a scheduler and a coroutine that are both there.
 ### :param c: The coroutine.
 routine @Sched.wake(c: @Coro) -> None
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     before: U32 = c.sched_state.peek_unbroken()
     me.make_ready(c)
     if before == SCHED_IDLE
@@ -598,7 +598,7 @@ routine rf_sched_arm_cross_waker(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     next_cross_wakers: S64 = s.cross_wakers.peek() + 1
     next_cross_wakers.poke_into(s.cross_wakers)
     return
@@ -610,7 +610,7 @@ routine rf_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     n: S64 = s.cross_wakers.peek()
     if n > 0
         s.cross_wakers.poke(n - 1)
@@ -673,7 +673,7 @@ routine @Sched.try_steal() -> @Coro?
 routine @Sched.run_coro(c: @Coro) -> None
     st: U32 = rf_coro_resume(c)
     if st == CORO_COMPLETED
-        held: Authorized[U8] <- me.guard.get_exclusive_access()
+        held: @U8 <- me.guard.get_exclusive_access()
         c.sched_state.poke_unbroken(SCHED_DONE)
         if not c.counted_done.peek()
             c.counted_done.poke(true)
@@ -707,7 +707,7 @@ routine @Sched.run_coro(c: @Coro) -> None
         c.sched_state.poke_unbroken(SCHED_QUEUED)
         deques.unwrap().stride(id).push_bottom(c)
         return
-    held2: Authorized[U8] <- me.guard.get_exclusive_access()
+    held2: @U8 <- me.guard.get_exclusive_access()
     when
         c.sched_state.peek_unbroken() == SCHED_NOTIFIED =>
             me.enqueue_ready(c)
@@ -733,7 +733,7 @@ routine @Sched.run_coro(c: @Coro) -> None
 ### already has it abandoned here.
 ### :param c: The coroutine, just switched out.
 routine @Sched.finish_stopped(c: @Coro) -> None
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     c.sched_state.poke_unbroken(SCHED_DONE)
     if c.completion_seq.peek_unbroken() == U64.MAX
         c.completion_seq.poke_unbroken(next_completion_seq())
@@ -782,7 +782,7 @@ routine @Sched.claim_work() -> @Coro?
             c: @Coro = mine.unwrap()
             c.sched_state.poke_unbroken(SCHED_RUNNING)
             return c
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     injected: @Coro? = me.pop_injector()
     drop held
     if injected.is_absent()
@@ -799,7 +799,7 @@ routine @Sched.step() -> Bool
 
     if claimed.is_absent()
         # Every source again under the lock: an enqueue signals the cond under the same lock, so none is lost.
-        held: Authorized[U8] <- me.guard.get_exclusive_access()
+        held: @U8 <- me.guard.get_exclusive_access()
         id: S64 = worker_id()
         deques: @Deque? = me.deques.peek()
         if id >= 0 and deques.is_present()
@@ -888,7 +888,7 @@ routine rf_sched_run(s_or_none: @Sched?) -> None
     CURRENT_SCHED.store(s.to[Addr]())
 
     loop
-        held: Authorized[U8] <- s.guard.get_exclusive_access()
+        held: @U8 <- s.guard.get_exclusive_access()
         done2: Bool = s.live.peek() <= 0
         drop held
         if done2
@@ -937,7 +937,7 @@ routine rf_sched_signal(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     s.block_cond.cast_all()
     s.cond.cast_one()
     return
@@ -1053,7 +1053,7 @@ routine here_has_live() -> Bool
     if here_or_none.is_absent()
         return false
     here: @Sched = here_or_none.unwrap()
-    held: Authorized[U8] <- here.guard.get_exclusive_access()
+    held: @U8 <- here.guard.get_exclusive_access()
     live: Bool = here.live.peek() > 0
     return live
 
@@ -1067,7 +1067,7 @@ routine run_here_ready() -> Bool
     if here_or_none.is_absent()
         return false
     here: @Sched = here_or_none.unwrap()
-    held: Authorized[U8] <- here.guard.get_exclusive_access()
+    held: @U8 <- here.guard.get_exclusive_access()
 
     now: U64 = ns_of(Clock.monotonic())
 
@@ -1092,18 +1092,16 @@ routine run_here_ready() -> Bool
 ### ready, or sleeps at most HERE_POLL, so those jobs go on while this thread waits on something else.
 routine @Sched.block_wait() -> None
     if not here_has_live()
-        # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
-        lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
-        me.block_cond.wait(lock)
+        # The lock is held by hand: the wait gives the guard's access back and takes it again.
+        me.block_cond.wait(access: me.guard)
         return
     AccessManager.give_back(at: me.guard)
     ran: Bool = run_here_ready()
     AccessManager.take_exclusive(at: me.guard, size: 1)
     if ran
         return
-    # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
-    held_lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
-    me.block_cond.wait_for(access: held_lock, timeout: HERE_POLL)
+    # The lock is held by hand: the wait gives the guard's access back and takes it again.
+    me.block_cond.wait_for(access: me.guard, timeout: HERE_POLL)
     return
 
 ### Spawns a new coroutine onto the process pool (start_now()).
@@ -1130,7 +1128,7 @@ routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
         home.is_absent() => rf_sched_thread_default()
         else => home.unwrap()
     running: @Coro? = current_coro()
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     next_waiters: S64 = s.waiters.peek() + 1
     next_waiters.poke_into(s.waiters)
     if running.is_absent()
@@ -1242,7 +1240,7 @@ routine rf_sched_unschedule_default(c_or_none: @Coro?) -> U32
     if home.is_absent()
         return 0
     s: @Sched = home.unwrap()
-    held: Authorized[U8] <- s.guard.get_exclusive_access()
+    held: @U8 <- s.guard.get_exclusive_access()
     found: Bool = s.remove_locked(c)
     drop held
     if found
@@ -1276,7 +1274,7 @@ routine home_of(c: @Coro) -> @Sched?
 ### :param c: The coroutine.
 ### :returns: 1 when the caller frees it, 0 when the worker does.
 routine @Sched.dispose(c: @Coro) -> U32
-    access: Authorized[U8] <- me.guard.get_exclusive_access()
+    access: @U8 <- me.guard.get_exclusive_access()
     found: Bool = me.remove_locked(c)
     st: U32 = c.sched_state.peek_unbroken()
     held: Bool = not found and (st == SCHED_RUNNING or st == SCHED_QUEUED)

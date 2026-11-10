@@ -130,7 +130,7 @@ routine rf_channel_add_feeder(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     next_producer_refs: U32 = chan.producer_refs.peek() + 1
     next_producer_refs.poke_into(chan.producer_refs)
     return
@@ -142,7 +142,7 @@ routine rf_channel_add_consumer(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     next_consumer_refs: U32 = chan.consumer_refs.peek() + 1
     next_consumer_refs.poke_into(chan.consumer_refs)
     return
@@ -155,7 +155,7 @@ routine rf_channel_drop_feeder(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     refs: U32 = chan.producer_refs.peek()
     left: U32 = refs -^ 1
     chan.producer_refs.poke(left)
@@ -175,7 +175,7 @@ routine rf_channel_drop_consumer(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     refs: U32 = chan.consumer_refs.peek()
     left: U32 = refs -^ 1
     chan.consumer_refs.poke(left)
@@ -193,7 +193,7 @@ routine rf_channel_close(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     if not chan.closed.peek()
         chan.closed.poke(true)
         chan.cast_all(chan.not_empty_head.peek())
@@ -228,9 +228,8 @@ routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
             slice: Duration = when
                 here_live => HERE_POLL
                 else => CHANNEL_GRACE
-            # The lock is held by hand: an access made from its fields stands for it, and nothing gives it back.
-            lock: Authorized[U8] <- Authorized[U8].construct(at: me.guard)
-            if me.cond.wait_for(access: lock, timeout: slice)
+            # The lock is held by hand: the wait gives the guard's access back and takes it again.
+            if me.cond.wait_for(access: me.guard, timeout: slice)
                 return
             if here_live
                 return
@@ -285,7 +284,7 @@ routine rf_channel_feed(chan_or_none: @Channel?, payload: Addr) -> U32
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 0 when not.
 routine @Channel.feed(payload: Addr) -> U32
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
 
     until (me.count.peek() != me.slot_cap.peek()) or (me.closed.peek() or (me.consumer_refs.peek() == 0))
         if not (rf_cancel_requested() == 0)
@@ -331,7 +330,7 @@ routine rf_channel_offer(chan_or_none: @Channel?, payload: Addr) -> U32
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 2 when full, 0 when closed or without a consumer.
 routine @Channel.offer(payload: Addr) -> U32
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
     result: U32 = when
         me.closed.peek() or (me.consumer_refs.peek() == 0) => 0
         else =>
@@ -363,7 +362,7 @@ routine rf_channel_next(chan_or_none: @Channel?) -> Addr
 ### rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
 ### :returns: The payload, or null when the channel is closed and drained or the agent was cancelled.
 routine @Channel.next() -> Addr
-    held: Authorized[U8] <- me.guard.get_exclusive_access()
+    held: @U8 <- me.guard.get_exclusive_access()
 
     until (me.count.peek() != 0) or me.closed.peek()
         if not (rf_cancel_requested() == 0)
@@ -394,7 +393,7 @@ routine rf_channel_count(chan_or_none: @Channel?) -> U64
     if chan_or_none.is_absent()
         return 0
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     n: U64 = chan.count.peek()
     return n
 
@@ -406,7 +405,7 @@ routine rf_channel_is_closed(chan_or_none: @Channel?) -> U32
     if chan_or_none.is_absent()
         return 1
     chan: @Channel = chan_or_none.unwrap()
-    held: Authorized[U8] <- chan.guard.get_exclusive_access()
+    held: @U8 <- chan.guard.get_exclusive_access()
     closed: Bool = chan.closed.peek()
     drop held
     if closed
