@@ -186,13 +186,13 @@ routine @Deque.pop_bottom() -> @Coro?
     held: @U8 <- me.guard.get_exclusive_access()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro? = when
-        empty => None()
+        empty => none
         else =>
             b: U64 = me.bottom.peek() - 1
             me.bottom.poke(b)
             slot: @(@Coro?) = me.slot(b)
             c: @Coro? = slot.peek()
-            slot.poke(None())
+            slot.poke(none)
             becomes c
     return taken
 
@@ -202,12 +202,12 @@ routine @Deque.steal_top() -> @Coro?
     held: @U8 <- me.guard.get_exclusive_access()
     empty: Bool = me.bottom.peek() == me.top.peek()
     taken: @Coro? = when
-        empty => None()
+        empty => none
         else =>
             t: U64 = me.top.peek()
             slot: @(@Coro?) = me.slot(t)
             c: @Coro? = slot.peek()
-            slot.poke(None())
+            slot.poke(none)
             me.top.poke(t + 1)
             becomes c
     return taken
@@ -229,7 +229,7 @@ routine @Deque.remove(c: @Coro) -> Bool
             then
                 b: U64 = me.bottom.peek() - 1
                 me.bottom.poke(b)
-                me.slot(b).poke(None())
+                me.slot(b).poke(none)
                 return true
     then
         return false
@@ -253,12 +253,12 @@ routine @Sched.pop_injector() -> @Coro?
     head: @Coro? = me.injector_head.peek()
 
     if head.is_absent()
-        return None()
+        return none
     c: @Coro = head.unwrap()
     next: @Coro? = c.sched_next.peek().to[@Coro?]()
     me.injector_head.poke(next)
     if next.is_absent()
-        me.injector_tail.poke(None())
+        me.injector_tail.poke(none)
     c.sched_next.poke(Addr.zero())
     c.sched_state.poke_unbroken(SCHED_RUNNING)
     return c
@@ -375,17 +375,17 @@ routine @Sched.insert_timer(c: @Coro) -> None
 ### :returns: The coroutine, or null when no timer is pending.
 routine @Sched.timer_pop_min() -> @Coro?
     if me.timer_count.peek() == 0
-        return None()
+        return none
     top: @Coro = me.timer_at(0)
     top.timer_idx.poke(-1)
     last: S64 = me.timer_count.peek() - 1
     me.timer_count.poke(last)
     if last > 0
         me.timer_put(i: 0, c: me.timer_at(last))
-        me.timer_slot(last).poke(None())
+        me.timer_slot(last).poke(none)
         me.timer_sift_down(0)
         return top
-    me.timer_slot(0).poke(None())
+    me.timer_slot(0).poke(none)
     return top
 
 ### Takes c off the heap if it is on it: a deadline park woken by something other than its timer.
@@ -400,11 +400,11 @@ routine @Sched.unlink_timer(c: @Coro) -> None
     last: S64 = me.timer_count.peek() - 1
     me.timer_count.poke(last)
     if i == last
-        me.timer_slot(last).poke(None())
+        me.timer_slot(last).poke(none)
         return
     moved: @Coro = me.timer_at(last)
     me.timer_put(i, c: moved)
-    me.timer_slot(last).poke(None())
+    me.timer_slot(last).poke(none)
     me.timer_sift_up(i)
     if not (moved.timer_idx.peek() == i)
         return
@@ -623,9 +623,9 @@ routine rf_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
 @noinline
 routine steal_rand() -> U32
     x: U32 = STEAL_RNG.load()
-    none: Bool = x == 0
+    zero: Bool = x == 0
     x2: U32 = when
-        none =>
+        zero =>
             worker_ordinal: S64 = worker_id() + 1
             s: U32 = worker_ordinal.to_wrap[U32]() *% 2654435761
             if s == 0
@@ -647,7 +647,7 @@ routine @Sched.try_steal() -> @Coro?
     deques_or_none: @Deque? = me.deques.peek()
 
     if deques_or_none.is_absent() or n <= 1
-        return None()
+        return none
     deques: @Deque = deques_or_none.unwrap()
 
     r: U32 = steal_rand()
@@ -665,7 +665,7 @@ routine @Sched.try_steal() -> @Coro?
         c.sched_state.poke_unbroken(SCHED_RUNNING)
         return c
     then
-        return None()
+        return none
 
 ### Runs a coroutine this worker took (RUNNING), with no lock held, then applies how it stopped.
 ### :param c: The coroutine.
@@ -762,14 +762,14 @@ routine @Sched.finish_stopped(c: @Coro) -> None
 routine @Sched.release_awaiter(c: @Coro) -> @Coro?
     waiter: @Coro? = c.awaiter.peek().to[@Coro?]()
     if waiter.is_absent()
-        return None()
+        return none
     w: @Coro = waiter.unwrap()
     c.awaiter.poke(Addr.zero())
     home: @Me? = w.home.peek().to[@Me?]()
     if home.is_present() and home.unwrap() !== me
         return w
     me.make_ready(w)
-    return None()
+    return none
 
 ### One runnable coroutine (now RUNNING), or null: this worker's deque, then the injector, then a steal.
 ### :returns: The coroutine, or null.
@@ -1041,7 +1041,7 @@ routine rf_sched_here() -> @Sched?
     if s.is_present()
         return s
     if current_coro().is_present()
-        return None()
+        return none
     made: @Sched = rf_sched_create()
     HERE_SCHED.store(made)
     return made
@@ -1186,7 +1186,7 @@ routine @Sched.remove_locked(c: @Coro) -> Bool
 ### :param c: The coroutine.
 ### :returns: True when it was in the injector.
 secret routine @Sched.unqueue_injected(c: @Coro) -> Bool
-    until at.is_absent() with prev: @Coro? = None(), at: @Coro? = me.injector_head.peek()
+    until at.is_absent() with prev: @Coro? = none, at: @Coro? = me.injector_head.peek()
         if is_coro(a: at, b: c)
             next: @Coro? = c.sched_next.peek().to[@Coro?]()
             when prev
