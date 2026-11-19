@@ -12,7 +12,7 @@ module Ingrid/Runtime
 
 import Hosted
 
-### The scheduler and coroutine rf_sched_current and current_coro report: null on a plain thread.
+### The scheduler and coroutine ig_sched_current and current_coro report: null on a plain thread.
 lateinit global CURRENT_SCHED: &@Sched
 lateinit global CURRENT_CORO: &@Coro
 
@@ -83,34 +83,34 @@ routine unlink(list: @(@ChannelWaiter?), node: @ChannelWaiter) -> None
         node.next.poke(none)
         return
 
-routine rf_sched_current() -> @Sched
+routine ig_sched_current() -> @Sched
     return CURRENT_SCHED.load()
 
 routine current_coro() -> @Coro
     return CURRENT_CORO.load()
 
-routine rf_sched_arm_cross_waker(s: @Sched) -> None
+routine ig_sched_arm_cross_waker(s: @Sched) -> None
     Console.show("  cross-thread waker armed on scheduler {s.id.peek()}")
     return
 
-routine rf_sched_disarm_cross_waker(s: @Sched) -> None
+routine ig_sched_disarm_cross_waker(s: @Sched) -> None
     Console.show("  cross-thread waker disarmed on scheduler {s.id.peek()}")
     return
 
-routine rf_sched_wake(s: @Sched, c: @Coro) -> None
+routine ig_sched_wake(s: @Sched, c: @Coro) -> None
     Console.show("  wake coroutine {c.id.peek()} on scheduler {s.id.peek()}")
     return
 
 ### The coroutine is off its thread: another agent casts meanwhile, if CAST_DURING_PARK says so.
-routine rf_sched_park_external() -> None
+routine ig_sched_park_external() -> None
     cast: @Monitor? = CAST_DURING_PARK.load().to[@Monitor?]()
     sig: @Monitor = cast.unwrap()
     Console.show("  parked, {count_waiters(sig)} on the wait list")
-    rf_signal_cast_one(sig)
+    ig_signal_cast_one(sig)
     return
 
-### As rf_sched_park_external, until a cast or the delay has passed.
-routine rf_sched_park_deadline(delay_ns: U64) -> None
+### As ig_sched_park_external, until a cast or the delay has passed.
+routine ig_sched_park_deadline(delay_ns: U64) -> None
     cast: @Monitor? = CAST_DURING_PARK.load().to[@Monitor?]()
     if cast.is_absent()
         Console.show("  parked with a deadline, no cast comes")
@@ -118,7 +118,7 @@ routine rf_sched_park_deadline(delay_ns: U64) -> None
         return
     else
         Console.show("  parked with a deadline, a cast comes")
-        rf_signal_cast_one(cast.unwrap())
+        ig_signal_cast_one(cast.unwrap())
         return
 
 # -- helpers -------------------------------------------------------------------------
@@ -151,7 +151,7 @@ routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
 
     loop
         left2: Duration = deadline -^ Clock.monotonic()
-        result2: U32 = rf_signal_wait_deadline(sig,
+        result2: U32 = ig_signal_wait_deadline(sig,
             timeout_ns: left2.max(0s).nanoseconds().to[U64]())
         if result2 == 1
             continue
@@ -165,17 +165,17 @@ routine wait_out(sig: @Monitor, timeout_ns: U64) -> U32
 routine arrive(gate: @Gate) -> None
     arrived: U64 = gate.arrived.peek() + 1
     arrived.poke_into(gate.arrived)
-    rf_signal_unlock(gate.sig.peek())
-    rf_signal_cast_all(gate.sig.peek())
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_unlock(gate.sig.peek())
+    ig_signal_cast_all(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     return
 
 ### Counts the calling thread through, holding the SignalCaster, releases it, and wakes the main thread.
 routine let_through(gate: @Gate) -> None
     through: U64 = gate.passed.peek() + 1
     through.poke_into(gate.passed)
-    rf_signal_unlock(gate.sig.peek())
-    rf_signal_cast_all(gate.sig.peek())
+    ig_signal_unlock(gate.sig.peek())
+    ig_signal_cast_all(gate.sig.peek())
     return
 
 ### A gate thread that waits for a token and takes it. It gets the gate as an Addr, which the build doesn't follow:
@@ -183,7 +183,7 @@ routine let_through(gate: @Gate) -> None
 ### :param at: The gate.
 routine take_token(at: Addr) -> None
     gate: @Gate = at.to[@Gate]()
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     arrive(gate)
 
     loop
@@ -193,7 +193,7 @@ routine take_token(at: Addr) -> None
             let_through(gate)
             return
         else
-            rf_signal_wait(gate.sig.peek())
+            ig_signal_wait(gate.sig.peek())
             continue
 
 ### A gate thread that waits for the gate to open. It gets the gate as an Addr, which the build doesn't follow: the
@@ -201,11 +201,11 @@ routine take_token(at: Addr) -> None
 ### :param at: The gate.
 routine pass_open(at: Addr) -> None
     gate: @Gate = at.to[@Gate]()
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     arrive(gate)
 
     until gate.open.peek()
-        rf_signal_wait(gate.sig.peek())
+        ig_signal_wait(gate.sig.peek())
     let_through(gate)
     return
 
@@ -213,14 +213,14 @@ routine pass_open(at: Addr) -> None
 ### wait releases it, so all of them wait by then.
 routine await_arrived(gate: @Gate, count: U64) -> None
     until gate.arrived.peek() >= count
-        rf_signal_wait(gate.sig.peek())
+        ig_signal_wait(gate.sig.peek())
     then
         return
 
 ### Waits, holding the SignalCaster, until `count` gate threads are through.
 routine await_passed(gate: @Gate, count: U64) -> None
     until gate.passed.peek() >= count
-        rf_signal_wait(gate.sig.peek())
+        ig_signal_wait(gate.sig.peek())
     then
         return
 
@@ -229,31 +229,31 @@ routine await_passed(gate: @Gate, count: U64) -> None
 routine hand_tokens(gate: @Gate) -> Bool
     exact: &Bool <- true
 
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     await_arrived(gate, count: GATE_THREADS)
 
     for round in 1 to GATE_THREADS
         gate.tokens.poke(1)
-        rf_signal_unlock(gate.sig.peek())
-        rf_signal_cast_one(gate.sig.peek())
-        rf_signal_lock(gate.sig.peek())
+        ig_signal_unlock(gate.sig.peek())
+        ig_signal_cast_one(gate.sig.peek())
+        ig_signal_lock(gate.sig.peek())
         await_passed(gate, count: round)
         through: U64 = gate.passed.peek()
         one: Bool = through == round and gate.tokens.peek() == 0
         (exact.load() and one).poke_into(exact)
-    rf_signal_unlock(gate.sig.peek())
+    ig_signal_unlock(gate.sig.peek())
     return exact.load()
 
 ### Opens the gate once every gate thread waits at it, with one cast_all, and waits for them all to go through.
 routine open_gate(gate: @Gate) -> None
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     await_arrived(gate, count: GATE_THREADS)
     gate.open.poke(true)
-    rf_signal_unlock(gate.sig.peek())
-    rf_signal_cast_all(gate.sig.peek())
-    rf_signal_lock(gate.sig.peek())
+    ig_signal_unlock(gate.sig.peek())
+    ig_signal_cast_all(gate.sig.peek())
+    ig_signal_lock(gate.sig.peek())
     await_passed(gate, count: GATE_THREADS)
-    rf_signal_unlock(gate.sig.peek())
+    ig_signal_unlock(gate.sig.peek())
     return
 
 # -- the test ------------------------------------------------------------------------
@@ -261,42 +261,42 @@ routine open_gate(gate: @Gate) -> None
 ### The handle count, and a coroutine parked by each kind of wait.
 routine coroutines(sig: @Monitor) -> None
     Console.show("handles: {sig.refcount.peek()}")
-    rf_signal_add_ref(sig)
+    ig_signal_add_ref(sig)
     Console.show("after add_ref: {sig.refcount.peek()}")
-    rf_signal_drop(sig)
+    ig_signal_drop(sig)
     Console.show("after drop: {sig.refcount.peek()}")
     CURRENT_SCHED.store(THE_SCHED)
     CURRENT_CORO.store(THE_CORO)
     CAST_DURING_PARK.store(sig.to[Addr]())
     Console.show("a coroutine waits:")
-    rf_signal_lock(sig)
-    rf_signal_wait(sig)
+    ig_signal_lock(sig)
+    ig_signal_wait(sig)
     Console.show("  back, {count_waiters(sig)} on the wait list")
     Console.show("a coroutine waits with a deadline:")
-    cast: U32 = rf_signal_wait_deadline(sig, timeout_ns: 1000000000)
+    cast: U32 = ig_signal_wait_deadline(sig, timeout_ns: 1000000000)
     Console.show("  result {cast}, {count_waiters(sig)} on the wait list")
     CAST_DURING_PARK.zeroinit(1)
-    late: U32 = rf_signal_wait_deadline(sig, timeout_ns: 2000000)
+    late: U32 = ig_signal_wait_deadline(sig, timeout_ns: 2000000)
     Console.show("  result {late}, {count_waiters(sig)} on the wait list")
-    rf_signal_unlock(sig)
+    ig_signal_unlock(sig)
     sig.waiters.poke(SECOND_WAITER)
     Console.show("two coroutines parked, cast_one:")
-    rf_signal_cast_one(sig)
+    ig_signal_cast_one(sig)
     Console.show("cast_all:")
-    rf_signal_cast_all(sig)
+    ig_signal_cast_all(sig)
     sig.waiters.zeroinit(1)
     CURRENT_SCHED.zeroinit(1)
     CURRENT_CORO.zeroinit(1)
     return
 
 routine start() -> None
-    sig: @Monitor = rf_signal_create()
+    sig: @Monitor = ig_signal_create()
     coroutines(sig)
-    rf_signal_lock(sig)
+    ig_signal_lock(sig)
     start: Duration = Clock.monotonic()
     result: U32 = wait_out(sig, timeout_ns: 2000000)
     waited: Duration = Clock.monotonic() - start
-    rf_signal_unlock(sig)
+    ig_signal_unlock(sig)
     Console.show("a thread waits with a deadline: result {result}, waited it out {waited >= 2ms}")
     tokens: &Gate <- Gate(sig: sig, arrived: 0, tokens: 0, passed: 0, open: false)
     t1: Thread[None] <- get_thread[None]()
@@ -334,5 +334,5 @@ routine start() -> None
     u3.retrieve()
     drop u3
     Console.show("cast_all: {gate.passed.peek()} of {GATE_THREADS} through")
-    rf_signal_drop(sig)
+    ig_signal_drop(sig)
     return

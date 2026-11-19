@@ -1,12 +1,12 @@
-# The runtime's crash: __rf_throw writes the error and a stack trace to stderr and exits with the crash status, and
+# The runtime's crash: __ig_throw writes the error and a stack trace to stderr and exits with the crash status, and
 # in the modes that trace, a hardware fault (an access violation, a division by zero, an illegal instruction) prints
 # the stack before the process dies.
 #
-# Three trace modes, set at startup by __rf_set_trace_mode:
+# Three trace modes, set at startup by __ig_set_trace_mode:
 #   0  none (release-time, release-space): no trace
 #   1  platform (release): the native stack, function names from the debug information
 #   2  shadow (debug and release): the RV call chain, which the program keeps (Ingrid/lapila/crash.lpa), so a crash
-#      raised here is reported by the program's own crash report, set at startup through rf_set_crash_report
+#      raised here is reported by the program's own crash report, set at startup through ig_set_crash_report
 
 module Ingrid/Runtime
 
@@ -43,14 +43,14 @@ routine write_hex(value: U64, digits: U64) -> None
 # -- the crash -----------------------------------------------------------------------
 
 ### The program's report of a crash raised here (Ingrid/lapila/crash.lpa, linked into the program with the crash
-### trace): set at startup through rf_set_crash_report, null until then.
+### trace): set at startup through ig_set_crash_report, null until then.
 global CRASH_REPORT: &(Callable[(CStrView, CStrView, @SourceLocation?), None]?)
 
 ### Sets the trace mode and installs the fault handlers. A tracing mode prints the stack of a hardware fault. On
 ### Windows a stack overflow is reported as a crash in every mode.
 ### :param mode: `TRACE_NONE`, `TRACE_PLATFORM`, or `TRACE_SHADOW`.
-@export("__rf_set_trace_mode")
-routine rf_set_trace_mode(mode: CInt) -> None
+@export("__ig_set_trace_mode")
+routine ig_set_trace_mode(mode: CInt) -> None
     TRACE_MODE.store(mode)
     install_fault_handlers()
     return
@@ -59,14 +59,14 @@ routine rf_set_trace_mode(mode: CInt) -> None
 ### crash trace from the stack starts there when it reports the fault (a stack overflow), since the report runs on
 ### the thread's fault stack.
 ### :returns: The frame pointer.
-@export("rf_fault_frame")
-routine rf_fault_frame() -> Addr
+@export("ig_fault_frame")
+routine ig_fault_frame() -> Addr
     return fault_frame_pointer()
 
 ### The instruction a fault interrupted on the calling thread, hollow when none was noted.
 ### :returns: Its address.
-@export("rf_fault_pc")
-routine rf_fault_pc() -> Addr
+@export("ig_fault_pc")
+routine ig_fault_pc() -> Addr
     return fault_pc()
 
 ### Linux's `dladdr`: the shared object an address is in.
@@ -83,11 +83,11 @@ routine c_dladdr(address: Addr, info: @Byte) -> CInt
 ### Writes nothing when the library can't find itself.
 ### :param low: Where the code's first address goes.
 ### :param high: Where the address after its last goes.
-@export("rf_runtime_code")
+@export("ig_runtime_code")
 @target(os: "linux")
-routine rf_runtime_code(low: @Addr, high: @Addr) -> None
+routine ig_runtime_code(low: @Addr, high: @Addr) -> None
     info: &Items[U64, 4]
-    here: Addr = rf_runtime_code.to[Callable]().addr()
+    here: Addr = ig_runtime_code.to[Callable]().addr()
 
     if c_dladdr(here, info.to[@Byte]()) == 0
         return
@@ -116,17 +116,17 @@ routine rf_runtime_code(low: @Addr, high: @Addr) -> None
 ### JIT links that library as one object.
 ### :param low: Unused.
 ### :param high: Unused.
-@export("rf_runtime_code")
+@export("ig_runtime_code")
 @target(os: not "linux")
-routine rf_runtime_code(low: @Addr, high: @Addr) -> None
+routine ig_runtime_code(low: @Addr, high: @Addr) -> None
     return
 
 ### Sets the routine that reports a crash raised here in the shadow trace mode: the program's crash report, which
 ### writes where the program was and its crash trace, then exits with status 82. The program's entry calls this at
 ### startup.
 ### :param report: The report, called with the error type's name, the message, and where it happened (or null).
-@export("rf_set_crash_report")
-routine rf_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation?), None]?) -> None
+@export("ig_set_crash_report")
+routine ig_set_crash_report(report: Callable[(CStrView, CStrView, @SourceLocation?), None]?) -> None
     CRASH_REPORT.store(report)
     return
 
@@ -156,9 +156,9 @@ routine write_error_title(name: @[Byte]) -> None
 ### output is flushed first.
 ### :param error_type: The error's type name, or null for `Error`.
 ### :param message: What happened, or null for none.
-@export("__rf_throw")
+@export("__ig_throw")
 @noreturn
-routine rf_throw(error_type: CStrView, message: CStrView) -> None
+routine ig_throw(error_type: CStrView, message: CStrView) -> None
     report_crash(error_type, message, place: none)
 
 ### Reports a crash raised here and exits with the crash status. In the shadow trace mode the program's crash report
@@ -169,7 +169,7 @@ routine rf_throw(error_type: CStrView, message: CStrView) -> None
 ### :param place: Where it happened, or null when that isn't known.
 @noreturn
 routine report_crash(error_type: CStrView, message: CStrView, place: @SourceLocation?) -> None
-    rf_console_flush_crashing()
+    ig_console_flush_crashing()
     kind: CStrView = when
         error_type.data.to[Addr]().is_hollow() => "Error"
         else => error_type
@@ -384,7 +384,7 @@ routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte?
 
 ### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
-### Frames 0 and 1 (this helper, and __rf_throw or the signal handler) are left out.
+### Frames 0 and 1 (this helper, and __ig_throw or the signal handler) are left out.
 ### :param fault: Unused here: the two frames left out are already the handler's.
 @target(os: not "windows")
 routine print_platform_stack(fault: U64) -> None
@@ -414,7 +414,7 @@ routine print_platform_stack(fault: U64) -> None
 # -- fault handlers: Windows ---------------------------------------------------------
 
 ### The program's report for a stack overflow (Ingrid/lapila/crash.lpa, linked into the program, where the crash
-### trace lives): set at startup through rf_set_stack_overflow_report, None until then.
+### trace lives): set at startup through ig_set_stack_overflow_report, None until then.
 global STACK_OVERFLOW_REPORT: &(Callable[(U64,), None]?)
 
 ### Win32's `AddVectoredExceptionHandler`: registers a handler every exception passes through.
@@ -449,25 +449,25 @@ routine c_set_thread_stack_guarantee(size: @U32) -> CInt
 ### Sets the routine that reports a stack overflow (it writes the report and exits with status 82). The program's
 ### entry calls this right after setting the trace mode.
 ### :param report: The report, called with the thread's stack size in bytes.
-@export("rf_set_stack_overflow_report")
-routine rf_set_stack_overflow_report(report: Callable[(U64,), None]) -> None
+@export("ig_set_stack_overflow_report")
+routine ig_set_stack_overflow_report(report: Callable[(U64,), None]) -> None
     STACK_OVERFLOW_REPORT.store(report)
     return
 
 ### Keeps 64 KiB of the calling thread's stack back for its exception handler, so a stack overflow on the thread can
 ### still be reported. Each thread the runtime starts calls it first.
-@export("rf_thread_stack_guarantee")
+@export("ig_thread_stack_guarantee")
 @target(os: "windows")
-routine rf_thread_stack_guarantee() -> None
+routine ig_thread_stack_guarantee() -> None
     size: &U32 <- 65536
 
     c_set_thread_stack_guarantee(size)
     return
 
 ### Does nothing: Windows keeps stack back for the exception handler of each thread for its whole life.
-@export("rf_thread_stack_release")
+@export("ig_thread_stack_release")
 @target(os: "windows")
-routine rf_thread_stack_release() -> None
+routine ig_thread_stack_release() -> None
     return
 
 ### Every exception passes through here first. A stack overflow is reported as a crash (exit status 82), with how deep
@@ -493,7 +493,7 @@ routine exception_handler(pointers: @Addr) -> CInt
     if TRACE_MODE.load() == TRACE_NONE
         return 0
     name: @[Byte] = exception_name(code).getview()
-    rf_console_flush_on_fault()
+    ig_console_flush_on_fault()
     if Console.errors().is_terminal()
         Console.alert("[91m", end: "")
     Console.alert("\n{name} (code 0x", end: "")
@@ -521,13 +521,13 @@ routine exception_name(code: U32) -> CStrView
 ### Keeps stack back for the main thread's exception handler and registers {exception_handler} first in line.
 @target(os: "windows")
 routine install_fault_handlers() -> None
-    rf_thread_stack_guarantee()
+    ig_thread_stack_guarantee()
     c_add_vectored_exception_handler(1, exception_handler.to[Callable]())
     return
 
 # -- fault handlers: POSIX -----------------------------------------------------------
 
-### The fault stack given to this thread by rf_thread_stack_guarantee, null when it has none of its own.
+### The fault stack given to this thread by ig_thread_stack_guarantee, null when it has none of its own.
 @threadlocal
 @target(os: not "windows")
 global THREAD_FAULT_STACK: &Addr
@@ -557,7 +557,7 @@ routine sigbus() -> CInt
 ### :param event: The fault, with its signal and the address it touched.
 @target(os: not "windows")
 routine fault_handler(event: CpuEvent) -> None
-    rf_console_flush_on_fault()
+    ig_console_flush_on_fault()
     if event.ran_out_of_stack()
         report: Callable[(U64,), None]? = STACK_OVERFLOW_REPORT.load()
         if report.is_present()
@@ -588,9 +588,9 @@ routine signal_name(signo: CInt) -> CStrView
 ### Gives the calling thread a stack of its own for the fault handler, so a stack overflow on the thread can still be
 ### reported, and reads its stack's bounds now, so the handler only reads them. Each thread the runtime starts calls
 ### it first. A second call on the same thread does nothing.
-@export("rf_thread_stack_guarantee")
+@export("ig_thread_stack_guarantee")
 @target(os: not "windows")
-routine rf_thread_stack_guarantee() -> None
+routine ig_thread_stack_guarantee() -> None
     if THREAD_FAULT_STACK.load().is_not_hollow()
         return
     bounds: @StackManager = StackManager.current()
@@ -599,9 +599,9 @@ routine rf_thread_stack_guarantee() -> None
 
 ### Takes the calling thread's fault stack away and gives its memory back: a thread the runtime started for one task
 ### calls it as it ends.
-@export("rf_thread_stack_release")
+@export("ig_thread_stack_release")
 @target(os: not "windows")
-routine rf_thread_stack_release() -> None
+routine ig_thread_stack_release() -> None
     release_fault_stack(THREAD_FAULT_STACK.load())
     THREAD_FAULT_STACK.zeroinit(1)
     return

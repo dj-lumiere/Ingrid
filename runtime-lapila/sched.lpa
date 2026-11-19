@@ -67,7 +67,7 @@ record Deque
     top: U64  # the oldest coroutine, at the thieves' end
     guard: U8
 
-### rf_sched.
+### ig_sched.
 record Sched
     injector_head: @Coro?
     injector_tail: @Coro?
@@ -362,7 +362,7 @@ routine @Sched.insert_timer(c: @Coro) -> None
             else => cap * 2
         heap: Addr = c_realloc(me.timer_heap.peek(), (ncap.to[U64]() * sizeof[@Coro]()).to[CSize]())
         if heap.is_hollow()
-            rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow scheduler timer heap")
+            ig_throw(error_type: "OutOfMemoryError", message: "Failed to grow scheduler timer heap")
         me.timer_heap.poke(heap)
         me.timer_cap.poke(ncap)
     i: S64 = me.timer_count.peek()
@@ -434,16 +434,16 @@ routine @Sched.make_ready(c: @Coro) -> None
 ### Creates a scheduler driven directly (no pool deques), with one worker.
 ### :returns: The new scheduler.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-@export("rf_sched_create")
-routine rf_sched_create() -> @Sched
+@export("ig_sched_create")
+routine ig_sched_create() -> @Sched
     s: @Sched = zeroed[Sched](count: 1, what: "Failed to allocate coroutine scheduler")
     s.workers_total.poke(1)
     return s
 
 ### Frees a scheduler and its timer heap. A null `s` does nothing.
 ### :param s: The scheduler.
-@export("rf_sched_destroy")
-routine rf_sched_destroy(s: @Sched?) -> None
+@export("ig_sched_destroy")
+routine ig_sched_destroy(s: @Sched?) -> None
     when s
         is @Sched as sched =>
             c_free(sched.timer_heap.peek())
@@ -455,14 +455,14 @@ routine rf_sched_destroy(s: @Sched?) -> None
 ### retrieved after). A null `s` or `c` does nothing.
 ### :param s: The scheduler.
 ### :param c: The coroutine.
-@export("rf_sched_spawn")
-routine rf_sched_spawn(s: @Sched?, c: @Coro?) -> None
+@export("ig_sched_spawn")
+routine ig_sched_spawn(s: @Sched?, c: @Coro?) -> None
     if s.is_absent() or c.is_absent()
         return
     s.unwrap().spawn(c.unwrap())
     return
 
-### rf_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
+### ig_sched_spawn on a scheduler and a coroutine that are both there, under the scheduler's lock.
 ### :param c: The coroutine.
 routine @Sched.spawn(c: @Coro) -> None
     held: @U8 <- me.guard.get_exclusive_access()
@@ -478,8 +478,8 @@ routine @Sched.spawn(c: @Coro) -> None
 ### Parks the running coroutine until delay_ns from now. The worker puts it on the timer heap once it is off its
 ### stack. Outside a scheduler-driven coroutine it does nothing.
 ### :param delay_ns: How long to park, in nanoseconds.
-@export("rf_sched_park_timer")
-routine rf_sched_park_timer(delay_ns: U64) -> None
+@export("ig_sched_park_timer")
+routine ig_sched_park_timer(delay_ns: U64) -> None
     running: @Coro? = current_coro()
     if current_sched().is_absent() or running.is_absent()
         return
@@ -489,16 +489,16 @@ routine rf_sched_park_timer(delay_ns: U64) -> None
     coro_switch_out()
     return
 
-### rf_sched_park_timer that a wake can also end first: a wake on an IDLE coroutine takes it off the timer heap.
+### ig_sched_park_timer that a wake can also end first: a wake on an IDLE coroutine takes it off the timer heap.
 ### :param delay_ns: The longest park, in nanoseconds.
-@export("rf_sched_park_deadline")
-routine rf_sched_park_deadline(delay_ns: U64) -> None
-    rf_sched_park_timer(delay_ns)
+@export("ig_sched_park_deadline")
+routine ig_sched_park_deadline(delay_ns: U64) -> None
+    ig_sched_park_timer(delay_ns)
     return
 
-### Parks the running coroutine until rf_sched_wake. A wake that comes first finds it RUNNING and isn't lost.
-@export("rf_sched_park_external")
-routine rf_sched_park_external() -> None
+### Parks the running coroutine until ig_sched_wake. A wake that comes first finds it RUNNING and isn't lost.
+@export("ig_sched_park_external")
+routine ig_sched_park_external() -> None
     running: @Coro? = current_coro()
     if current_sched().is_absent() or running.is_absent()
         return
@@ -508,8 +508,8 @@ routine rf_sched_park_external() -> None
     return
 
 ### Lets the other ready coroutines run first, then goes on. Outside a scheduler it switches back to the resumer.
-@export("rf_coro_yield")
-routine rf_coro_yield() -> None
+@export("ig_coro_yield")
+routine ig_coro_yield() -> None
     running: @Coro? = current_coro()
     if running.is_absent()
         return
@@ -526,11 +526,11 @@ routine rf_coro_yield() -> None
 ### access is not stopped, since abandoning it would never give the access back: its wait returns early again, after
 ### a turn for the others. A thread can't be stopped from outside, so each of its waits returns early.
 ### :returns: 1 when the wait returns early, 0 when it waits.
-@export("rf_coro_cancel_at_wait")
-routine rf_coro_cancel_at_wait() -> U32
+@export("ig_coro_cancel_at_wait")
+routine ig_coro_cancel_at_wait() -> U32
     running: @Coro? = current_coro()
     if current_sched().is_absent() or running.is_absent()
-        return rf_cancel_requested()
+        return ig_cancel_requested()
     this_coro: @Coro = running.unwrap()
     asked: U32 = this_coro.cancel_requested.peek_unbroken()
     if asked == 0
@@ -540,21 +540,21 @@ routine rf_coro_cancel_at_wait() -> U32
         this_coro.cancel_requested.poke_unbroken(2)
         return 1
     if AccessManager.held_count() != 0
-        rf_coro_yield()
+        ig_coro_yield()
         return 1
     this_coro.park_intent.poke(PARK_STOPPED)
     coro_switch_out()
     return 1
 
-### Asks a coroutine to stop: a flag it reads at a suspend point or with rf_cancel_requested. Nothing is freed. A
+### Asks a coroutine to stop: a flag it reads at a suspend point or with ig_cancel_requested. Nothing is freed. A
 ### coroutine parked on a timer (`waitfor`) is woken now, so its wait ends early. A null `coro` does nothing.
 ### :param coro_or_none: The coroutine.
-@export("rf_coro_request_cancel")
-routine rf_coro_request_cancel(coro_or_none: @Coro?) -> None
+@export("ig_coro_request_cancel")
+routine ig_coro_request_cancel(coro_or_none: @Coro?) -> None
     if coro_or_none.is_absent()
         return
     coro: @Coro = coro_or_none.unwrap()
-    # Asked once: a second request leaves a coroutine that was told already as it is (rf_coro_cancel_at_wait).
+    # Asked once: a second request leaves a coroutine that was told already as it is (ig_coro_cancel_at_wait).
     seen: &U32 <- 0
     coro.cancel_requested.compare_exchange_unbroken_raw(expected: 0, new: 1, previous: seen)
     home: @Sched? = coro.home.peek().to[@Sched?]()
@@ -573,14 +573,14 @@ routine rf_coro_request_cancel(coro_or_none: @Coro?) -> None
 ### does nothing.
 ### :param s: The coroutine's scheduler.
 ### :param c: The coroutine.
-@export("rf_sched_wake")
-routine rf_sched_wake(s: @Sched?, c: @Coro?) -> None
+@export("ig_sched_wake")
+routine ig_sched_wake(s: @Sched?, c: @Coro?) -> None
     if s.is_absent() or c.is_absent()
         return
     s.unwrap().wake(c.unwrap())
     return
 
-### rf_sched_wake on a scheduler and a coroutine that are both there.
+### ig_sched_wake on a scheduler and a coroutine that are both there.
 ### :param c: The coroutine.
 routine @Sched.wake(c: @Coro) -> None
     held: @U8 <- me.guard.get_exclusive_access()
@@ -593,8 +593,8 @@ routine @Sched.wake(c: @Coro) -> None
 ### A wake another thread has promised (a threaded task, an I/O call, a cast, a race! competitor): while one is
 ### outstanding, all-parked isn't a deadlock. A null `s` does nothing.
 ### :param s_or_none: The scheduler.
-@export("rf_sched_arm_cross_waker")
-routine rf_sched_arm_cross_waker(s_or_none: @Sched?) -> None
+@export("ig_sched_arm_cross_waker")
+routine ig_sched_arm_cross_waker(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
@@ -605,8 +605,8 @@ routine rf_sched_arm_cross_waker(s_or_none: @Sched?) -> None
 
 ### Withdraws one wake another thread had promised, never below 0. A null `s` does nothing.
 ### :param s_or_none: The scheduler.
-@export("rf_sched_disarm_cross_waker")
-routine rf_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
+@export("ig_sched_disarm_cross_waker")
+routine ig_sched_disarm_cross_waker(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
@@ -671,7 +671,7 @@ routine @Sched.try_steal() -> @Coro?
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when a deque or the timer heap can't grow.
 routine @Sched.run_coro(c: @Coro) -> None
-    st: U32 = rf_coro_resume(c)
+    st: U32 = ig_coro_resume(c)
     if st == CORO_COMPLETED
         held: @U8 <- me.guard.get_exclusive_access()
         c.sched_state.poke_unbroken(SCHED_DONE)
@@ -687,11 +687,11 @@ routine @Sched.run_coro(c: @Coro) -> None
         me.block_cond.cast_all()
         drop held
         when away
-            is @Coro as w => rf_sched_wake(s: w.home.peek().to[@Me?](), c: w)
+            is @Coro as w => ig_sched_wake(s: w.home.peek().to[@Me?](), c: w)
             is None => nothing
         if not free_now
             return
-        rf_coro_delete(c)
+        ig_coro_delete(c)
         return
     # A NOTIFIED wake or a yield goes back on this worker's own deque without the scheduler lock: make_ready
     # leaves a NOTIFIED or QUEUED coroutine alone, and a yielding one is nobody's awaiter.
@@ -727,7 +727,7 @@ routine @Sched.run_coro(c: @Coro) -> None
             c.sched_state.poke_unbroken(SCHED_IDLE)
             return
 
-### Ends a coroutine that stopped on a cancel request (rf_coro_cancel_at_wait) the way a completed one ends: it
+### Ends a coroutine that stopped on a cancel request (ig_coro_cancel_at_wait) the way a completed one ends: it
 ### is DONE and off the live count, and whoever waits for it goes on. It is marked cancelled, not completed, so the
 ### Work that holds it abandons it (its shadow stack runs) instead of reading a result, and a holder that let go of it
 ### already has it abandoned here.
@@ -748,10 +748,10 @@ routine @Sched.finish_stopped(c: @Coro) -> None
     me.block_cond.cast_all()
     drop held
     when away
-        is @Coro as w => rf_sched_wake(s: w.home.peek().to[@Me?](), c: w)
+        is @Coro as w => ig_sched_wake(s: w.home.peek().to[@Me?](), c: w)
         is None => nothing
     if free_now
-        rf_coro_abandon(c)
+        ig_coro_abandon(c)
     return
 
 ### Takes the coroutine waiting for `c` off it. A waiter spawned on this scheduler is made ready here, one spawned on
@@ -848,7 +848,7 @@ routine @Sched.step() -> Bool
                         me.deadlock_confirm.poke(confirm)
                         if confirm >= DEADLOCK_CONFIRMS
                             drop held
-                            rf_throw(error_type: "DeadlockError",
+                            ig_throw(error_type: "DeadlockError",
                                 message: "all coroutines are parked and none is runnable — no send, receive, or wake can ever make progress (deadlock). If coroutines communicate (a channel, a SignalCaster), they must all be LAUNCHED before you wait on one: retrieving a consumer before its producer is started parks it forever. Start background feeders with `.start_now()` and await the rest with `.retrieve()`/`.gather()`.")
                         else
                             more_idle: S64 = me.workers_idle.peek() + 1
@@ -879,8 +879,8 @@ routine @Sched.step() -> Bool
 ### Drives every spawned coroutine to completion on this thread. A null `s` does nothing.
 ### :param s_or_none: The scheduler.
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
-@export("rf_sched_run")
-routine rf_sched_run(s_or_none: @Sched?) -> None
+@export("ig_sched_run")
+routine ig_sched_run(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
@@ -909,14 +909,14 @@ routine is_finished(c: @Coro) -> Bool
 ### :param s: The scheduler.
 ### :param target: The coroutine to wait for.
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
-@export("rf_sched_run_until")
-routine rf_sched_run_until(s: @Sched?, target: @Coro?) -> None
+@export("ig_sched_run_until")
+routine ig_sched_run_until(s: @Sched?, target: @Coro?) -> None
     if s.is_absent() or target.is_absent()
         return
     s.unwrap().run_until(target.unwrap())
     return
 
-### rf_sched_run_until on a scheduler and a coroutine that are both there.
+### ig_sched_run_until on a scheduler and a coroutine that are both there.
 ### :param target: The coroutine to wait for.
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 routine @Sched.run_until(target: @Coro) -> None
@@ -932,8 +932,8 @@ routine @Sched.run_until(target: @Coro) -> None
 ### Wakes a scheduler's waiters with no coroutine in particular: a top-level race! re-polls. From any thread. A null
 ### `s` does nothing.
 ### :param s_or_none: The scheduler.
-@export("rf_sched_signal")
-routine rf_sched_signal(s_or_none: @Sched?) -> None
+@export("ig_sched_signal")
+routine ig_sched_signal(s_or_none: @Sched?) -> None
     if s_or_none.is_absent()
         return
     s: @Sched = s_or_none.unwrap()
@@ -944,8 +944,8 @@ routine rf_sched_signal(s_or_none: @Sched?) -> None
 
 ### Whether the caller runs in a scheduler-driven coroutine, where a park suspends.
 ### :returns: 1 inside one, else 0.
-@export("rf_in_coroutine")
-routine rf_in_coroutine() -> U32
+@export("ig_in_coroutine")
+routine ig_in_coroutine() -> U32
     has_sched: Bool = current_sched().is_present()
     if has_sched and current_coro().is_present()
         return 1
@@ -953,8 +953,8 @@ routine rf_in_coroutine() -> U32
 
 ### The scheduler driving this thread.
 ### :returns: The scheduler, or null.
-@export("rf_sched_current")
-routine rf_sched_current() -> @Sched?
+@export("ig_sched_current")
+routine ig_sched_current() -> @Sched?
     return current_sched()
 
 # -- the process pool ----------------------------------------------------------------
@@ -971,7 +971,7 @@ record WorkerStart
 ### :param start: The worker's scheduler and index.
 ### :throws: Crashes with `DeadlockError` when no coroutine can ever run again.
 routine worker_main(start: @WorkerStart) -> None
-    rf_thread_stack_guarantee()
+    ig_thread_stack_guarantee()
     s: @Sched = start.sched.peek()
     WORKER_ID.store(start.index.peek())
     c_free(start)
@@ -993,7 +993,7 @@ routine pool_worker_count() -> S64
 ### :throws: Crashes with `OutOfMemoryError` when an allocation fails, and with `TaskSpawnError` when a worker can't
 ###     be started.
 routine pool_start() -> @Sched
-    s: @Sched = rf_sched_create()
+    s: @Sched = ig_sched_create()
     n: S64 = pool_worker_count()
 
     s.workers_total.poke(n)
@@ -1015,8 +1015,8 @@ routine pool_start() -> @Sched
 ### The process pool, made (and its workers started) on first use, once even when several threads ask at once.
 ### :returns: The pool's scheduler.
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
-@export("rf_sched_thread_default")
-routine rf_sched_thread_default() -> @Sched
+@export("ig_sched_thread_default")
+routine ig_sched_thread_default() -> @Sched
     if POOL_STATE.peek_unbroken() == 2
         return POOL.peek_unbroken().unwrap()
     seen: &U32 <- 0
@@ -1035,14 +1035,14 @@ routine rf_sched_thread_default() -> @Sched
 ### can move between threads, so it has no thread of its own to run a job beside.
 ### :returns: The scheduler, or null inside a start_now() job.
 ### :throws: Crashes with `OutOfMemoryError` when the scheduler can't be allocated.
-@export("rf_sched_here")
-routine rf_sched_here() -> @Sched?
+@export("ig_sched_here")
+routine ig_sched_here() -> @Sched?
     s: @Sched? = HERE_SCHED.load()
     if s.is_present()
         return s
     if current_coro().is_present()
         return none
-    made: @Sched = rf_sched_create()
+    made: @Sched = ig_sched_create()
     HERE_SCHED.store(made)
     return made
 
@@ -1107,9 +1107,9 @@ routine @Sched.block_wait() -> None
 ### Spawns a new coroutine onto the process pool (start_now()).
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
-@export("rf_sched_spawn_default")
-routine rf_sched_spawn_default(c: @Coro?) -> None
-    rf_sched_spawn(s: rf_sched_thread_default(), c)
+@export("ig_sched_spawn_default")
+routine ig_sched_spawn_default(c: @Coro?) -> None
+    ig_sched_spawn(s: ig_sched_thread_default(), c)
     return
 
 ### retrieve!: waits for target to finish, on the scheduler it was spawned on. Inside a coroutine it parks (that
@@ -1118,14 +1118,14 @@ routine rf_sched_spawn_default(c: @Coro?) -> None
 ### `target` returns at once.
 ### :param target_or_none: The coroutine to wait for.
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
-@export("rf_sched_run_until_default")
-routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
+@export("ig_sched_run_until_default")
+routine ig_sched_run_until_default(target_or_none: @Coro?) -> None
     if target_or_none.is_absent()
         return
     target: @Coro = target_or_none.unwrap()
     home: @Sched? = target.home.peek().to[@Sched?]()
     s: @Sched = when
-        home.is_absent() => rf_sched_thread_default()
+        home.is_absent() => ig_sched_thread_default()
         else => home.unwrap()
     running: @Coro? = current_coro()
     held: @U8 <- s.guard.get_exclusive_access()
@@ -1139,7 +1139,7 @@ routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
             if s.deques.peek().is_absent()
                 # A directly driven scheduler has no worker of its own: the waiting thread is its worker.
                 AccessManager.give_back(at: s.guard)
-                rf_sched_run_until(s, target)
+                ig_sched_run_until(s, target)
                 AccessManager.take_exclusive(at: s.guard, size: 1)
                 remaining_waiters: S64 = s.waiters.peek() - 1
                 remaining_waiters.poke_into(s.waiters)
@@ -1157,12 +1157,12 @@ routine rf_sched_run_until_default(target_or_none: @Coro?) -> None
             AccessManager.give_back(at: s.guard)
             home2: @Sched? = this_coro.home.peek().to[@Sched?]()
             if home2.is_present() and home2.unwrap() !== s
-                rf_sched_arm_cross_waker(home2)
-                rf_sched_park_external()
-                rf_sched_disarm_cross_waker(home2)
+                ig_sched_arm_cross_waker(home2)
+                ig_sched_park_external()
+                ig_sched_disarm_cross_waker(home2)
                 AccessManager.take_exclusive(at: s.guard, size: 1)
             else
-                rf_sched_park_external()
+                ig_sched_park_external()
                 AccessManager.take_exclusive(at: s.guard, size: 1)
         then
             target.awaiter.poke(Addr.zero())
@@ -1227,12 +1227,12 @@ secret routine @Sched.unqueue_deques(c: @Coro) -> Bool
     then
         return false
 
-### Takes c off the scheduler it was spawned on (the process pool when it was never spawned) before rf_coro_abandon
+### Takes c off the scheduler it was spawned on (the process pool when it was never spawned) before ig_coro_abandon
 ### frees a coroutine spawned and never retrieved.
 ### :param c_or_none: The coroutine.
 ### :returns: 1 when it was queued or on a timer, 0 otherwise or with no scheduler.
-@export("rf_sched_unschedule_default")
-routine rf_sched_unschedule_default(c_or_none: @Coro?) -> U32
+@export("ig_sched_unschedule_default")
+routine ig_sched_unschedule_default(c_or_none: @Coro?) -> U32
     if c_or_none.is_absent()
         return 0
     c: @Coro = c_or_none.unwrap()
@@ -1251,8 +1251,8 @@ routine rf_sched_unschedule_default(c_or_none: @Coro?) -> U32
 ### frees it itself when it completes. Decided under the lock together with the removal.
 ### :param c_or_none: The coroutine.
 ### :returns: 1 when the caller frees it (always with no pool), 0 when a worker does (or for a null `c`).
-@export("rf_sched_dispose_default")
-routine rf_sched_dispose_default(c_or_none: @Coro?) -> U32
+@export("ig_sched_dispose_default")
+routine ig_sched_dispose_default(c_or_none: @Coro?) -> U32
     if c_or_none.is_absent()
         return 0
     c: @Coro = c_or_none.unwrap()
@@ -1269,7 +1269,7 @@ routine home_of(c: @Coro) -> @Sched?
         return POOL.peek_unbroken()
     return home
 
-### rf_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
+### ig_sched_dispose_default on the pool: under the lock, takes c out of the queues, or leaves it to the worker that
 ### holds it.
 ### :param c: The coroutine.
 ### :returns: 1 when the caller frees it, 0 when the worker does.
@@ -1288,7 +1288,7 @@ routine @Sched.dispose(c: @Coro) -> U32
 ### The number of pool workers (making the pool): coroutines can move between threads only when it is more than 1.
 ### :returns: The worker count.
 ### :throws: Crashes with `OutOfMemoryError` or `TaskSpawnError` when the pool can't be made.
-@export("rf_sched_worker_count")
-routine rf_sched_worker_count() -> U64
-    s: @Sched = rf_sched_thread_default()
+@export("ig_sched_worker_count")
+routine ig_sched_worker_count() -> U64
+    s: @Sched = ig_sched_thread_default()
     return s.workers_total.peek().to[U64]()

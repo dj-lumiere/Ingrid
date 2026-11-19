@@ -5,7 +5,7 @@
 # What is Revare's here is the policy. Standard output is buffered, and flushed after every show when it is an
 # interactive terminal, so prompts and progress appear at once. On a pipe or a file it goes out a bufferful at a time
 # (a write per show costs a system call and a reader's round trip per print). Buffered output still arrives: at exit
-# (registered with atexit at start-up), before every ask, on rf_console_flush, and before a crash report.
+# (registered with atexit at start-up), before every ask, on ig_console_flush, and before a crash report.
 # RV_FLUSH_STDOUT=1 flushes after every show on a pipe too, so a test harness keeps what was written before a hang or
 # a crash. alert writes to stderr in magenta. Each ask hands Revare a malloc'd block it frees: the count of the
 # bytes read, as a U64, then the bytes. ask_line gives a blank line as an empty block and null only at the end of the input.
@@ -93,8 +93,8 @@ routine @OutputBuffer.drain() -> None
 ### every show.
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
-@export("rf_console_show")
-routine rf_console_show(ptr: @Byte, count: U64) -> None
+@export("ig_console_show")
+routine ig_console_show(ptr: @Byte, count: U64) -> None
     out: @OutputBuffer = STDOUT
 
     held: @U8 <- out.guard.get_exclusive_access()
@@ -117,8 +117,8 @@ routine rf_console_show(ptr: @Byte, count: U64) -> None
     return
 
 ### Gives standard output everything buffered so far.
-@export("rf_console_flush")
-routine rf_console_flush() -> None
+@export("ig_console_flush")
+routine ig_console_flush() -> None
     out: @OutputBuffer = STDOUT
     held: @U8 <- out.guard.get_exclusive_access()
     out.drain()
@@ -130,7 +130,7 @@ routine rf_console_flush() -> None
 ### workers take for every scheduler step, or the buffer's own access), and waiting for it would keep the process from
 ### ending. No other thread is left to write, so the buffer is drained without taking its access.
 @target(os: "windows")
-routine rf_console_flush_at_exit() -> None
+routine ig_console_flush_at_exit() -> None
     out: @OutputBuffer = STDOUT
     out.drain()
     return
@@ -138,14 +138,14 @@ routine rf_console_flush_at_exit() -> None
 ### Gives standard output what is buffered when the process ends: the runtime library registers it with atexit, which
 ### runs inside `exit` while the other threads go on, so the buffer's access is taken as for any flush.
 @target(os: not "windows")
-routine rf_console_flush_at_exit() -> None
-    rf_console_flush()
+routine ig_console_flush_at_exit() -> None
+    ig_console_flush()
     return
 
 ### Gives standard output what is buffered when the program crashes, without taking the buffer's exclusive access: the crashing
 ### thread may hold it, taking it could take memory (a fiber's flow is made the first time it takes an access), and
 ### the other threads that crash meanwhile wait for the stop, so nothing else writes.
-routine rf_console_flush_crashing() -> None
+routine ig_console_flush_crashing() -> None
     out: @OutputBuffer = STDOUT
     out.drain()
     return
@@ -153,8 +153,8 @@ routine rf_console_flush_crashing() -> None
 ### Gives standard output what is buffered when the program faulted, so its output comes before the fault report.
 ### The faulting thread may hold the buffer's exclusive access (a fault inside a show), and waiting for it would hang, so the
 ### buffer is drained only when no other flow holds that access.
-@export("rf_console_flush_on_fault")
-routine rf_console_flush_on_fault() -> None
+@export("ig_console_flush_on_fault")
+routine ig_console_flush_on_fault() -> None
     lateinit place: &SourceLocation
 
     out: @OutputBuffer = STDOUT
@@ -168,9 +168,9 @@ routine rf_console_flush_on_fault() -> None
 ### were written.
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
-@export("rf_console_alert")
-routine rf_console_alert(ptr: @Byte, count: U64) -> None
-    rf_console_flush()
+@export("ig_console_alert")
+routine ig_console_alert(ptr: @Byte, count: U64) -> None
+    ig_console_flush()
     colored: Bool = Console.errors().is_terminal()
     on: @[Byte] = "[95m"
     off: @[Byte] = "[0m"
@@ -186,7 +186,7 @@ routine rf_console_alert(ptr: @Byte, count: U64) -> None
 ### Whether the last read from stdin was ask_word, so the line end left after the word isn't read as a blank line.
 global AFTER_WORD: &Bool
 
-### `text` copied into a malloc'd block the caller frees with rf_invalidate: its count as a U64, then its bytes. The
+### `text` copied into a malloc'd block the caller frees with ig_invalidate: its count as a U64, then its bytes. The
 ### count travels in the block, since the fiber that reads it may be on another thread by then (a per-thread length
 ### would be another thread's). The block is never empty, so null stays the end of the input.
 ### :param text: The text, taken over.
@@ -216,15 +216,15 @@ routine counted_option(text: Optional[BorrowedSlice[Byte]]) -> @Byte?
 routine flush_before_read() -> None
     out: @OutputBuffer = STDOUT
     if out.count.peek_unbroken[RELAXED]() != 0
-        rf_console_flush()
+        ig_console_flush()
     return
 
 ### The next line from stdin, without its end, or null at the end of the input. A blank line is an empty block. Right
 ### after ask_word, a line that is empty because the word ended it is skipped. Standard output is flushed first when it
 ### holds something.
-### :returns: The line's bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null.
-@export("rf_console_ask_line")
-routine rf_console_ask_line() -> @Byte?
+### :returns: The line's bytes, a block the caller frees with ig_invalidate (its count, a U64, then its bytes), or null.
+@export("ig_console_ask_line")
+routine ig_console_ask_line() -> @Byte?
     flush_before_read()
     manager: @MemoryManager = heap()
     after_word: Bool = AFTER_WORD.load()
@@ -241,9 +241,9 @@ routine rf_console_ask_line() -> @Byte?
 
 ### The next word from stdin, or null at the end of the input. Standard output is flushed first when it holds
 ### something.
-### :returns: The word's bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null.
-@export("rf_console_ask_word")
-routine rf_console_ask_word() -> @Byte?
+### :returns: The word's bytes, a block the caller frees with ig_invalidate (its count, a U64, then its bytes), or null.
+@export("ig_console_ask_word")
+routine ig_console_ask_word() -> @Byte?
     flush_before_read()
     manager: @MemoryManager = heap()
     word: @Byte? = counted_option(try Console.ask_word(manager))
@@ -252,20 +252,20 @@ routine rf_console_ask_word() -> @Byte?
 
 ### Up to `count` bytes from stdin. Standard output is flushed first when it holds something.
 ### :param count: The most bytes to read.
-### :returns: The bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null when the
+### :returns: The bytes, a block the caller frees with ig_invalidate (its count, a U64, then its bytes), or null when the
 ###     allocation fails.
-@export("rf_console_ask_bytes")
-routine rf_console_ask_bytes(count: U64) -> @Byte?
+@export("ig_console_ask_bytes")
+routine ig_console_ask_bytes(count: U64) -> @Byte?
     flush_before_read()
     AFTER_WORD.store(false)
     manager: @MemoryManager = heap()
     return counted_text(Console.ask_bytes(count, manager))
 
 ### The rest of stdin. Standard output is flushed first when it holds something.
-### :returns: The bytes, a block the caller frees with rf_invalidate (its count, a U64, then its bytes), or null when the
+### :returns: The bytes, a block the caller frees with ig_invalidate (its count, a U64, then its bytes), or null when the
 ###     allocation fails.
-@export("rf_console_ask_all")
-routine rf_console_ask_all() -> @Byte?
+@export("ig_console_ask_all")
+routine ig_console_ask_all() -> @Byte?
     flush_before_read()
     AFTER_WORD.store(false)
     manager: @MemoryManager = heap()
@@ -276,30 +276,30 @@ routine rf_console_ask_all() -> @Byte?
 ### @[Byte] on stderr as they are, with no color or newline. A null `ptr` or a `count` of 0 writes nothing.
 ### :param ptr: The bytes to write.
 ### :param count: The number of bytes.
-@export("rf_console_error")
-routine rf_console_error(ptr: @Byte?, count: U64) -> None
+@export("ig_console_error")
+routine ig_console_error(ptr: @Byte?, count: U64) -> None
     if ptr.is_absent() or count == 0
         return
     try Console.errors().write_all(data: ptr.unwrap(), count)
     return
 
 ### Flushes stdout, so a program's output appears before the crash report that follows it.
-@export("rf_flush_output")
-routine rf_flush_output() -> None
-    rf_console_flush()
+@export("ig_flush_output")
+routine ig_flush_output() -> None
+    ig_console_flush()
     return
 
 ### Whether standard error is a terminal, so a crash report may color its text.
 ### :returns: True when standard error is a terminal.
-@export("rf_stderr_is_terminal")
-routine rf_stderr_is_terminal() -> Bool
+@export("ig_stderr_is_terminal")
+routine ig_stderr_is_terminal() -> Bool
     return Console.errors().is_terminal()
 
 ### Ends the program with the crash status, after the report.
-@export("rf_crash_exit")
+@export("ig_crash_exit")
 @noreturn
-routine rf_crash_exit() -> None
-    rf_console_flush()
+routine ig_crash_exit() -> None
+    ig_console_flush()
     ProcessManager.exit_process(CRASH_STATUS)
 
 # -- start-up ------------------------------------------------------------------------
@@ -307,27 +307,27 @@ routine rf_crash_exit() -> None
 ### Process start-up: a crash in the library's own Lapila code is reported by runtime_crash_handler, the I/O threads
 ### start on the main thread, standard output's buffer is flushed at exit, and stderr takes ANSI colors (on Windows a
 ### console needs asking).
-@export("rf_runtime_init")
-routine rf_runtime_init() -> None
+@export("ig_runtime_init")
+routine ig_runtime_init() -> None
     Crash.report_with(runtime_crash_handler.to[Callable]())
-    rf_io_runtime_init()
-    c_atexit(rf_console_flush_at_exit.to[Callable]())
+    ig_io_runtime_init()
+    c_atexit(ig_console_flush_at_exit.to[Callable]())
     Console.errors().enable_colors()
     return
 
 ### Sets the exit status the program ends with when its `start` returns: Revare's and Mielia's `set_exit_code`.
 ### The last store wins (Hosted keeps it in one unbroken value).
 ### :param code: The exit status, 0 for success.
-@export("rf_set_exit_code")
-routine rf_set_exit_code(code: S32) -> None
+@export("ig_set_exit_code")
+routine ig_set_exit_code(code: S32) -> None
     set_exit_code(code)
     return
 
-### The exit status the program ends with when its `start` returns: what `rf_set_exit_code` stored last, 0 when
+### The exit status the program ends with when its `start` returns: what `ig_set_exit_code` stored last, 0 when
 ### nothing did. The builder's `main` returns it after `start`.
 ### :returns: The status.
-@export("rf_exit_code")
-routine rf_exit_code() -> S32
+@export("ig_exit_code")
+routine ig_exit_code() -> S32
     return exit_code()
 
 # -- C strings -----------------------------------------------------------------------
@@ -335,22 +335,22 @@ routine rf_exit_code() -> S32
 ### The length of a NUL-terminated string.
 ### :param cstr: The string.
 ### :returns: The number of bytes before the terminator.
-@export("rf_cstr_count")
-routine rf_cstr_count(cstr: @Byte) -> U64
+@export("ig_cstr_count")
+routine ig_cstr_count(cstr: @Byte) -> U64
     return c_strlen(cstr).to[U64]()
 
 ### Copies the NUL-terminated string at `src`, terminator included, to `dest`.
 ### :param dest: Where the copy goes, large enough for it.
 ### :param src: The string to copy.
 ### :returns: `dest`.
-@export("rf_cstr_copy")
-routine rf_cstr_copy(dest: @Byte, src: @Byte) -> @Byte
+@export("ig_cstr_copy")
+routine ig_cstr_copy(dest: @Byte, src: @Byte) -> @Byte
     return c_strcpy(dest, src)
 
 ### Compares two NUL-terminated strings byte by byte.
 ### :param a: The first string.
 ### :param b: The second string.
 ### :returns: Negative, zero, or positive as `a` sorts before, equal to, or after `b`.
-@export("rf_cstr_compare")
-routine rf_cstr_compare(a: @Byte, b: @Byte) -> S32
+@export("ig_cstr_compare")
+routine ig_cstr_compare(a: @Byte, b: @Byte) -> S32
     return c_strcmp(a, b)

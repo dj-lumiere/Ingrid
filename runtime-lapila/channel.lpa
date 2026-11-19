@@ -1,7 +1,7 @@
 # Revare's channels (Hopper[T] / Conveyor[T]): a refcounted ring buffer of payload pointers between agents.
 #
 # A consumer waiting for an item, or a producer waiting for room, parks when it is a scheduler-driven coroutine
-# (woken by rf_sched_wake from the other side, on any thread) and blocks on the channel's condition variable on a
+# (woken by ig_sched_wake from the other side, on any thread) and blocks on the channel's condition variable on a
 # plain thread: the same either-way contract as retrieve! and waitfor.
 #
 # capacity N >= 1 buffers N items and feed waits while they are full. Capacity 0 is a rendezvous, where feed also
@@ -24,7 +24,7 @@ record ChannelWaiter
     coro: @Coro
     next: @ChannelWaiter?
 
-### rf_channel.
+### ig_channel.
 record Channel
     guard: U8
     cond: SignalCaster  # threads waiting for room or for an item
@@ -71,7 +71,7 @@ routine @Channel.destruct() -> None
 routine @Channel.cast_all(list: @ChannelWaiter?) -> None
     until at.is_absent() with at: @ChannelWaiter? = list
         w: @ChannelWaiter = at.unwrap()
-        rf_sched_wake(s: w.sched.peek(), c: w.coro.peek())
+        ig_sched_wake(s: w.sched.peek(), c: w.coro.peek())
         continue with at: w.next.peek()
     me.casts.poke(me.casts.peek() + 1)
     me.cond.cast_all()
@@ -81,8 +81,8 @@ routine @Channel.cast_all(list: @ChannelWaiter?) -> None
 ### :param capacity: The items it buffers, 0 for a rendezvous.
 ### :returns: The new channel, or None when the buffer is too large to count in bytes or an allocation fails
 ###     (the caller reports `OutOfMemoryError`).
-@export("rf_channel_create")
-routine rf_channel_create(capacity: U64) -> @Channel?
+@export("ig_channel_create")
+routine ig_channel_create(capacity: U64) -> @Channel?
     slot_cap: U64 = when
         capacity == 0 => 1
         else => capacity
@@ -125,8 +125,8 @@ routine @Channel.free_if(last: Bool) -> None
 
 ### Adds a producer handle, under the lock. A null `chan` does nothing.
 ### :param chan_or_none: The channel.
-@export("rf_channel_add_feeder")
-routine rf_channel_add_feeder(chan_or_none: @Channel?) -> None
+@export("ig_channel_add_feeder")
+routine ig_channel_add_feeder(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
@@ -137,8 +137,8 @@ routine rf_channel_add_feeder(chan_or_none: @Channel?) -> None
 
 ### Adds a consumer handle, under the lock. A null `chan` does nothing.
 ### :param chan_or_none: The channel.
-@export("rf_channel_add_consumer")
-routine rf_channel_add_consumer(chan_or_none: @Channel?) -> None
+@export("ig_channel_add_consumer")
+routine ig_channel_add_consumer(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
@@ -150,8 +150,8 @@ routine rf_channel_add_consumer(chan_or_none: @Channel?) -> None
 ### Drops a producer handle. The last producer dropping closes the channel: consumers drain what is left, then see it
 ### closed. The channel is freed when no handle is left. A null `chan` does nothing.
 ### :param chan_or_none: The channel.
-@export("rf_channel_drop_feeder")
-routine rf_channel_drop_feeder(chan_or_none: @Channel?) -> None
+@export("ig_channel_drop_feeder")
+routine ig_channel_drop_feeder(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
@@ -170,8 +170,8 @@ routine rf_channel_drop_feeder(chan_or_none: @Channel?) -> None
 ### Drops a consumer handle. With no consumer left, producers waiting for room wake and fail instead of waiting
 ### forever. The channel is freed when no handle is left. A null `chan` does nothing.
 ### :param chan_or_none: The channel.
-@export("rf_channel_drop_consumer")
-routine rf_channel_drop_consumer(chan_or_none: @Channel?) -> None
+@export("ig_channel_drop_consumer")
+routine ig_channel_drop_consumer(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
@@ -188,8 +188,8 @@ routine rf_channel_drop_consumer(chan_or_none: @Channel?) -> None
 
 ### Closes the channel and wakes every waiting producer and consumer. Closing twice, or a null `chan`, does nothing.
 ### :param chan_or_none: The channel.
-@export("rf_channel_close")
-routine rf_channel_close(chan_or_none: @Channel?) -> None
+@export("ig_channel_close")
+routine ig_channel_close(chan_or_none: @Channel?) -> None
     if chan_or_none.is_absent()
         return
     chan: @Channel = chan_or_none.unwrap()
@@ -204,7 +204,7 @@ routine rf_channel_close(chan_or_none: @Channel?) -> None
 ### the lock before and after, and checks its condition again.
 ### :param list: The list of parked coroutines to join.
 routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
-    sched_or_none: @Sched? = rf_sched_current()
+    sched_or_none: @Sched? = ig_sched_current()
     coro_or_none: @Coro? = current_coro()
     if sched_or_none.is_absent() or coro_or_none.is_absent()
         # The node outlives nothing of this routine's: it is on the heap while the list holds it, and goes after.
@@ -237,7 +237,7 @@ routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
                 return
             continue with quiet: quiet + 1
         AccessManager.give_back(at: me.guard)
-        rf_throw(error_type: "DeadlockError",
+        ig_throw(error_type: "DeadlockError",
             message: "This job waits on a channel or mailbox, and no other work is running that could add to it, take from it or close it, so what it waits for never comes. Close it from the side that is done with it before reading it to its end, or start the work that adds before waiting.")
     else
         node: @ChannelWaiter = zeroed[ChannelWaiter](count: 1,
@@ -246,7 +246,7 @@ routine @Channel.wait(list: @(@ChannelWaiter?)) -> None
             next: list.peek()))
         list.poke(node)
         AccessManager.give_back(at: me.guard)
-        rf_sched_park_external()
+        ig_sched_park_external()
         AccessManager.take_exclusive(at: me.guard, size: 1)
         unlink(list, node)
         c_free(node)
@@ -273,25 +273,25 @@ routine unlink(list: @(@ChannelWaiter?), node: @ChannelWaiter) -> None
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 0 when `chan` is null, closed, has no consumer, or the agent was cancelled while waiting
 ###     for room.
-@export("rf_channel_feed")
-routine rf_channel_feed(chan_or_none: @Channel?, payload: Addr) -> U32
+@export("ig_channel_feed")
+routine ig_channel_feed(chan_or_none: @Channel?, payload: Addr) -> U32
     if chan_or_none.is_absent()
         return 0
     chan: @Channel = chan_or_none.unwrap()
     return chan.feed(payload)
 
-### rf_channel_feed on a channel that is there: everything under the lock, which finish gives back.
+### ig_channel_feed on a channel that is there: everything under the lock, which finish gives back.
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 0 when not.
 routine @Channel.feed(payload: Addr) -> U32
     held: @U8 <- me.guard.get_exclusive_access()
 
     until (me.count.peek() != me.slot_cap.peek()) or (me.closed.peek() or (me.consumer_refs.peek() == 0))
-        if not (rf_cancel_requested() == 0)
+        if not (ig_cancel_requested() == 0)
             # A rendezvous: not over until this item was taken.
             drop held
             # The job is told the item was not sent, or a fiber told before stops here.
-            rf_coro_cancel_at_wait()
+            ig_coro_cancel_at_wait()
             return 0
         me.wait(me.not_full_head)
         continue
@@ -306,7 +306,7 @@ routine @Channel.feed(payload: Addr) -> U32
     next_count.poke_into(me.count)
     me.cast_all(me.not_empty_head.peek())
     if me.capacity.peek() == 0
-        until not ((me.count.peek() > 0) and not me.closed.peek() and (me.consumer_refs.peek() > 0)) or not (rf_cancel_requested() == 0)
+        until not ((me.count.peek() > 0) and not me.closed.peek() and (me.consumer_refs.peek() > 0)) or not (ig_cancel_requested() == 0)
             me.wait(me.not_full_head)
         then
             return 1
@@ -319,14 +319,14 @@ routine @Channel.feed(payload: Addr) -> U32
 ### :param chan_or_none: The channel, or null.
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 2 when full, 0 when `chan` is null, closed, or has no consumer.
-@export("rf_channel_offer")
-routine rf_channel_offer(chan_or_none: @Channel?, payload: Addr) -> U32
+@export("ig_channel_offer")
+routine ig_channel_offer(chan_or_none: @Channel?, payload: Addr) -> U32
     if chan_or_none.is_absent()
         return 0
     chan: @Channel = chan_or_none.unwrap()
     return chan.offer(payload)
 
-### rf_channel_offer on a channel that is there: everything under the lock, which finish gives back.
+### ig_channel_offer on a channel that is there: everything under the lock, which finish gives back.
 ### :param payload: The item to send.
 ### :returns: 1 when sent, 2 when full, 0 when closed or without a consumer.
 routine @Channel.offer(payload: Addr) -> U32
@@ -352,23 +352,23 @@ routine @Channel.offer(payload: Addr) -> U32
 ### was cancelled.
 ### :param chan_or_none: The channel, or null.
 ### :returns: The payload, or null.
-@export("rf_channel_next")
-routine rf_channel_next(chan_or_none: @Channel?) -> Addr
+@export("ig_channel_next")
+routine ig_channel_next(chan_or_none: @Channel?) -> Addr
     if chan_or_none.is_absent()
         return Addr.zero()
     chan: @Channel = chan_or_none.unwrap()
     return chan.next()
 
-### rf_channel_next on a channel that is there: everything under the lock, which finish gives back.
+### ig_channel_next on a channel that is there: everything under the lock, which finish gives back.
 ### :returns: The payload, or null when the channel is closed and drained or the agent was cancelled.
 routine @Channel.next() -> Addr
     held: @U8 <- me.guard.get_exclusive_access()
 
     until (me.count.peek() != 0) or me.closed.peek()
-        if not (rf_cancel_requested() == 0)
+        if not (ig_cancel_requested() == 0)
             drop held
             # The job is told nothing came, or a fiber told before stops here.
-            rf_coro_cancel_at_wait()
+            ig_coro_cancel_at_wait()
             return Addr.zero()
         me.wait(me.not_empty_head)
         continue
@@ -388,8 +388,8 @@ routine @Channel.next() -> Addr
 ### The number of items waiting in the channel.
 ### :param chan_or_none: The channel, or null.
 ### :returns: The buffered item count, 0 for a null `chan`.
-@export("rf_channel_count")
-routine rf_channel_count(chan_or_none: @Channel?) -> U64
+@export("ig_channel_count")
+routine ig_channel_count(chan_or_none: @Channel?) -> U64
     if chan_or_none.is_absent()
         return 0
     chan: @Channel = chan_or_none.unwrap()
@@ -400,8 +400,8 @@ routine rf_channel_count(chan_or_none: @Channel?) -> U64
 ### Whether the channel is closed.
 ### :param chan_or_none: The channel, or null.
 ### :returns: 1 when closed or null, 0 when open.
-@export("rf_channel_is_closed")
-routine rf_channel_is_closed(chan_or_none: @Channel?) -> U32
+@export("ig_channel_is_closed")
+routine ig_channel_is_closed(chan_or_none: @Channel?) -> U32
     if chan_or_none.is_absent()
         return 1
     chan: @Channel = chan_or_none.unwrap()
@@ -415,8 +415,8 @@ routine rf_channel_is_closed(chan_or_none: @Channel?) -> U32
 ### The channel's capacity.
 ### :param chan_or_none: The channel, or null.
 ### :returns: The items it buffers (0 for a rendezvous or a null `chan`).
-@export("rf_channel_capacity")
-routine rf_channel_capacity(chan_or_none: @Channel?) -> U64
+@export("ig_channel_capacity")
+routine ig_channel_capacity(chan_or_none: @Channel?) -> U64
     if chan_or_none.is_absent()
         return 0
     chan: @Channel = chan_or_none.unwrap()

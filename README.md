@@ -83,7 +83,7 @@ collector, the heap calls, and the crash report, and from
 `runtime-lapila/` the SignalCaster (`monitor.lpa`), the channels' last-handle drop, the per-thread file results, the
 coroutine cancellation stack, the JIT's emulated thread-locals, and the clock and random word. Each test is a directory with a `config.toml` that lists the
 files it builds with (`sources`), and `<name>.expected` (standard output) and `<name>.exit` (exit status) next to it.
-The routines a test reaches in the Revare runtime library (`rf_crash_exit`, the trace, the current task, the
+The routines a test reaches in the Revare runtime library (`ig_crash_exit`, the trace, the current task, the
 scheduler's park and wake, ...) are defined in the test itself, so a test needs nothing but the builder. With Lapila
 checked out next to Ingrid and built (`dotnet build`), from Ingrid's directory:
 

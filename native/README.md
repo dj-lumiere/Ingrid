@@ -26,9 +26,9 @@ native/
 └── build.sh
 ../runtime-lapila/
 ├── sync.li  // what the rest shares: C calls, a condition variable, the clock, the crash handler
-├── trace.li  // the crash: __rf_throw, stack traces, fault handlers, the standard streams
+├── trace.li  // the crash: __ig_throw, stack traces, fault handlers, the standard streams
 ├── console.li  // show / alert / ask, crash output and exit, runtime init, C-string helpers
-├── files.li  // the rf_* files and filesystem calls over Lapila's Standard::Os: handles, mappings, listings
+├── files.li  // the ig_* files and filesystem calls over Lapila's Standard::Os: handles, mappings, listings
 ├── numeric.li  // libm's exact float operations, a random word, the wall clock, FFI test helpers
 ├── signals.li  // CpuEventManager: when_interrupted / when_terminated
 ├── builtins.li  // what the JIT would otherwise get from compiler-rt: emulated TLS
@@ -41,7 +41,7 @@ native/
 ├── io.li  // whole-file reads and writes and subprocesses on the I/O threads
 └── context.li  // the older context entry points, and waitfor on a thread
 ../lapila/
-├── memory.li  // rf_allocate_dynamic and the rest of the heap calls, scratch regions
+├── memory.li  // ig_allocate_dynamic and the rest of the heap calls, scratch regions
 ├── divide.li  // word division for the wide integers
 ├── random.li  // splitmix64
 ├── hash.li  // SipHash-2-4, behind every hash(k0, k1) in the standard libraries
@@ -80,7 +80,7 @@ each executable.
 ## Rules
 
 1. The standard library owns the language-facing API, the builder owns lowering, and Ingrid owns platform work and
-   runtime state, behind a narrow `rf_*` boundary.
-2. Don't expose an external library's API to the builder or the standard library: wrap it in an `rf_*` routine.
+   runtime state, behind a narrow `ig_*` boundary.
+2. Don't expose an external library's API to the builder or the standard library: wrap it in an `ig_*` routine.
 3. An exported name is a contract with the builder (`RuntimeContract.cs`) or the standard library's declarations;
    renaming it means editing both sides.

@@ -82,9 +82,9 @@ secret routine c_block_size(ptr: Addr) -> CSize
 ### :param error_type: The error's name, such as `OutOfMemoryError`.
 ### :param message: What went wrong.
 @external("c")
-@symbol("__rf_throw")
+@symbol("__ig_throw")
 @noreturn
-secret routine rf_throw(error_type: CStrView, message: CStrView) -> None
+secret routine ig_throw(error_type: CStrView, message: CStrView) -> None
 
 ### "Failed to <what> <bytes> bytes", as an OutOfMemoryError.
 ### :param what: What failed, such as "allocate".
@@ -99,7 +99,7 @@ secret routine out_of_memory(what: @[Byte], bytes: U64) -> None
     text: @[Byte] = out.getview()
     terminator: @Byte = buffer.getview().to[@Byte]().stride(text.count)
     terminator.poke(0x00)
-    rf_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStrView]())
+    ig_throw("OutOfMemoryError", buffer.to[@CChar]().to[CStrView]())
 
 # -- heap counting -------------------------------------------------------------------
 #
@@ -151,8 +151,8 @@ secret routine memory_getenv(name: CStrView) -> @Byte?
 
 ### Reads RV_MEMORY_LIMIT (the test command sets it, in bytes, for a test with @memory_limit) and, when it holds a
 ### number above 0, counts the heap from here on. The builder's `main` calls it first.
-@export("rf_heap_limit_init")
-routine rf_heap_limit_init() -> None
+@export("ig_heap_limit_init")
+routine ig_heap_limit_init() -> None
     text_or_none: @Byte? = memory_getenv("RV_MEMORY_LIMIT")
     if text_or_none.is_absent()
         return
@@ -176,8 +176,8 @@ routine rf_heap_limit_init() -> None
 ### past its limit. The builder's `main` calls it last.
 ### :param status: The status the program would end with.
 ### :returns: The status to end with.
-@export("rf_heap_limit_status")
-routine rf_heap_limit_status(status: CInt) -> CInt
+@export("ig_heap_limit_status")
+routine ig_heap_limit_status(status: CInt) -> CInt
     limit: U64 = HEAP_LIMIT.load()
     peak: S64 = HEAP_PEAK.peek_unbroken()
     if limit == 0 or peak <= 0 or peak.to[U64]() <= limit
@@ -191,9 +191,9 @@ routine rf_heap_limit_status(status: CInt) -> CInt
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
 ###     does not fit in U64 (on a 32-bit target).
-@export("rf_allocate_dynamic")
+@export("ig_allocate_dynamic")
 @expensive("allocates heap memory")
-routine rf_allocate_dynamic(bytes: U64) -> Addr
+routine ig_allocate_dynamic(bytes: U64) -> Addr
     p: Addr = c_calloc(bytes.to[CSize](), 1)
     if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
@@ -206,9 +206,9 @@ routine rf_allocate_dynamic(bytes: U64) -> Addr
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
 ###     does not fit in U64 (on a 32-bit target).
-@export("rf_allocate_dynamic_uninit")
+@export("ig_allocate_dynamic_uninit")
 @expensive("allocates heap memory")
-routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
+routine ig_allocate_dynamic_uninit(bytes: U64) -> Addr
     p: Addr = c_malloc(bytes.to[CSize]())
     if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
@@ -218,9 +218,9 @@ routine rf_allocate_dynamic_uninit(bytes: U64) -> Addr
 
 ### Frees a block. Null is fine.
 ### :param ptr: The block to free, or null.
-@export("rf_invalidate")
+@export("ig_invalidate")
 @expensive("frees heap memory")
-routine rf_invalidate(ptr: Addr) -> None
+routine ig_invalidate(ptr: Addr) -> None
     count_freed(ptr)
     c_free(ptr)
     return
@@ -232,9 +232,9 @@ routine rf_invalidate(ptr: Addr) -> None
 ### :returns: The block, maybe moved.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
 ###     does not fit in U64 (on a 32-bit target).
-@export("rf_reallocate_dynamic")
+@export("ig_reallocate_dynamic")
 @expensive("reallocates heap memory")
-routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
+routine ig_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
     count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_hollow() and bytes != 0
@@ -247,9 +247,9 @@ routine rf_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
 ### reports the failure itself (a failable reserve) uses this one.
 ### :param bytes: How many bytes.
 ### :returns: The memory, or null.
-@export("rf_allocate_dynamic_or_hollow")
+@export("ig_allocate_dynamic_or_hollow")
 @expensive("allocates heap memory")
-routine rf_allocate_dynamic_or_hollow(bytes: U64) -> Addr
+routine ig_allocate_dynamic_or_hollow(bytes: U64) -> Addr
     p: Addr = c_calloc(bytes.to[CSize](), 1)
     count_allocated(p)
     return p
@@ -257,21 +257,21 @@ routine rf_allocate_dynamic_or_hollow(bytes: U64) -> Addr
 ### Allocates `bytes` bytes from the C heap, not zeroed, or gives null when the heap has no room for them.
 ### :param bytes: How many bytes.
 ### :returns: The memory, or null.
-@export("rf_allocate_dynamic_uninit_or_hollow")
+@export("ig_allocate_dynamic_uninit_or_hollow")
 @expensive("allocates heap memory")
-routine rf_allocate_dynamic_uninit_or_hollow(bytes: U64) -> Addr
+routine ig_allocate_dynamic_uninit_or_hollow(bytes: U64) -> Addr
     p: Addr = c_malloc(bytes.to[CSize]())
     count_allocated(p)
     return p
 
-### Resizes the block at `ptr` to `bytes` bytes as `rf_reallocate_dynamic` does, or gives null when the heap has no
+### Resizes the block at `ptr` to `bytes` bytes as `ig_reallocate_dynamic` does, or gives null when the heap has no
 ### room for them. The block at `ptr` then stays as it was, and the caller still frees it.
 ### :param ptr: The block, or null to allocate a new one.
 ### :param bytes: The new size, in bytes, above 0.
 ### :returns: The block, maybe moved, or null.
-@export("rf_reallocate_dynamic_or_hollow")
+@export("ig_reallocate_dynamic_or_hollow")
 @expensive("reallocates heap memory")
-routine rf_reallocate_dynamic_or_hollow(ptr: Addr, bytes: U64) -> Addr
+routine ig_reallocate_dynamic_or_hollow(ptr: Addr, bytes: U64) -> Addr
     count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_hollow()
@@ -285,8 +285,8 @@ routine rf_reallocate_dynamic_or_hollow(ptr: Addr, bytes: U64) -> Addr
 ### :param dst_address: Where the bytes go.
 ### :param src_address: Where the bytes come from.
 ### :param bytes: How many bytes.
-@export("rf_copy_bytes_at")
-routine rf_copy_bytes_at(dst_address: Addr, src_address: Addr, bytes: U64) -> None
+@export("ig_copy_bytes_at")
+routine ig_copy_bytes_at(dst_address: Addr, src_address: Addr, bytes: U64) -> None
     if src_address.is_hollow() or dst_address.is_hollow() or bytes == 0
         return
     c_memmove(dst_address, src_address, bytes.to[CSize]())
@@ -297,8 +297,8 @@ routine rf_copy_bytes_at(dst_address: Addr, src_address: Addr, bytes: U64) -> No
 ### :param value: The byte to fill with.
 ### :param bytes: How many bytes.
 ### :throws: Crashes with `IntegerOverflowError` when `bytes` does not fit in U64 (on a 32-bit target).
-@export("rf_set_bytes_at")
-routine rf_set_bytes_at(dest_address: Addr, value: U8, bytes: U64) -> None
+@export("ig_set_bytes_at")
+routine ig_set_bytes_at(dest_address: Addr, value: U8, bytes: U64) -> None
     if dest_address.is_hollow() or bytes == 0
         return
     c_memset(dest_address, value.to[CInt](), bytes.to[CSize]())
@@ -319,8 +319,8 @@ record RegionBlock
 
 ### The current top: release to it to free everything allocated after.
 ### :returns: The mark, the address of this thread's top block (0 when the region is empty).
-@export("rf_region_mark")
-routine rf_region_mark() -> U64
+@export("ig_region_mark")
+routine ig_region_mark() -> U64
     when REGION_TOP.load()
         is @RegionBlock as top => return ptrtoint[@RegionBlock, U64](top)
         is None => return 0
@@ -330,8 +330,8 @@ routine rf_region_mark() -> U64
 ### :returns: The memory.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
 ###     plus the block header does not fit in U64.
-@export("rf_region_alloc")
-routine rf_region_alloc(bytes: U64) -> Addr
+@export("ig_region_alloc")
+routine ig_region_alloc(bytes: U64) -> Addr
     p: Addr = c_calloc(1, (sizeof[RegionBlock]() + bytes.to[U64]()).to[CSize]())
     if p.is_hollow()
         out_of_memory(what: "allocate scratch", bytes)
@@ -341,9 +341,9 @@ routine rf_region_alloc(bytes: U64) -> Addr
     return node.stride(1)
 
 ### Frees every block allocated since `mark`, in this thread's region.
-### :param mark: A mark from rf_region_mark.
-@export("rf_region_release")
-routine rf_region_release(mark: U64) -> None
+### :param mark: A mark from ig_region_mark.
+@export("ig_region_release")
+routine ig_region_release(mark: U64) -> None
     loop
         top: @RegionBlock? = REGION_TOP.load()
         if top.is_absent()

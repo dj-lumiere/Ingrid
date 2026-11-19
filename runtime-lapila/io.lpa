@@ -115,7 +115,7 @@ routine io_do_work(req: @IoReq) -> None
 ### :param guard: The byte whose exclusive access the request queue is kept under (IO_GUARD).
 routine io_thread_main(guard: @U8) -> None
     loop
-        rf_thread_stack_guarantee()
+        ig_thread_stack_guarantee()
         held: @U8 <- guard.get_exclusive_access()
         # wait until a request is queued, then take the first one
         until queued.is_present() with queued: @IoReq? = IO_HEAD.load().to[@IoReq?]()
@@ -129,13 +129,13 @@ routine io_thread_main(guard: @U8) -> None
                 IO_TAIL.store(Addr.zero())
             drop held
             io_do_work(req)
-            rf_sched_wake(s: req.sched.peek(), c: req.coro.peek())
+            ig_sched_wake(s: req.sched.peek(), c: req.coro.peek())
 
-### Starts the I/O threads at process startup (rf_runtime_init, on the main thread), so a later coroutine call is
+### Starts the I/O threads at process startup (ig_runtime_init, on the main thread), so a later coroutine call is
 ### only a submit and a park. A second call does nothing.
 ### :throws: Crashes with `TaskSpawnError` when an I/O thread can't be started.
-@export("rf_io_runtime_init")
-routine rf_io_runtime_init() -> None
+@export("ig_io_runtime_init")
+routine ig_io_runtime_init() -> None
     if IO_OK.load() == 1
         return
 
@@ -163,16 +163,16 @@ routine io_submit(req: @IoReq) -> None
 ### :param req: The request.
 routine io_run(req: @IoReq) -> None
     if IO_OK.load() == 1
-        sched_or_none: @Sched? = rf_sched_current()
+        sched_or_none: @Sched? = ig_sched_current()
         this_coro: @Coro? = current_coro()
         if sched_or_none.is_present() and this_coro.is_present()
             sched: @Sched = sched_or_none.unwrap()
             req.sched.poke(sched)
             req.coro.poke(this_coro)
-            rf_sched_arm_cross_waker(sched)
+            ig_sched_arm_cross_waker(sched)
             io_submit(req)
-            rf_sched_park_external()
-            rf_sched_disarm_cross_waker(sched)
+            ig_sched_park_external()
+            ig_sched_disarm_cross_waker(sched)
             return
     io_do_work(req)
     return
@@ -189,7 +189,7 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
     req.result.poke(-1)
     copy: @Byte? = strdupn(s: path, n: path_len)
     if copy.is_absent()
-        rf_throw(error_type: "OutOfMemoryError", message: "Failed to allocate async I/O path")
+        ig_throw(error_type: "OutOfMemoryError", message: "Failed to allocate async I/O path")
     req.path.poke(copy.unwrap())
     return req
 
@@ -199,8 +199,8 @@ routine io_req_new(kind: U32, path: @Byte, path_len: S32) -> @IoReq
 ### :param path_len: The path's length, or negative for a NUL-terminated `path`.
 ### :returns: The block, or null when it can't be allocated.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
-@export("rf_io_read_file_all")
-routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte?
+@export("ig_io_read_file_all")
+routine ig_io_read_file_all(path: @Byte, path_len: S32) -> @Byte?
     req: @IoReq = io_req_new(kind: IO_READ_FILE, path, path_len)
     io_run(req)
     data: Addr = req.data.peek()
@@ -229,8 +229,8 @@ routine rf_io_read_file_all(path: @Byte, path_len: S32) -> @Byte?
 ### :param data_len: The number of bytes.
 ### :returns: The bytes written, or minus the reason's code on an error.
 ### :throws: Crashes with `OutOfMemoryError` when the request or the copy of the payload can't be allocated.
-@export("rf_io_write_file_all")
-routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
+@export("ig_io_write_file_all")
+routine ig_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: S64) -> S64
     req: @IoReq = io_req_new(kind: IO_WRITE_FILE, path, path_len)
     len: S64 = data_len.max(0)
 
@@ -238,7 +238,7 @@ routine rf_io_write_file_all(path: @Byte, path_len: S32, data: @Byte, data_len: 
     if len > 0
         buf: Addr = c_malloc(len.to[CSize]())
         if buf.is_hollow()
-            rf_throw(error_type: "OutOfMemoryError",
+            ig_throw(error_type: "OutOfMemoryError",
                 message: "Failed to allocate async I/O write buffer")
         c_memcpy(buf, data, len.to[CSize]())
         req.data.poke(buf)
@@ -256,35 +256,35 @@ record AsyncRuntime
 
 ### The name of the old async API's backend.
 ### :returns: `"threads"`.
-@export("rf_async_backend_name")
-routine rf_async_backend_name() -> CStrView
+@export("ig_async_backend_name")
+routine ig_async_backend_name() -> CStrView
     return "threads"
 
 ### Whether the old async API's backend is available.
 ### :returns: Always 1 (available).
-@export("rf_async_backend_state")
-routine rf_async_backend_state() -> CInt
+@export("ig_async_backend_state")
+routine ig_async_backend_state() -> CInt
     return 1
 
 ### Creates the placeholder runtime object of the old async API.
 ### :returns: A zeroed `AsyncRuntime`.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-@export("rf_async_runtime_create")
-routine rf_async_runtime_create() -> @AsyncRuntime
+@export("ig_async_runtime_create")
+routine ig_async_runtime_create() -> @AsyncRuntime
     return zeroed[AsyncRuntime](count: 1, what: "Failed to allocate async runtime")
 
-### Frees a runtime object from {rf_async_runtime_create}.
+### Frees a runtime object from {ig_async_runtime_create}.
 ### :param runtime: The runtime object to free.
-@export("rf_async_runtime_destroy")
-routine rf_async_runtime_destroy(runtime: @AsyncRuntime) -> None
+@export("ig_async_runtime_destroy")
+routine ig_async_runtime_destroy(runtime: @AsyncRuntime) -> None
     c_free(runtime)
     return
 
 ### Runs nothing: reports whether the runtime would go on.
 ### :param runtime_or_none: The runtime object, or null.
 ### :returns: 0 when `runtime` is null or stopped, else 1.
-@export("rf_async_runtime_run_once")
-routine rf_async_runtime_run_once(runtime_or_none: @AsyncRuntime?) -> CInt
+@export("ig_async_runtime_run_once")
+routine ig_async_runtime_run_once(runtime_or_none: @AsyncRuntime?) -> CInt
     if runtime_or_none.is_absent()
         return 0
     runtime: @AsyncRuntime = runtime_or_none.unwrap()
@@ -295,8 +295,8 @@ routine rf_async_runtime_run_once(runtime_or_none: @AsyncRuntime?) -> CInt
 ### Runs nothing: reports whether there is a runtime.
 ### :param runtime_or_none: The runtime object, or null.
 ### :returns: 0 when `runtime` is null, else 1.
-@export("rf_async_runtime_run_default")
-routine rf_async_runtime_run_default(runtime_or_none: @AsyncRuntime?) -> CInt
+@export("ig_async_runtime_run_default")
+routine ig_async_runtime_run_default(runtime_or_none: @AsyncRuntime?) -> CInt
     if runtime_or_none.is_absent()
         return 0
     runtime: @AsyncRuntime = runtime_or_none.unwrap()
@@ -304,8 +304,8 @@ routine rf_async_runtime_run_default(runtime_or_none: @AsyncRuntime?) -> CInt
 
 ### Marks the runtime stopped. A null `runtime` does nothing.
 ### :param runtime_or_none: The runtime object.
-@export("rf_async_runtime_stop")
-routine rf_async_runtime_stop(runtime_or_none: @AsyncRuntime?) -> None
+@export("ig_async_runtime_stop")
+routine ig_async_runtime_stop(runtime_or_none: @AsyncRuntime?) -> None
     if runtime_or_none.is_absent()
         return
     runtime: @AsyncRuntime = runtime_or_none.unwrap()
@@ -314,10 +314,10 @@ routine rf_async_runtime_stop(runtime_or_none: @AsyncRuntime?) -> None
 
 # -- subprocesses --------------------------------------------------------------------
 #
-# Lapila's Hosted runs the program. This is the rf_* boundary over it. Every string is a malloc'd copy, and
+# Lapila's Hosted runs the program. This is the ig_* boundary over it. Every string is a malloc'd copy, and
 # the captured streams come back malloc'd and NUL-terminated (the caller frees them).
 
-### The captured result of the last subprocess, set just before rf_proc_run returns and read right after.
+### The captured result of the last subprocess, set just before ig_proc_run returns and read right after.
 @threadlocal
 global PROC_SIGNAL: &CInt
 
@@ -380,32 +380,32 @@ routine @ProcState.destruct() -> None
 
 ### The signal that stopped this thread's last subprocess.
 ### :returns: The signal, or 0 when it exited normally.
-@export("rf_proc_term_signal")
-routine rf_proc_term_signal() -> S32
+@export("ig_proc_term_signal")
+routine ig_proc_term_signal() -> S32
     return PROC_SIGNAL.load()
 
 ### The captured stdout of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated output the caller frees, or null when none came.
-@export("rf_proc_output")
-routine rf_proc_output() -> @Byte?
+@export("ig_proc_output")
+routine ig_proc_output() -> @Byte?
     return PROC_OUT.load().to[@Byte?]()
 
 ### The length of the captured stdout of this thread's last subprocess.
 ### :returns: The output's length in bytes.
-@export("rf_proc_output_len")
-routine rf_proc_output_len() -> U64
+@export("ig_proc_output_len")
+routine ig_proc_output_len() -> U64
     return PROC_OUT_LEN.load()
 
 ### The captured stderr of this thread's last subprocess.
 ### :returns: The malloc'd, NUL-terminated errors the caller frees, or null when none came.
-@export("rf_proc_errors")
-routine rf_proc_errors() -> @Byte?
+@export("ig_proc_errors")
+routine ig_proc_errors() -> @Byte?
     return PROC_ERR.load().to[@Byte?]()
 
 ### The length of the captured stderr of this thread's last subprocess.
 ### :returns: The errors' length in bytes.
-@export("rf_proc_errors_len")
-routine rf_proc_errors_len() -> U64
+@export("ig_proc_errors_len")
+routine ig_proc_errors_len() -> U64
     return PROC_ERR_LEN.load()
 
 ### A malloc'd copy of `n` bytes of `s` (all of it before its NUL for `n < 0`), or empty when that can't be had.
@@ -545,17 +545,17 @@ routine proc_exec(st: @ProcState) -> S64
 ### :param command_len: Its length, or negative for a NUL-terminated `command`.
 ### :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start.
 ### :throws: Crashes with `OutOfMemoryError` when the state or the request can't be allocated.
-@export("rf_proc_run")
-routine rf_proc_run(command: @Byte, command_len: S32) -> S64
+@export("ig_proc_run")
+routine ig_proc_run(command: @Byte, command_len: S32) -> S64
     return proc_exec(proc_state_new(shell: true, program: owned_copy(s: command, n: command_len)))
 
 ### Starts building a subprocess: an executable and its arguments, run with no shell.
 ### :param file: The executable, looked up on PATH.
 ### :param file_len: Its length, or negative for a NUL-terminated `file`.
-### :returns: The state to add to and run with {rf_proc_run_built}.
+### :returns: The state to add to and run with {ig_proc_run_built}.
 ### :throws: Crashes with `OutOfMemoryError` when the state can't be allocated.
-@export("rf_proc_begin")
-routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
+@export("ig_proc_begin")
+routine ig_proc_begin(file: @Byte, file_len: S32) -> @ProcState
     return proc_state_new(shell: false, program: owned_copy(s: file, n: file_len))
 
 ### Appends an argument to a subprocess being built. A null `b` does nothing, and when the argument list can't grow
@@ -563,8 +563,8 @@ routine rf_proc_begin(file: @Byte, file_len: S32) -> @ProcState
 ### :param b_or_none: The subprocess state.
 ### :param arg: The argument.
 ### :param arg_len: Its length, or negative for a NUL-terminated `arg`.
-@export("rf_proc_add_arg")
-routine rf_proc_add_arg(b_or_none: @ProcState?, arg: @Byte, arg_len: S32) -> None
+@export("ig_proc_add_arg")
+routine ig_proc_add_arg(b_or_none: @ProcState?, arg: @Byte, arg_len: S32) -> None
     if b_or_none.is_absent()
         return
     b: @ProcState = b_or_none.unwrap()
@@ -587,8 +587,8 @@ routine rf_proc_add_arg(b_or_none: @ProcState?, arg: @Byte, arg_len: S32) -> Non
 ### :param b_or_none: The subprocess state.
 ### :param cwd: The directory.
 ### :param cwd_len: Its length, or negative for a NUL-terminated `cwd`.
-@export("rf_proc_set_cwd")
-routine rf_proc_set_cwd(b_or_none: @ProcState?, cwd: @Byte, cwd_len: S32) -> None
+@export("ig_proc_set_cwd")
+routine ig_proc_set_cwd(b_or_none: @ProcState?, cwd: @Byte, cwd_len: S32) -> None
     if b_or_none.is_absent()
         return
     b: @ProcState = b_or_none.unwrap()
@@ -603,8 +603,8 @@ routine rf_proc_set_cwd(b_or_none: @ProcState?, cwd: @Byte, cwd_len: S32) -> Non
 ### :param key_len: Its length, or negative for a NUL-terminated `key`.
 ### :param val: The variable's value.
 ### :param val_len: Its length, or negative for a NUL-terminated `val`.
-@export("rf_proc_add_env")
-routine rf_proc_add_env(b_or_none: @ProcState?, key: @Byte, key_len: S32, val: @Byte,
+@export("ig_proc_add_env")
+routine ig_proc_add_env(b_or_none: @ProcState?, key: @Byte, key_len: S32, val: @Byte,
     val_len: S32) -> None
     if b_or_none.is_absent()
         return
@@ -623,12 +623,12 @@ routine rf_proc_add_env(b_or_none: @ProcState?, key: @Byte, key_len: S32, val: @
     b.env_count.poke(n + 1)
     return
 
-### Runs a subprocess built with {rf_proc_begin}, and frees its state.
+### Runs a subprocess built with {ig_proc_begin}, and frees its state.
 ### :param b_or_none: The subprocess state, or null.
 ### :returns: The exit code, 0 when a signal stopped the child, or -1 when it couldn't start or `b` is null.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
-@export("rf_proc_run_built")
-routine rf_proc_run_built(b_or_none: @ProcState?) -> S64
+@export("ig_proc_run_built")
+routine ig_proc_run_built(b_or_none: @ProcState?) -> S64
     if b_or_none.is_absent()
         return -1
     b: @ProcState = b_or_none.unwrap()
@@ -639,8 +639,8 @@ routine rf_proc_run_built(b_or_none: @ProcState?) -> S64
 ### :param body: The routine to run.
 ### :param arg: Its argument.
 ### :throws: Crashes with `OutOfMemoryError` when the request can't be allocated.
-@export("rf_blocking_call")
-routine rf_blocking_call(body: Callable[(Addr), None], arg: Addr) -> None
+@export("ig_blocking_call")
+routine ig_blocking_call(body: Callable[(Addr), None], arg: Addr) -> None
     req: @IoReq = zeroed[IoReq](count: 1, what: "Failed to allocate a blocking call request")
     req.kind.poke(IO_CALL)
     req.call.poke(body)

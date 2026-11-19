@@ -1,8 +1,8 @@
 # Files and the filesystem for Revare and Mielia: open / read / write / close by handle, memory-mapped views, and
 # the filesystem operations (existence, directories, copy, move, remove, listing, metadata, paths, permissions).
 #
-# The OS work is Lapila's Hosted. This file is the rf_* boundary over it. A routine that returns bytes returns
-# a malloc'd block (the caller frees it with rf_invalidate): RESULT_HEADER bytes of U64 words, then the bytes and a
+# The OS work is Lapila's Hosted. This file is the ig_* boundary over it. A routine that returns bytes returns
+# a malloc'd block (the caller frees it with ig_invalidate): RESULT_HEADER bytes of U64 words, then the bytes and a
 # NUL. Word 0 is why the call failed (a {reason_code}, 0 when it didn't), word 1 the byte count, words 2 to 5 what
 # else the call hands back (a mapping's delta and base, a path's metadata). Paths come as a pointer and a byte count,
 # UTF-8. Nothing a call returns travels through a global, since the fiber that reads it may be on another thread by
@@ -129,7 +129,7 @@ routine file_path_result(r: Check[File]) -> @Byte?
             return copied
         is FsError as error => return failed_result(error)
 
-### The malloc heap's MemoryManager, so what Hosted hands back is freed by rf_invalidate.
+### The malloc heap's MemoryManager, so what Hosted hands back is freed by ig_invalidate.
 ### :returns: The C heap's memory manager.
 routine heap() -> @MemoryManager
     return C_HEAP
@@ -289,14 +289,14 @@ routine open_in_mode(path: @[Byte], mode: S32) -> FileHandle
         is FileHandle as f => f
 
 ### Opens a file that exists. mode: 0 read, 1 write (emptied first), 2 append. A handle, or a failure status. No mode makes a
-### missing file: rf_fs_make_file does.
+### missing file: ig_fs_make_file does.
 ### :param path: The file's path.
 ### :param path_len: The path's length.
 ### :param mode: 0 read, 1 write, 2 append.
 ### :returns: The handle, or a failure status for a bad mode, a missing file or another failure to open, no buffer, or
 ###     no free slot (256 at once).
-@export("rf_file_open")
-routine rf_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
+@export("ig_file_open")
+routine ig_file_open(path: @Byte, path_len: S32, mode: S32) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     if mode < 0 or mode > 2
         return failure_status(1)
@@ -351,8 +351,8 @@ routine @OpenFile.refill() -> Bool
 
 ### Writes the pending bytes, closes the file, and frees its handle. A handle not open does nothing.
 ### :param fd: The handle.
-@export("rf_file_close")
-routine rf_file_close(fd: S32) -> None
+@export("ig_file_close")
+routine ig_file_close(fd: S32) -> None
     found: @OpenFile? = open_file(fd)
     if found.is_absent()
         return
@@ -366,8 +366,8 @@ routine rf_file_close(fd: S32) -> None
 ### The rest of the file from where the reader is.
 ### :param fd: The handle.
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't grow.
-@export("rf_file_read_all")
-routine rf_file_read_all(fd: S32) -> @Byte?
+@export("ig_file_read_all")
+routine ig_file_read_all(fd: S32) -> @Byte?
     found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
 
@@ -402,8 +402,8 @@ routine rf_file_read_all(fd: S32) -> @Byte?
 ### One line, without its '\n' (and any '\r'). At the end of the file the line is empty.
 ### :param fd: The handle.
 ### :returns: The line, or null (length 0) for a handle not open or when the buffer can't grow.
-@export("rf_file_read_line")
-routine rf_file_read_line(fd: S32) -> @Byte?
+@export("ig_file_read_line")
+routine ig_file_read_line(fd: S32) -> @Byte?
     found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
 
@@ -433,8 +433,8 @@ routine rf_file_read_line(fd: S32) -> @Byte?
 ### is empty.
 ### :param fd: The handle.
 ### :returns: The word, or null (length 0) for a handle not open or when the buffer can't grow.
-@export("rf_file_read_word")
-routine rf_file_read_word(fd: S32) -> @Byte?
+@export("ig_file_read_word")
+routine ig_file_read_word(fd: S32) -> @Byte?
     found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
 
@@ -465,8 +465,8 @@ routine rf_file_read_word(fd: S32) -> @Byte?
 ### :param fd: The handle.
 ### :param count: The most bytes to read.
 ### :returns: The bytes, or null (length 0) for a handle not open or when the buffer can't be allocated.
-@export("rf_file_read_bytes")
-routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte?
+@export("ig_file_read_bytes")
+routine ig_file_read_bytes(fd: S32, count: U64) -> @Byte?
     found: @OpenFile? = open_file(fd)
     out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
 
@@ -494,8 +494,8 @@ routine rf_file_read_bytes(fd: S32, count: U64) -> @Byte?
 ### :param ptr: The bytes.
 ### :param len: The number of bytes.
 ### :returns: The bytes written (all of them, or 0 on a failure or for a handle not open).
-@export("rf_file_write")
-routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
+@export("ig_file_write")
+routine ig_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
     found: @OpenFile? = open_file(fd)
 
     if found.is_absent()
@@ -517,8 +517,8 @@ routine rf_file_write(fd: S32, ptr: @Byte, len: U64) -> U64
 
 ### Writes a writer's pending bytes. A handle not open does nothing.
 ### :param fd: The handle.
-@export("rf_file_flush")
-routine rf_file_flush(fd: S32) -> None
+@export("ig_file_flush")
+routine ig_file_flush(fd: S32) -> None
     found: @OpenFile? = open_file(fd)
     if found.is_absent()
         return
@@ -530,8 +530,8 @@ routine rf_file_flush(fd: S32) -> None
 ### ahead into the buffer when the buffer is empty.
 ### :param fd: The handle.
 ### :returns: True at the end, or for a handle not open.
-@export("rf_file_is_eof")
-routine rf_file_is_eof(fd: S32) -> Bool
+@export("ig_file_is_eof")
+routine ig_file_is_eof(fd: S32) -> Bool
     found: @OpenFile? = open_file(fd)
     if found.is_absent()
         return true
@@ -592,8 +592,8 @@ routine write_whole_file(cpath: @Byte, data: Addr, len: S64) -> S64
 ### :param b: The second path.
 ### :param b_len: Its length.
 ### :returns: The joined path, or null (length 0) when the allocation fails.
-@export("rf_fs_join_path")
-routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte?
+@export("ig_fs_join_path")
+routine ig_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte?
     first: @[Byte] = path_of(path: a, len: a_len)
     second: @[Byte] = path_of(path: b, len: b_len)
     out: &ResultBuffer <- ResultBuffer(buf: Addr.zero(), len: 0, cap: 0)
@@ -611,8 +611,8 @@ routine rf_fs_join_path(a: @Byte, a_len: S32, b: @Byte, b_len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The parent, or null (length 0) when the allocation fails.
-@export("rf_fs_parent_path")
-routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_parent_path")
+routine ig_fs_parent_path(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
     parent: &Directory <- file.parent()
 
@@ -624,8 +624,8 @@ routine rf_fs_parent_path(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The name, or null (length 0) when the allocation fails.
-@export("rf_fs_file_name")
-routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_file_name")
+routine ig_fs_file_name(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     n: @[Byte] = file.name()
@@ -636,8 +636,8 @@ routine rf_fs_file_name(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The stem, or null (length 0) when the allocation fails.
-@export("rf_fs_file_stem")
-routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_file_stem")
+routine ig_fs_file_stem(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     s: @[Byte] = file.stem()
@@ -648,8 +648,8 @@ routine rf_fs_file_stem(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The extension, or null (length 0) when the allocation fails.
-@export("rf_fs_extension")
-routine rf_fs_extension(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_extension")
+routine ig_fs_extension(path: @Byte, len: S32) -> @Byte?
     file: &File <- File.at(path_of(path, len))
 
     e: @[Byte] = file.extension()
@@ -662,48 +662,48 @@ routine rf_fs_extension(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True when it exists.
-@export("rf_fs_exists")
-routine rf_fs_exists(path: @Byte, len: S32) -> Bool
+@export("ig_fs_exists")
+routine ig_fs_exists(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_present(at: File.at(path_of(path, len)))
 
 ### Whether the path is a file.
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True for a file.
-@export("rf_fs_is_file")
-routine rf_fs_is_file(path: @Byte, len: S32) -> Bool
+@export("ig_fs_is_file")
+routine ig_fs_is_file(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_file(at: File.at(path_of(path, len)))
 
 ### Whether the path is a directory.
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True for a directory.
-@export("rf_fs_is_directory")
-routine rf_fs_is_directory(path: @Byte, len: S32) -> Bool
+@export("ig_fs_is_directory")
+routine ig_fs_is_directory(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_directory(at: Directory.at(path_of(path, len)))
 
 ### Whether the path can be read.
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True when it is readable.
-@export("rf_fs_can_read")
-routine rf_fs_can_read(path: @Byte, len: S32) -> Bool
+@export("ig_fs_can_read")
+routine ig_fs_can_read(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.READ)
 
 ### Whether the path can be written.
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True when it is writable.
-@export("rf_fs_can_write")
-routine rf_fs_can_write(path: @Byte, len: S32) -> Bool
+@export("ig_fs_can_write")
+routine ig_fs_can_write(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.WRITE)
 
 ### Whether the path can be executed.
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: True when it is executable.
-@export("rf_fs_can_execute")
-routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
+@export("ig_fs_can_execute")
+routine ig_fs_can_execute(path: @Byte, len: S32) -> Bool
     return OsFileManager.is_accessible(at: File.at(path_of(path, len)), access: Access.EXECUTE)
 
 ### Sets or clears the read-only permission of the path.
@@ -711,8 +711,8 @@ routine rf_fs_can_execute(path: @Byte, len: S32) -> Bool
 ### :param len: Its length.
 ### :param readonly: True to make it read-only.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_set_readonly")
-routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
+@export("ig_fs_set_readonly")
+routine ig_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
     return status(check OsFileManager.set_readonly(at: File.at(path_of(path, len)), readonly))
 
 # -- directories, copy, move, remove ---------------------------------------------------
@@ -721,8 +721,8 @@ routine rf_fs_set_readonly(path: @Byte, len: S32, readonly: Bool) -> S32
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_create_dir")
-routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
+@export("ig_fs_create_dir")
+routine ig_fs_create_dir(path: @Byte, len: S32) -> S32
     return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
         parents: false))
 
@@ -730,8 +730,8 @@ routine rf_fs_create_dir(path: @Byte, len: S32) -> S32
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_create_dir_all")
-routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
+@export("ig_fs_create_dir_all")
+routine ig_fs_create_dir_all(path: @Byte, len: S32) -> S32
     return status(check OsFileManager.make_directory(at: Directory.at(path_of(path, len)),
         parents: true))
 
@@ -739,8 +739,8 @@ routine rf_fs_create_dir_all(path: @Byte, len: S32) -> S32
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_remove")
-routine rf_fs_remove(path: @Byte, len: S32) -> S32
+@export("ig_fs_remove")
+routine ig_fs_remove(path: @Byte, len: S32) -> S32
     p: @[Byte] = path_of(path, len)
 
     m: Check[Metadata] = check OsFileManager.link_metadata(at: File.at(p))
@@ -755,8 +755,8 @@ routine rf_fs_remove(path: @Byte, len: S32) -> S32
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_remove_all")
-routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
+@export("ig_fs_remove_all")
+routine ig_fs_remove_all(path: @Byte, len: S32) -> S32
     manager: @MemoryManager = heap()
 
     return status(check OsFileManager.delete_all(at: Directory.at(path_of(path, len)), manager))
@@ -767,8 +767,8 @@ routine rf_fs_remove_all(path: @Byte, len: S32) -> S32
 ### :param dst: The destination path.
 ### :param dst_len: Its length.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_copy")
-routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+@export("ig_fs_copy")
+routine ig_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
         to: File.at(path_of(path: dst, len: dst_len)), replacing: true)
     when copied
@@ -781,8 +781,8 @@ routine rf_fs_copy(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
 ### :param dst: The destination path.
 ### :param dst_len: Its length.
 ### :returns: 0 copied, 1 the destination exists (nothing copied), -1 an error.
-@export("rf_fs_copy_no_replace")
-routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
+@export("ig_fs_copy_no_replace")
+routine ig_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32) -> S32
     copied: Check[U64] = check OsFileManager.copy(from: File.at(path_of(path: src, len: src_len)),
         to: File.at(path_of(path: dst, len: dst_len)), replacing: false)
     when copied
@@ -801,8 +801,8 @@ routine rf_fs_copy_no_replace(src: @Byte, src_len: S32, dst: @Byte, dst_len: S32
 ### :param replacing: Whether something already called `name` there is replaced.
 ### :returns: 0 renamed, 1 something there has that name and `replacing` is false (nothing renamed), 2 the name isn't a
 ###     name (empty, "." or "..", or holding a separator), a failure status for another error.
-@export("rf_fs_rename")
-routine rf_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, replacing: Bool) -> S32
+@export("ig_fs_rename")
+routine ig_fs_rename(path: @Byte, path_len: S32, name: @Byte, name_len: S32, replacing: Bool) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     n: @[Byte] = path_of(path: name, len: name_len)
 
@@ -863,8 +863,8 @@ routine move_either(p: @[Byte], d: @[Byte], replacing: Bool, manager: @MemoryMan
 ### :param replacing: Whether something of the same name in `into` is replaced.
 ### :returns: 0 moved, 1 something of that name is there and `replacing` is false (nothing moved), -2 the copy was made
 ###     but the original couldn't be deleted, a failure status for another error.
-@export("rf_fs_move_into")
-routine rf_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
+@export("ig_fs_move_into")
+routine ig_fs_move_into(path: @Byte, path_len: S32, into: @Byte, into_len: S32,
     replacing: Bool) -> S32
     p: @[Byte] = path_of(path, len: path_len)
     d: @[Byte] = path_of(path: into, len: into_len)
@@ -981,16 +981,16 @@ routine list_directory(path: @Byte, len: S32, typed: Bool) -> @Byte?
 ### :param path: The directory's path.
 ### :param len: Its length.
 ### :returns: The listing, or null (length 0) on a failure.
-@export("rf_fs_list_dir")
-routine rf_fs_list_dir(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_list_dir")
+routine ig_fs_list_dir(path: @Byte, len: S32) -> @Byte?
     return list_directory(path, len, typed: false)
 
 ### `<d|f><mtime> <name>` per entry, '\n' between them.
 ### :param path: The directory's path.
 ### :param len: Its length.
 ### :returns: The listing, or null (length 0) on a failure.
-@export("rf_fs_list_dir_typed")
-routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_list_dir_typed")
+routine ig_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
     return list_directory(path, len, typed: true)
 
 # -- metadata ------------------------------------------------------------------------
@@ -1001,8 +1001,8 @@ routine rf_fs_list_dir_typed(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The block, or null when the allocation fails.
-@export("rf_fs_metadata")
-routine rf_fs_metadata(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_metadata")
+routine ig_fs_metadata(path: @Byte, len: S32) -> @Byte?
     m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
     info: Metadata = when m
         is Metadata as info => info
@@ -1026,8 +1026,8 @@ routine rf_fs_metadata(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The size in bytes, or a failure status.
-@export("rf_fs_file_size")
-routine rf_fs_file_size(path: @Byte, len: S32) -> S64
+@export("ig_fs_file_size")
+routine ig_fs_file_size(path: @Byte, len: S32) -> S64
     m: Check[Metadata] = check OsFileManager.metadata(at: File.at(path_of(path, len)))
     when m
         is Metadata as info => return info.size.to_wrap[S64]()
@@ -1037,24 +1037,24 @@ routine rf_fs_file_size(path: @Byte, len: S32) -> S64
 
 ### The working directory.
 ### :returns: The path, or null (length 0) on a failure.
-@export("rf_fs_current_dir")
-routine rf_fs_current_dir() -> @Byte?
+@export("ig_fs_current_dir")
+routine ig_fs_current_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.working_directory(manager))
 
 ### The directory for temporary files.
 ### :returns: The path, or null (length 0) on a failure.
-@export("rf_fs_temp_dir")
-routine rf_fs_temp_dir() -> @Byte?
+@export("ig_fs_temp_dir")
+routine ig_fs_temp_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.temp_directory(manager))
 
 ### The user's home directory, or null when it can't be told.
 ### :returns: The path, or null (length 0).
-@export("rf_fs_home_dir")
-routine rf_fs_home_dir() -> @Byte?
+@export("ig_fs_home_dir")
+routine ig_fs_home_dir() -> @Byte?
     manager: @MemoryManager = heap()
 
     return path_result(check OsEnvironment.home_directory(manager))
@@ -1065,8 +1065,8 @@ routine rf_fs_home_dir() -> @Byte?
 ### :param replacing: Whether a file already there is emptied. When false, one there is left as it is.
 ### :returns: 0 made (or emptied when `replacing`), 1 something is there and `replacing` is false, -1 any other
 ###     failure.
-@export("rf_fs_make_file")
-routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
+@export("ig_fs_make_file")
+routine ig_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
     made: Check[None] = check OsFileManager.make_file(at: File.at(path_of(path, len)), replacing)
     when made
         is None => return 0
@@ -1083,8 +1083,8 @@ routine rf_fs_make_file(path: @Byte, len: S32, replacing: Bool) -> S32
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The absolute path, or null (length 0) on a failure.
-@export("rf_fs_absolute_path")
-routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_absolute_path")
+routine ig_fs_absolute_path(path: @Byte, len: S32) -> @Byte?
     manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.absolute(at: File.at(path_of(path, len)), manager))
@@ -1093,8 +1093,8 @@ routine rf_fs_absolute_path(path: @Byte, len: S32) -> @Byte?
 ### :param path: The path.
 ### :param len: Its length.
 ### :returns: The canonical path, or null (length 0) on a failure.
-@export("rf_fs_canonical_path")
-routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte?
+@export("ig_fs_canonical_path")
+routine ig_fs_canonical_path(path: @Byte, len: S32) -> @Byte?
     manager: @MemoryManager = heap()
 
     return file_path_result(check OsFileManager.canonical(at: File.at(path_of(path, len)), manager))
@@ -1105,8 +1105,8 @@ routine rf_fs_canonical_path(path: @Byte, len: S32) -> @Byte?
 ### :param path_len: Its length.
 ### :param size: The new size in bytes.
 ### :returns: 0, or -1 on a failure.
-@export("rf_fs_set_size")
-routine rf_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
+@export("ig_fs_set_size")
+routine ig_fs_set_size(path: @Byte, path_len: S32, size: U64) -> S32
     return status(check OsFileManager.set_size(at: File.at(path_of(path, len: path_len)), size))
 
 # -- files as storage, mapped ----------------------------------------------------------
@@ -1146,7 +1146,7 @@ routine map_window(path: @[Byte], offset: U64, count: U64, write: Bool) -> @Byte
         is FsError as error => return failed_result(error)
 
 ### The window a storage maps, handed on in a result block: word 1 the length, word 2 the delta from the base to the
-### first byte, word 3 the base ({rf_file_unmap} gives it back). An empty storage has the empty-map marker as its base.
+### first byte, word 3 the base ({ig_file_unmap} gives it back). An empty storage has the empty-map marker as its base.
 ### :param m: The storage.
 ### :returns: The block, or null when the allocation fails.
 routine handed_on(m: FileStorage[Byte]) -> @Byte?
@@ -1176,16 +1176,16 @@ routine handed_on(m: FileStorage[Byte]) -> @Byte?
 ### :param write: 1 to map it for writing, 0 for reading only.
 ### :returns: The block: the window, or the reason it failed (a file that can't be written mapped for writing fails
 ###     with the reason "not allowed").
-@export("rf_file_map")
-routine rf_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte?
+@export("ig_file_map")
+routine ig_file_map(path: @Byte, path_len: S32, offset: U64, count: U64, write: U8) -> @Byte?
     return map_window(path: path_of(path, len: path_len), offset, count, write: write != 0)
 
 ### Writes dirty pages back, then unmaps: ptr is the base, len the delta and the length. A null view or length 0
 ### (the empty marker) does nothing.
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
-@export("rf_file_unmap")
-routine rf_file_unmap(ptr: Addr, len: U64) -> None
+@export("ig_file_unmap")
+routine ig_file_unmap(ptr: Addr, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
     m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
@@ -1194,12 +1194,12 @@ routine rf_file_unmap(ptr: Addr, len: U64) -> None
 ### Writes a mapping's dirty pages back to the file, ignoring a failure. A null view or length 0 does nothing.
 ### :param ptr: The mapping's base.
 ### :param len: The delta plus the length.
-@export("rf_file_map_flush")
-routine rf_file_map_flush(ptr: Addr, len: U64) -> None
+@export("ig_file_map_flush")
+routine ig_file_map_flush(ptr: Addr, len: U64) -> None
     if ptr.is_hollow() or len == 0
         return
     m: FileStorage[Byte] <- FileStorage[Byte].construct(base: ptr, delta: 0, count: len)
     try m.flush()
-    # the mapping stays: rf_file_unmap gives it back
+    # the mapping stays: ig_file_unmap gives it back
     m.take_mapping()
     return

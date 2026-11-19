@@ -9,7 +9,7 @@ module Ingrid/Runtime
 
 import Hosted
 
-### rf_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
+### ig_race: competitors and their kinds (0 a coroutine, 1 a threaded task).
 record Race
     handles: Addr  # of Addr slots
     kinds: Addr  # of U8 slots
@@ -17,10 +17,10 @@ record Race
     cap: S64
 
 ### Starts an empty set of race competitors.
-### :returns: The new set, freed with {rf_race_end}.
+### :returns: The new set, freed with {ig_race_end}.
 ### :throws: Crashes with `OutOfMemoryError` when the allocation fails.
-@export("rf_race_begin")
-routine rf_race_begin() -> @Race
+@export("ig_race_begin")
+routine ig_race_begin() -> @Race
     r: @Race = zeroed[Race](count: 1, what: "Failed to allocate race competitor set")
     return r
 
@@ -37,7 +37,7 @@ routine @Race.add_last(handle: Addr, kind: U8) -> None
         handles: Addr = c_realloc(me.handles.peek(), (cap.to[U64]() * sizeof[Addr]()).to[CSize]())
         kinds: Addr = c_realloc(me.kinds.peek(), cap.to[CSize]())
         if handles.is_hollow() or kinds.is_hollow()
-            rf_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
+            ig_throw(error_type: "OutOfMemoryError", message: "Failed to grow race competitor set")
         me.handles.poke(handles)
         me.kinds.poke(kinds)
         me.cap.poke(cap)
@@ -52,8 +52,8 @@ routine @Race.add_last(handle: Addr, kind: U8) -> None
 ### :param r: The race.
 ### :param c: The coroutine.
 ### :throws: Crashes with `OutOfMemoryError` when the set can't grow.
-@export("rf_race_add_coro")
-routine rf_race_add_coro(r: @Race, c: @Coro) -> None
+@export("ig_race_add_coro")
+routine ig_race_add_coro(r: @Race, c: @Coro) -> None
     r.add_last(handle: c, kind: 0)
     return
 
@@ -61,8 +61,8 @@ routine rf_race_add_coro(r: @Race, c: @Coro) -> None
 ### :param r: The race.
 ### :param t: The task.
 ### :throws: Crashes with `OutOfMemoryError` when the set can't grow.
-@export("rf_race_add_task")
-routine rf_race_add_task(r: @Race, t: @Task) -> None
+@export("ig_race_add_task")
+routine ig_race_add_task(r: @Race, t: @Task) -> None
     r.add_last(handle: t, kind: 1)
     return
 
@@ -91,11 +91,11 @@ routine @Race.register(s: @Sched, coro: @Coro?, on: Bool) -> None
             continue
         task: @Task = me.handle(i).to[@Task]()
         if on
-            rf_task_race_register(task_or_none: task, s, coro)
-            rf_sched_arm_cross_waker(s)
+            ig_task_race_register(task_or_none: task, s, coro)
+            ig_sched_arm_cross_waker(s)
             continue
-        rf_task_race_register(task_or_none: task, s: none, coro: none)
-        rf_sched_disarm_cross_waker(s)
+        ig_task_race_register(task_or_none: task, s: none, coro: none)
+        ig_sched_disarm_cross_waker(s)
         continue
     then
         return
@@ -127,8 +127,8 @@ routine @Race.winner() -> S64
         seq: U64 = when
             me.is_task(i) =>
                 t: @Task = me.handle(i).to[@Task]()
-                if rf_task_status_get(t) == TASK_COMPLETED
-                    becomes rf_task_completion_seq(t)
+                if ig_task_status_get(t) == TASK_COMPLETED
+                    becomes ig_task_completion_seq(t)
                 else
                     continue with best: best, best_seq: best_seq
             else =>
@@ -148,8 +148,8 @@ routine @Race.winner() -> S64
 ### Waits until one competitor finishes: its index in List order, or -1 for an empty set.
 ### :param r_or_none: The race, or null.
 ### :returns: The winner's index, or -1 when `r` is null or empty.
-@export("rf_race_wait")
-routine rf_race_wait(r_or_none: @Race?) -> S64
+@export("ig_race_wait")
+routine ig_race_wait(r_or_none: @Race?) -> S64
     if r_or_none.is_absent()
         return -1
     r: @Race = r_or_none.unwrap()
@@ -157,12 +157,12 @@ routine rf_race_wait(r_or_none: @Race?) -> S64
         return -1
     return wait_for_winner(r)
 
-### rf_race_wait on a set with competitors: registers as their waiter under the scheduler's lock, waits for a
+### ig_race_wait on a set with competitors: registers as their waiter under the scheduler's lock, waits for a
 ### winner, and gives the lock and the registration back in finish.
 ### :param r: The race, with at least one competitor.
 ### :returns: The winner's index.
 secret routine wait_for_winner(r: @Race) -> S64
-    s: @Sched = rf_sched_thread_default()
+    s: @Sched = ig_sched_thread_default()
     this_coro: @Coro? = current_coro()
 
     r.register(s, coro: this_coro, on: true)
@@ -192,14 +192,14 @@ secret routine wait_for_winner(r: @Race) -> S64
             s.block_wait()
             continue
         AccessManager.give_back(at: s.guard)
-        rf_sched_park_external()
+        ig_sched_park_external()
         AccessManager.take_exclusive(at: s.guard, size: 1)
         continue
 
 ### Frees the set, not the competitors (their Agents still own them). A null `r` does nothing.
 ### :param r_or_none: The race to free.
-@export("rf_race_end")
-routine rf_race_end(r_or_none: @Race?) -> None
+@export("ig_race_end")
+routine ig_race_end(r_or_none: @Race?) -> None
     if r_or_none.is_absent()
         return
     r: @Race = r_or_none.unwrap()
