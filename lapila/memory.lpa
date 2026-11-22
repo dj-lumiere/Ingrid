@@ -94,6 +94,13 @@ secret routine c_block_size(ptr: Addr) -> CSize
 @noreturn
 secret routine ig_throw(error_type: CStrView, message: CStrView) -> None
 
+### Whether `bytes` is a size C's heap can be asked for: on a 32-bit target a count past 4 GiB is more than its
+### addresses reach, so no heap has room for it.
+### :param bytes: How many bytes.
+### :returns: True when `bytes` fits in C's size.
+routine fits_c_size(bytes: U64) -> Bool
+    return bytes <= CSize.MAX.to[U64]()
+
 ### "Failed to <what> <bytes> bytes", as an OutOfMemoryError.
 ### :param what: What failed, such as "allocate".
 ### :param bytes: How many bytes were asked for.
@@ -197,11 +204,13 @@ routine ig_heap_limit_status(status: CInt) -> CInt
 ### Allocates `bytes` zeroed bytes from the C heap.
 ### :param bytes: How many bytes.
 ### :returns: The memory.
-### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in U64 (on a 32-bit target).
+### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or when `bytes` is more than the target's
+###     addresses count (on a 32-bit target).
 @export("ig_allocate_dynamic")
 @expensive("allocates heap memory")
 routine ig_allocate_dynamic(bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        out_of_memory(what: "allocate", bytes)
     p: Addr = c_calloc(bytes.to[CSize](), 1)
     if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
@@ -212,11 +221,13 @@ routine ig_allocate_dynamic(bytes: U64) -> Addr
 ### Allocates `bytes` bytes from the C heap, not zeroed: the caller writes them before reading.
 ### :param bytes: How many bytes.
 ### :returns: The memory.
-### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in U64 (on a 32-bit target).
+### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or when `bytes` is more than the target's
+###     addresses count (on a 32-bit target).
 @export("ig_allocate_dynamic_uninit")
 @expensive("allocates heap memory")
 routine ig_allocate_dynamic_uninit(bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        out_of_memory(what: "allocate", bytes)
     p: Addr = c_malloc(bytes.to[CSize]())
     if p.is_hollow()
         out_of_memory(what: "allocate", bytes)
@@ -238,11 +249,13 @@ routine ig_invalidate(ptr: Addr) -> None
 ### :param ptr: The block, or null to allocate a new one.
 ### :param bytes: The new size, in bytes.
 ### :returns: The block, maybe moved.
-### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or with `IntegerOverflowError` when `bytes`
-###     does not fit in U64 (on a 32-bit target).
+### :throws: Crashes with `OutOfMemoryError` when the allocation fails, or when `bytes` is more than the target's
+###     addresses count (on a 32-bit target).
 @export("ig_reallocate_dynamic")
 @expensive("reallocates heap memory")
 routine ig_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        out_of_memory(what: "reallocate to", bytes)
     count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_hollow() and bytes != 0
@@ -258,6 +271,8 @@ routine ig_reallocate_dynamic(ptr: Addr, bytes: U64) -> Addr
 @export("ig_allocate_dynamic_or_hollow")
 @expensive("allocates heap memory")
 routine ig_allocate_dynamic_or_hollow(bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        return Addr.zero()
     p: Addr = c_calloc(bytes.to[CSize](), 1)
     count_allocated(p)
     return p
@@ -268,6 +283,8 @@ routine ig_allocate_dynamic_or_hollow(bytes: U64) -> Addr
 @export("ig_allocate_dynamic_uninit_or_hollow")
 @expensive("allocates heap memory")
 routine ig_allocate_dynamic_uninit_or_hollow(bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        return Addr.zero()
     p: Addr = c_malloc(bytes.to[CSize]())
     count_allocated(p)
     return p
@@ -280,6 +297,8 @@ routine ig_allocate_dynamic_uninit_or_hollow(bytes: U64) -> Addr
 @export("ig_reallocate_dynamic_or_hollow")
 @expensive("reallocates heap memory")
 routine ig_reallocate_dynamic_or_hollow(ptr: Addr, bytes: U64) -> Addr
+    if not fits_c_size(bytes)
+        return Addr.zero()
     count_freed(ptr)
     p: Addr = c_realloc(ptr, bytes.to[CSize]())
     if p.is_hollow()
