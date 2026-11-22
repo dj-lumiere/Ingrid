@@ -239,7 +239,7 @@ routine @SigAction.destruct() -> None
 ### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("sigaction")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
 
 ### POSIX `sigemptyset`: clears a signal set.
@@ -247,7 +247,7 @@ routine c_sigaction(signo: CInt, action: @SigAction, old: Addr) -> CInt
 ### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("sigemptyset")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine c_sigemptyset(set: Addr) -> CInt
 
 ### C's `raise`: sends a signal to the calling thread.
@@ -255,7 +255,7 @@ routine c_sigemptyset(set: Addr) -> CInt
 ### :returns: 0 on success.
 @external("c")
 @symbol("raise")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 secret routine c_raise_signal(signo: CInt) -> CInt
 
 ### Linux's `SA_RESTART` flag.
@@ -275,7 +275,7 @@ routine sa_restart() -> CInt
 ### :returns: 0 on success, -1 on error.
 @external("c")
 @symbol("pipe")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 secret routine c_pipe(fds: @CInt) -> CInt
 
 ### glibc's `__errno_location`: the calling thread's errno.
@@ -294,14 +294,14 @@ secret routine c_errno_place() -> @CInt
 
 ### The calling thread's errno.
 ### :returns: The current errno value.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 secret routine errno() -> CInt
     return c_errno_place().peek()
 
 ### The signal of a kind.
 ### :param which: `SIG_TERMINATE` or `SIG_INTERRUPT`.
 ### :returns: SIGTERM or SIGINT.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine signal_of(which: S32) -> CInt
     signo: CInt = when
         which == SIG_TERMINATE => SIGTERM
@@ -311,7 +311,7 @@ routine signal_of(which: S32) -> CInt
 ### Points a signal at posix_signal_handler, or back at the system's action. Async-signal-safe.
 ### :param signo: The signal.
 ### :param on: True for posix_signal_handler, false for the system's action.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine set_signal_action(signo: CInt, on: Bool) -> None
     lateinit sa: &SigAction
 
@@ -326,7 +326,7 @@ routine set_signal_action(signo: CInt, on: Bool) -> None
 ### Lets the system act on a signal: puts its action back and sends the signal again, which ends the process. Inside
 ### the signal's own handler the signal waits until the handler returns. Async-signal-safe.
 ### :param signo: The signal.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine system_action(signo: CInt) -> None
     set_signal_action(signo, on: false)
     c_raise_signal(signo)
@@ -336,7 +336,7 @@ routine system_action(signo: CInt) -> None
 ### Called with the lock held.
 ### :param which: The kind.
 ### :param on: Whether a handler holds its slot.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine listen(which: S32, on: Bool) -> None
     if SIGNALS_INSTALLED.load()
         set_signal_action(signal_of(which), on)
@@ -345,7 +345,7 @@ routine listen(which: S32, on: Bool) -> None
 ### Async-signal-safe: takes the event and writes its which-code byte to the self-pipe, retrying on EINTR. An event
 ### of a kind whose handler is still running takes the system's action instead.
 ### :param signo: The signal that came: SIGTERM writes 1, anything else 0.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine posix_signal_handler(signo: CInt) -> None
     code: U8 = when
 
@@ -368,7 +368,7 @@ routine posix_signal_handler(signo: CInt) -> None
 ### Reads which-codes from the pipe and runs each one's handler. When the slot has emptied since the event came, the
 ### system acts on it.
 ### :param pipe: The self-pipe (SELF_PIPE), read from its first end.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine signal_dispatch_main(pipe: @Items[CInt, 2]) -> None
     code: &U8 <- 0
 
@@ -388,7 +388,7 @@ routine signal_dispatch_main(pipe: @Items[CInt, 2]) -> None
 ### Makes the self-pipe and starts the dispatch thread. Called with the lock held. If the pipe can't be made, nothing
 ### is installed, the signals keep the system's action, and a later handler tries again.
 ### :throws: Crashes with `TaskSpawnError` when the dispatch thread can't be started.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine install_signal_dispatch() -> None
     fds: @CInt = SELF_PIPE.getview().to[@CInt]()
     if c_pipe(fds) != 0
@@ -399,4 +399,19 @@ routine install_signal_dispatch() -> None
         set_signal_action(SIGINT, on: true)
     if not TERMINATE_HOLDER.peek_unbroken().is_hollow()
         set_signal_action(SIGTERM, on: true)
+    return
+
+# -- WASI: no signals ------------------------------------------------------------------
+
+### WASI hands a program no signals: a handler waits in its slot, and no event comes to run it.
+### :param which: The kind.
+### :param on: Whether a handler holds its slot.
+@target(os: "wasip1")
+routine listen(which: S32, on: Bool) -> None
+    return
+
+### WASI hands a program no signals, so there is no dispatch to start.
+@target(os: "wasip1")
+routine install_signal_dispatch() -> None
+    SIGNALS_INSTALLED.store(true)
     return

@@ -371,7 +371,7 @@ secret routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @By
 ### :returns: The number of frames captured.
 @external("c")
 @symbol("backtrace")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 
 ### `backtrace_symbols`: a text for each address, in one malloc block the caller frees.
@@ -380,13 +380,13 @@ routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 ### :returns: The texts, or null when the allocation fails.
 @external("c")
 @symbol("backtrace_symbols")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte?
 
 ### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
 ### Frames 0 and 1 (this helper, and __ig_throw or the signal handler) are left out.
 ### :param fault: Unused here: the two frames left out are already the handler's.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine print_platform_stack(fault: U64) -> None
     stack_buffer: &Items[Addr, 64]
     frames: CInt = c_backtrace(stack_buffer.getview().to[@Addr](), 64)
@@ -529,7 +529,7 @@ routine install_fault_handlers() -> None
 
 ### The fault stack given to this thread by ig_thread_stack_guarantee, null when it has none of its own.
 @threadlocal
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 global THREAD_FAULT_STACK: &Addr
 
 preset SIGILL: CInt = 4
@@ -555,7 +555,7 @@ routine sigbus() -> CInt
 ### 82). In a tracing mode any other fault prints its name and the stack. When this returns, the signal ends the
 ### process as it would have.
 ### :param event: The fault, with its signal and the address it touched.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine fault_handler(event: CpuEvent) -> None
     ig_console_flush_on_fault()
     if event.ran_out_of_stack()
@@ -575,7 +575,7 @@ routine fault_handler(event: CpuEvent) -> None
 ### The name of a fault signal.
 ### :param signo: The signal.
 ### :returns: The name, or `Signal` for a signal not listed.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine signal_name(signo: CInt) -> CStrView
     when
         signo == SIGSEGV => return "SegmentationFault"
@@ -589,7 +589,7 @@ routine signal_name(signo: CInt) -> CStrView
 ### reported, and reads its stack's bounds now, so the handler only reads them. Each thread the runtime starts calls
 ### it first. A second call on the same thread does nothing.
 @export("ig_thread_stack_guarantee")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine ig_thread_stack_guarantee() -> None
     if THREAD_FAULT_STACK.load().is_not_hollow()
         return
@@ -600,7 +600,7 @@ routine ig_thread_stack_guarantee() -> None
 ### Takes the calling thread's fault stack away and gives its memory back: a thread the runtime started for one task
 ### calls it as it ends.
 @export("ig_thread_stack_release")
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine ig_thread_stack_release() -> None
     release_fault_stack(THREAD_FAULT_STACK.load())
     THREAD_FAULT_STACK.zeroinit(1)
@@ -608,8 +608,33 @@ routine ig_thread_stack_release() -> None
 
 ### Sets {fault_handler} for SIGSEGV, SIGBUS, SIGFPE, SIGILL, and SIGABRT through the standard library's fault
 ### handlers, which also give the main thread its fault stack. The main thread's stack bounds are read first.
-@target(os: not "windows")
+@target(os: not ("windows", "wasip1"))
 routine install_fault_handlers() -> None
     bounds: @StackManager = StackManager.current()
     before: Callable[(CpuEvent,), None]? = CpuEventManager.when_faulted(fault_handler.to[Callable]())
+    return
+
+# -- WASI: no native stack and no fault handlers --------------------------------------
+
+### WASI shows a program none of its native frames: the crash report's own trace is all there is.
+### :param fault: Unused.
+@target(os: "wasip1")
+routine print_platform_stack(fault: U64) -> None
+    return
+
+### WASI hands a program no faults: a trap ends it in the WebAssembly runtime, which reports it. Nothing to install.
+@target(os: "wasip1")
+routine install_fault_handlers() -> None
+    return
+
+### WASI runs one thread and hands it no faults, so it needs no fault stack.
+@export("ig_thread_stack_guarantee")
+@target(os: "wasip1")
+routine ig_thread_stack_guarantee() -> None
+    return
+
+### WASI runs one thread and hands it no faults: there is no fault stack to give back.
+@export("ig_thread_stack_release")
+@target(os: "wasip1")
+routine ig_thread_stack_release() -> None
     return

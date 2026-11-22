@@ -1,0 +1,238 @@
+# The C routines the runtime calls, written in Lapila for WASI, which has no C library. The heap is the standard
+# library's C_HEAP (blocks cut from WebAssembly pages), the environment is OsEnvironment, and the byte routines are
+# loops. Each is exported under its C name too, so Ingrid's Lapila library, which is linked into the program and
+# declares the same C routines, reaches the same heap.
+#
+# Elsewhere these are the C library's (sync.lpa, io.lpa, console.lpa, builtins.lpa).
+
+module Ingrid/Runtime
+
+import Hosted
+
+### The alignment of every block the heap here gives out, the one C's malloc gives on wasm32.
+preset C_BLOCK_ALIGN: U64 = 16
+
+### C's malloc under WASI: `size` bytes, not initialized, from C_HEAP.
+### :param size: How many bytes.
+### :returns: The memory, or null when the allocation fails.
+@export("malloc")
+@target(os: "wasip1")
+routine c_malloc(size: CSize) -> Addr
+    return C_HEAP.borrow(size.to[U64](), C_BLOCK_ALIGN)
+
+### C's calloc under WASI: `count` zeroed values of `size` bytes each, from C_HEAP.
+### :param count: How many values.
+### :param size: The size of one value, in bytes.
+### :returns: The memory, or null when the allocation fails.
+### :throws: Crashes with `IntegerOverflowError` when the total size doesn't fit in 64 bits.
+@export("calloc")
+@target(os: "wasip1")
+routine c_calloc(count: CSize, size: CSize) -> Addr
+    bytes: U64 = count.to[U64]() * size.to[U64]()
+    made: Addr = C_HEAP.borrow(bytes, C_BLOCK_ALIGN)
+    if made.is_not_hollow()
+        fill_bytes(made, value: 0x00, count: bytes)
+    return made
+
+### C's realloc under WASI: resizes the block at `ptr` to `size` bytes, keeping its contents up to the smaller size.
+### :param ptr: The block, or null to allocate a new one.
+### :param size: The new size, in bytes.
+### :returns: The block, maybe moved, or null when the allocation fails.
+@export("realloc")
+@target(os: "wasip1")
+routine c_realloc(ptr: Addr, size: CSize) -> Addr
+    return C_HEAP.reborrow(ptr, size.to[U64](), C_BLOCK_ALIGN)
+
+### C's free under WASI: gives the block at `ptr` back to C_HEAP.
+### :param ptr: The block, or null to do nothing.
+@export("free")
+@target(os: "wasip1")
+routine c_free(ptr: Addr) -> None
+    if ptr.is_hollow()
+        return
+    C_HEAP.give_back(ptr)
+    return
+
+### POSIX's posix_memalign under WASI: `size` bytes aligned to `align`, from C_HEAP.
+### :param out: Where the block's address goes.
+### :param align: The alignment, a power of two.
+### :param size: How many bytes.
+### :returns: 0, or 12 (ENOMEM) when the allocation fails.
+@export("posix_memalign")
+@target(os: "wasip1")
+routine c_posix_memalign(out: @Addr, align: CSize, size: CSize) -> CInt
+    made: Addr = C_HEAP.borrow(size.to[U64](), align.to[U64]().max(C_BLOCK_ALIGN))
+    if made.is_hollow()
+        return 12
+    out.poke(made)
+    return 0
+
+### Sets `count` bytes at `dst` to `value`.
+### :param dst: The first byte to write.
+### :param value: The byte to write.
+### :param count: The number of bytes.
+@no_builtins
+@target(os: "wasip1")
+routine fill_bytes(dst: Addr, value: Byte, count: U64) -> None
+    into: @Byte = dst.to[@Byte]()
+
+    for at in 0 til count
+        into.stride(at).poke(value)
+    then
+        return
+
+### C's memset under WASI: fills `n` bytes at `dst` with the low byte of `value`.
+### :param dst: Where to fill.
+### :param value: The byte to fill with, in the low 8 bits.
+### :param n: How many bytes.
+### :returns: `dst`.
+@export("memset")
+@no_builtins
+@target(os: "wasip1")
+routine c_memset(dst: Addr, value: CInt, n: CSize) -> Addr
+    fill_bytes(dst, value: value.to_wrap[U8]().bits(), count: n.to[U64]())
+    return dst
+
+### C's memcpy under WASI: copies `n` bytes from `src` to `dst`, front to back.
+### :param dst: Where the bytes go.
+### :param src: Where the bytes come from.
+### :param n: How many bytes.
+### :returns: `dst`.
+@export("memcpy")
+@no_builtins
+@target(os: "wasip1")
+routine c_memcpy(dst: Addr, src: Addr, n: CSize) -> Addr
+    into: @Byte = dst.to[@Byte]()
+    from: @Byte = src.to[@Byte]()
+
+    for at in 0 til n.to[U64]()
+        into.stride(at).poke(from.stride(at).peek())
+    then
+        return dst
+
+### C's memmove under WASI: copies `n` bytes from `src` to `dst`, which may overlap.
+### :param dst: Where the bytes go.
+### :param src: Where the bytes come from.
+### :param n: How many bytes.
+### :returns: `dst`.
+@export("memmove")
+@no_builtins
+@target(os: "wasip1")
+routine c_memmove(dst: Addr, src: Addr, n: CSize) -> Addr
+    into: @Byte = dst.to[@Byte]()
+    from: @Byte = src.to[@Byte]()
+    count: U64 = n.to[U64]()
+
+    if ptrtoint[Addr, U64](dst) <= ptrtoint[Addr, U64](src)
+        for at in 0 til count
+            into.stride(at).poke(from.stride(at).peek())
+        then
+            return dst
+    for back in 0 til count
+        at: U64 = count - 1 - back
+        into.stride(at).poke(from.stride(at).peek())
+    then
+        return dst
+
+### C's strlen under WASI: the bytes before the NUL.
+### :param s: The C string.
+### :returns: Its length.
+@export("strlen")
+@target(os: "wasip1")
+routine c_strlen(s: @Byte) -> CSize
+    loop with n: U64 = 0
+        if s.stride(n).peek() == 0x00
+            return n.to[CSize]()
+        continue with n: n + 1
+
+### C's strcpy under WASI: copies the C string `src`, NUL included, to `dest`.
+### :param dest: Where it goes.
+### :param src: The C string.
+### :returns: `dest`.
+@export("strcpy")
+@target(os: "wasip1")
+routine c_strcpy(dest: @Byte, src: @Byte) -> @Byte
+    loop with n: U64 = 0
+        byte: Byte = src.stride(n).peek()
+        dest.stride(n).poke(byte)
+        if byte == 0x00
+            return dest
+        continue with n: n + 1
+
+### C's strcmp under WASI: the two C strings compared byte by byte as unsigned bytes.
+### :param a: The first C string.
+### :param b: The second.
+### :returns: Below 0, 0, or above 0 as `a` sorts before, with, or after `b`.
+@export("strcmp")
+@target(os: "wasip1")
+routine c_strcmp(a: @Byte, b: @Byte) -> CInt
+    loop with n: U64 = 0
+        x: Byte = a.stride(n).peek()
+        y: Byte = b.stride(n).peek()
+        if x != y or x == 0x00
+            return x.to[U8]().to[CInt]() - y.to[U8]().to[CInt]()
+        continue with n: n + 1
+
+### The routines `c_atexit` keeps, by their addresses, run by `run_at_exit` last first.
+@target(os: "wasip1")
+global AT_EXIT: &Items[Addr, 8]
+
+### How many routines AT_EXIT holds.
+@target(os: "wasip1")
+global AT_EXIT_COUNT: &U64
+
+### C's atexit under WASI: keeps `at_exit` to run when the program ends (`run_at_exit`), up to 8 routines.
+### :param at_exit: The routine.
+### :returns: 0, or -1 when 8 are kept already.
+@target(os: "wasip1")
+routine c_atexit(at_exit: Callable[(), None]) -> CInt
+    count: U64 = AT_EXIT_COUNT.load()
+    if count >= 8
+        return -1
+    at: Addr = bitcast(at_exit)
+    kept: @Addr = AT_EXIT.getview().to[@Addr]()
+    kept.stride(count).poke(at)
+    AT_EXIT_COUNT.store(count + 1)
+    return 0
+
+### Runs the routines `c_atexit` kept, last first, as C's exit does: the builder's `_start` calls it when `start`
+### returns.
+@export("ig_run_at_exit")
+@target(os: "wasip1")
+routine run_at_exit() -> None
+    loop
+        count: U64 = AT_EXIT_COUNT.load()
+        if count == 0
+            return
+        AT_EXIT_COUNT.store(count - 1)
+        kept: @Addr = AT_EXIT.getview().to[@Addr]()
+        held: Callable[(), None] = bitcast(kept.stride(count - 1).peek())
+        held.call()
+
+### C's getenv under WASI: the value of the environment variable `name` as a C string, or null when it is not set. The
+### value is copied into C_HEAP with a NUL and kept for the rest of the program, as C's getenv keeps its own.
+### :param name: The variable's name.
+### :returns: The value as a C string.
+@export("getenv")
+@target(os: "wasip1")
+routine c_getenv(name: CStrView) -> @Byte?
+    named: @Byte = name.to[@CChar]().to[@Byte]()
+    length: U64 = c_strlen(named).to[U64]()
+    when OsEnvironment.variable(@[Byte].construct(data: named, count: length), C_HEAP)
+        is BorrowedSlice[Byte] as value =>
+            count: U64 = value.count()
+            copy: Addr = c_malloc((count + 1).to[CSize]())
+            if copy.is_hollow()
+                drop value
+                return none
+            c_memcpy(copy, value.data.peek(), count.to[CSize]())
+            copy.to[@Byte]().stride(count).poke(0x00)
+            drop value
+            return copy.to[@Byte]()
+        is None => return none
+
+### POSIX's pthread_self under WASI, which runs one thread: the same handle every time.
+### :returns: 1, as an address.
+@target(os: "wasip1")
+routine c_pthread_self() -> Addr
+    return inttoptr[U64, Addr](1)
