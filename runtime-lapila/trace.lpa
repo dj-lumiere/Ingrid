@@ -374,41 +374,31 @@ secret routine first_frame_in(process: Addr, stack: @Addr, frames: U32, sym: @By
 @target(os: not ("windows", "wasip1"))
 routine c_backtrace(frames: @Addr, size: CInt) -> CInt
 
-### `backtrace_symbols`: a text for each address, in one malloc block the caller frees.
+### `backtrace_symbols_fd`: writes a text for each address to a file descriptor, one line each, without allocating.
 ### :param frames: The addresses.
 ### :param size: The number of addresses.
-### :returns: The texts, or null when the allocation fails.
+### :param fd: The file descriptor written to.
 @external("c")
-@symbol("backtrace_symbols")
+@symbol("backtrace_symbols_fd")
 @target(os: not ("windows", "wasip1"))
-routine c_backtrace_symbols(frames: @Addr, size: CInt) -> @@Byte?
+routine c_backtrace_symbols_fd(frames: @Addr, size: CInt, fd: CInt) -> None
 
-### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text or else its address.
-### Frames 0 and 1 (this helper, and __ig_throw or the signal handler) are left out.
+### Writes the calling thread's native stack on stderr (up to 64 frames), each by its symbol text.
+### Frames 0 and 1 (this helper, and __ig_throw or the signal handler) are left out. Nothing here allocates: an abort
+### from inside malloc (a double free) holds malloc's lock while this runs, and an allocation would wait on it forever.
 ### :param fault: Unused here: the two frames left out are already the handler's.
 @target(os: not ("windows", "wasip1"))
 routine print_platform_stack(fault: U64) -> None
     stack_buffer: &Items[Addr, 64]
     frames: CInt = c_backtrace(stack_buffer.getview().to[@Addr](), 64)
-    symbols_or_none: @@Byte? = c_backtrace_symbols(stack_buffer.getview().to[@Addr](), frames)
     stack: @Addr = stack_buffer.getview().to[@Addr]()
 
     Console.alert("Stack trace:")
 
     for i in 2 til frames
-        if symbols_or_none.is_absent()
-            n: CInt = i - 2
-            address: Addr = stack.stride(i.to[U64]()).peek()
-            Console.alert("  {n}: {address}")
-        else
-            symbols: @@Byte = symbols_or_none.unwrap()
-            n: CInt = i - 2
-            text: @Byte = symbols.stride(i.to[U64]()).peek()
-            line: @[Byte] = text.to[CStrView]().getview()
-            Console.alert("  {n}: {line}")
-    when symbols_or_none
-        is @@Byte as symbols => c_free(symbols)
-        is None => nothing
+        n: CInt = i - 2
+        Console.alert("  {n}: ", end: "")
+        c_backtrace_symbols_fd(stack.stride(i.to[U64]()), 1, 2)
     return
 
 # -- fault handlers: Windows ---------------------------------------------------------
@@ -611,6 +601,9 @@ routine ig_thread_stack_release() -> None
 @target(os: not ("windows", "wasip1"))
 routine install_fault_handlers() -> None
     bounds: @StackManager = StackManager.current()
+    # The first `backtrace` loads the unwinder, which allocates: it happens here, not in a fault handler.
+    warm_up: &Items[Addr, 2]
+    c_backtrace(warm_up.getview().to[@Addr](), 2)
     before: Callable[(CpuEvent,), None]? = CpuEventManager.when_faulted(fault_handler.to[Callable]())
     return
 
